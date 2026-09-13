@@ -24,8 +24,8 @@ jobs:
 
       - run: npm test
 
-      # Hygiene gate: the repository must contain no references to the
-      # project this server was ported from and no absolute user paths.
+      # Hygiene gate: the repository must contain no leftover internal
+      # project names and no absolute user paths.
       # The pattern uses a bracket so this file does not itself trip the gate.
       - name: Hygiene
         run: "! grep -riE 'v[o]uch|/U[s]ers/' --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist ."

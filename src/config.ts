@@ -6,6 +6,8 @@
 export const VERSION = "0.1.0";
 
 // Agent meetings
+// The default is relative to the server process's cwd (whatever directory the MCP host launched it
+// from), which is why README and .env.example ask for an absolute ROUNDTABLE_AGENTS_DIR.
 export const AGENTS_DIR = process.env.ROUNDTABLE_AGENTS_DIR || ".claude/agents";
 export const MAX_TOKENS = parseInt(process.env.ROUNDTABLE_MAX_TOKENS || "8192", 10);
 export const LLM_TIMEOUT_MS = parseInt(process.env.ROUNDTABLE_LLM_TIMEOUT_MS || "600000", 10);

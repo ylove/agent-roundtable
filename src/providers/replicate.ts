@@ -22,7 +22,8 @@ const VERSION_ID = /^[A-Za-z0-9]+$/;
 
 /**
  * Accepts "owner/name", "owner/name:version", and the URL forms
- * https://replicate.com/owner/name[/versions/<id>] (www., trailing slash, query and hash tolerated)
+ * https://replicate.com/owner/name[/versions/<id>] (www., trailing slash, query and hash tolerated;
+ * page suffixes such as /api, /api/schema, /readme, /examples are ignored)
  * and https://api.replicate.com/v1/models/owner/name[/versions/<id>].
  */
 export function parseReplicateModelRef(input: string): ReplicateModelRef {
@@ -47,14 +48,11 @@ export function parseReplicateModelRef(input: string): ReplicateModelRef {
     const host = url.hostname.toLowerCase();
     const segments = url.pathname.split("/").filter(Boolean);
     if (host === "replicate.com" || host === "www.replicate.com") {
-      // /owner/name or /owner/name/versions/<id>
-      if (segments.length === 2) {
-        [owner, name] = segments;
-      } else if (segments.length === 4 && segments[2] === "versions") {
-        [owner, name, , version] = segments;
-      } else {
-        throw invalid();
-      }
+      // /owner/name, /owner/name/versions/<id>, or /owner/name/<page> as copied from the model's
+      // page (api, api/schema, readme, examples, ...): trailing page segments are ignored.
+      if (segments.length < 2) throw invalid();
+      [owner, name] = segments;
+      if (segments.length >= 4 && segments[2] === "versions") version = segments[3];
     } else if (host === "api.replicate.com") {
       // /v1/models/owner/name or /v1/models/owner/name/versions/<id>
       if (segments[0] !== "v1" || segments[1] !== "models") throw invalid();
@@ -72,7 +70,7 @@ export function parseReplicateModelRef(input: string): ReplicateModelRef {
     const colon = raw.indexOf(":");
     const path = colon >= 0 ? raw.slice(0, colon) : raw;
     version = colon >= 0 ? raw.slice(colon + 1) : undefined;
-    const parts = path.split("/");
+    const parts = path.replace(/\/+$/, "").split("/");
     if (parts.length !== 2) throw invalid();
     [owner, name] = parts;
   }
@@ -112,6 +110,11 @@ export function clearReplicateSchemaCache(): void {
   tokenWarned.clear();
 }
 
+/**
+ * Error bodies only: an error envelope that fails to parse is still an error, so swallowing the
+ * parse failure is safe there. Success bodies are parsed strictly (a dropped connection, an abort
+ * during the body read, or a non-JSON 200 must surface as a rejection, never as an empty object).
+ */
 async function readJsonBestEffort(response: Response): Promise<Record<string, unknown>> {
   try {
     const parsed = (await response.json()) as unknown;
@@ -121,6 +124,28 @@ async function readJsonBestEffort(response: Response): Promise<Record<string, un
   }
 }
 
+async function readJson(response: Response): Promise<Record<string, unknown>> {
+  return response.ok ? ((await response.json()) as Record<string, unknown>) : readJsonBestEffort(response);
+}
+
+/** Resolve/reject with `promise`, or reject with the signal's reason as soon as it fires. */
+function raceSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+/**
+ * The schema GET is shared by every concurrent first caller, so it is bounded by its own timeout
+ * rather than by any one caller's signal; each caller races the shared promise against its own
+ * signal (see raceSignal) so an abort still returns promptly for that caller alone.
+ */
+export const REPLICATE_SCHEMA_TIMEOUT_MS = 30_000;
+
 export function fetchReplicateInputSchema(
   ref: ReplicateModelRef,
   apiKey: string,
@@ -128,18 +153,31 @@ export function fetchReplicateInputSchema(
 ): Promise<ReplicateInputSchema> {
   const key = formatReplicateModelRef(ref);
   const cached = schemaCache.get(key);
-  if (cached) return cached;
+  if (cached) return raceSignal(cached, signal);
 
   const pending = (async (): Promise<ReplicateInputSchema> => {
     const url = ref.version
       ? `${API_BASE}/models/${ref.owner}/${ref.name}/versions/${ref.version}`
       : `${API_BASE}/models/${ref.owner}/${ref.name}`;
-    const response = await fetch(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal,
-    });
-    const body = (await readJsonBestEffort(response)) as ReplicateModelResponse;
+    const own = AbortSignal.timeout(REPLICATE_SCHEMA_TIMEOUT_MS);
+    let response: Response;
+    let body: ReplicateModelResponse;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: own,
+      });
+      body = (await readJson(response)) as ReplicateModelResponse;
+    } catch (error) {
+      // Report our own bound in our own words so it is not mistaken for ROUNDTABLE_LLM_TIMEOUT_MS.
+      if (own.aborted) {
+        throw new Error(
+          `Replicate schema fetch for model ${key} timed out after ${REPLICATE_SCHEMA_TIMEOUT_MS / 1000}s`
+        );
+      }
+      throw error;
+    }
     if (!response.ok) {
       let message = `Replicate API error (${response.status}) fetching schema for model ${key}: ${
         body.detail || response.statusText
@@ -163,7 +201,7 @@ export function fetchReplicateInputSchema(
   pending.catch(() => {
     if (schemaCache.get(key) === pending) schemaCache.delete(key);
   });
-  return pending;
+  return raceSignal(pending, signal);
 }
 
 /**
@@ -269,7 +307,8 @@ export function createReplicateCall({
       body: JSON.stringify(createBody),
       signal: o.signal,
     });
-    let prediction = (await readJsonBestEffort(response)) as ReplicatePrediction;
+    let prediction = (await readJson(response)) as ReplicatePrediction;
+    if (o.signal.aborted) throw o.signal.reason;
     if (!response.ok) {
       let message = `Replicate API error (${response.status}) for model ${refText}: ${
         prediction.detail || prediction.title || response.statusText
@@ -306,7 +345,8 @@ export function createReplicateCall({
         if (!pollResponse.ok) {
           throw new Error(`Replicate API error (${pollResponse.status}) polling model ${refText}`);
         }
-        prediction = (await readJsonBestEffort(pollResponse)) as ReplicatePrediction;
+        prediction = (await readJson(pollResponse)) as ReplicatePrediction;
+        if (o.signal.aborted) throw o.signal.reason;
         text = terminal(prediction);
         if (text !== undefined) break;
         if (polls % 15 === 0) {

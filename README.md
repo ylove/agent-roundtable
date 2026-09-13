@@ -65,7 +65,7 @@ Two or more personas take turns on a topic. One provider/model is used for the w
 | `together` | Together AI | `zai-org/GLM-5.3` | Any Together model id, e.g. `Qwen/Qwen3.8-2.4T-A95B`. |
 | `replicate` | Replicate predictions API | `qwen/qwen3-235b-a22b-instruct-2507` | `model` accepts `owner/name`, `owner/name:version`, or a `https://replicate.com/owner/name` URL. The server reads the model's input schema once and only sends fields the model declares (`prompt`, `system_prompt`, `max_tokens` or `max_new_tokens`, `temperature`). Cold starts are covered by the request timeout. |
 | `ollama` | Local Ollama at `OLLAMA_URL` | `qwen3:14b` | Only usable when `GET $OLLAMA_URL/api/tags` answers within 1 s. |
-| `openai_compatible` | Any `/v1/chat/completions` server (LM Studio, vLLM, llama.cpp server, OpenRouter, Groq, Fireworks, …) | `OPENAI_COMPATIBLE_MODEL` | Base URL from `OPENAI_COMPATIBLE_BASE_URL` or the `base_url` argument. API key optional — the `Authorization` header is omitted when `OPENAI_COMPATIBLE_API_KEY` is unset. |
+| `openai_compatible` | Any `/v1/chat/completions` server (LM Studio, vLLM, llama.cpp server, OpenRouter, Groq, Fireworks, …) | `OPENAI_COMPATIBLE_MODEL` | Base URL from `OPENAI_COMPATIBLE_BASE_URL` or the `base_url` argument. API key optional — the `Authorization` header is omitted when `OPENAI_COMPATIBLE_API_KEY` is unset; when it is set it is sent to whichever base URL is used, including a per-call `base_url`. |
 
 Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 10 min). Empty replies are errors, never blank messages. Unknown provider ids are rejected. Missing keys fail per call with a message naming the variable — the server itself always starts.
 
@@ -101,15 +101,15 @@ The `agent` argument is resolved, in order, as:
 3. `<ROUNDTABLE_AGENTS_DIR>/subagent-<agent>.md`;
 4. `<ROUNDTABLE_AGENTS_DIR>/<agent>/AGENT.md`.
 
-A leading YAML frontmatter block (`--- ... ---`, as in Claude Code agent files) is stripped before the text becomes the system prompt. Three generic personas ship in `examples/` (`cfo.md`, `product-lead.md`, `skeptic.md`); copy them into your agents directory or point `ROUNDTABLE_AGENTS_DIR` at `examples/` to try them.
+A leading YAML frontmatter block (`--- ... ---` with at least one `key: value` line, as in Claude Code agent files) is stripped before the text becomes the system prompt; a body that merely opens with a markdown horizontal rule is left intact. Three generic personas ship in `examples/` (`cfo.md`, `product-lead.md`, `skeptic.md`); copy them into your agents directory or point `ROUNDTABLE_AGENTS_DIR` at `examples/` to try them.
 
 ## Setup
 
 Requires Node 20+.
 
 ```sh
-git clone <this repository> agent-mcp
-cd agent-mcp
+git clone <repository-url> agent-roundtable
+cd agent-roundtable
 cp .env.example .env   # fill in the keys you have
 npm install
 npm run build          # dist/ is gitignored — a fresh clone must build
@@ -205,7 +205,7 @@ chat_completion {
 
 - State is in memory. A rebuild + reconnect drops every meeting and collaboration.
 - Local meetings require the `claude` CLI on `PATH`.
-- The smoke test assumes `.env` does not set `OLLAMA_URL`; it points Ollama at an unreachable port on purpose to exercise the unreachable path.
+- The smoke test assumes `.env` sets neither `OLLAMA_URL` nor `OPENAI_COMPATIBLE_BASE_URL` (`.env` is loaded with `override: true`, so it beats the values the harness pins): it points Ollama at an unreachable port on purpose to exercise the unreachable path, and the "openai_compatible without a base URL" check would otherwise send a request to your configured server.
 - Provider errors (missing key, empty reply, timeout, unknown model) surface as tool errors with the reason; they never abort the server.
 
 ## Contributing

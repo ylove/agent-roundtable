@@ -2,14 +2,14 @@
 import { startServer, assert } from "./mcp-client.mjs";
 
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
-// Keys are deliberately absent/unset so no provider can be reached even by accident; a token-shaped
-// REPLICATE_API_TOKEN is set only to prove debug_env never echoes more than its 6-char prefix.
+// Keys are deliberately absent/unset so no provider can be reached even by accident; a fake
+// REPLICATE_API_TOKEN is set only to prove debug_env never echoes any part of a configured key.
 const server = startServer({
   env: {
     OLLAMA_URL: "http://127.0.0.1:9",
     OPENAI_COMPATIBLE_BASE_URL: "",
     OPENAI_COMPATIBLE_API_KEY: "",
-    REPLICATE_API_TOKEN: "r8_testtoken0123456789abcdef",
+    REPLICATE_API_TOKEN: "r8_test",
   },
 });
 let failures = 0;
@@ -108,6 +108,8 @@ try {
   check("debug_env reports version 0.1.0", () => assert(/"version": "0\.1\.0"/.test(debug.text), debug.text.slice(0, 200)));
   check("debug_env does not leak key material", () =>
     assert(!/sk-[A-Za-z0-9_-]{8,}|r8_[A-Za-z0-9]{8,}/.test(debug.text), "key-like string in debug_env output"));
+  check("debug_env reports a configured key as exactly \"configured\" (no prefix, no length)", () =>
+    assert(!debug.text.includes("r8_test") && !debug.text.includes("r8_") && /"replicate_api_token": "configured"/.test(debug.text), debug.text.slice(0, 600)));
   check("debug_env lists together_api_key and ollama status", () =>
     assert(/together_api_key/.test(debug.text) && /"reachable": false/.test(debug.text), debug.text.slice(0, 400)));
   check("debug_env reports replicate_api_token and openai_compatible", () =>

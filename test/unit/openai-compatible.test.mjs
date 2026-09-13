@@ -22,8 +22,10 @@ const opts = (extra = {}) => ({ model: "m", maxTokens: 32, signal: new AbortCont
 describe("callOpenAI", () => {
   test("posts to api.openai.com with max_completion_tokens and the bearer key", async (t) => {
     const calls = stubFetch(t, () => ok());
-    const r = await callOpenAI(messages, opts({ temperature: 0.3 }));
+    const signal = new AbortController().signal;
+    const r = await callOpenAI(messages, opts({ temperature: 0.3, signal }));
     assert.equal(calls.length, 1);
+    assert.equal(calls[0].signal, signal, "the request carries the caller's signal");
     assert.equal(calls[0].url, "https://api.openai.com/v1/chat/completions");
     assert.equal(calls[0].init.method, "POST");
     assert.equal(calls[0].init.headers.Authorization, "Bearer sk-test-openai");
@@ -70,8 +72,10 @@ describe("callOpenAICompatible", () => {
     process.env.OPENAI_COMPATIBLE_API_KEY = "sk-test-local";
     t.after(() => delete process.env.OPENAI_COMPATIBLE_API_KEY);
     const calls = stubFetch(t, () => ok());
-    await callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:1234/v1" }));
+    const signal = new AbortController().signal;
+    await callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:1234/v1", signal }));
     assert.equal(calls[0].init.headers.Authorization, "Bearer sk-test-local");
+    assert.equal(calls[0].signal, signal, "the request carries the caller's signal");
   });
 
   test("falls back to OPENAI_COMPATIBLE_BASE_URL when no baseUrl option is given", async (t) => {

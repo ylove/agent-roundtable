@@ -42,7 +42,8 @@ export async function chatCompletion(
   options: ChatCompletionOptions = {}
 ): Promise<LLMCompletionResult> {
   const provider = options.provider || "openai";
-  const call = PROVIDERS[provider];
+  // Own-property check: "constructor", "toString", "__proto__" must not resolve via Object.prototype.
+  const call = Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider] : undefined;
   if (!call) {
     throw new Error(
       `Unknown provider "${provider}". Valid providers: ${PROVIDER_IDS.join(", ")}`

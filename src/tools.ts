@@ -76,7 +76,7 @@ export const tools: Tool[] = [
         base_url: {
           type: "string",
           description:
-            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call.',
+            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent as the bearer token to whichever base URL is used.',
         },
       },
       required: ["agent", "agenda"],
@@ -242,7 +242,7 @@ export const tools: Tool[] = [
         base_url: {
           type: "string",
           description:
-            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call.',
+            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent as the bearer token to whichever base URL is used.',
         },
       },
       required: ["messages"],
@@ -295,7 +295,7 @@ export const tools: Tool[] = [
         base_url: {
           type: "string",
           description:
-            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call.',
+            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent as the bearer token to whichever base URL is used.',
         },
       },
       required: ["agents", "topic"],
@@ -659,10 +659,8 @@ export async function handleToolCall(
       }
 
       case "debug_env": {
-        const keyStatus = (name: string) => {
-          const value = process.env[name];
-          return value ? `configured (${value.substring(0, 6)}...)` : "NOT SET";
-        };
+        // Presence only: no prefix, no length — nothing derived from the secret leaves the process.
+        const keyStatus = (name: string) => (process.env[name] ? "configured" : "NOT SET");
         const agentsDir = process.env.ROUNDTABLE_AGENTS_DIR;
 
         // Check if claude CLI is available for local meetings

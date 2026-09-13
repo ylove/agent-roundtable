@@ -21,6 +21,17 @@ describe("stripFrontmatter", () => {
     const late = "a\nb\nc\nd\n---\nname: x\n---\nBody";
     assert.equal(stripFrontmatter(late), late);
   });
+  test("leaves a body that opens with a markdown horizontal rule unchanged", () => {
+    const hr = "---\nYou are a persona.\n---\nMore text";
+    assert.equal(stripFrontmatter(hr), hr);
+    const empty = "---\n---\nBody";
+    assert.equal(stripFrontmatter(empty), empty);
+    const prose = "---\nfirst section: not yaml\n---\nBody";
+    assert.equal(stripFrontmatter(prose), prose);
+  });
+  test("strips a block whose key line is not the first line", () => {
+    assert.equal(stripFrontmatter("---\n# comment\nname: x\n---\nBody"), "Body");
+  });
   test("leaves an unterminated block unchanged", () => {
     const open = "---\nname: x\nBody";
     assert.equal(stripFrontmatter(open), open);

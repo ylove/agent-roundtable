@@ -64,6 +64,14 @@ describe("chatCompletion routing", () => {
     );
   });
 
+  test("Object.prototype keys are not providers", async (t) => {
+    const calls = stubFetch(t, () => json(200, {}));
+    for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      await assert.rejects(chatCompletion(messages, { provider: name }), new RegExp(`^Error: Unknown provider "${name}"`));
+    }
+    assert.equal(calls.length, 0);
+  });
+
   test("callLLM prepends the system prompt and forwards baseUrl", async (t) => {
     const calls = stubFetch(t, () => json(200, { choices: [{ message: { content: "reply" } }] }));
     const text = await callLLM("SYS", [{ role: "user", content: "q" }], {

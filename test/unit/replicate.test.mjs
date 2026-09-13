@@ -11,6 +11,7 @@ const {
   normalizeReplicateOutput,
   clearReplicateSchemaCache,
   createReplicateCall,
+  fetchReplicateInputSchema,
 } = await import("../../dist/providers/replicate.js");
 
 const API = "https://api.replicate.com/v1";
@@ -34,6 +35,16 @@ const opts = (extra = {}) => ({
 });
 const messages = [{ role: "user", content: "hi" }];
 const isSchemaGet = (url, init) => (init.method ?? "GET") === "GET" && url.startsWith(`${API}/models/`);
+/** A 200 whose body stream errors mid-read (connection dropped / abort during the body read). */
+const erroredBody = (status = 200) =>
+  new Response(
+    new ReadableStream({
+      start(c) {
+        c.error(new TypeError("terminated"));
+      },
+    }),
+    { status, headers: { "content-type": "application/json" } }
+  );
 
 beforeEach(() => clearReplicateSchemaCache());
 
@@ -47,6 +58,14 @@ describe("parseReplicateModelRef", () => {
     assert.deepEqual(parseReplicateModelRef("https://www.replicate.com/meta/llama/"), plain);
     assert.deepEqual(parseReplicateModelRef("https://replicate.com/meta/llama?x=1#api"), plain);
     assert.deepEqual(parseReplicateModelRef("https://replicate.com/meta/llama/versions/abc123"), pinned);
+    // URLs copied from a model page's tabs, and a trailing slash in the plain form
+    assert.deepEqual(parseReplicateModelRef("https://replicate.com/meta/llama/api"), plain);
+    assert.deepEqual(parseReplicateModelRef("https://replicate.com/meta/llama/api/schema"), plain);
+    assert.deepEqual(parseReplicateModelRef("https://replicate.com/meta/llama/readme"), plain);
+    assert.deepEqual(parseReplicateModelRef("https://replicate.com/meta/llama/examples?x=1"), plain);
+    assert.deepEqual(parseReplicateModelRef("https://replicate.com/meta/llama/versions"), plain);
+    assert.deepEqual(parseReplicateModelRef("https://replicate.com/meta/llama/versions/abc123/api"), pinned);
+    assert.deepEqual(parseReplicateModelRef("meta/llama/"), plain);
     assert.deepEqual(parseReplicateModelRef("https://api.replicate.com/v1/models/meta/llama"), plain);
     assert.deepEqual(
       parseReplicateModelRef("https://api.replicate.com/v1/models/meta/llama/versions/abc123"),
@@ -61,7 +80,17 @@ describe("parseReplicateModelRef", () => {
   });
 
   test("rejects malformed refs", () => {
-    for (const bad of ["", "llama", "a/b/c", "a b/c", "https://example.com/meta/llama", "meta/llama:v-1"]) {
+    for (const bad of [
+      "",
+      "llama",
+      "a/b/c",
+      "a b/c",
+      "https://example.com/meta/llama",
+      "https://replicate.com/meta",
+      "https://replicate.com/meta/llama/versions/v-1",
+      "https://api.replicate.com/v1/models/meta/llama/api",
+      "meta/llama:v-1",
+    ]) {
       assert.throws(() => parseReplicateModelRef(bad), /Invalid Replicate model/, `should reject ${JSON.stringify(bad)}`);
     }
   });
@@ -108,6 +137,99 @@ describe("schema GET", () => {
     });
     await assert.rejects(call(messages, opts()), /Replicate API error \(404\)/);
     assert.equal(gets, 2, "a failed schema fetch must not poison the cache");
+  });
+
+  test("a 200 whose body errors mid-read rejects and is not cached", async (t) => {
+    let gets = 0;
+    const calls = stubFetch(t, (url, init) => {
+      if (isSchemaGet(url, init)) return gets++ === 0 ? erroredBody() : json(200, schemaBody(["prompt", "max_tokens"]));
+      return json(200, { status: "succeeded", output: ["ok"] });
+    });
+    const call = createReplicateCall({ pollIntervalMs: 1 });
+    await assert.rejects(call(messages, opts()), (e) => {
+      assert.ok(!/exposes no Input schema/.test(e.message));
+      assert.match(e.message, /terminated/);
+      return true;
+    });
+    assert.equal(calls.length, 1, "no prediction POST after a failed schema fetch");
+    await call(messages, opts());
+    assert.equal(gets, 2, "a swallowed 200 must not be cached as an empty schema");
+    assert.deepEqual(calls.at(-1).body.input, { prompt: "User: hi\n\n", max_tokens: 64 });
+  });
+
+  test("a non-JSON 200 rejects and is not cached", async (t) => {
+    let gets = 0;
+    stubFetch(t, (url, init) => {
+      if (isSchemaGet(url, init)) {
+        return gets++ === 0
+          ? new Response("<html>captive portal</html>", { status: 200, headers: { "content-type": "text/html" } })
+          : json(200, schemaBody(["prompt"]));
+      }
+      return json(200, { status: "succeeded", output: ["ok"] });
+    });
+    const call = createReplicateCall({ pollIntervalMs: 1 });
+    await assert.rejects(call(messages, opts()), SyntaxError);
+    await call(messages, opts());
+    assert.equal(gets, 2);
+  });
+
+  test("the schema GET is bounded by its own signal; POST and poll carry the caller's", async (t) => {
+    const GET_URL = `${API}/predictions/p1`;
+    const calls = stubFetch(t, (url, init) => {
+      if (isSchemaGet(url, init)) return json(200, schemaBody(["prompt"]));
+      if (init.method === "POST") return json(201, { status: "processing", urls: { get: GET_URL } });
+      return json(200, { status: "succeeded", output: ["ok"] });
+    });
+    const signal = new AbortController().signal;
+    await createReplicateCall({ pollIntervalMs: 1 })(messages, opts({ signal }));
+    assert.equal(calls.length, 3);
+    assert.ok(calls[0].signal instanceof AbortSignal, "schema GET carries a signal");
+    assert.notEqual(calls[0].signal, signal, "schema GET is not tied to one caller's signal");
+    assert.equal(calls[1].signal, signal, "prediction POST carries the caller's signal");
+    assert.equal(calls[2].signal, signal, "poll GET carries the caller's signal");
+  });
+
+  test("a concurrent caller's abort does not reject the other caller sharing the schema fetch", async (t) => {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const calls = stubFetch(t, async (url, init) => {
+      if (isSchemaGet(url, init)) {
+        await gate;
+        return json(200, schemaBody(["prompt"]));
+      }
+      return json(200, { status: "succeeded", output: ["ok"] });
+    });
+    const call = createReplicateCall({ pollIntervalMs: 1 });
+    const acA = new AbortController();
+    const acB = new AbortController();
+    const a = call(messages, opts({ signal: acA.signal }));
+    const b = call(messages, opts({ signal: acB.signal }));
+    a.catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    acA.abort();
+    await assert.rejects(a, (e) => {
+      assert.equal(e.name, "AbortError");
+      return true;
+    });
+    release();
+    const r = await b;
+    assert.equal(r.content, "ok");
+    assert.equal(acB.signal.aborted, false);
+    assert.equal(calls.filter((c) => isSchemaGet(c.url, c.init)).length, 1, "one shared schema GET");
+    // A's abort did not evict the shared promise: a third call hits the cache.
+    await call(messages, opts());
+    assert.equal(calls.filter((c) => isSchemaGet(c.url, c.init)).length, 1);
+  });
+
+  test("an already-aborted caller rejects with its own reason without fetching", async (t) => {
+    const calls = stubFetch(t, () => json(200, schemaBody(["prompt"])));
+    const ac = new AbortController();
+    ac.abort();
+    await assert.rejects(fetchReplicateInputSchema({ owner: "meta", name: "llama" }, "r8_test", ac.signal), (e) => {
+      assert.equal(e.name, "AbortError");
+      return true;
+    });
+    assert.equal(calls.length, 1, "the shared fetch still starts for the next caller");
   });
 
   test("missing Input schema yields an empty key set (prompt only)", async (t) => {
@@ -313,15 +435,47 @@ describe("poll loop", () => {
       if (init.method === "POST") return json(201, { status: "processing", urls: { get: GET_URL } });
       return json(200, { status: "processing" });
     });
-    await assert.rejects(
-      createReplicateCall({ pollIntervalMs: 1 })(messages, opts({ signal: AbortSignal.timeout(30) })),
-      (e) => {
-        assert.ok(e.name === "AbortError" || e.name === "TimeoutError", `got ${e.name}: ${e.message}`);
-        return true;
-      }
-    );
+    const signal = AbortSignal.timeout(30);
+    await assert.rejects(createReplicateCall({ pollIntervalMs: 1 })(messages, opts({ signal })), (e) => {
+      assert.ok(e.name === "AbortError" || e.name === "TimeoutError", `got ${e.name}: ${e.message}`);
+      return true;
+    });
     const after = calls.length;
     await new Promise((r) => setTimeout(r, 20));
     assert.equal(calls.length, after, "no fetch after the rejection");
+    // Every request after the shared schema GET is bound to the caller's signal.
+    const bound = calls.filter((c) => !isSchemaGet(c.url, c.init));
+    assert.ok(bound.length >= 2, "POST plus at least one poll");
+    for (const c of bound) assert.equal(c.signal, signal, `${c.init.method ?? "GET"} ${c.url} carries the caller's signal`);
+  });
+
+  test("an abort that fires during the POST body read is reported as the abort, not as a missing polling URL", async (t) => {
+    const ac = new AbortController();
+    stubFetch(t, (url, init) => {
+      if (isSchemaGet(url, init)) return json(200, schemaBody(["prompt"]));
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            ac.abort(); // the caller's timeout fires while the body is being read
+            c.enqueue(new TextEncoder().encode(JSON.stringify({ status: "processing" })));
+            c.close();
+          },
+        }),
+        { status: 201, headers: { "content-type": "application/json" } }
+      );
+    });
+    await assert.rejects(createReplicateCall({ pollIntervalMs: 1 })(messages, opts({ signal: ac.signal })), (e) => {
+      assert.equal(e.name, "AbortError", `got ${e.name}: ${e.message}`);
+      assert.ok(!/no polling URL/.test(e.message));
+      return true;
+    });
+  });
+
+  test("a POST body that errors mid-read rejects with the transport error", async (t) => {
+    stubFetch(t, (url, init) => {
+      if (isSchemaGet(url, init)) return json(200, schemaBody(["prompt"]));
+      return erroredBody(201);
+    });
+    await assert.rejects(createReplicateCall({ pollIntervalMs: 1 })(messages, opts()), /terminated/);
   });
 });

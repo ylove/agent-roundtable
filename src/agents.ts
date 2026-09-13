@@ -9,20 +9,25 @@ import { AGENTS_DIR } from "./config.js";
 
 /**
  * Strip a leading YAML frontmatter block ("---" ... "---") from an agent prompt file.
- * Rule: if the text (after an optional BOM) starts with "---" as its first line and a later line
- * matches /^---\s*$/ (CRLF tolerant), drop everything through that closing line plus any blank
- * lines that follow it. Otherwise the text is returned unchanged.
+ * Rule: if the text (after an optional BOM) starts with "---" as its first line, a later line
+ * matches /^---\s*$/ (CRLF tolerant), and at least one line between the fences looks like a YAML
+ * key ("name: ..."), drop everything through that closing line plus any blank lines that follow
+ * it. Otherwise the text is returned unchanged — so a persona whose body opens with a markdown
+ * horizontal rule and contains a second one is never truncated.
  */
 export function stripFrontmatter(text: string): string {
   const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const lines = body.split(/\r?\n/);
   if (lines.length === 0 || !/^---\s*$/.test(lines[0])) return text;
+  let sawKey = false;
   for (let i = 1; i < lines.length; i++) {
     if (/^---\s*$/.test(lines[i])) {
+      if (!sawKey) return text;
       let next = i + 1;
       while (next < lines.length && lines[next].trim() === "") next++;
       return lines.slice(next).join("\n");
     }
+    if (/^[A-Za-z_][\w-]*\s*:/.test(lines[i])) sawKey = true;
   }
   return text;
 }

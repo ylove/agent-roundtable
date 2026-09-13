@@ -1,0 +1,46 @@
+{
+  "name": "agent-roundtable",
+  "version": "0.1.0",
+  "description": "MCP server for meetings and collaborations between AI agents — Anthropic, OpenAI, Together AI, Replicate, Ollama, or any OpenAI-compatible endpoint",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agent-roundtable": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agents",
+    "multi-agent",
+    "llm",
+    "claude-code"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "pretest": "npm run build",
+    "test": "npm run test:unit && npm run test:smoke",
+    "test:unit": "node --test test/unit/*.test.mjs",
+    "test:smoke": "node test/smoke.mjs",
+    "test:live": "node test/live-smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^17.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

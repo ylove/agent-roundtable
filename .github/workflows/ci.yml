@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - run: npm test
+
+      # Hygiene gate: the repository must contain no references to the
+      # project this server was ported from and no absolute user paths.
+      # The pattern uses a bracket so this file does not itself trip the gate.
+      - name: Hygiene
+        run: "! grep -riE 'v[o]uch|/U[s]ers/' --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist ."

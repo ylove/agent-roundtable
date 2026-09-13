@@ -20,6 +20,8 @@ export interface Meeting {
   startedAt: Date;
   provider: LLMProvider;
   model: string;
+  /** Only with provider "openai_compatible": base URL pinned for the life of the meeting. */
+  baseUrl?: string;
 }
 
 export const meetings = new Map<string, Meeting>();
@@ -30,7 +32,8 @@ export async function startMeeting(
   agenda: string,
   context?: string,
   provider: LLMProvider = "anthropic",
-  model?: string
+  model?: string,
+  baseUrl?: string
 ): Promise<{ meetingId: string; response: string }> {
   const systemPrompt = await loadAgentPrompt(agent);
   const meetingId = `meeting-${++meetingCounter}`;
@@ -44,8 +47,7 @@ export async function startMeeting(
   const assistantMessage = await callLLM(
     systemPrompt,
     [{ role: "user", content: userMessage }],
-    provider,
-    resolvedModel
+    { provider, model: resolvedModel, baseUrl }
   );
 
   const meeting: Meeting = {
@@ -59,6 +61,7 @@ export async function startMeeting(
     startedAt: new Date(),
     provider,
     model: resolvedModel,
+    ...(baseUrl !== undefined && { baseUrl }),
   };
   meetings.set(meetingId, meeting);
 
@@ -82,8 +85,7 @@ export async function continueMeeting(
       role: m.role,
       content: m.content,
     })),
-    meeting.provider,
-    meeting.model
+    { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
   );
 
   meeting.messages.push({ role: "assistant", content: assistantMessage });
@@ -116,8 +118,7 @@ export async function endMeeting(
     summary = await callLLM(
       meeting.systemPrompt,
       summaryMessages,
-      meeting.provider,
-      meeting.model
+      { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
     );
   }
 
@@ -133,6 +134,7 @@ export function listMeetings(): Array<{
   startedAt: string;
   provider: LLMProvider;
   model: string;
+  baseUrl?: string;
 }> {
   return Array.from(meetings.values()).map((m) => ({
     id: m.id,
@@ -141,5 +143,6 @@ export function listMeetings(): Array<{
     startedAt: m.startedAt.toISOString(),
     provider: m.provider,
     model: m.model,
+    ...(m.baseUrl !== undefined && { baseUrl: m.baseUrl }),
   }));
 }

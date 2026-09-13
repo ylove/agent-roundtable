@@ -22,6 +22,8 @@ export interface ProviderCallOptions {
   maxTokens: number;
   temperature?: number;
   signal: AbortSignal;
+  /** Only honoured by the openai_compatible provider: overrides OPENAI_COMPATIBLE_BASE_URL. */
+  baseUrl?: string;
 }
 
 export type ProviderCall = (

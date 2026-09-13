@@ -58,10 +58,16 @@ async function main() {
   console.error(`agent-roundtable v${VERSION} running on stdio`);
   console.error(`  Agents dir: ${resolve(AGENTS_DIR)}`);
   console.error(`  Default models: ${PROVIDER_IDS.map((p) => `${p}=${DEFAULT_MODELS[p]}`).join(", ")}`);
-  console.error(`  Anthropic API key: ${process.env.ANTHROPIC_API_KEY ? "configured" : "NOT configured"}`);
-  console.error(`  OpenAI API key: ${process.env.OPENAI_API_KEY ? "configured" : "NOT configured"}`);
-  console.error(`  Together AI key (glm, qwen): ${process.env.TOGETHER_API_KEY ? "configured" : "NOT configured"}`);
-  console.error(`  Ollama: ${OLLAMA_URL} (optional; checked on use)`);
+  const status = (name: string) => (process.env[name] ? "configured" : "NOT configured");
+  console.error(`  anthropic: ANTHROPIC_API_KEY ${status("ANTHROPIC_API_KEY")}`);
+  console.error(`  openai: OPENAI_API_KEY ${status("OPENAI_API_KEY")}`);
+  console.error(`  together: TOGETHER_API_KEY ${status("TOGETHER_API_KEY")}`);
+  console.error(`  replicate: REPLICATE_API_TOKEN ${status("REPLICATE_API_TOKEN")}`);
+  console.error(`  ollama: ${OLLAMA_URL} (optional; checked on use)`);
+  console.error(
+    `  openai_compatible: OPENAI_COMPATIBLE_BASE_URL ${process.env.OPENAI_COMPATIBLE_BASE_URL || "NOT SET (pass base_url per call)"}, ` +
+      `OPENAI_COMPATIBLE_API_KEY ${process.env.OPENAI_COMPATIBLE_API_KEY ? "configured" : "not set (no auth header)"}`
+  );
   console.error(`  Local meetings (CLI): ${claudeCliAvailable ? "available" : "NOT available (install claude CLI)"}`);
 }
 

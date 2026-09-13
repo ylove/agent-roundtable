@@ -1,4 +1,4 @@
-// --- OpenAI-compatible chat completions (OpenAI, Together AI) ---
+// --- OpenAI-compatible chat completions (OpenAI, Together AI, any /v1/chat/completions server) ---
 import type { LLMCompletionResult, ProviderCall } from "./shared.js";
 import { assertNonEmpty, stripThinkTags } from "./shared.js";
 import type { LLMProvider } from "../config.js";
@@ -34,38 +34,81 @@ export function parseChatCompletions(
   };
 }
 
-export const callOpenAI: ProviderCall = async (messages, o) => {
-  const apiKey = requireEnv("OPENAI_API_KEY", "the openai provider");
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: o.model,
-      messages,
-      max_completion_tokens: o.maxTokens,
-      ...(o.temperature !== undefined && { temperature: o.temperature }),
-    }),
-    signal: o.signal,
-  });
-  const result = (await response.json()) as ChatCompletionsResponse;
-  return parseChatCompletions("OpenAI", "openai", response, result, o.model);
-};
+export interface OpenAICompatibleSpec {
+  provider: LLMProvider;
+  /** Human label used in error messages ("OpenAI", "Together", ...). */
+  label: string;
+  /** OpenAI's newer models only accept max_completion_tokens; everyone else speaks max_tokens. */
+  tokenParam: "max_tokens" | "max_completion_tokens";
+  /** Fixed base URL, or a thunk read at call time (so env changes are picked up). */
+  baseUrl: string | (() => string | undefined);
+  /** Returns the bearer token, or undefined to send no Authorization header at all. */
+  apiKey: () => string | undefined;
+  /** When true, options.baseUrl (the tool's base_url argument) wins over spec.baseUrl. */
+  allowBaseUrlOverride?: boolean;
+}
 
-export function createTogetherCall(provider: "glm" | "qwen"): ProviderCall {
+/**
+ * One factory, three instances: the request shape is identical for every /v1/chat/completions
+ * server; only the base URL, the auth header and the token-limit parameter name differ.
+ */
+export function createOpenAICompatibleCall(spec: OpenAICompatibleSpec): ProviderCall {
   return async (messages, o) => {
-    const apiKey = requireEnv("TOGETHER_API_KEY", `the ${provider} provider (Together AI)`);
-    const response = await fetch("https://api.together.xyz/v1/chat/completions", {
+    const base =
+      o.baseUrl && spec.allowBaseUrlOverride
+        ? o.baseUrl
+        : typeof spec.baseUrl === "function"
+          ? spec.baseUrl()
+          : spec.baseUrl;
+    if (!base) {
+      throw new Error(
+        "OPENAI_COMPATIBLE_BASE_URL not configured and no base_url argument given " +
+          "(required for the openai_compatible provider). Set it in the MCP server .env file or pass base_url."
+      );
+    }
+    const url = `${base.replace(/\/+$/, "")}/chat/completions`;
+    const apiKey = spec.apiKey();
+    // Local servers (LM Studio, vLLM, llama.cpp) need no auth: omit the header rather than send a fake token.
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+    const response = await fetch(url, {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         model: o.model,
-        messages, // Together accepts system messages inline
-        max_tokens: o.maxTokens,
+        messages, // system messages are accepted inline by every OpenAI-compatible server
+        [spec.tokenParam]: o.maxTokens,
         ...(o.temperature !== undefined && { temperature: o.temperature }),
       }),
       signal: o.signal,
     });
     const result = (await response.json()) as ChatCompletionsResponse;
-    return parseChatCompletions("Together", provider, response, result, o.model);
+    return parseChatCompletions(spec.label, spec.provider, response, result, o.model);
   };
 }
+
+export const callOpenAI: ProviderCall = createOpenAICompatibleCall({
+  provider: "openai",
+  label: "OpenAI",
+  tokenParam: "max_completion_tokens",
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: () => requireEnv("OPENAI_API_KEY", "the openai provider"),
+});
+
+export const callTogether: ProviderCall = createOpenAICompatibleCall({
+  provider: "together",
+  label: "Together",
+  tokenParam: "max_tokens",
+  baseUrl: "https://api.together.xyz/v1",
+  apiKey: () => requireEnv("TOGETHER_API_KEY", "the together provider (Together AI)"),
+});
+
+export const callOpenAICompatible: ProviderCall = createOpenAICompatibleCall({
+  provider: "openai_compatible",
+  label: "OpenAI-compatible",
+  tokenParam: "max_tokens",
+  baseUrl: () => process.env.OPENAI_COMPATIBLE_BASE_URL,
+  apiKey: () => process.env.OPENAI_COMPATIBLE_API_KEY || undefined,
+  allowBaseUrlOverride: true,
+});

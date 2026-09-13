@@ -12,7 +12,8 @@ import {
   resolveAnthropicModel,
 } from "../config.js";
 import { callAnthropic } from "./anthropic.js";
-import { callOpenAI, createTogetherCall } from "./openai-compatible.js";
+import { callOpenAI, callTogether, callOpenAICompatible } from "./openai-compatible.js";
+import { callReplicate } from "./replicate.js";
 import { callOllama, isOllamaAvailable } from "./ollama.js";
 
 export type { LLMMessage, LLMCompletionResult, ProviderCall, ProviderCallOptions } from "./shared.js";
@@ -21,25 +22,35 @@ export { isOllamaAvailable };
 export const PROVIDERS: Record<LLMProvider, ProviderCall> = {
   anthropic: callAnthropic,
   openai: callOpenAI,
-  glm: createTogetherCall("glm"),
-  qwen: createTogetherCall("qwen"),
+  together: callTogether,
+  replicate: callReplicate,
   ollama: callOllama,
+  openai_compatible: callOpenAICompatible,
 };
+
+export interface ChatCompletionOptions {
+  provider?: LLMProvider;
+  model?: string;
+  maxTokens?: number;
+  temperature?: number;
+  /** Only with provider "openai_compatible": overrides OPENAI_COMPATIBLE_BASE_URL. */
+  baseUrl?: string;
+}
 
 export async function chatCompletion(
   messages: LLMMessage[],
-  options: {
-    provider?: LLMProvider;
-    model?: string;
-    maxTokens?: number;
-    temperature?: number;
-  } = {}
+  options: ChatCompletionOptions = {}
 ): Promise<LLMCompletionResult> {
   const provider = options.provider || "openai";
   const call = PROVIDERS[provider];
   if (!call) {
     throw new Error(
       `Unknown provider "${provider}". Valid providers: ${PROVIDER_IDS.join(", ")}`
+    );
+  }
+  if (options.baseUrl && provider !== "openai_compatible") {
+    throw new Error(
+      `base_url is only supported with provider "openai_compatible" (got "${provider}")`
     );
   }
 
@@ -54,6 +65,7 @@ export async function chatCompletion(
       maxTokens: options.maxTokens || MAX_TOKENS,
       temperature: options.temperature,
       signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+      ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
     });
   } catch (error) {
     if (
@@ -68,6 +80,13 @@ export async function chatCompletion(
   }
 }
 
+export interface CallLLMOptions {
+  provider: LLMProvider;
+  model: string;
+  maxTokens?: number;
+  baseUrl?: string;
+}
+
 /**
  * Unified helper to call any LLM provider for meetings/collaborations.
  * Routes to chatCompletion() with the appropriate provider and model.
@@ -75,9 +94,7 @@ export async function chatCompletion(
 export async function callLLM(
   systemPrompt: string,
   messages: Array<{ role: "user" | "assistant"; content: string }>,
-  provider: LLMProvider,
-  model: string,
-  maxTokens: number = MAX_TOKENS
+  { provider, model, maxTokens = MAX_TOKENS, baseUrl }: CallLLMOptions
 ): Promise<string> {
   const llmMessages: LLMMessage[] = [
     { role: "system", content: systemPrompt },
@@ -91,6 +108,7 @@ export async function callLLM(
     provider,
     model,
     maxTokens,
+    baseUrl,
   });
 
   return result.content;

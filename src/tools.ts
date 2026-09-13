@@ -67,11 +67,16 @@ export const tools: Tool[] = [
           type: "string",
           enum: PROVIDER_IDS,
           description:
-            "LLM provider to use. Default: anthropic. Options: anthropic, openai, glm (Together AI), qwen (Together AI), ollama (local; only when reachable).",
+            "LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
         model: {
           type: "string",
           description: MODEL_PARAM_DESCRIPTION,
+        },
+        base_url: {
+          type: "string",
+          description:
+            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call.',
         },
       },
       required: ["agent", "agenda"],
@@ -197,7 +202,7 @@ export const tools: Tool[] = [
   {
     name: "chat_completion",
     description:
-      "Call an LLM for text completion. Providers: anthropic (claude-opus-5 / claude-sonnet-5), openai (gpt-5.6-luna), glm and qwen (Together AI), ollama (local, optional).",
+      "Call an LLM for text completion. Providers: anthropic (claude-opus-5 / claude-sonnet-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).",
     inputSchema: {
       type: "object",
       properties: {
@@ -220,7 +225,7 @@ export const tools: Tool[] = [
           type: "string",
           enum: PROVIDER_IDS,
           description:
-            "LLM provider to use. Default: openai. Options: anthropic, openai, glm (Together AI), qwen (Together AI), ollama (local; only when reachable).",
+            "LLM provider to use. Default: openai. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
         model: {
           type: "string",
@@ -232,7 +237,12 @@ export const tools: Tool[] = [
         },
         temperature: {
           type: "number",
-          description: "Sampling temperature (0-2). Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too.",
+          description: "Sampling temperature (0-2). Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too. Replicate: sent only when the model's schema declares it.",
+        },
+        base_url: {
+          type: "string",
+          description:
+            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call.',
         },
       },
       required: ["messages"],
@@ -276,11 +286,16 @@ export const tools: Tool[] = [
           type: "string",
           enum: PROVIDER_IDS,
           description:
-            "LLM provider to use. Default: anthropic. Options: anthropic, openai, glm (Together AI), qwen (Together AI), ollama (local; only when reachable).",
+            "LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
         model: {
           type: "string",
           description: MODEL_PARAM_DESCRIPTION,
+        },
+        base_url: {
+          type: "string",
+          description:
+            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call.',
         },
       },
       required: ["agents", "topic"],
@@ -398,14 +413,15 @@ export async function handleToolCall(
     switch (name) {
       // === Meeting Tools ===
       case "start_meeting": {
-        const { agent, agenda, context, provider, model } = args as {
+        const { agent, agenda, context, provider, model, base_url } = args as {
           agent: string;
           agenda: string;
           context?: string;
           provider?: LLMProvider;
           model?: string;
+          base_url?: string;
         };
-        const result = await startMeeting(agent, agenda, context, provider, model);
+        const result = await startMeeting(agent, agenda, context, provider, model, base_url);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
@@ -500,12 +516,13 @@ export async function handleToolCall(
 
       // === LLM Completion Tools ===
       case "chat_completion": {
-        const { messages, provider, model, max_tokens, temperature } = args as {
+        const { messages, provider, model, max_tokens, temperature, base_url } = args as {
           messages: LLMMessage[];
           provider?: LLMProvider;
           model?: string;
           max_tokens?: number;
           temperature?: number;
+          base_url?: string;
         };
 
         const result = await chatCompletion(messages, {
@@ -513,6 +530,7 @@ export async function handleToolCall(
           model,
           maxTokens: max_tokens,
           temperature,
+          baseUrl: base_url,
         });
 
         return {
@@ -522,7 +540,7 @@ export async function handleToolCall(
 
       // === Collaboration Tools ===
       case "start_collaboration": {
-        const { agents, topic, context, max_rounds, auto_run_rounds, provider, model } = args as {
+        const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, base_url } = args as {
           agents: string[];
           topic: string;
           context?: string;
@@ -530,6 +548,7 @@ export async function handleToolCall(
           auto_run_rounds?: number;
           provider?: LLMProvider;
           model?: string;
+          base_url?: string;
         };
 
         const result = await startCollaboration(agents, topic, {
@@ -539,6 +558,7 @@ export async function handleToolCall(
           runRounds: auto_run_rounds,
           provider,
           model,
+          baseUrl: base_url,
         });
 
         return {
@@ -660,6 +680,11 @@ export async function handleToolCall(
           anthropic_api_key: keyStatus("ANTHROPIC_API_KEY"),
           openai_api_key: keyStatus("OPENAI_API_KEY"),
           together_api_key: keyStatus("TOGETHER_API_KEY"),
+          replicate_api_token: keyStatus("REPLICATE_API_TOKEN"),
+          openai_compatible: {
+            base_url: process.env.OPENAI_COMPATIBLE_BASE_URL || "NOT SET",
+            api_key: keyStatus("OPENAI_COMPATIBLE_API_KEY"),
+          },
           ollama: { url: OLLAMA_URL, reachable: await isOllamaAvailable() },
           default_models: DEFAULT_MODELS,
           max_tokens: MAX_TOKENS,
@@ -672,7 +697,7 @@ export async function handleToolCall(
           active_api_meetings: meetings.size,
           active_collaborations: collaborations.size,
           env_keys: Object.keys(process.env).filter(k =>
-            k.includes('ANTHROPIC') || k.includes('OPENAI') || k.includes('TOGETHER') || k.includes('OLLAMA') || k.includes('ROUNDTABLE')
+            k.includes('ANTHROPIC') || k.includes('OPENAI') || k.includes('TOGETHER') || k.includes('REPLICATE') || k.includes('OLLAMA') || k.includes('ROUNDTABLE')
           ),
         };
 

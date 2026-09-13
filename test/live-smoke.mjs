@@ -1,5 +1,10 @@
-// Opt-in live smoke: one tiny chat_completion per provider (max_tokens 128).
-// Run: ROUNDTABLE_LIVE_TEST=1 npm run test:live   (ROUNDTABLE_LIVE_PROVIDERS=anthropic,openai,glm,qwen to narrow)
+// Opt-in live smoke: one tiny chat_completion per provider (max_tokens 128). Spends real API credits.
+// Run: ROUNDTABLE_LIVE_TEST=1 npm run test:live
+//   ROUNDTABLE_LIVE_PROVIDERS=anthropic,openai,together   narrows or widens the provider list (default shown)
+//   ROUNDTABLE_LIVE_REPLICATE=1                            also calls replicate (default model; ~1 min cold start)
+//   ROUNDTABLE_LIVE_OPENAI_COMPATIBLE=1                    also calls openai_compatible (needs OPENAI_COMPATIBLE_BASE_URL)
+//   ROUNDTABLE_LIVE_OLLAMA=1                               also calls ollama (needs a reachable OLLAMA_URL)
+// replicate and openai_compatible are never called unless opted in via their flag or listed explicitly.
 import { startServer } from "./mcp-client.mjs";
 
 if (process.env.ROUNDTABLE_LIVE_TEST !== "1") {
@@ -7,10 +12,14 @@ if (process.env.ROUNDTABLE_LIVE_TEST !== "1") {
   process.exit(0);
 }
 
-const providers = (process.env.ROUNDTABLE_LIVE_PROVIDERS || "anthropic,openai,glm,qwen")
+const providers = (process.env.ROUNDTABLE_LIVE_PROVIDERS || "anthropic,openai,together")
   .split(",")
   .map((p) => p.trim())
   .filter(Boolean);
+if (process.env.ROUNDTABLE_LIVE_REPLICATE === "1" && !providers.includes("replicate")) providers.push("replicate");
+if (process.env.ROUNDTABLE_LIVE_OPENAI_COMPATIBLE === "1" && !providers.includes("openai_compatible")) {
+  providers.push("openai_compatible");
+}
 const server = startServer({ timeoutMs: 300_000 });
 let failures = 0;
 

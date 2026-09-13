@@ -31,6 +31,8 @@ export interface Collaboration {
   startedAt: Date;
   provider: LLMProvider;
   model: string;
+  /** Only with provider "openai_compatible": base URL pinned for the life of the collaboration. */
+  baseUrl?: string;
 }
 
 export const collaborations = new Map<string, Collaboration>();
@@ -46,6 +48,7 @@ export async function startCollaboration(
     runRounds?: number;
     provider?: LLMProvider;
     model?: string;
+    baseUrl?: string;
   } = {}
 ): Promise<{
   collaborationId: string;
@@ -58,6 +61,7 @@ export async function startCollaboration(
 
   const provider = options.provider || "anthropic";
   const resolvedModel = options.model || DEFAULT_MODELS[provider];
+  const baseUrl = options.baseUrl;
 
   // Load all agent prompts
   const agents: CollaborationAgent[] = [];
@@ -82,6 +86,7 @@ export async function startCollaboration(
     startedAt: new Date(),
     provider,
     model: resolvedModel,
+    ...(baseUrl !== undefined && { baseUrl }),
   };
 
   collaborations.set(collaborationId, collaboration);
@@ -101,8 +106,7 @@ export async function startCollaboration(
   const firstMessage = await callLLM(
     firstAgent.systemPrompt,
     [{ role: "user", content: initialPrompt }],
-    provider,
-    resolvedModel
+    { provider, model: resolvedModel, baseUrl }
   );
 
   collaboration.messages.push({
@@ -166,8 +170,7 @@ export async function advanceCollaboration(
   const messageContent = await callLLM(
     currentAgent.systemPrompt,
     [{ role: "user", content: conversationContext }],
-    collaboration.provider,
-    collaboration.model
+    { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl }
   );
 
   const newMessage: CollaborationMessage = {
@@ -288,8 +291,7 @@ export async function endCollaboration(
     summary = await callLLM(
       summarizer.systemPrompt,
       [{ role: "user", content: summaryPrompt }],
-      collaboration.provider,
-      collaboration.model
+      { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl }
     );
   }
 
@@ -310,6 +312,7 @@ export function listCollaborations(): Array<{
   startedAt: string;
   provider: LLMProvider;
   model: string;
+  baseUrl?: string;
 }> {
   return Array.from(collaborations.values()).map((c) => ({
     id: c.id,
@@ -322,6 +325,7 @@ export function listCollaborations(): Array<{
     startedAt: c.startedAt.toISOString(),
     provider: c.provider,
     model: c.model,
+    ...(c.baseUrl !== undefined && { baseUrl: c.baseUrl }),
   }));
 }
 

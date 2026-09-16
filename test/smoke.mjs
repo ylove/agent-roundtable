@@ -118,6 +118,10 @@ try {
     const parsed = JSON.parse(debug.text);
     assert(JSON.stringify(Object.keys(parsed.default_models)) === JSON.stringify(EXPECTED_PROVIDERS), JSON.stringify(parsed.default_models));
   });
+  check("server writes only JSON-RPC to stdout (stdio transport is the MCP channel)", () => {
+    const noise = server.noise();
+    assert(noise.length === 0, `non-JSON stdout lines: ${JSON.stringify(noise)}`);
+  });
 } catch (e) {
   failures++;
   console.log(`  FAIL harness: ${e.message}`);

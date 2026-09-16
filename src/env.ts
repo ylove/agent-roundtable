@@ -9,4 +9,5 @@ import { resolve, dirname } from "path";
 // importing module's own body runs, so if dotenv were called from index.ts's body, config.ts (which
 // reads process.env at module-evaluation time) would already have run against an unloaded .env.
 // Importing "./env.js" first guarantees .env is loaded before config.ts is evaluated.
-config({ path: resolve(dirname(fileURLToPath(import.meta.url)), "..", ".env"), override: true });
+// quiet: true — dotenv 17 otherwise prints an "injected env" line to STDOUT, which is the MCP JSON-RPC channel.
+config({ path: resolve(dirname(fileURLToPath(import.meta.url)), "..", ".env"), override: true, quiet: true });

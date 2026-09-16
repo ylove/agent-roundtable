@@ -15,6 +15,7 @@ export function startServer({ env = {}, timeoutMs = 120_000 } = {}) {
   let nextId = 1;
   const pending = new Map();
   const stderr = [];
+  const noise = []; // stdout lines that are not JSON-RPC: any such line is a protocol violation
 
   child.stdout.on("data", (chunk) => {
     buffer += chunk;
@@ -30,7 +31,7 @@ export function startServer({ env = {}, timeoutMs = 120_000 } = {}) {
           pending.delete(msg.id);
         }
       } catch {
-        // non-JSON noise on stdout is ignored
+        noise.push(line); // recorded so the smoke test can assert stdout is JSON-only
       }
     }
   });
@@ -84,6 +85,7 @@ export function startServer({ env = {}, timeoutMs = 120_000 } = {}) {
     listTools,
     callTool,
     stderr: () => stderr.join(""),
+    noise: () => noise.slice(),
     stop: () => child.kill(),
   };
 }

@@ -121,8 +121,9 @@ export class PublishQueue {
   async flush(timeoutMs: number): Promise<{ timedOut: boolean }> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<boolean>((resolve) => {
+      // Deliberately NOT unref'd: someone is awaiting this flush, so the timer must keep the
+      // event loop alive until the race settles (it is always cleared below).
       timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
-      timer.unref?.();
     });
     const drained = this.chain.then(() => true);
     const ok = await Promise.race([drained, timeout]);

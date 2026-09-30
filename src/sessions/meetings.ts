@@ -6,6 +6,9 @@ import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
 import { loadAgentPrompt } from "../agents.js";
 import { callLLM } from "../providers/index.js";
+import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
+import type { MeetingMode } from "./modes.js";
+import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -22,10 +25,48 @@ export interface Meeting {
   model: string;
   /** Only with provider "openai_compatible": base URL pinned for the life of the meeting. */
   baseUrl?: string;
+  mode: MeetingMode;
+  debateFocus?: string;
+  /** Set when the meeting was started with public: true. */
+  publicChannel?: PublicChannel;
 }
 
 export const meetings = new Map<string, Meeting>();
 let meetingCounter = 0;
+
+export type MeetingRecordHook = (meeting: Meeting, message: Message) => void;
+
+let recordHook: MeetingRecordHook | undefined;
+
+/** Install (or clear, with undefined) the hook called after every recorded message. No-op by default. */
+export function setMeetingRecordHook(hook: MeetingRecordHook | undefined): void {
+  recordHook = hook;
+}
+
+/** Single choke point for everything pushed into meeting.messages. Hook failures never break a session. */
+export function recordMeetingMessage(meeting: Meeting, message: Message, publicText?: string): Message {
+  meeting.messages.push(message);
+  // Public mirror: publicText overrides what is posted (the opening user message is published as the agenda only).
+  meeting.publicChannel?.record({
+    turn: meeting.messages.length,
+    speaker: message.role === "user" ? "caller" : meeting.agent,
+    content: publicText ?? message.content,
+    kind: message.role === "user" ? "caller" : "turn",
+  });
+  if (recordHook) {
+    try {
+      const r: unknown = recordHook(meeting, message);
+      if (r && typeof (r as Promise<unknown>).catch === "function") {
+        (r as Promise<unknown>).catch((e) =>
+          console.error(`[Meeting] record hook failed: ${e instanceof Error ? e.message : String(e)}`)
+        );
+      }
+    } catch (e) {
+      console.error(`[Meeting] record hook failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return message;
+}
 
 export async function startMeeting(
   agent: string,
@@ -33,39 +74,68 @@ export async function startMeeting(
   context?: string,
   provider: LLMProvider = "anthropic",
   model?: string,
-  baseUrl?: string
-): Promise<{ meetingId: string; response: string }> {
-  const systemPrompt = await loadAgentPrompt(agent);
+  baseUrl?: string,
+  mode: MeetingMode = "standard",
+  debateFocus?: string,
+  isPublic: boolean = false
+): Promise<{ meetingId: string; response: string; public?: { url: string | null; topic: string } }> {
+  assertMeetingMode(mode);
+  let systemPrompt = await loadAgentPrompt(agent);
+  if (mode === "debate") {
+    systemPrompt += buildChallengerDirective(debateFocus);
+  }
+  if (isPublic) systemPrompt += publicDirectiveSuffix();
   const meetingId = `meeting-${++meetingCounter}`;
+  // Created before the first LLM call so the header is the first post. Config errors fail the start.
+  const publicChannel = isPublic
+    ? openPublicChannel(meetingId, { mode, participants: [agent], topic: agenda })
+    : undefined;
   const resolvedModel = model || DEFAULT_MODELS[provider];
 
   let userMessage = agenda;
   if (context) {
     userMessage = `${agenda}\n\n---\n\n${context}`;
   }
+  if (mode === "debate") {
+    userMessage += "\n\n" + DEBATE_MEETING_USER_SUFFIX;
+  }
 
-  const assistantMessage = await callLLM(
-    systemPrompt,
-    [{ role: "user", content: userMessage }],
-    { provider, model: resolvedModel, baseUrl }
-  );
+  let assistantMessage: string;
+  try {
+    assistantMessage = await callLLM(
+      systemPrompt,
+      [{ role: "user", content: userMessage }],
+      { provider, model: resolvedModel, baseUrl }
+    );
+  } catch (e) {
+    // The meeting never started; close the channel so nothing dangles.
+    if (publicChannel) void publicChannel.finalize();
+    throw e;
+  }
 
   const meeting: Meeting = {
     id: meetingId,
     agent,
     systemPrompt,
-    messages: [
-      { role: "user", content: userMessage },
-      { role: "assistant", content: assistantMessage },
-    ],
+    messages: [],
     startedAt: new Date(),
     provider,
     model: resolvedModel,
     ...(baseUrl !== undefined && { baseUrl }),
+    mode,
+    ...(debateFocus !== undefined && { debateFocus }),
+    ...(publicChannel && { publicChannel }),
   };
   meetings.set(meetingId, meeting);
+  // Publish the agenda only: userMessage also carries the private context and the debate suffix.
+  recordMeetingMessage(meeting, { role: "user", content: userMessage }, agenda);
+  recordMeetingMessage(meeting, { role: "assistant", content: assistantMessage });
 
-  return { meetingId, response: assistantMessage };
+  return {
+    meetingId,
+    response: assistantMessage,
+    ...(publicChannel && { public: { url: publicChannel.url, topic: publicChannel.topic } }),
+  };
 }
 
 export async function continueMeeting(
@@ -77,7 +147,7 @@ export async function continueMeeting(
     throw new Error(`Meeting not found: ${meetingId}`);
   }
 
-  meeting.messages.push({ role: "user", content: message });
+  recordMeetingMessage(meeting, { role: "user", content: message });
 
   const assistantMessage = await callLLM(
     meeting.systemPrompt,
@@ -88,7 +158,7 @@ export async function continueMeeting(
     { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
   );
 
-  meeting.messages.push({ role: "assistant", content: assistantMessage });
+  recordMeetingMessage(meeting, { role: "assistant", content: assistantMessage });
 
   return assistantMessage;
 }
@@ -124,7 +194,12 @@ export async function endMeeting(
 
   meetings.delete(meetingId);
 
-  return summary || `Meeting ${meetingId} with ${meeting.agent} ended.`;
+  const text = summary || `Meeting ${meetingId} with ${meeting.agent} ended.`;
+  if (meeting.publicChannel) {
+    const r = await meeting.publicChannel.finalize({ summary: summary || undefined });
+    return `${text}\n\n${formatPublicBlock(meeting.publicChannel, r)}`;
+  }
+  return text;
 }
 
 export function listMeetings(): Array<{
@@ -134,6 +209,8 @@ export function listMeetings(): Array<{
   startedAt: string;
   provider: LLMProvider;
   model: string;
+  mode: MeetingMode;
+  public: boolean;
   baseUrl?: string;
 }> {
   return Array.from(meetings.values()).map((m) => ({
@@ -143,6 +220,8 @@ export function listMeetings(): Array<{
     startedAt: m.startedAt.toISOString(),
     provider: m.provider,
     model: m.model,
+    mode: m.mode,
+    public: m.publicChannel !== undefined,
     ...(m.baseUrl !== undefined && { baseUrl: m.baseUrl }),
   }));
 }

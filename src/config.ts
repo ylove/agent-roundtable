@@ -1,9 +1,12 @@
 // ============================================================================
-// Configuration (reads process.env only; imports nothing local)
+// Configuration (reads process.env only; imports no local modules)
 // ============================================================================
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 // Version (also reported by debug_env and the startup banner)
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 // Agent meetings
 // The default is relative to the server process's cwd (whatever directory the MCP host launched it
@@ -64,3 +67,22 @@ export const MODEL_PARAM_DESCRIPTION =
   `Model id. Defaults: ${PROVIDER_IDS.map((p) => `${DEFAULT_MODELS[p]} (${p})`).join(", ")}. ` +
   `Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). ` +
   `Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL.`;
+
+// Public sessions: publishing a session's turns to a world-readable channel (see src/publishers/)
+// ROUNDTABLE_PUBLISHER selects the backend; it is validated when a public channel is created, not at startup.
+export const PUBLISHER_KIND = (process.env.ROUNDTABLE_PUBLISHER || "ntfy").trim().toLowerCase();
+export const NTFY_URL = (process.env.ROUNDTABLE_NTFY_URL || "https://ntfy.sh").replace(/\/+$/, "");
+export const NTFY_TOKEN = process.env.ROUNDTABLE_NTFY_TOKEN || "";
+export const NTFY_USER = process.env.ROUNDTABLE_NTFY_USER || "";
+export const NTFY_PASSWORD = process.env.ROUNDTABLE_NTFY_PASSWORD || "";
+export const WEBHOOK_URL = process.env.ROUNDTABLE_WEBHOOK_URL || "";
+export const WEBHOOK_VIEW_URL = process.env.ROUNDTABLE_WEBHOOK_VIEW_URL || "";
+export const WEBHOOK_AUTH_HEADER = process.env.ROUNDTABLE_WEBHOOK_AUTH_HEADER || "";
+export const PUBLIC_TOPIC_PREFIX = process.env.ROUNDTABLE_PUBLIC_TOPIC_PREFIX || "roundtable";
+// Built from the home directory at runtime so no literal home path appears in source.
+export const TRANSCRIPTS_DIR =
+  process.env.ROUNDTABLE_TRANSCRIPTS_DIR || join(homedir(), ".agent-roundtable", "transcripts");
+export const PUBLISH_FLUSH_TIMEOUT_MS = parseInt(
+  process.env.ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS || "30000",
+  10
+);

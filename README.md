@@ -14,7 +14,7 @@ The caller talks to one agent persona. Provider and model are fixed at `start_me
 
 | Tool | Arguments |
 | --- | --- |
-| `start_meeting` | `{ agent, agenda, context?, provider?, model?, base_url? }` |
+| `start_meeting` | `{ agent, agenda, context?, mode?, debate_focus?, public?, provider?, model?, base_url? }` |
 | `say` | `{ meeting_id, message }` |
 | `end_meeting` | `{ meeting_id, request_summary? }` |
 | `list_meetings` | — |
@@ -25,7 +25,7 @@ Spawns the local `claude` CLI with `--system-prompt-file`, so the conversation r
 
 | Tool | Arguments |
 | --- | --- |
-| `start_local_meeting` | `{ agent, agenda, context? }` |
+| `start_local_meeting` | `{ agent, agenda, context?, mode?, debate_focus?, public? }` |
 | `say_local` | `{ meeting_id, message }` |
 | `end_local_meeting` | `{ meeting_id, request_summary? }` |
 | `list_local_meetings` | — |
@@ -36,7 +36,7 @@ Two or more personas take turns on a topic. One provider/model is used for the w
 
 | Tool | Arguments |
 | --- | --- |
-| `start_collaboration` | `{ agents[], topic, context?, max_rounds?, auto_run_rounds?, provider?, model?, base_url? }` |
+| `start_collaboration` | `{ agents[], topic, context?, max_rounds?, auto_run_rounds?, mode?, debate_focus?, public?, provider?, model?, base_url? }` |
 | `continue_collaboration` | `{ collaboration_id, rounds? }` |
 | `nudge_collaboration` | `{ collaboration_id, message }` |
 | `pause_collaboration` | `{ collaboration_id }` |
@@ -54,7 +54,34 @@ Two or more personas take turns on a topic. One provider/model is used for the w
 
 | Tool | Returns |
 | --- | --- |
-| `debug_env` | version, which keys are configured (6-character prefix only), Ollama reachability, default models, agents dir, active sessions |
+| `debug_env` | version, whether each key is configured (presence only, never any part of the value), Ollama reachability, default models, agents dir, active sessions, public-session publisher settings |
+
+## Modes
+
+- **debate** (meetings, local meetings, collaborations): the agent, or every agent after `agents[0]`, acts as a challenger that stress-tests a position instead of helping build it. `agents[0]` is the proponent. `debate_focus` optionally narrows the challenge.
+- **waffle-house** (collaborations only): an adversarial gauntlet. `agents[0]` defends an idea, every other agent attacks it. Each round every attacker attacks, then the defender answers the whole volley (rebut, concede or revise) and restates its "Current position (vN)". A session runs `1 + max_rounds x N` agent turns and always ends on the defender's rebuttal; the defender writes the summary (final form of the idea, what changed and which attack forced it, unanswered attacks, confidence). Needs 2+ agents. Attackers may be blunt about the idea; identity attacks, threats and slurs are out of bounds.
+
+Nudges from the caller never count as agent turns, so they do not shorten a session or change whose turn it is.
+
+> Have a waffle-house on the roundtable with the product-lead defending "we should ship without onboarding", and the skeptic and cfo attacking. Three rounds, make it public.
+
+## Public sessions
+
+Pass `public: true` to `start_meeting`, `start_local_meeting` or `start_collaboration` (default `false`) and the session is mirrored live to a public channel. The start result includes `public: { url, topic }` so you can watch it while it runs. When you end the session, the server flushes pending posts, downloads the public record, and saves a Markdown transcript under `ROUNDTABLE_TRANSCRIPTS_DIR`. `end_*` results then end with a line such as `Public transcript: <url> (live ~12h on the public server) · Saved: <path> · Published 9/9`, followed by warnings if anything was not delivered, the channel was rate limited, or the history was truncated. `list_*` results include `public` and `mode`.
+
+**Privacy rules.** A public channel is readable by anyone who has the link.
+
+- Posted: a header (mode, participants, topic or agenda), every agent reply, your `say` and `nudge` messages, and the summary if you asked for one.
+- Never posted: the `context` argument, system prompts, and persona files. Agents may still paraphrase context in their replies, so keep `context` generic in public sessions. The tool description tells the calling model to set `public` only when you ask for it.
+- Every agent's system prompt gets a notice that the session is public, telling it to work at the level of ideas and never reproduce private context, code, credentials or personal information.
+- Outgoing text passes through a mechanical redaction filter (emails, phone numbers, API-key and token patterns, home-directory paths, private IP addresses, card numbers that pass a Luhn check, US SSNs). It is a backstop only and cannot catch personal names or unusual secrets.
+- Channel names are random (`<prefix>-<session id>-<22 random characters>`) and never derived from the topic. Unlisted is not private: anyone with the link can read it. Do not put anything in a public session that you would not put on a billboard.
+- Publishing never fails or blocks a session. If posting fails, the session continues and the failure shows up in the end-of-session block; the local transcript marks undelivered entries.
+- If a server exits before a public session is ended, the transcript is not saved; the public channel just expires.
+
+**ntfy (default).** Messages go to `ROUNDTABLE_NTFY_URL` (default `https://ntfy.sh`) as JSON with `Firebase: no`, so they are not forwarded to Google. Open `<server>/<topic>` in a browser to watch; the page renders Markdown. Limits on the anonymous `ntfy.sh` server: 250 messages per day, a burst of 60 requests then one every 5 seconds, and messages are cached for 12 hours. Replies longer than about 3.8 KB are split into ordered parts. The server retries on 429 (honoring `Retry-After`) and stops posting for the session if the daily limit is reached or auth is rejected, then marks the channel degraded. Self-host ntfy or set a token to lift the limits.
+
+**Webhook alternative.** Set `ROUNDTABLE_PUBLISHER=webhook` and `ROUNDTABLE_WEBHOOK_URL` to receive each entry as a JSON POST `{session, turn, part, parts, agent, content, timestamp}`, optionally with `ROUNDTABLE_WEBHOOK_AUTH_HEADER` and a `ROUNDTABLE_WEBHOOK_VIEW_URL` template containing `{channel}`. A webhook cannot return history, so the saved transcript is built from the local copy.
 
 ## Providers
 
@@ -89,6 +116,16 @@ Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 
 | `ROUNDTABLE_OLLAMA_MODEL` | default Ollama model | `qwen3:14b` |
 | `ROUNDTABLE_MAX_TOKENS` | max output tokens (thinking tokens count) | `8192` |
 | `ROUNDTABLE_LLM_TIMEOUT_MS` | per-request timeout | `600000` |
+| `ROUNDTABLE_PUBLISHER` | public sessions: `ntfy` or `webhook` | `ntfy` |
+| `ROUNDTABLE_NTFY_URL` | ntfy server | `https://ntfy.sh` |
+| `ROUNDTABLE_NTFY_TOKEN` | ntfy access token (`tk_...`), if the server needs auth | — |
+| `ROUNDTABLE_NTFY_USER` / `ROUNDTABLE_NTFY_PASSWORD` | ntfy basic auth, alternative to the token | — |
+| `ROUNDTABLE_WEBHOOK_URL` | webhook publisher: URL that receives each entry as JSON | — |
+| `ROUNDTABLE_WEBHOOK_VIEW_URL` | webhook publisher: URL template for the viewing page, `{channel}` is replaced | — |
+| `ROUNDTABLE_WEBHOOK_AUTH_HEADER` | webhook publisher: value sent as the `Authorization` header | — |
+| `ROUNDTABLE_PUBLIC_TOPIC_PREFIX` | prefix of the generated public channel name | `roundtable` |
+| `ROUNDTABLE_TRANSCRIPTS_DIR` | where public-session transcripts are saved | `~/.agent-roundtable/transcripts` |
+| `ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS` | max wait for pending posts when a public session ends | `30000` |
 
 `.env` is loaded from the package directory (next to `package.json`) with `override: true`, so values there win over anything the MCP host passes in its `env` block. `.env` is gitignored and is the single source of truth for secrets. See `.env.example`.
 
@@ -198,6 +235,12 @@ Once the server is registered you do not call the tools yourself: you ask for wh
 > Send this to the replicate provider with model https://replicate.com/qwen/qwen3-235b-a22b-instruct-2507: "Explain CRDTs to a product manager."
 
 > Use the openai_compatible provider with base URL http://localhost:1234/v1 and model local-model to answer: what is the capital of Australia?
+
+**Debate, waffle-house and public sessions:**
+
+> Have a waffle-house on the roundtable with the skeptic defending "pineapple belongs on pizza" against the cfo and product-lead. Two rounds, make it public.
+
+> Start a debate meeting with the cfo about our pricing agenda.
 
 **Diagnostics:**
 

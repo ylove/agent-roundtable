@@ -12,6 +12,16 @@ import {
   OLLAMA_URL,
   PROVIDER_IDS,
   MODEL_PARAM_DESCRIPTION,
+  PUBLISHER_KIND,
+  NTFY_URL,
+  NTFY_TOKEN,
+  NTFY_USER,
+  NTFY_PASSWORD,
+  WEBHOOK_URL,
+  WEBHOOK_VIEW_URL,
+  WEBHOOK_AUTH_HEADER,
+  PUBLIC_TOPIC_PREFIX,
+  TRANSCRIPTS_DIR,
 } from "./config.js";
 import type { LLMMessage } from "./providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "./providers/index.js";
@@ -39,13 +49,47 @@ import {
   getCollaborationTranscript,
   listCollaborations,
 } from "./sessions/collaborations.js";
+import type { MeetingMode, CollaborationMode } from "./sessions/modes.js";
+import { MEETING_MODES, COLLABORATION_MODES } from "./sessions/modes.js";
+
+const MEETING_MODE_PROPS = {
+  mode: {
+    type: "string",
+    enum: [...MEETING_MODES],
+    description:
+      "debate: the agent acts as a challenger and stress-tests your agenda instead of helping execute it. Default: standard.",
+  },
+  debate_focus: {
+    type: "string",
+    description: "Optional: what the challenge should concentrate on (only used with mode debate).",
+  },
+} as const;
+
+const PUBLIC_PROP = {
+  type: "boolean",
+  description:
+    "Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: " +
+    "the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. " +
+    "The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. " +
+    "Never include personal information, credentials, or private code anywhere in a public session. " +
+    "The result includes public.url so the human can watch live.",
+} as const;
+
+/** Origin only: webhook URLs often carry the secret in the path or query. */
+function webhookOrigin(raw: string): string {
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return "unparseable URL";
+  }
+}
 
 export const tools: Tool[] = [
   // === Meeting Tools ===
   {
     name: "start_meeting",
     description:
-      "Start a meeting with an agent. Returns a meeting ID for follow-up messages. Use this to begin a synchronous conversation with another agent (CFO, FP&A, Product, etc.).",
+      "Start a meeting with an agent. Returns a meeting ID for follow-up messages. Use this to begin a synchronous conversation with another agent (CFO, FP&A, Product, etc.). Pass mode: \"debate\" to have the agent stress-test your agenda as a challenger instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -63,6 +107,9 @@ export const tools: Tool[] = [
           description:
             "Optional additional context, document content, or data to share.",
         },
+        mode: MEETING_MODE_PROPS.mode,
+        debate_focus: MEETING_MODE_PROPS.debate_focus,
+        public: PUBLIC_PROP,
         provider: {
           type: "string",
           enum: PROVIDER_IDS,
@@ -131,7 +178,7 @@ export const tools: Tool[] = [
   {
     name: "start_local_meeting",
     description:
-      "Start a LOCAL meeting with an agent using the installed Claude CLI. This uses your Claude Pro/Max subscription instead of API credits. Returns a meeting ID for follow-up messages. Ideal for cost-conscious lengthy conversations.",
+      "Start a LOCAL meeting with an agent using the installed Claude CLI. This uses your Claude Pro/Max subscription instead of API credits. Returns a meeting ID for follow-up messages. Ideal for cost-conscious lengthy conversations. Pass mode: \"debate\" to have the agent stress-test your agenda as a challenger instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -149,6 +196,9 @@ export const tools: Tool[] = [
           description:
             "Optional additional context, document content, or data to share.",
         },
+        mode: MEETING_MODE_PROPS.mode,
+        debate_focus: MEETING_MODE_PROPS.debate_focus,
+        public: PUBLIC_PROP,
       },
       required: ["agent", "agenda"],
     },
@@ -253,7 +303,7 @@ export const tools: Tool[] = [
   {
     name: "start_collaboration",
     description:
-      "Start a collaboration session where multiple agents discuss a topic with each other. Returns a collaboration ID. Agents take turns responding, building on each other's ideas.",
+      "Start a collaboration session where multiple agents discuss a topic with each other. Returns a collaboration ID. Agents take turns responding, building on each other's ideas. Pass mode: \"debate\" for a structured debate where agents[0] defends a position and the others challenge it, or mode: \"waffle-house\" for an adversarial gauntlet where agents[0] defends an idea and the others attack it until it is distilled to its best form.",
     inputSchema: {
       type: "object",
       properties: {
@@ -282,6 +332,20 @@ export const tools: Tool[] = [
           description:
             "If set, automatically run this many rounds before returning. Otherwise returns after first agent speaks.",
         },
+        mode: {
+          type: "string",
+          enum: [...COLLABORATION_MODES],
+          description:
+            "debate: agents[0] is the proponent; every other agent is a challenger that stress-tests the proponent. " +
+            "waffle-house: agents[0] is the defender of an idea (the topic) and every other agent is an adversarial attacker (needs 2+ agents); " +
+            "each round every attacker attacks, then the defender answers the whole volley, and the session always ends on the defender's rebuttal. " +
+            "Speaking order is the same as collaborate; a session runs 1 + max_rounds x N agent turns. Default: collaborate.",
+        },
+        debate_focus: {
+          type: "string",
+          description: "Optional: what the challenge should concentrate on (only used with mode debate).",
+        },
+        public: PUBLIC_PROP,
         provider: {
           type: "string",
           enum: PROVIDER_IDS,
@@ -342,7 +406,7 @@ export const tools: Tool[] = [
   },
   {
     name: "pause_collaboration",
-    description: "Pause a running collaboration. Can be resumed with continue_collaboration.",
+    description: "Pause a running collaboration. Resume it with nudge_collaboration (continue_collaboration only advances a running collaboration).",
     inputSchema: {
       type: "object",
       properties: {
@@ -413,15 +477,18 @@ export async function handleToolCall(
     switch (name) {
       // === Meeting Tools ===
       case "start_meeting": {
-        const { agent, agenda, context, provider, model, base_url } = args as {
+        const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic } = args as {
           agent: string;
           agenda: string;
           context?: string;
           provider?: LLMProvider;
           model?: string;
           base_url?: string;
+          mode?: MeetingMode;
+          debate_focus?: string;
+          public?: boolean;
         };
-        const result = await startMeeting(agent, agenda, context, provider, model, base_url);
+        const result = await startMeeting(agent, agenda, context, provider, model, base_url, mode, debate_focus, isPublic === true);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
@@ -466,12 +533,15 @@ export async function handleToolCall(
 
       // === Local Meeting Tools (CLI-based) ===
       case "start_local_meeting": {
-        const { agent, agenda, context } = args as {
+        const { agent, agenda, context, mode, debate_focus, public: isPublic } = args as {
           agent: string;
           agenda: string;
           context?: string;
+          mode?: MeetingMode;
+          debate_focus?: string;
+          public?: boolean;
         };
-        const result = await startLocalMeeting(agent, agenda, context);
+        const result = await startLocalMeeting(agent, agenda, context, mode, debate_focus, isPublic === true);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
@@ -540,7 +610,7 @@ export async function handleToolCall(
 
       // === Collaboration Tools ===
       case "start_collaboration": {
-        const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, base_url } = args as {
+        const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, base_url, mode, debate_focus, public: isPublic } = args as {
           agents: string[];
           topic: string;
           context?: string;
@@ -549,6 +619,9 @@ export async function handleToolCall(
           provider?: LLMProvider;
           model?: string;
           base_url?: string;
+          mode?: CollaborationMode;
+          debate_focus?: string;
+          public?: boolean;
         };
 
         const result = await startCollaboration(agents, topic, {
@@ -559,6 +632,9 @@ export async function handleToolCall(
           provider,
           model,
           baseUrl: base_url,
+          mode,
+          debateFocus: debate_focus,
+          public: isPublic === true,
         });
 
         return {
@@ -622,6 +698,9 @@ export async function handleToolCall(
         }
         if (result.summary) {
           output += `## Summary\n\n${result.summary}`;
+        }
+        if (result.publicBlock) {
+          output += `\n\n${result.publicBlock}`;
         }
 
         return {
@@ -688,6 +767,23 @@ export async function handleToolCall(
           max_tokens: MAX_TOKENS,
           llm_timeout_ms: LLM_TIMEOUT_MS,
           agents_dir: agentsDir || "NOT SET (defaulting to .claude/agents)",
+          public_sessions: {
+            publisher: PUBLISHER_KIND,
+            ...(PUBLISHER_KIND === "webhook"
+              ? {
+                  webhook_url: WEBHOOK_URL ? `configured (${webhookOrigin(WEBHOOK_URL)}, path/query hidden)` : "NOT SET",
+                  webhook_view_url: WEBHOOK_VIEW_URL || "NOT SET",
+                  webhook_auth_header: WEBHOOK_AUTH_HEADER ? "configured" : "not set",
+                }
+              : {
+                  server_url: NTFY_URL,
+                  token: NTFY_TOKEN ? "configured" : "not set",
+                  user: NTFY_USER ? "configured" : "not set",
+                  password: NTFY_PASSWORD ? "configured" : "not set",
+                }),
+            topic_prefix: PUBLIC_TOPIC_PREFIX,
+            transcripts_dir: TRANSCRIPTS_DIR,
+          },
           local_meetings: claudeCliAvailable
             ? "available (claude CLI found)"
             : "NOT available (claude CLI not in PATH)",

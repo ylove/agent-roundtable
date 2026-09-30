@@ -58,6 +58,25 @@ try {
     check(`${name} has no base_url parameter`, () =>
       assert(!byName[name]?.inputSchema?.properties?.base_url, "unexpected base_url"));
   }
+  check("start_meeting / start_local_meeting mode enum = standard|debate, plus debate_focus", () => {
+    for (const name of ["start_meeting", "start_local_meeting"]) {
+      const p = byName[name]?.inputSchema?.properties;
+      assert(JSON.stringify(p?.mode?.enum) === JSON.stringify(["standard", "debate"]), `${name}: ${JSON.stringify(p?.mode)}`);
+      assert(p?.debate_focus?.type === "string", `${name} missing debate_focus`);
+    }
+  });
+  check("start_collaboration mode enum = collaborate|debate|waffle-house, plus debate_focus", () => {
+    const p = byName.start_collaboration?.inputSchema?.properties;
+    assert(JSON.stringify(p?.mode?.enum) === JSON.stringify(["collaborate", "debate", "waffle-house"]), JSON.stringify(p?.mode));
+    assert(p?.debate_focus?.type === "string", "missing debate_focus");
+  });
+  check("start_meeting / start_local_meeting / start_collaboration have a boolean public parameter", () => {
+    for (const name of ["start_meeting", "start_local_meeting", "start_collaboration"]) {
+      const p = byName[name]?.inputSchema?.properties?.public;
+      assert(p?.type === "boolean", `${name} missing public`);
+      assert(/context/.test(p.description) && /world-readable/.test(p.description), `${name} public description`);
+    }
+  });
   // The forbidden names are assembled from fragments so this file itself passes the repo hygiene grep
   // (which rejects any file containing the legacy project name or the removed image-tool names).
   const forbidden = new RegExp(["vo" + "uch", "generate_" + "image", "list_image_" + "models"].join("|"), "i");
@@ -73,6 +92,16 @@ try {
     assert(unknown.isError && /Unknown provider "grok"/.test(unknown.text), unknown.text));
   check("unknown provider error lists the six valid ids", () =>
     assert(unknown.text.includes(`Valid providers: ${EXPECTED_PROVIDERS.join(", ")}`), unknown.text));
+
+  for (const [tool, args, valid] of [
+    ["start_meeting", { agent: "x", agenda: "y", mode: "Debate" }, "standard, debate"],
+    ["start_local_meeting", { agent: "x", agenda: "y", mode: "waffle-house" }, "standard, debate"],
+    ["start_collaboration", { agents: ["x", "y"], topic: "t", mode: "waffle_house" }, "collaborate, debate, waffle-house"],
+  ]) {
+    const r = await server.callTool(tool, args);
+    check(`${tool} rejects unknown mode with the valid list`, () =>
+      assert(r.isError && r.text.includes(`Unknown mode "${args.mode}". Valid modes: ${valid}`), r.text));
+  }
 
   const baseUrlMisuse = await server.callTool("chat_completion", {
     messages: [{ role: "user", content: "hi" }],
@@ -105,7 +134,7 @@ try {
     assert(ollama.isError && /Ollama is not reachable at http:\/\/127\.0\.0\.1:9/.test(ollama.text), ollama.text));
 
   const debug = await server.callTool("debug_env");
-  check("debug_env reports version 0.1.0", () => assert(/"version": "0\.1\.0"/.test(debug.text), debug.text.slice(0, 200)));
+  check("debug_env reports version 0.2.0", () => assert(/"version": "0\.2\.0"/.test(debug.text), debug.text.slice(0, 200)));
   check("debug_env does not leak key material", () =>
     assert(!/sk-[A-Za-z0-9_-]{8,}|r8_[A-Za-z0-9]{8,}/.test(debug.text), "key-like string in debug_env output"));
   check("debug_env reports a configured key as exactly \"configured\" (no prefix, no length)", () =>

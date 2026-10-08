@@ -1,0 +1,509 @@
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname, relative } from "node:path";
+
+const root = fs.mkdtempSync(join(tmpdir(), "roundtable-agent-files-"));
+const oldHome = process.env.HOME;
+process.env.HOME = join(root, "home");
+for (const [key, value] of Object.entries({
+  AGENTS_DIR: "agents",
+  SKILLS_DIR: "skills",
+  WORKSPACE_DIR: "workspace",
+  ACTIVITY_LOG: "activity.jsonl",
+  TRANSCRIPTS_DIR: "transcripts"
+})) {
+  process.env[`ROUNDTABLE_${key}`] = join(root, value);
+}
+after(() => {
+  if (oldHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = oldHome;
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+});
+const f = await import("../../dist/agent-files.js");
+const { readFrontmatter } = await import("../../dist/agents.js");
+const raw = (extra = {}) => ({
+  name: "budget",
+  description: "Plans budgets.",
+  system_prompt: "You plan budgets.",
+  skills: [],
+  contributions: [],
+  ...extra
+});
+const validate = (extra = {}, ctx = {}) =>
+  f.validateAgentSpec(raw(extra), { mode: "create", existingSkills: [], ...ctx });
+const spec = (extra = {}) => validate(extra).spec;
+const skill = (name, extra = {}) => ({
+  name,
+  description: "Check budgets.",
+  instructions: "Check each number. Then report.",
+  contributed_by: ["cfo"],
+  ...extra
+});
+const date = "2026-10-08";
+let seq = 0;
+
+function dirs() {
+  const base = join(root, `case-${++seq}`);
+  return { agentsDir: join(base, "agents"), skillsDir: join(base, "skills"), createdFrom: ["cfo"], date };
+}
+
+function fixture(p, text) {
+  fs.mkdirSync(dirname(p), { recursive: true });
+  fs.writeFileSync(p, text);
+  return p;
+}
+
+function listing(base) {
+  return fs.existsSync(base) ? fs.readdirSync(base, { recursive: true }).sort() : [];
+}
+
+test("slugify normalizes punctuation, marks, dashes, colons and maximum length", () => {
+  for (const [input, expected] of [
+    ["Hello World", "hello-world"],
+    ["Café: Déjà Vu!", "cafe-deja-vu"],
+    ["--- A__B ---", "a-b"],
+    [":", ""],
+    ["Straße", "stra-e"]
+  ]) {
+    assert.equal(f.slugify(input), expected);
+  }
+  assert.equal(f.slugify("abc-def", 4), "abc");
+  assert.equal(f.slugify("a".repeat(80)).length, 64);
+  assert.equal(f.slugify("name", 0), "");
+});
+
+test("validation rejects non-objects and missing required strings", () => {
+  for (const input of [null, [], "x", new Date(), 1]) {
+    assert.throws(() => f.validateAgentSpec(input, { mode: "create", existingSkills: [] }), /plain object/);
+  }
+  for (const field of ["name", "description", "system_prompt"]) {
+    for (const value of [undefined, " ", 12]) {
+      assert.throws(() => validate({ [field]: value }), new RegExp(field));
+    }
+  }
+  assert.throws(() => validate({ name: ":---" }), /name/);
+});
+
+test("name is a bounded slug and warns when normalized", () => {
+  const r = validate({ name: " -Café: Finance- " });
+  assert.equal(r.spec.name, "cafe-finance");
+  assert.match(r.warnings.join(" "), /normalized/);
+  assert.equal(validate({ name: "a".repeat(100) }).spec.name.length, 64);
+});
+
+test("description collapses whitespace and truncates with warning", () => {
+  assert.equal(validate({ description: " a\n\t b " }).spec.description, "a b");
+  const r = validate({ description: "a".repeat(1001) });
+  assert.equal(r.spec.description.length, 1000);
+  assert.match(r.warnings.join(" "), /description truncated/);
+});
+
+test("model canonicalization accepts all choices and drops invalid types", () => {
+  for (const model of f.MODEL_CHOICES) {
+    assert.equal(validate({ model: ` ${model.toUpperCase()} ` }).spec.model, model);
+  }
+  for (const model of ["unknown", 1]) {
+    const r = validate({ model });
+    assert.ok(!("model" in r.spec));
+    assert.match(r.warnings.join(" "), /model dropped/);
+  }
+  for (const model of [null, "", " \t "]) {
+    const r = validate({ model });
+    assert.ok(!("model" in r.spec));
+    assert.deepEqual(r.warnings, []);
+  }
+});
+
+test("tools accept arrays and comma strings, canonicalize, dedupe and drop unknowns", () => {
+  const r = validate({ tools: ["read", "READ", "grep", "Teleport", 5] });
+  assert.deepEqual(r.spec.tools, ["Read", "Grep"]);
+  assert.match(r.warnings.join(" "), /Teleport, 5/);
+  assert.deepEqual(validate({ tools: " bash, websearch, WebFetch " }).spec.tools, ["Bash", "WebSearch", "WebFetch"]);
+  assert.deepEqual(validate({ tools: f.TOOL_ALLOWLIST }).spec.tools, [...f.TOOL_ALLOWLIST]);
+  for (const tools of [[], "", ["unknown"], null]) {
+    assert.ok(!("tools" in validate({ tools }).spec));
+  }
+  for (const tools of [null, "", " \t ", ",, ,"]) {
+    const r = validate({ tools });
+    assert.ok(!("tools" in r.spec));
+    assert.deepEqual(r.warnings, []);
+  }
+  const commaTools = validate({ tools: "Read,,Grep, ," });
+  assert.deepEqual(commaTools.spec.tools, ["Read", "Grep"]);
+  assert.deepEqual(commaTools.warnings, []);
+});
+
+test("system prompt is trimmed and capped", () => {
+  assert.equal(validate({ system_prompt: " hi \n" }).spec.system_prompt, "hi");
+  const r = validate({ system_prompt: "x".repeat(40001) });
+  assert.equal(r.spec.system_prompt.length, 40000);
+  assert.match(r.warnings.join(" "), /system_prompt truncated/);
+});
+
+test("skills reject invalid containers and entries and normalize names", () => {
+  assert.deepEqual(validate({ skills: "bad" }).spec.skills, []);
+  assert.match(validate({ skills: "bad" }).warnings.join(" "), /array/);
+  const r = validate({ skills: [null, "x", skill(":"), skill(" Café Steps ")] });
+  assert.equal(r.spec.skills[0].name, "cafe-steps");
+  assert.ok(r.warnings.length >= 3);
+});
+
+test("reserved skill names receive the skill suffix", () => {
+  const r = validate({ skills: f.RESERVED_SKILL_NAMES.map(n => skill(n)) });
+  assert.deepEqual(r.spec.skills.map(s => s.name), ["synced-skill", "anthropic-skills-skill"]);
+  assert.equal(r.warnings.length, 2);
+});
+
+test("duplicate skills merge the first non-empty text and contributor union", () => {
+  const r = validate({
+    skills: [
+      skill("check", { description: "", instructions: "", contributed_by: [" cfo ", "", 3] }),
+      skill("CHECK", { contributed_by: ["cfo", "reviewer"] }),
+      skill("check", { description: "later", instructions: "later" })
+    ]
+  });
+  assert.equal(r.spec.skills.length, 1);
+  assert.equal(r.spec.skills[0].description, "Check budgets.");
+  assert.equal(r.spec.skills[0].instructions, "Check each number. Then report.");
+  assert.deepEqual(r.spec.skills[0].contributed_by, ["cfo", "reviewer"]);
+  assert.match(r.warnings.join(" "), /Duplicate/);
+});
+
+test("existing skills reuse exact spelling and ignore instructions", () => {
+  const r = validate({ skills: [skill("checking", { description: "" })] }, { existingSkills: ["Checking"] });
+  assert.equal(r.spec.skills[0].name, "Checking");
+  assert.equal(r.spec.skills[0].description, "");
+  assert.equal(r.spec.skills[0].instructions, undefined);
+  assert.match(r.warnings.join(" "), /instructions ignored; existing skills are never overwritten/);
+  assert.equal(validate({ skills: [{ name: "checking" }] }, { existingSkills: ["checking"] }).warnings.length, 0);
+});
+
+test("new skills need instructions, cap text and derive missing descriptions", () => {
+  const dropped = validate({ skills: [skill("check", { instructions: " " })] });
+  assert.equal(dropped.spec.skills.length, 0);
+  assert.match(dropped.warnings.join(" "), /non-empty instructions/);
+  const r = validate({
+    skills: [
+      skill("check", { description: "", instructions: "First step. Second step." }),
+      skill("long", { description: "d".repeat(1001), instructions: "x".repeat(20001) })
+    ]
+  });
+  assert.equal(r.spec.skills[0].description, "First step.");
+  assert.equal(r.spec.skills[1].description.length, 1000);
+  assert.equal(r.spec.skills[1].instructions.length, 20000);
+  assert.match(r.warnings.join(" "), /derived/);
+  assert.equal(validate({ skills: [skill("check", { description: " a\n b " })] }).spec.skills[0].description, "a b");
+});
+
+test("only six processed skills remain, with a warning naming extras", () => {
+  const r = validate({ skills: Array.from({ length: 8 }, (_, i) => skill(`skill-${i}`)) });
+  assert.equal(r.spec.skills.length, 6);
+  assert.match(r.warnings.join(" "), /skill-6, skill-7/);
+});
+
+test("contributions require strings, collapse summaries and cap both fields", () => {
+  const r = validate({
+    contributions: [
+      null,
+      { agent: "", summary: "x" },
+      { agent: "cfo", summary: 1 },
+      { agent: " cfo ", summary: " a\n b " },
+      { agent: "x".repeat(101), summary: "y".repeat(501) }
+    ]
+  });
+  assert.deepEqual(r.spec.contributions[0], { agent: "cfo", summary: "a b" });
+  assert.equal(r.spec.contributions[1].agent.length, 100);
+  assert.equal(r.spec.contributions[1].summary.length, 500);
+  assert.equal(r.warnings.length, 1);
+  assert.deepEqual(validate().spec.contributions, []);
+});
+
+test("open questions and improve changes filter and cap; create ignores changes", () => {
+  const extra = {
+    open_questions: [null, "", ...Array.from({ length: 12 }, (_, i) => ` q${i} `)],
+    changes: Array.from({ length: 35 }, (_, i) => ` change${i} `)
+  };
+  const r = validate(extra, { mode: "improve" });
+  assert.equal(r.spec.open_questions.length, 10);
+  assert.equal(r.spec.open_questions[0], "q0");
+  assert.equal(r.spec.changes.length, 30);
+  assert.ok(!("changes" in validate(extra).spec));
+  assert.ok(!("open_questions" in validate({ open_questions: [" "] }).spec));
+  assert.ok(!("changes" in validate({ changes: [] }, { mode: "improve" }).spec));
+});
+
+test("unmanaged model keys never enter a new spec or rendered frontmatter", () => {
+  const forbidden = {
+    permissionMode: "bypassPermissions",
+    hooks: {},
+    mcpServers: {},
+    memory: "project",
+    isolation: "worktree",
+    background: true,
+    color: "red",
+    surprise: 1
+  };
+  const s = validate(forbidden).spec;
+  const rendered = readFrontmatter(f.renderAgentFile(s, { createdFrom: [], date }));
+  for (const key of Object.keys(forbidden)) {
+    assert.ok(!(key in s));
+    assert.ok(!(key in rendered.data));
+  }
+});
+
+test("agent and skill YAML safely round-trip hostile descriptions", () => {
+  const hostile = `---\nvalue: # both 'single' and "double"\npermissionMode: bypassPermissions\n---`;
+  const s = spec({
+    description: hostile,
+    model: "opus",
+    tools: ["Read"],
+    skills: [skill("check", { description: hostile })]
+  });
+  const a = readFrontmatter(f.renderAgentFile(s, { createdFrom: ["cfo-->", "reviewer"], date }));
+  assert.equal(a.data.description, hostile.replace(/\s+/g, " ").trim());
+  assert.deepEqual(Object.keys(a.data), ["name", "description", "model", "tools", "skills"]);
+  assert.ok(a.body.startsWith(s.system_prompt));
+  assert.ok(!a.body.includes("cfo-->"));
+  const k = readFrontmatter(f.renderSkillFile(s.skills[0], { date }));
+  assert.equal(k.data.description, a.data.description);
+  assert.deepEqual(Object.keys(k.data), ["name", "description"]);
+  assert.match(k.body, /^# Check/);
+});
+
+test("rendering removes old creation comments, sanitizes credits, and labels reused skills", () => {
+  const s = validate({
+    system_prompt: "You plan.\n<!-- Created by agent-roundtable create_agent old -->\nKeep this.",
+    skills: [skill("check"), { name: "existing", description: "Existing", contributed_by: [] }],
+    open_questions: ["Why?"],
+    contributions: [{ agent: "cfo", summary: "math" }]
+  }, { existingSkills: ["existing"] }).spec;
+  assert.equal((f.renderAgentFile(s, { createdFrom: [], date }).match(/<!-- Created by/g) ?? []).length, 1);
+  assert.match(f.renderSkillFile({ ...s.skills[0], contributed_by: [] }, { date }), /contributed by: \(unknown\)/);
+  const markdown = f.renderSpecMarkdown({ ...s, changes: ["Clearer instructions"] });
+  for (const text of [
+    "inherit (not set)",
+    "all tools (inherited)",
+    "check (new)",
+    "existing (existing skill, reused)",
+    "## Open questions",
+    "## Changes"
+  ]) {
+    assert.ok(markdown.includes(text));
+  }
+  assert.equal(f.formatBackupTimestamp(new Date("2026-01-02T03:04:05Z")), "20260102-030405");
+});
+
+test("prefix detection counts only regular markdown files, with strict majority", () => {
+  const o = dirs();
+  assert.equal(f.detectAgentFilePrefix(o.agentsDir), "");
+  fs.mkdirSync(o.agentsDir, { recursive: true });
+  assert.equal(f.detectAgentFilePrefix(o.agentsDir), "");
+  fixture(join(o.agentsDir, "subagent-a.md"), "A");
+  fixture(join(o.agentsDir, "SUBAGENT-b.MD"), "B");
+  fixture(join(o.agentsDir, "c.md"), "C");
+  fs.mkdirSync(join(o.agentsDir, "subagent-fake.md"));
+  fixture(join(o.agentsDir, "ignored.txt"), "x");
+  assert.equal(f.detectAgentFilePrefix(o.agentsDir), "subagent-");
+  fixture(join(o.agentsDir, "d.md"), "D");
+  assert.equal(f.detectAgentFilePrefix(o.agentsDir), "");
+});
+
+test("collisions by filename, directory and frontmatter identity suffix both name and file", () => {
+  for (const filename of ["cfo.md", "subagent-cfo.md", "cfo/AGENT.md", "x.md"]) {
+    const o = dirs();
+    fixture(join(o.agentsDir, filename), "---\nname: cfo\n---\nOriginal");
+    const r = f.writeNewAgent(spec({ name: "cfo" }), o);
+    assert.equal(r.agentName, "cfo-2");
+    assert.equal(readFrontmatter(fs.readFileSync(r.agentPath, "utf8")).data.name, "cfo-2");
+    assert.equal(relative(o.agentsDir, r.agentPath), filename === "subagent-cfo.md" ? "subagent-cfo-2.md" : "cfo-2.md");
+    assert.match(r.warnings.join(" "), /already exists/);
+  }
+  const o = dirs();
+  const name = "a".repeat(64);
+  fixture(join(o.agentsDir, name + ".md"), "x");
+  fixture(join(o.agentsDir, name.slice(0, 62) + "-2.md"), "x");
+  assert.equal(f.writeNewAgent(spec({ name }), o).agentName, name.slice(0, 62) + "-3");
+});
+
+test("exclusive creation reuses an existing skill and handles skill and agent races", (t) => {
+  const o = dirs();
+  const s = spec({ skills: [skill("check")] });
+  const p = fixture(join(o.skillsDir, "check", "SKILL.md"), "Original skill");
+  const r = f.writeNewAgent(s, o);
+  assert.equal(r.skills[0].status, "reused");
+  assert.equal(fs.readFileSync(p, "utf8"), "Original skill");
+  const race = dirs();
+  const originalWrite = fs.writeFileSync;
+  let agentRace = true;
+  let skillRace = true;
+  t.mock.method(fs, "writeFileSync", function (p, text, options) {
+    if (options?.flag === "wx" && (String(p).endsWith("SKILL.md") ? skillRace : agentRace)) {
+      if (String(p).endsWith("SKILL.md")) {
+        skillRace = false;
+      } else {
+        agentRace = false;
+      }
+      originalWrite(p, "Racing file");
+    }
+    return originalWrite(p, text, options);
+  });
+  const raced = f.writeNewAgent(spec({ skills: [skill("check"), skill("created-here")] }), race);
+  assert.equal(raced.agentName, "budget-2");
+  assert.equal(raced.skills[0].status, "reused");
+  assert.equal(raced.skills[1].status, "created");
+  assert.ok(!raced.warnings.some(warning => warning.includes('Skill "created-here" already exists; reused')));
+  assert.equal(fs.readFileSync(join(race.agentsDir, "budget.md"), "utf8"), "Racing file");
+  assert.equal(fs.readFileSync(join(race.skillsDir, "check", "SKILL.md"), "utf8"), "Racing file");
+});
+
+test("improve backs up exact bytes, preserves identity and unmanaged keys, and unions skills", () => {
+  const o = dirs();
+  const original = [
+    "---",
+    "name: original-identity",
+    "description: old",
+    "model: sonnet",
+    "tools: Read, Grep",
+    "skills: old, check",
+    "permissionMode: plan",
+    "color: red",
+    "memory: project",
+    "hooks: {Stop: []}",
+    "---",
+    "Original bytes.",
+    "",
+  ].join("\n");
+  const targetPath = fixture(join(o.agentsDir, "budget.md"), original);
+  const opts = {
+    targetPath,
+    skillsDir: o.skillsDir,
+    createdFrom: o.createdFrom,
+    date,
+    timestamp: "20261008-120000"
+  };
+  const r = f.writeImprovedAgent(spec({ name: "different", skills: [skill("check"), skill("new")] }), opts);
+  assert.equal(r.backupPath, targetPath + ".bak-20261008-120000");
+  assert.equal(fs.readFileSync(r.backupPath, "utf8"), original);
+  const data = readFrontmatter(fs.readFileSync(targetPath, "utf8")).data;
+  assert.equal(data.name, "original-identity");
+  assert.equal(r.agentName, data.name);
+  assert.equal(data.model, "sonnet");
+  assert.equal(data.tools, "Read, Grep");
+  assert.deepEqual(data.skills, ["old", "check", "new"]);
+  for (const key of ["permissionMode", "color", "memory", "hooks"]) {
+    assert.deepEqual(data[key], readFrontmatter(original).data[key]);
+  }
+  const secondBytes = fs.readFileSync(targetPath, "utf8");
+  const second = f.writeImprovedAgent(spec({ model: "haiku", tools: ["Bash"] }), opts);
+  assert.equal(second.backupPath, r.backupPath + "-2");
+  assert.equal(fs.readFileSync(second.backupPath, "utf8"), secondBytes);
+  const replaced = readFrontmatter(fs.readFileSync(targetPath, "utf8")).data;
+  assert.equal(replaced.model, "haiku");
+  assert.equal(replaced.tools, "Bash");
+  assert.deepEqual(replaced.skills, data.skills);
+});
+
+test("improve validates target and timestamp; identity falls back to agentKey", () => {
+  const o = dirs();
+  const opts = {
+    mode: "improve",
+    targetPath: join(o.agentsDir, "missing.md"),
+    skillsDir: o.skillsDir,
+    createdFrom: [],
+    date,
+    timestamp: "ok"
+  };
+  assert.throws(() => f.planAgentFiles(spec(), opts), /existing .md/);
+  fixture(opts.targetPath.replace(".md", ".txt"), "x");
+  assert.throws(
+    () => f.planAgentFiles(spec(), { ...opts, targetPath: opts.targetPath.replace(".md", ".txt") }),
+    /existing .md/,
+  );
+  fixture(opts.targetPath, "Plain");
+  assert.throws(() => f.planAgentFiles(spec(), { ...opts, timestamp: "../escape" }), /timestamp/);
+  assert.equal(f.planAgentFiles(spec(), opts).agentName, "missing");
+});
+
+test("creation warns about directories Claude Code did not watch at startup", () => {
+  const r = f.writeNewAgent(spec({ skills: [skill("check")] }), dirs());
+  assert.match(r.warnings.join(" "), /agent directories.*restart/);
+  assert.match(r.warnings.join(" "), /skill directories.*restart/);
+});
+
+test("preview and plan write nothing and match subsequent creation and improvement", () => {
+  const o = dirs();
+  const s = spec({ skills: [skill("check")] });
+  const before = listing(root);
+  const opts = { ...o, mode: "create" };
+  const preview = f.previewFiles(s, opts);
+  const plan = f.planAgentFiles(s, opts);
+  assert.deepEqual(listing(root), before);
+  assert.deepEqual(preview, plan.files.map(({ path, content }) => ({ path, content })));
+  assert.deepEqual(plan.files.map(f => f.kind), ["skill", "agent"]);
+  const written = f.writeNewAgent(s, o);
+  assert.equal(written.agentPath, plan.agentPath);
+  for (const file of preview) {
+    assert.equal(fs.readFileSync(file.path, "utf8"), file.content);
+  }
+  const improvement = {
+    mode: "improve",
+    targetPath: written.agentPath,
+    skillsDir: o.skillsDir,
+    createdFrom: [],
+    date,
+    timestamp: "preview"
+  };
+  const listingBefore = listing(root);
+  const previewImprovement = f.previewFiles(spec(), improvement);
+  const improvementPlan = f.planAgentFiles(spec(), improvement);
+  assert.deepEqual(listing(root), listingBefore);
+  assert.ok(!fs.existsSync(improvementPlan.backupPath));
+  const changed = f.writeImprovedAgent(spec(), improvement);
+  assert.equal(changed.backupPath, improvementPlan.backupPath);
+  for (const file of previewImprovement) {
+    assert.equal(fs.readFileSync(file.path, "utf8"), file.content);
+  }
+});
+
+test("path safety rejects traversal and links escaping a base directory", () => {
+  const o = dirs();
+  assert.throws(() => f.planAgentFiles({ ...spec(), name: "../../escape" }, { ...o, mode: "create" }), /Unsafe/);
+  assert.throws(
+    () => f.planAgentFiles({ ...spec(), skills: [skill("../../escape")] }, { ...o, mode: "create" }),
+    /Unsafe/,
+  );
+  fs.mkdirSync(o.skillsDir, { recursive: true });
+  const outside = join(root, "outside");
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, join(o.skillsDir, "check"));
+  assert.throws(() => f.writeNewAgent(spec({ skills: [skill("check")] }), o), /Unsafe/);
+  assert.deepEqual(listing(outside), []);
+});
+
+test("improve refuses a symbolic link and tells the caller to pass the real file", () => {
+  const o = dirs();
+  const realFile = fixture(join(root, "real-agent.md"), "Original agent bytes.");
+  const link = join(o.agentsDir, "linked-agent.md");
+  fs.mkdirSync(o.agentsDir, { recursive: true });
+  fs.symlinkSync(realFile, link);
+  const realPath = fs.realpathSync(realFile);
+  const before = listing(root);
+  const opts = {
+    targetPath: link,
+    skillsDir: o.skillsDir,
+    createdFrom: [],
+    date,
+    timestamp: "20261008-120000"
+  };
+  assert.throws(() => f.writeImprovedAgent(spec(), opts), {
+    message: `improve_agent will not edit ${link}: it is a symbolic link to ${realPath}. ` +
+      `Pass the real file instead (agent: "${realPath}").`
+  });
+  assert.equal(fs.readFileSync(realFile, "utf8"), "Original agent bytes.");
+  assert.deepEqual(listing(root), before);
+});

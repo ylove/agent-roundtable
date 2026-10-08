@@ -1,15 +1,16 @@
 // ============================================================================
-// Session modes: debate (meetings + collaborations) and waffle-house (collaborations)
+// Session modes: debate (meetings + collaborations), waffle-house and conversation
 // ============================================================================
 
 export type MeetingMode = "standard" | "debate";
-export type CollaborationMode = "collaborate" | "debate" | "waffle-house";
+export type CollaborationMode = "collaborate" | "debate" | "waffle-house" | "conversation";
+export type ConversationAngle = "recent-work" | "product" | "founder" | "open-problem" | "cross-team" | "theme";
 export type CollaborationRole = "proponent" | "challenger" | "defender" | "attacker";
 
 // Declared enums for the tool schemas. The low-level MCP Server does not enforce inputSchema enums,
 // so the start* functions re-check against these lists (same idea as the Unknown provider guard).
 export const MEETING_MODES: readonly MeetingMode[] = ["standard", "debate"];
-export const COLLABORATION_MODES: readonly CollaborationMode[] = ["collaborate", "debate", "waffle-house"];
+export const COLLABORATION_MODES: readonly CollaborationMode[] = ["collaborate", "debate", "waffle-house", "conversation"];
 
 export function assertMeetingMode(mode: string): asserts mode is MeetingMode {
   if (!(MEETING_MODES as readonly string[]).includes(mode)) {
@@ -21,6 +22,67 @@ export function assertCollaborationMode(mode: string): asserts mode is Collabora
   if (!(COLLABORATION_MODES as readonly string[]).includes(mode)) {
     throw new Error(`Unknown mode "${mode}". Valid modes: ${COLLABORATION_MODES.join(", ")}`);
   }
+}
+
+// ----------------------------------------------------------------------------
+// Conversation (collaborations only)
+// ----------------------------------------------------------------------------
+
+export function buildConversationDirective(): string {
+  return "\n\n## Conversation mode\n" +
+    "Have an unstructured conversation with colleagues, not a meeting or debate. There is no agenda or deliverable. " +
+    "React, share specifics from your own work, ask real questions, disagree when you disagree, and move to a new thread when one runs out. " +
+    "Draw on your situation: the product you're building, recent work, the people you work with including the founder or whoever you report to, and open problems.\n\n" +
+    "TRUTHFULNESS: Only state as fact what your persona or your \"Your context\" notes establish. " +
+    "Say when you don't know and mark guesses as guesses. Never invent past events, metrics or decisions.\n\n" +
+    "Usually 2-6 sentences. No headings, no bullet lists, no summaries, and no action-item lists unless asked.";
+}
+
+export function pickOpeningAngle(
+  available: { activity: boolean; memory: boolean; workspace: boolean },
+  topic?: string,
+  rand: () => number = Math.random
+): ConversationAngle {
+  if (topic?.trim()) return "theme";
+  const choices: Array<[ConversationAngle, number]> = [
+    ["recent-work", available.activity || available.memory ? 3 : 0],
+    ["product", available.workspace ? 2 : 1],
+    ["founder", 1],
+    ["open-problem", 2],
+    ["cross-team", 1],
+  ];
+  let remaining = rand() * choices.reduce((sum, [, weight]) => sum + weight, 0);
+  for (const [angle, weight] of choices) {
+    if (remaining < weight) return angle;
+    remaining -= weight;
+  }
+  return "cross-team";
+}
+
+export function buildConversationOpeningPrompt(angle: ConversationAngle, participants: string[], topic?: string): string {
+  const phrases: Record<ConversationAngle, string> = {
+    "recent-work": "something you worked on recently or something that happened in your recent work",
+    product: "something about the product you're building: where it is, where it's heading, or what's been on your mind about it",
+    founder: "something about the founder or the person you work for: a decision they made, how they're shaping the product, or what working with them is like",
+    "open-problem": "an open problem in your area that you keep coming back to",
+    "cross-team": "something another participant's area is doing that affects your work",
+    theme: "your honest take on the theme, from your own context",
+  };
+  return `You're starting a conversation with: ${participants.join(", ")}.\n\n` +
+    (angle === "theme" && topic?.trim() ? `Loose theme: ${topic}. It's a starting point, not an agenda.\n\n` : "") +
+    `Open the way a colleague would, with ${phrases[angle]}.`;
+}
+
+export function buildConversationTurnPrompt(): string {
+  return "It's your turn. Respond to what was just said the way you would in a real conversation: " +
+    "react, add something from your own context, or ask a question, or move to a new thread if this one has run its course. Usually 2-6 sentences.";
+}
+
+export function buildConversationSummaryPrompt(topic?: string): string {
+  return "Give a short recap of the conversation" + (topic?.trim() ? ` (loose theme: ${topic})` : "") + ":\n" +
+    "1. Threads that came up\n" +
+    "2. Ideas or concerns worth following up, and who raised them\n" +
+    "3. Anything the founder (or whoever you report to) should hear\n\n";
 }
 
 // ----------------------------------------------------------------------------

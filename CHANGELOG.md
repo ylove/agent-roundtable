@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Ultraplan: the orchestrator writes plans shaped by specialist input, independent version reviews and final sign-offs; an optional planner persona runs the entire loop in one call. Final documents include input, sign-offs and revision history, with optional public mirroring.
+- Conversation mode: informal agent chat with an optional theme, short turns and truthfulness guidance. Private sessions can draw on workspace, agent-memory and local activity excerpts; `grounding: false` disables this, and public conversations never receive grounding.
+- Agent creation and refinement: specialists contribute expertise and skills, an architect drafts the definition, and participants review it. Supports live-session context, dry-run previews, optional task delegation, collision-safe creation, refinement backups and restricted generated frontmatter. Existing skills are reused without overwrites.
+- Personas inline skills from frontmatter. Completed sessions record best-effort local activity, used for conversation grounding and refinement.
+- Five new tools bring the total to 22. `debug_env` and startup diagnostics report skills/workspace directories and activity settings; diagnostics also report parallel turn limits and active ultraplans. Package version is now 0.3.0.
+- New environment variables: `ROUNDTABLE_SKILLS_DIR`, `ROUNDTABLE_WORKSPACE_DIR`, `ROUNDTABLE_ACTIVITY_LOG`, `ROUNDTABLE_PARALLEL_TURNS`.
+
 ## 0.2.0
 
 - Public sessions: `public: true` on `start_meeting`, `start_local_meeting` and `start_collaboration` mirrors the session live to a public channel (ntfy by default, or a webhook), saves a Markdown transcript locally when the session ends, and reports the URL, saved path and delivery counts in the `end_*` results. Includes redaction, chunking, rate-limit handling, and a privacy notice added to every agent's system prompt. Publishing never blocks or fails a session. The `context` argument is never posted.

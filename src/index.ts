@@ -9,7 +9,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { resolve } from "path";
-import { VERSION, AGENTS_DIR, PROVIDER_IDS, DEFAULT_MODELS, OLLAMA_URL, PUBLISHER_KIND, NTFY_URL, WEBHOOK_URL } from "./config.js";
+import { VERSION, AGENTS_DIR, SKILLS_DIR, WORKSPACE_DIR, ACTIVITY_LOG_PATH, PROVIDER_IDS, DEFAULT_MODELS, OLLAMA_URL, PUBLISHER_KIND, NTFY_URL, WEBHOOK_URL } from "./config.js";
 import { tools, handleToolCall } from "./tools.js";
 import { finalizeOpenChannels } from "./publishers/index.js";
 
@@ -71,6 +71,9 @@ async function main() {
 
   console.error(`agent-roundtable v${VERSION} running on stdio`);
   console.error(`  Agents dir: ${resolve(AGENTS_DIR)}`);
+  console.error(`  Skills dir: ${resolve(SKILLS_DIR)}`);
+  console.error(`  Workspace dir: ${resolve(WORKSPACE_DIR)}`);
+  console.error(`  Activity log: ${ACTIVITY_LOG_PATH ?? "off"}`);
   console.error(`  Default models: ${PROVIDER_IDS.map((p) => `${p}=${DEFAULT_MODELS[p]}`).join(", ")}`);
   const status = (name: string) => (process.env[name] ? "configured" : "NOT configured");
   console.error(`  anthropic: ANTHROPIC_API_KEY ${status("ANTHROPIC_API_KEY")}`);

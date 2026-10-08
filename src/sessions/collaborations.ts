@@ -4,7 +4,8 @@
 
 import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
-import { loadAgentPrompt } from "../agents.js";
+import { agentKey, loadAgentPrompt } from "../agents.js";
+import { recordActivity } from "../activity.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
@@ -513,6 +514,15 @@ export async function endCollaboration(
     );
   }
 
+  recordActivity({
+    session: collaborationId,
+    kind: "collaboration",
+    mode: collaboration.mode,
+    agents: collaboration.agents.map((agent) => agentKey(agent.name)),
+    topic: collaboration.topic,
+    outcome: summary || collaboration.messages.slice().reverse().find((m) => m.agent !== ORCHESTRATOR)?.content,
+    public: collaboration.publicChannel !== undefined,
+  });
   const transcript = [...collaboration.messages];
   collaborations.delete(collaborationId);
 

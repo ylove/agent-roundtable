@@ -4,7 +4,9 @@
 
 import { spawn } from "node:child_process";
 import type { Message } from "./meetings.js";
-import { loadAgentPromptWithPath } from "../agents.js";
+import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
+import { recordActivity } from "../activity.js";
+import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
 import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
@@ -12,6 +14,8 @@ import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX
 export interface LocalMeeting {
   id: string;
   agent: string;
+  /** Agenda without private context or session directives. */
+  agenda?: string;
   agentPromptPath: string;  // Path to the agent prompt file for --system-prompt-file
   systemPrompt: string;     // Cached content for building context
   messages: Message[];
@@ -20,7 +24,7 @@ export interface LocalMeeting {
   debateFocus?: string;
   /** Debate mode: passed to the CLI via --append-system-prompt on every call (the CLI is stateless). */
   challengerDirective?: string;
-  /** Everything passed via --append-system-prompt on every call: debate directive and/or public-session directive. */
+  /** Everything passed via --append-system-prompt on every call: skills and session directives. */
   appendSystemPrompt?: string;
   /** Set when the meeting was started with public: true. */
   publicChannel?: PublicChannel;
@@ -43,7 +47,7 @@ export function recordLocalMeetingMessage(meeting: LocalMeeting, message: Messag
   meeting.messages.push(message);
   meeting.publicChannel?.record({
     turn: meeting.messages.length,
-    speaker: message.role === "user" ? "caller" : meeting.agent,
+    speaker: message.role === "user" ? "caller" : publicLabel(meeting.agent),
     content: publicText ?? message.content,
     kind: message.role === "user" ? "caller" : "turn",
   });
@@ -166,15 +170,15 @@ export async function startLocalMeeting(
   isPublic: boolean = false
 ): Promise<{ meetingId: string; response: string; public?: { url: string | null; topic: string } }> {
   assertMeetingMode(mode);
-  const agentInfo = await loadAgentPromptWithPath(agent);
+  const agentInfo = await loadAgent(agent);
   const meetingId = `local-${++localMeetingCounter}`;
   const challengerDirective = mode === "debate" ? buildChallengerDirective(debateFocus) : undefined;
-  const appendSystemPrompt = isPublic
-    ? [challengerDirective?.trim(), publicDirectiveSuffix().trim()].filter(Boolean).join("\n\n")
-    : challengerDirective;
+  const skillsSection = renderSkillsSection(agentInfo.skills);
+  const appendSystemPrompt = [skillsSection.trim(), challengerDirective?.trim(), isPublic ? publicDirectiveSuffix().trim() : undefined]
+    .filter(Boolean).join("\n\n") || undefined;
   // Created before the first CLI call so the header is the first post. Config errors fail the start.
   const publicChannel = isPublic
-    ? openPublicChannel(meetingId, { mode, participants: [agent], topic: agenda })
+    ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda })
     : undefined;
 
   let userMessage = agenda;
@@ -197,8 +201,9 @@ export async function startLocalMeeting(
   const meeting: LocalMeeting = {
     id: meetingId,
     agent,
+    agenda,
     agentPromptPath: agentInfo.path,
-    systemPrompt: agentInfo.content,
+    systemPrompt: agentInfo.body + skillsSection,
     messages: [],
     startedAt: new Date(),
     mode,
@@ -255,6 +260,15 @@ export async function endLocalMeeting(
     summary = await executeClaudeCLI(meeting.agentPromptPath, summaryPrompt, undefined, meeting.appendSystemPrompt);
   }
 
+  recordActivity({
+    session: meetingId,
+    kind: "local-meeting",
+    mode: meeting.mode,
+    agents: [agentKey(meeting.agent)],
+    topic: meeting.agenda ?? "",
+    outcome: summary || meeting.messages.slice().reverse().find((m) => m.role === "assistant")?.content,
+    public: meeting.publicChannel !== undefined,
+  });
   localMeetings.delete(meetingId);
 
   const text = summary || `Local meeting ${meetingId} with ${meeting.agent} ended.`;

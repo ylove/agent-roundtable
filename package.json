@@ -31,13 +31,14 @@
     "start": "node dist/index.js",
     "pretest": "npm run build",
     "test": "npm run test:unit && npm run test:smoke",
-    "test:unit": "node --test test/unit/*.test.mjs",
+    "test:unit": "node --import ./test/fixtures/foundation/test-env.mjs --test test/unit/*.test.mjs",
     "test:smoke": "node test/smoke.mjs",
     "test:live": "node test/live-smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

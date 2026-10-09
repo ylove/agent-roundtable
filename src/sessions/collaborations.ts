@@ -4,13 +4,20 @@
 
 import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
-import { loadAgentPrompt } from "../agents.js";
+import { agentKey, loadAgent, loadAgentPrompt, renderSkillsSection } from "../agents.js";
+import { recordActivity } from "../activity.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
-import type { CollaborationMode, CollaborationRole } from "./modes.js";
+import type { CollaborationMode, CollaborationRole, ConversationAngle } from "./modes.js";
+import { buildGrounding, type Grounding } from "./grounding.js";
 import {
   assertCollaborationMode,
+  buildConversationDirective,
+  buildConversationOpeningPrompt,
+  buildConversationTurnPrompt,
+  buildConversationSummaryPrompt,
+  pickOpeningAngle,
   buildAttackerDirective,
   buildAttackerTurnPrompt,
   buildChallengerDirective,
@@ -57,6 +64,8 @@ export interface Collaboration {
   baseUrl?: string;
   mode: CollaborationMode;
   debateFocus?: string;
+  conversationAngle?: ConversationAngle;
+  groundingSources?: Grounding["sources"];
   /** Set when the collaboration was started with public: true. */
   publicChannel?: PublicChannel;
 }
@@ -156,7 +165,7 @@ function roleLabel(mode: CollaborationMode, a: CollaborationAgent, pub = false):
 
 export async function startCollaboration(
   agentNames: string[],
-  topic: string,
+  topic: string | undefined,
   options: {
     context?: string;
     maxRounds?: number;
@@ -168,6 +177,7 @@ export async function startCollaboration(
     mode?: CollaborationMode;
     debateFocus?: string;
     public?: boolean;
+    grounding?: boolean;
   } = {}
 ): Promise<{
   collaborationId: string;
@@ -186,13 +196,33 @@ export async function startCollaboration(
   const baseUrl = options.baseUrl;
   const mode: CollaborationMode = options.mode ?? "collaborate";
   assertCollaborationMode(mode);
+  if (mode !== "conversation" && !topic?.trim()) {
+    throw new Error('topic is required (only mode "conversation" may omit it)');
+  }
+  topic = topic?.trim() ? topic : "";
   const debateFocus = options.debateFocus;
+  const groundingSources: Grounding["sources"] = [];
+  let openingSources: Grounding["sources"] = [];
 
   // Load all agent prompts (debate: agents[0] proponent, others challengers;
   // waffle-house: agents[0] defender, others attackers)
   const agents: CollaborationAgent[] = [];
   for (const [i, name] of agentNames.entries()) {
-    let systemPrompt = await loadAgentPrompt(name);
+    let systemPrompt: string;
+    if (mode === "conversation") {
+      const loaded = await loadAgent(name);
+      systemPrompt = loaded.body + renderSkillsSection(loaded.skills) + buildConversationDirective({ public: !!options.public });
+      if (options.grounding !== false && !options.public) {
+        const grounding = await buildGrounding(loaded);
+        if (grounding.text) systemPrompt += "\n\n" + grounding.text;
+        if (i === 0) openingSources = grounding.sources;
+        for (const source of grounding.sources) {
+          if (!groundingSources.includes(source)) groundingSources.push(source);
+        }
+      }
+    } else {
+      systemPrompt = await loadAgentPrompt(name);
+    }
     let role: CollaborationRole | undefined;
     if (mode === "debate") {
       role = i === 0 ? "proponent" : "challenger";
@@ -209,10 +239,15 @@ export async function startCollaboration(
   const maxRounds = options.maxRounds || 5;
   const isPublic = !!options.public;
   const roleNames = agents.map((a) => roleLabel(mode, a, isPublic));
+  const conversationAngle = mode === "conversation" ? pickOpeningAngle({
+    activity: openingSources.includes("activity"),
+    memory: openingSources.includes("memory"),
+    workspace: openingSources.includes("workspace"),
+  }, topic, Math.random, { public: isPublic }) : undefined;
   // Created before the first LLM call so the header is the first post. Only topic (never context) is
   // published. Config errors fail the start.
   const publicChannel = options.public
-    ? openPublicChannel(collaborationId, { mode, participants: roleNames, topic })
+    ? openPublicChannel(collaborationId, { mode, participants: roleNames, topic: topic || "(open conversation)" })
     : undefined;
 
   const collaboration: Collaboration = {
@@ -230,6 +265,7 @@ export async function startCollaboration(
     model: resolvedModel,
     ...(baseUrl !== undefined && { baseUrl }),
     mode,
+    ...(conversationAngle !== undefined && { conversationAngle, groundingSources }),
     ...(debateFocus !== undefined && { debateFocus }),
     ...(publicChannel && { publicChannel }),
   };
@@ -238,7 +274,10 @@ export async function startCollaboration(
 
   // Build initial prompt for first agent
   let initialPrompt: string;
-  if (mode === "debate") {
+  if (mode === "conversation") {
+    initialPrompt = buildConversationOpeningPrompt(conversationAngle!, roleNames, topic);
+    if (options.context) initialPrompt += `\n\n**Background Context:**\n${options.context}`;
+  } else if (mode === "debate") {
     initialPrompt = `You are entering a structured debate. You are the **proponent**.\n\n`;
     initialPrompt += `**Topic:** ${topic}\n\n`;
     initialPrompt += `**Participants:** ${roleNames.join(", ")}\n\n`;
@@ -340,13 +379,18 @@ export async function advanceCollaboration(
       ? `You are in a structured debate. Your role: ${currentAgent.role}.\n\n`
       : mode === "waffle-house"
         ? `You are in a waffle-house session (an adversarial gauntlet). Your role: ${currentAgent.role}.\n\n`
-        : `You are in a collaborative discussion.\n\n`;
-  conversationContext += `**Topic:** ${collaboration.topic}\n\n`;
+        : mode === "conversation"
+          ? `You are in an informal conversation.\n\n`
+          : `You are in a collaborative discussion.\n\n`;
+  if (mode !== "conversation") conversationContext += `**Topic:** ${collaboration.topic}\n\n`;
   conversationContext += `**Participants:** ${collaboration.agents.map((a) => roleLabel(mode, a, pub)).join(", ")}\n\n`;
+  if (mode === "conversation" && collaboration.topic) {
+    conversationContext += `Loose theme: ${collaboration.topic}. It's a starting point, not an agenda.\n\n`;
+  }
   if (collaboration.context) {
     conversationContext += `**Background Context:**\n${collaboration.context}\n\n`;
   }
-  conversationContext += `**Discussion so far:**\n\n`;
+  conversationContext += mode === "conversation" ? `Conversation so far:\n\n` : `**Discussion so far:**\n\n`;
 
   for (const msg of collaboration.messages) {
     // Waffle-house: label by role so a persona that both defends and attacks can tell its own turns apart.
@@ -357,7 +401,9 @@ export async function advanceCollaboration(
     conversationContext += `**${speaker}:** ${msg.content}\n\n`;
   }
 
-  if (mode === "debate" && currentAgent.role === "proponent") {
+  if (mode === "conversation") {
+    conversationContext += "---\n\n" + buildConversationTurnPrompt();
+  } else if (mode === "debate" && currentAgent.role === "proponent") {
     conversationContext += "---\n\n" + "It's your turn. " + buildProponentDirective(collaboration.debateFocus);
   } else if (mode === "debate") {
     conversationContext += "---\n\n" + buildChallengerTurnPrompt(collaboration.debateFocus);
@@ -490,7 +536,9 @@ export async function endCollaboration(
     const summarizer = collaboration.agents[0];
 
     let summaryPrompt: string;
-    if (collaboration.mode === "debate") {
+    if (collaboration.mode === "conversation") {
+      summaryPrompt = buildConversationSummaryPrompt(collaboration.topic);
+    } else if (collaboration.mode === "debate") {
       summaryPrompt = buildDebateSummaryPrompt(collaboration.topic);
     } else if (collaboration.mode === "waffle-house") {
       summaryPrompt = buildWaffleHouseSummaryPrompt(collaboration.topic);
@@ -513,6 +561,15 @@ export async function endCollaboration(
     );
   }
 
+  recordActivity({
+    session: collaborationId,
+    kind: "collaboration",
+    mode: collaboration.mode,
+    agents: collaboration.agents.map((agent) => agentKey(agent.name)),
+    topic: collaboration.topic,
+    outcome: summary || collaboration.messages.slice().reverse().find((m) => m.agent !== ORCHESTRATOR)?.content,
+    public: collaboration.publicChannel !== undefined,
+  });
   const transcript = [...collaboration.messages];
   collaborations.delete(collaborationId);
 
@@ -540,13 +597,15 @@ export function listCollaborations(): Array<{
   provider: LLMProvider;
   model: string;
   mode: CollaborationMode;
+  conversationAngle?: ConversationAngle;
+  grounding?: Grounding["sources"];
   public: boolean;
   baseUrl?: string;
 }> {
   return Array.from(collaborations.values()).map((c) => ({
     id: c.id,
     agents: c.agents.map((a) => a.name),
-    topic: c.topic,
+    topic: c.topic || (c.mode === "conversation" ? "(open conversation)" : ""),
     messageCount: c.messages.length,
     currentRound: c.currentRound,
     maxRounds: c.maxRounds,
@@ -555,6 +614,7 @@ export function listCollaborations(): Array<{
     provider: c.provider,
     model: c.model,
     mode: c.mode,
+    ...(c.mode === "conversation" && { conversationAngle: c.conversationAngle, grounding: c.groundingSources }),
     public: c.publicChannel !== undefined,
     ...(c.baseUrl !== undefined && { baseUrl: c.baseUrl }),
   }));

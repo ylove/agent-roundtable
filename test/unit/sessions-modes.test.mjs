@@ -36,7 +36,7 @@ const user = (call) => call.body.messages[1].content;
 describe("mode constants", () => {
   test("lists", () => {
     assert.deepEqual([...modes.MEETING_MODES], ["standard", "debate"]);
-    assert.deepEqual([...modes.COLLABORATION_MODES], ["collaborate", "debate", "waffle-house"]);
+    assert.deepEqual([...modes.COLLABORATION_MODES], ["collaborate", "debate", "waffle-house", "conversation"]);
   });
   test("directives carry no legacy names or home paths", () => {
     const text = [
@@ -59,7 +59,7 @@ describe("unknown modes are rejected at runtime", () => {
       const calls = stubFetch(t, (_u, _i, i) => reply(i));
       await assert.rejects(
         startCollaboration([sample, plain], "x", { ...opts, mode: bad }),
-        (e) => e.message === `Unknown mode "${bad}". Valid modes: collaborate, debate, waffle-house`
+        (e) => e.message === `Unknown mode "${bad}". Valid modes: collaborate, debate, waffle-house, conversation`
       );
       assert.equal(calls.length, 0);
     });

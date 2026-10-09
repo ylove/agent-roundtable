@@ -3,15 +3,32 @@
 // ============================================================================
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 // Version (also reported by debug_env and the startup banner)
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 // Agent meetings
 // The default is relative to the server process's cwd (whatever directory the MCP host launched it
 // from), which is why README and .env.example ask for an absolute ROUNDTABLE_AGENTS_DIR.
 export const AGENTS_DIR = process.env.ROUNDTABLE_AGENTS_DIR || ".claude/agents";
+export const SKILLS_DIR = process.env.ROUNDTABLE_SKILLS_DIR || join(dirname(AGENTS_DIR), "skills");
+
+/** Use the project containing .claude/agents, or the process cwd for a custom agent directory. */
+export function defaultWorkspaceDir(): string {
+  const a = resolve(AGENTS_DIR);
+  return basename(a) === "agents" && basename(dirname(a)) === ".claude"
+    ? dirname(dirname(a))
+    : process.cwd();
+}
+
+export const WORKSPACE_DIR = process.env.ROUNDTABLE_WORKSPACE_DIR || defaultWorkspaceDir();
+const activityLog = process.env.ROUNDTABLE_ACTIVITY_LOG;
+export const ACTIVITY_LOG_PATH: string | null = !activityLog
+  ? join(homedir(), ".agent-roundtable", "activity.jsonl")
+  : /^(off|false|0|no)$/i.test(activityLog) ? null : activityLog;
+export const ACTIVITY_LOG_MAX_ENTRIES = 500;
+export const PARALLEL_TURNS = Math.max(1, parseInt(process.env.ROUNDTABLE_PARALLEL_TURNS || "4", 10) || 4);
 export const MAX_TOKENS = parseInt(process.env.ROUNDTABLE_MAX_TOKENS || "8192", 10);
 export const LLM_TIMEOUT_MS = parseInt(process.env.ROUNDTABLE_LLM_TIMEOUT_MS || "600000", 10);
 export const OLLAMA_URL = (process.env.OLLAMA_URL || "http://localhost:11434").replace(/\/+$/, "");

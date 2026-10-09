@@ -4,8 +4,10 @@
 
 import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
-import { loadAgentPrompt } from "../agents.js";
+import { agentKey, loadAgentPrompt } from "../agents.js";
+import { recordActivity } from "../activity.js";
 import { callLLM } from "../providers/index.js";
+import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
 import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
@@ -18,6 +20,8 @@ export interface Message {
 export interface Meeting {
   id: string;
   agent: string;
+  /** Agenda without private context or session directives. */
+  agenda?: string;
   systemPrompt: string;
   messages: Message[];
   startedAt: Date;
@@ -49,7 +53,7 @@ export function recordMeetingMessage(meeting: Meeting, message: Message, publicT
   // Public mirror: publicText overrides what is posted (the opening user message is published as the agenda only).
   meeting.publicChannel?.record({
     turn: meeting.messages.length,
-    speaker: message.role === "user" ? "caller" : meeting.agent,
+    speaker: message.role === "user" ? "caller" : publicLabel(meeting.agent),
     content: publicText ?? message.content,
     kind: message.role === "user" ? "caller" : "turn",
   });
@@ -88,7 +92,7 @@ export async function startMeeting(
   const meetingId = `meeting-${++meetingCounter}`;
   // Created before the first LLM call so the header is the first post. Config errors fail the start.
   const publicChannel = isPublic
-    ? openPublicChannel(meetingId, { mode, participants: [agent], topic: agenda })
+    ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda })
     : undefined;
   const resolvedModel = model || DEFAULT_MODELS[provider];
 
@@ -116,6 +120,7 @@ export async function startMeeting(
   const meeting: Meeting = {
     id: meetingId,
     agent,
+    agenda,
     systemPrompt,
     messages: [],
     startedAt: new Date(),
@@ -192,6 +197,15 @@ export async function endMeeting(
     );
   }
 
+  recordActivity({
+    session: meetingId,
+    kind: "meeting",
+    mode: meeting.mode,
+    agents: [agentKey(meeting.agent)],
+    topic: meeting.agenda ?? "",
+    outcome: summary || meeting.messages.slice().reverse().find((m) => m.role === "assistant")?.content,
+    public: meeting.publicChannel !== undefined,
+  });
   meetings.delete(meetingId);
 
   const text = summary || `Meeting ${meetingId} with ${meeting.agent} ended.`;

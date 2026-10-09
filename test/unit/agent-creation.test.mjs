@@ -1,11 +1,11 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { json, stubFetch } from "./helpers.mjs";
 
-const root = mkdtempSync(join(tmpdir(), "roundtable-agent-creation-"));
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), "roundtable-agent-creation-")));
 const agentsDir = join(root, "agents");
 const skillsDir = join(root, "skills");
 const oldHome = process.env.HOME;
@@ -679,7 +679,7 @@ test("improve refuses unreadable frontmatter before fetch or a public channel", 
   const { unreadableFrontmatter } = await import("../fixtures/file-layer.mjs");
   const target = fixture(join(agentsDir, "unreadable.md"), unreadableFrontmatter);
   const h = harness(t);
-  await assert.rejects(improveAgent({ ...opts, agent: target, public: true }), /cannot read the frontmatter.*Quote values.*retry; nothing was written/s);
+  await assert.rejects(improveAgent({ ...opts, agent: target, public: true }), /Claude Code cannot parse the frontmatter.*fix the frontmatter first/s);
   assert.equal(h.calls.length, 0);
   assert.equal(readFileSync(target, "utf8"), unreadableFrontmatter);
 });

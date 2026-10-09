@@ -27,15 +27,33 @@ export function agentKey(ref: string): string {
  * horizontal rule and contains a second one is never truncated.
  */
 export function stripFrontmatter(text: string): string {
-  return readFrontmatter(text).body;
+  const source = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const lines = source.split(/\r?\n/);
+  if (!/^---\s*$/.test(lines[0])) return text;
+  let sawKey = false;
+  for (let i = 1; i < lines.length; i++) {
+    if (/^---\s*$/.test(lines[i])) {
+      if (!sawKey) return text;
+      let next = i + 1;
+      while (next < lines.length && lines[next].trim() === "") next++;
+      return lines.slice(next).join("\n");
+    }
+    if (/^[A-Za-z_][\w-]*\s*:/.test(lines[i])) sawKey = true;
+  }
+  return text;
 }
 
-export interface Frontmatter {
+export interface AgentFrontmatter {
   data: Record<string, unknown>;
-  body: string;
   hasFrontmatter: boolean;
   parseError?: string;
-  lenient?: boolean;
+  /** Offset after the Claude-compatible closing fence, in the original text. */
+  blockEnd: number;
+  fenceMismatch: boolean;
+}
+
+export interface Frontmatter extends AgentFrontmatter {
+  body: string;
 }
 
 function metadataObject(parsed: unknown): Record<string, unknown> {
@@ -43,96 +61,66 @@ function metadataObject(parsed: unknown): Record<string, unknown> {
     ? parsed as Record<string, unknown> : {};
 }
 
-function quotedScalar(value: string): string | undefined {
-  return /^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')\s*(?:#.*)?$/.exec(value)?.[1];
-}
-
-function fallbackScalar(value: string): string {
-  const quoted = quotedScalar(value);
-  if (!quoted) return value;
+/** Read metadata using Claude Code 2.1.x's fence and single YAML recovery pass. */
+export function parseAgentFrontmatter(text: string): AgentFrontmatter {
+  const bomLength = text.charCodeAt(0) === 0xfeff ? 1 : 0;
+  const source = text.slice(bomLength);
+  const match = /^---\s*\n([\s\S]*?)---\s*\n?/.exec(source);
+  if (!match) return { data: {}, hasFrontmatter: false, blockEnd: 0, fenceMismatch: false };
+  const openingEnd = /^---\s*\n/.exec(source)![0].length;
+  const fenceStart = openingEnd + match[1].length;
+  // Body extraction still uses a whole closing line; metadata ends at any triple dash.
+  const lineFence = /^---[^\S\r\n]*\r?$/gm;
+  lineFence.lastIndex = openingEnd;
+  const closingLine = lineFence.exec(source);
+  const result = {
+    hasFrontmatter: true,
+    blockEnd: bomLength + match[0].length,
+    fenceMismatch: closingLine !== null && fenceStart < closingLine.index,
+  };
   try {
-    return String(parse(quoted, { logLevel: "error" }));
+    return { ...result, data: metadataObject(parse(match[1], { logLevel: "error" })) };
   } catch {
-    // Invalid YAML escapes must not prevent the last-resort reader from recovering keys.
-    const unquoted = quoted.slice(1, -1);
-    return quoted.startsWith("'") ? unquoted.replace(/''/g, "'") : unquoted;
-  }
-}
-
-/** Recover top-level strings and block lists when a YAML collection is still malformed. */
-function lineFrontmatter(lines: string[]): Record<string, unknown> {
-  const data = new Map<string, unknown>();
-  for (let i = 0; i < lines.length; i++) {
-    const match = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(lines[i]);
-    if (!match) continue;
-    const [, key, value] = match;
-    if (value.trim()) {
-      data.set(key, fallbackScalar(value.trim()));
-      continue;
-    }
-    const items: string[] = [];
-    for (let next = i + 1; next < lines.length; next++) {
-      if (!lines[next].trim()) continue;
-      const item = /^\s*-\s+(.+)$/.exec(lines[next]);
-      if (!item) break;
-      items.push(fallbackScalar(item[1].trim()));
-      i = next;
-    }
-    if (items.length) data.set(key, items);
-  }
-  return Object.fromEntries(data);
-}
-
-/** Recognize the same fences as stripFrontmatter; recover Claude Code's lossy scalars. */
-export function readFrontmatter(text: string): Frontmatter {
-  const unchanged = { data: {}, body: text, hasFrontmatter: false };
-  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  const lines = body.split(/\r?\n/);
-  if (!/^---\s*$/.test(lines[0])) return unchanged;
-  let sawKey = false;
-  for (let i = 1; i < lines.length; i++) {
-    if (/^---\s*$/.test(lines[i])) {
-      if (!sawKey) return unchanged;
-      let next = i + 1;
-      while (next < lines.length && lines[next].trim() === "") next++;
-      const block = lines.slice(1, i);
-      const result = { body: lines.slice(next).join("\n"), hasFrontmatter: true };
-      try {
-        return { data: metadataObject(parse(block.join("\n"), { logLevel: "error" })), ...result };
-      } catch (error) {
-        const parseError = error instanceof Error ? error.message : String(error);
-        const quoted = block.map(line => {
-          const match = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(line);
-          if (!match) return line;
-          const [, key, rawValue] = match;
-          const value = rawValue.trim();
-          if (!value || quotedScalar(value) || /^[|>[{&*#]/.test(value) ||
-              /^(?:true|false|null|~|[-+]?\d+(?:\.\d*)?|[-+]?\.\d+)$/i.test(value)) {
-            return line;
-          }
-          return `${key}: ${JSON.stringify(value)}`;
-        });
-        let data: Record<string, unknown>;
+    const rewritten = match[1].split("\n").map(line => {
+      const scalar = /^([a-zA-Z_-]+):\s+(\S.*)$/.exec(line);
+      if (!scalar) return line;
+      const [, key, value] = scalar;
+      if ((value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))) return line;
+      if (value.startsWith("[") && value.endsWith("]")) {
         try {
-          data = metadataObject(parse(quoted.join("\n"), { logLevel: "error" }));
-        } catch {
-          data = lineFrontmatter(block);
-        }
-        if (!Object.keys(data).length) data = lineFrontmatter(block);
-        return { data, ...result, parseError, ...(Object.keys(data).length && { lenient: true }) };
+          if (Array.isArray(parse(value, { logLevel: "error" }))) return line;
+        } catch { /* A malformed flow value may still be recovered as a string. */ }
       }
+      if (!/[{}\[\]*&#!|>%@`]|: /.test(value)) return line;
+      const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      return `${key}: "${escaped}"`;
+    }).join("\n").replace(/^\t+/gm, tabs => "  ".repeat(tabs.length));
+    try {
+      return { ...result, data: metadataObject(parse(rewritten, { logLevel: "error" })) };
+    } catch (error) {
+      return { ...result, data: {}, parseError: error instanceof Error ? error.message : String(error) };
     }
-    if (/^[A-Za-z_][\w-]*\s*:/.test(lines[i])) sawKey = true;
   }
-  return unchanged;
 }
 
-/** Fail before improving a definition whose metadata cannot be recovered. */
-export function assertReadableFrontmatter(frontmatter: Frontmatter, file: string): void {
-  if (frontmatter.hasFrontmatter && frontmatter.parseError && !Object.keys(frontmatter.data).length) {
+/** Metadata uses Claude Code's view; persona body extraction keeps the existing line fences. */
+export function readFrontmatter(text: string): Frontmatter {
+  return { ...parseAgentFrontmatter(text), body: stripFrontmatter(text) };
+}
+
+/** Refuse an improvement that could revive dormant keys or discard ambiguous metadata. */
+export function assertReadableFrontmatter(frontmatter: AgentFrontmatter, file: string): void {
+  if (frontmatter.fenceMismatch) {
     throw new Error(
-      `improve_agent cannot read the frontmatter of ${file}: ${frontmatter.parseError}. ` +
-        'Quote values that contain ": " (or fix the YAML) and retry; nothing was written.',
+      `${file} has '---' inside its frontmatter; Claude Code ends the frontmatter there, ` +
+        "so the file's keys are ambiguous; fix it first",
+    );
+  }
+  if (frontmatter.hasFrontmatter && frontmatter.parseError) {
+    throw new Error(
+      `Claude Code cannot parse the frontmatter of ${file} (${frontmatter.parseError}), ` +
+        "so it does not load this agent today; fix the frontmatter first",
     );
   }
 }

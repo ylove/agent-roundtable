@@ -91,7 +91,7 @@ export function parseVerdict(text: string, label: string, options: readonly stri
     const verdict = match[1].trim().toUpperCase();
     for (const option of sorted) {
       const canonical = option.toUpperCase();
-      if (verdict.startsWith(canonical) && (verdict.length === canonical.length || /[\s.,;:!?—–(]/.test(verdict[canonical.length]))) {
+      if (verdict.startsWith(canonical) && (verdict.length === canonical.length || /[\s.,;:!?—–(-]/.test(verdict[canonical.length]))) {
         return option;
       }
     }

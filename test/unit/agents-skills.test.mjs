@@ -96,17 +96,18 @@ test("agentKey canonicalizes names, paths, prefixes, and directory-style agents"
   }
 });
 
-test("readFrontmatter uses YAML for quoted colons, lists, BOM, CRLF, and malformed input", () => {
+test("readFrontmatter uses Claude-compatible metadata and keeps persona body extraction", () => {
   const parsed = agents.readFrontmatter('\ufeff---\r\nname: "A: B"\r\nskills: [drafting, checking]\r\n---\r\n\r\nBody\r\n');
-  assert.deepEqual(parsed, { data: { name: "A: B", skills: ["drafting", "checking"] }, body: "Body\n", hasFrontmatter: true });
+  assert.deepEqual(parsed.data, { name: "A: B", skills: ["drafting", "checking"] });
+  assert.equal(parsed.body, "Body\n");
+  assert.equal(parsed.hasFrontmatter, true);
   const unclosed = agents.readFrontmatter('---\nname: "unclosed\n---\nBody');
-  assert.deepEqual(unclosed.data, { name: '"unclosed' });
+  assert.deepEqual(unclosed.data, {});
   assert.equal(unclosed.body, "Body");
   assert.equal(unclosed.hasFrontmatter, true);
-  assert.equal(unclosed.lenient, true);
   assert.ok(unclosed.parseError);
   for (const text of ["Plain\r\n", "---\nA horizontal rule\n---\nBody", "---\nfirst section: prose\n---\nBody", "---\nname: x\nBody", "---\n---\nBody"]) {
-    assert.deepEqual(agents.readFrontmatter(text), { data: {}, body: text, hasFrontmatter: false });
+    assert.equal(agents.readFrontmatter(text).body, text);
     assert.equal(agents.stripFrontmatter(text), text);
   }
 });
@@ -213,7 +214,7 @@ test("local meetings append skills on every CLI call with debate/public directiv
   assert.equal(readActivity().find((e) => e.session === plain.meetingId).kind, "local-meeting");
 });
 
-test("lenient frontmatter recovers generator metadata and remains visible to loaders", async () => {
+test("Claude-compatible frontmatter recovers generator metadata and remains visible to loaders", async () => {
   const { generatorFrontmatter, unreadableFrontmatter } = await import("../fixtures/file-layer.mjs");
   const parsed = agents.readFrontmatter(generatorFrontmatter);
   assert.deepEqual(parsed.data, {
@@ -221,8 +222,7 @@ test("lenient frontmatter recovers generator metadata and remains visible to loa
     description: "Use this agent when: the user asks. Examples: <example>Context: x</example>",
     tools: "Read, Grep", model: "opus", permissionMode: "plan", color: "red", skills: "ledger"
   });
-  assert.equal(parsed.lenient, true);
-  assert.ok(parsed.parseError);
+  assert.equal(parsed.parseError, undefined);
   const typed = agents.readFrontmatter(generatorFrontmatter.replace("color: red", "background: true\ncount: 12\nratio: 1.5\nempty: null"));
   assert.equal(typed.data.background, true);
   assert.equal(typed.data.count, 12);
@@ -231,21 +231,18 @@ test("lenient frontmatter recovers generator metadata and remains visible to loa
   const unreadable = agents.readFrontmatter(unreadableFrontmatter);
   assert.deepEqual(unreadable.data, {});
   assert.ok(unreadable.parseError);
-  assert.ok(!unreadable.lenient);
   fixture(join(skillsDir, "ledger", "SKILL.md"), "Ledger instructions.");
   const p = fixture(join(agentsDir, "generator.md"), generatorFrontmatter);
   assert.equal((await agents.loadAgent(p)).skills[0].name, "ledger");
   assert.equal(agents.listAgents().find(a => a.path === p).name, "code-reviewer");
 });
 
-test("line fallback recovers quotes and block lists when flow YAML remains broken", () => {
-  const parsed = agents.readFrontmatter('---\nname: "reviewer" # identity\nbroken: [unclosed\nskills:\n  - ledger\n- checking\nempty:\n---\nBody');
-  assert.equal(parsed.lenient, true);
+test("broken nested YAML stays dormant rather than falling back to top-level keys", async () => {
+  const { frontmatterCases } = await import("../fixtures/review2.mjs");
+  const dormant = frontmatterCases.find(fixture => fixture.name === "dormant");
+  const parsed = agents.readFrontmatter(dormant.text);
+  assert.deepEqual(parsed.data, dormant.data);
   assert.ok(parsed.parseError);
-  assert.deepEqual(parsed.data, { name: "reviewer", broken: "[unclosed", skills: ["ledger", "checking"] });
-  for (const scalar of ['"complete\\" quote" # comment', "'complete '' quote' # comment"]) {
-    assert.equal(agents.readFrontmatter(`---\nname: ${scalar}\ndescription: Use when: needed\n---\nBody`).data.name, 'complete' + (scalar.startsWith('"') ? '"' : " '") + ' quote');
-  }
 });
 
 test("skill search uses personal, target project, then configured directories, deduplicated", async () => {
@@ -271,9 +268,8 @@ test("skill search uses personal, target project, then configured directories, d
   assert.deepEqual(await agents.loadSkills(["fallback"], skillsDir), []);
 });
 
-test("line fallback strips complete quotes even with an invalid YAML escape", () => {
+test("retry preserves the literal quotes and comment in a recovered scalar", () => {
   const parsed = agents.readFrontmatter('---\nname: "bad\\q" # identity\nbroken: [unclosed\n---\nBody');
-  assert.deepEqual(parsed.data, { name: "bad\\q", broken: "[unclosed" });
-  assert.equal(parsed.lenient, true);
-  assert.ok(parsed.parseError);
+  assert.deepEqual(parsed.data, { name: '"bad\\q" # identity', broken: "[unclosed" });
+  assert.equal(parsed.parseError, undefined);
 });

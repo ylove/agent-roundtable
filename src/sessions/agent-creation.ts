@@ -3,8 +3,9 @@
 // ============================================================================
 
 import fs from "node:fs";
+import { join } from "node:path";
 import { AGENTS_DIR, SKILLS_DIR, DEFAULT_MODELS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
-import { agentKey, assertReadableFrontmatter, loadAgent, listAgents, listSkills, projectSkillsDir, readFrontmatter, renderSkillsSection, skillSearchDirs, type LoadedAgent } from "../agents.js";
+import { agentKey, assertReadableFrontmatter, loadAgent, listAgents, listSkills, readFrontmatter, renderSkillsSection, skillSearchDirs, type LoadedAgent } from "../agents.js";
 import { recordActivity, recentActivityFor } from "../activity.js";
 import { callLLM, type ChatCompletionOptions } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
@@ -146,6 +147,7 @@ export interface ImproveContributionPromptOptions extends PromptContext {
 
 /** Contract and specialist input for drafting a definition. */
 export interface ArchitectPromptOptions extends PromptContext {
+  public?: boolean;
   mode: "create" | "improve";
   task: string;
   name?: string;
@@ -187,6 +189,7 @@ interface PreparedWorkshop {
   sessionId: string;
   task: string;
   target?: LoadedAgent;
+  originalMode?: number;
   targetKey?: string;
   targetLabel: string;
   participants: Participant[];
@@ -342,6 +345,9 @@ export function buildArchitectSystemPrompt(): string {
 /** Document the JSON contract and supply all private design input to the architect. */
 export function buildArchitectPrompt(o: ArchitectPromptOptions): string {
   const lines = [`Design the final definition for: ${o.task}`, ""];
+  if (o.public) {
+    lines.push("This run is public: in changes, open_questions, contribution summaries and descriptions, refer to passages of the current definition by heading or paraphrase; never reproduce its text, and never include personal information, credentials or private details.", "Do not reproduce the current text.", "");
+  }
   if (o.name && slugify(o.name)) {
     lines.push(`Use exactly this name: ${slugify(o.name)}`, "");
   }
@@ -608,7 +614,7 @@ async function prepareWorkshop(
   const provider = options.provider || "anthropic";
   const model = options.model || DEFAULT_MODELS[provider];
   const rounds = Number.isNaN(options.rounds) ? 1 : Math.min(3, Math.max(1, Math.floor(options.rounds ?? 1)));
-  const existingSkills = listSkills(skillSearchDirs(target?.path));
+  const existingSkills = listSkills(skillSearchDirs(target?.path ?? join(AGENTS_DIR, "new-agent.md")));
   const sessionId = mode === "create" ? `create-${++createCounter}` : `improve-${++improveCounter}`;
   const targetLabel = target ? display(improve.agent, isPublic) : "";
   const agents = listAgents().sort((a, b) => a.key.localeCompare(b.key));
@@ -629,6 +635,7 @@ async function prepareWorkshop(
   }
   const architectOptions: ArchitectPromptOptions = {
     ...common,
+    public: isPublic,
     mode,
     task: mode === "create" ? task : `improve ${targetLabel}`,
     name: mode === "create" ? create.name : undefined,
@@ -643,6 +650,7 @@ async function prepareWorkshop(
     sessionId,
     task,
     target,
+    originalMode: target ? fs.statSync(target.path).mode : undefined,
     targetKey: target ? agentKey(improve.agent) : undefined,
     targetLabel,
     participants,
@@ -782,14 +790,15 @@ function saveDefinition(workshop: PreparedWorkshop, spec: AgentSpec): SavedDefin
     ? {
       mode: "improve",
       targetPath: workshop.target.path,
-      skillsDir: projectSkillsDir(workshop.target.path) ?? SKILLS_DIR,
+      skillsDir: SKILLS_DIR,
       searchDirs: skillSearchDirs(workshop.target.path),
       originalContent: workshop.target.raw,
+      originalMode: workshop.originalMode,
       createdFrom,
       date,
       timestamp: formatBackupTimestamp(new Date()),
     }
-    : { mode: "create", agentsDir: AGENTS_DIR, skillsDir: SKILLS_DIR, searchDirs: skillSearchDirs(), createdFrom, date };
+    : { mode: "create", agentsDir: AGENTS_DIR, skillsDir: SKILLS_DIR, searchDirs: skillSearchDirs(join(AGENTS_DIR, `${spec.name}.md`)), createdFrom, date };
   if (workshop.options.write === false) {
     const plan = planAgentFiles(spec, opts);
     const files = plan.files.map(({ path, content }) => ({ path, content }));
@@ -838,23 +847,35 @@ export function buildWorkshopNext(o: {
 }
 
 /** Public metadata and credits only; the full definition stays in the tool result. */
-export function renderPublicSpecSummary(spec: AgentSpec, opts: { reusedSkills?: string[] } = {}): string {
+export function renderPublicSpecSummary(
+  spec: AgentSpec,
+  opts: { reusedSkills?: string[]; privateTexts?: string[] } = {},
+): string {
+  // A model can ignore the public prompt. Withhold exact copied passages in public metadata,
+  // while retaining the complete spec for reviews, files and the caller's private tool result.
+  const passages = [...new Set((opts.privateTexts ?? []).flatMap(text =>
+    text.split(/\r?\n/).map(line => line.replace(/\s+/g, " ").trim())
+      .filter(line => line && !line.startsWith("#")),
+  ))].sort((a, b) => b.length - a.length);
+  const publicText = (text: string): string => passages.reduce(
+    (safe, passage) => safe.split(passage).join("[private passage withheld]"), text,
+  );
   const blocks = [
     `# ${spec.name}`,
-    spec.description,
+    publicText(spec.description),
     "The system prompt and skill instructions are not posted publicly.",
     `Model: ${spec.model ?? "inherit (not set)"}`,
     `Tools: ${spec.tools?.join(", ") ?? "all tools (inherited)"}`,
     "## Skills",
     spec.skills.map((skill) => {
       const status = !skill.instructions || opts.reusedSkills?.includes(skill.name) ? "reused" : "created";
-      return `- ${skill.name}: ${skill.description} (${status})`;
+      return `- ${skill.name}: ${skill.descriptionDerived ? "(no description provided)" : publicText(skill.description)} (${status})`;
     }).join("\n") || "(none)",
     "## Contributions",
-    spec.contributions.map((credit) => `- ${publicLabel(credit.agent)}: ${credit.summary}`).join("\n") || "(none)",
+    spec.contributions.map((credit) => `- ${publicLabel(credit.agent)}: ${publicText(credit.summary)}`).join("\n") || "(none)",
   ];
-  if (spec.changes?.length) blocks.push("## Changes", spec.changes.map((change) => `- ${change}`).join("\n"));
-  if (spec.open_questions?.length) blocks.push("## Open questions", spec.open_questions.map((question) => `- ${question}`).join("\n"));
+  if (spec.changes?.length) blocks.push("## Changes", spec.changes.map((change) => `- ${publicText(change)}`).join("\n"));
+  if (spec.open_questions?.length) blocks.push("## Open questions", spec.open_questions.map((question) => `- ${publicText(question)}`).join("\n"));
   return blocks.join("\n\n");
 }
 
@@ -925,6 +946,11 @@ async function finishWorkshop(
   if (workshop.run.channel) {
     const finalSpec = { ...spec, name: workshop.isPublic ? publicLabel(plan.agentName) : plan.agentName };
     const finalized = await workshop.run.channel.finalize({ summary: renderPublicSpecSummary(finalSpec, {
+      privateTexts: [
+        ...(workshop.target ? [workshop.target.body, ...workshop.target.skills.map(skill => skill.body)] : []),
+        spec.system_prompt,
+        ...spec.skills.flatMap(skill => skill.instructions ? [skill.instructions] : []),
+      ],
       reusedSkills: plan.skills.filter((skill) => skill.status === "reused").map((skill) => skill.name),
     }) });
     publicBlock = formatPublicBlock(workshop.run.channel, finalized);
@@ -980,7 +1006,7 @@ async function workshop(
   options: CreateAgentOptions | ImproveAgentOptions,
 ): Promise<AgentWorkshopResult> {
   const prepared = await prepareWorkshop(mode, options);
-  const lockPath = prepared.target ? fs.realpathSync(prepared.target.path) : undefined;
+  const lockPath = prepared.target ? fs.realpathSync.native(prepared.target.path) : undefined;
   if (lockPath) {
     if (improveLocks.has(lockPath)) {
       throw new Error(`improve_agent is already running for ${agentKey(prepared.target!.path)}; wait for it to finish`);

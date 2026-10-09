@@ -146,11 +146,11 @@ function webhookOrigin(raw: string): string {
 }
 
 const SKILL_LOOKUP_DESCRIPTION =
-  "Skill lookup follows Claude Code precedence: personal ~/.claude/skills, then .claude/skills beside the agent file when it is in .claude/agents, then ROUNDTABLE_SKILLS_DIR. Any skill found is reused, never overwritten or shadowed. ";
+  "Creation includes the destination project's .claude/skills in lookup even when the configured skills directory differs. Skill lookup follows Claude Code precedence: personal ~/.claude/skills, then .claude/skills beside the agent file when it is in .claude/agents, then ROUNDTABLE_SKILLS_DIR. Any skill found is reused, never overwritten or shadowed. ";
 const WORKSHOP_TOOLS_DESCRIPTION =
   "Tools fail closed: a list with no allowlisted matches or a value of the wrong type is rejected and the architect retries once. Omitting tools inherits all tools and warns: tools omitted: the agent inherits all tools. ";
 const PUBLIC_WORKSHOP_DESCRIPTION =
-  "Public workshops post contributions, reviews and a redacted summary of the final definition (name, description, model, tools, skill names and status, contribution credits, changes and open questions), without its system prompt or skill instructions. They never post context, personas, fleet listings or source-session transcripts. ";
+  "Public workshops post contributions, reviews and a redacted summary of the final definition (name, description, model, tools, skill names and status, contribution credits, changes and open questions), without its system prompt, skill instructions or descriptions derived from instructions; copied private passages in summary fields are withheld. They never post context, personas, fleet listings or source-session transcripts. ";
 
 export const tools: Tool[] = [
   // === Meeting Tools ===
@@ -605,12 +605,12 @@ export const tools: Tool[] = [
     name: "improve_agent",
     description:
       "Refine an existing Claude Code agent in one call, preserving its identity and useful instructions. By default the target reviews itself candidly; add specialists with with or inherit participants/discussion from a live collab-N or meeting-N via from_session. They suggest gaps, replacements, skills and cuts; an architect drafts the definition, participants review independently, and the architect revises if needed. The target may be any existing .md path, including outside the agents directory. write: false previews without writes. " +
-      "Frontmatter rejected by strict YAML (such as an unquoted description containing colon-space) is read leniently as Claude Code reads it: every recovered key is preserved, with a warning, and rewritten as valid YAML. No recoverable keys means refinement is refused; identity collision checks also see recovered names. Model output only supplies name/description/model/tools/skills. " +
-      "Only one improve run per target is allowed; a second fails fast: improve_agent is already running for <key>; wait for it to finish. Default write: true saves <target>.bak-<timestamp>, then atomically replaces via a temp file and rename, keeping the original mode. If the target changed during the run it is not overwritten: changes go to <target>.proposed-<timestamp>, which is not an agent file; next explains recovery. " +
+      "Frontmatter is read the way Claude Code reads it, including one quoting and leading-tab recovery pass. Exactly the keys Claude Code sees are preserved; improve refuses files Claude Code cannot parse or whose frontmatter contains '---' inside a value, with an error asking you to fix the file first. Identity collision checks use the same metadata view. Model output only supplies name/description/model/tools/skills. " +
+      "Only one improve run per target is allowed; a second fails fast: improve_agent is already running for <key>; wait for it to finish. Default write: true saves <target>.bak-<timestamp>, then atomically replaces via a temp file and rename, keeping the original mode. If the target changed, was renamed or was deleted during the run it is not overwritten: changes go to <target>.proposed-<timestamp>, which is not an agent file and keeps the original mode; next explains recovery. " +
       SKILL_LOOKUP_DESCRIPTION +
-      "New skills go beside a target in .claude/agents to its project's .claude/skills, otherwise to ROUNDTABLE_SKILLS_DIR. Results report actual paths, warnings and next instructions. " +
+      "New skills go beside a target in .claude/agents to its project's .claude/skills only if neither .claude nor .claude/skills is a symlink and the skills realpath stays inside the project. Otherwise they fall back to ROUNDTABLE_SKILLS_DIR with a warning. Results report file realpaths, warnings and next instructions. " +
       WORKSHOP_TOOLS_DESCRIPTION + PUBLIC_WORKSHOP_DESCRIPTION +
-      "Public improve runs never include the target's recent activity in any prompt; contributors and reviewers point to passages rather than reproduce them. Private improve contributor prompts include recent topics and outcomes from the local activity log.",
+      "Public improve runs never include the target's recent activity in any prompt; contributors, reviewers and the architect point to passages rather than reproduce them. Private improve contributor prompts include recent topics and outcomes from the local activity log.",
     inputSchema: {
       type: "object",
       properties: {

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, relative } from "node:path";
 
-const root = fs.mkdtempSync(join(tmpdir(), "roundtable-agent-files-"));
+const root = fs.realpathSync.native(fs.mkdtempSync(join(tmpdir(), "roundtable-agent-files-")));
 const oldHome = process.env.HOME;
 process.env.HOME = join(root, "home");
 for (const [key, value] of Object.entries({
@@ -266,7 +266,7 @@ test("agent and skill YAML safely round-trip hostile descriptions", () => {
     skills: [skill("check", { description: hostile })]
   });
   const a = readFrontmatter(f.renderAgentFile(s, { createdFrom: ["cfo-->", "reviewer"], date }));
-  assert.equal(a.data.description, hostile.replace(/\s+/g, " ").trim());
+  assert.equal(a.data.description, hostile.replace(/\s+/g, " ").trim().replace(/-{3,}/g, "—"));
   assert.deepEqual(Object.keys(a.data), ["name", "description", "model", "tools", "skills"]);
   assert.ok(a.body.startsWith(s.system_prompt));
   assert.ok(!a.body.includes("cfo-->"));
@@ -509,30 +509,29 @@ test("improve refuses a symbolic link and tells the caller to pass the real file
   assert.deepEqual(listing(root), before);
 });
 
-test("lenient improve preserves recovered keys, warns, and collisions see the identity", async () => {
+test("Claude-compatible improve preserves visible keys and collisions see the identity", async () => {
   const { generatorFrontmatter, unreadableFrontmatter } = await import("../fixtures/file-layer.mjs");
   const o = dirs();
   const targetPath = fixture(join(o.agentsDir, "old-filename.md"), generatorFrontmatter);
   const options = { ...o, mode: "improve", targetPath, timestamp: "now" };
   const plan = f.planAgentFiles(spec(), options);
-  const warning = `Original frontmatter of ${targetPath} is not strict YAML; it was read leniently and rewritten as valid YAML`;
-  assert.ok(plan.warnings.includes(warning));
+  assert.deepEqual(plan.warnings, []);
   const r = f.writeImprovedAgent(spec(), options);
   assert.equal(r.agentName, "code-reviewer");
-  assert.ok(r.warnings.includes(warning));
+  assert.deepEqual(r.warnings, []);
   const data = readFrontmatter(fs.readFileSync(targetPath, "utf8")).data;
   assert.equal(data.name, "code-reviewer");
   for (const key of ["tools", "permissionMode", "color", "model"]) {
     assert.equal(data[key], readFrontmatter(generatorFrontmatter).data[key]);
   }
   assert.deepEqual(data.skills, ["ledger"]);
-  // Restore the lenient file so the collision test exercises recovery too.
+  // Restore the generator file so the collision test exercises recovery too.
   fs.writeFileSync(targetPath, generatorFrontmatter);
   assert.equal(f.writeNewAgent(spec({ name: "code-reviewer" }), o).agentName, "code-reviewer-2");
   fs.writeFileSync(targetPath, unreadableFrontmatter);
-  assert.throws(() => f.planAgentFiles(spec(), options), /cannot read the frontmatter.*Quote values.*retry; nothing was written/s);
-  assert.throws(() => f.previewFiles(spec(), options), /cannot read the frontmatter/);
-  assert.throws(() => f.writeImprovedAgent(spec(), options), /cannot read the frontmatter/);
+  assert.throws(() => f.planAgentFiles(spec(), options), /Claude Code cannot parse the frontmatter.*fix the frontmatter first/s);
+  assert.throws(() => f.previewFiles(spec(), options), /Claude Code cannot parse the frontmatter/);
+  assert.throws(() => f.writeImprovedAgent(spec(), options), /Claude Code cannot parse the frontmatter/);
   assert.equal(fs.readFileSync(targetPath, "utf8"), unreadableFrontmatter);
 });
 

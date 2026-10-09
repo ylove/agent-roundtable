@@ -104,7 +104,7 @@ test("recentActivityFor filters by canonical agent key and returns newest first 
 
 test("endMeeting records the summary or final assistant message and the agenda without private context", async (t) => {
   const calls = replies(t);
-  const first = await startMeeting("alpha", "meeting-agenda", "private-context", "openai_compatible", "m", baseUrl, "debate");
+  const first = await startMeeting("Alpha", "meeting-agenda", "private-context", "openai_compatible", "m", baseUrl, "debate");
   await continueMeeting(first.meetingId, "follow-up");
   const ended = await endMeeting(first.meetingId, true);
   assert.equal(ended, "reply 2");
@@ -124,7 +124,7 @@ test("endMeeting records the summary or final assistant message and the agenda w
 test("endCollaboration records participants and summary, excluding the final orchestrator nudge", async (t) => {
   replies(t);
   const opts = { provider: "openai_compatible", model: "m", baseUrl };
-  const first = await startCollaboration(["alpha", "beta"], "collaboration-topic", opts);
+  const first = await startCollaboration(["Alpha", "beta"], "collaboration-topic", opts);
   await nudgeCollaboration(first.collaborationId, "private nudge");
   await endCollaboration(first.collaborationId);
   const activity = readActivity().find((e) => e.session === first.collaborationId);
@@ -135,7 +135,7 @@ test("endCollaboration records participants and summary, excluding the final orc
   assert.equal(activity.outcome, "reply 0");
   assert.equal(activity.public, false);
   assert.ok(!collaborations.has(first.collaborationId));
-  const second = await startCollaboration(["alpha", "beta"], "topic2", opts);
+  const second = await startCollaboration(["Alpha", "beta"], "topic2", opts);
   const ended = await endCollaboration(second.collaborationId, true);
   assert.equal(ended.summary, "reply 2");
   assert.equal(readActivity().find((e) => e.session === second.collaborationId).outcome, ended.summary);
@@ -149,7 +149,7 @@ test("public session end records public status while publisher requests stay stu
   assert.equal(activity.public, true);
   assert.equal(activity.topic, "open agenda");
   assert.deepEqual(activity.agents, ["alpha"]);
-  const collaboration = await startCollaboration(["alpha", "beta"], "open topic", { provider: "openai_compatible", model: "m", baseUrl, public: true });
+  const collaboration = await startCollaboration(["Alpha", "beta"], "open topic", { provider: "openai_compatible", model: "m", baseUrl, public: true });
   await endCollaboration(collaboration.collaborationId);
   assert.equal(readActivity().find((e) => e.session === collaboration.collaborationId).public, true);
 });
@@ -157,8 +157,8 @@ test("public session end records public status while publisher requests stay stu
 test("failed activity writes do not break or retain ended sessions", async (t) => {
   replies(t);
   t.mock.method(console, "error", () => {});
-  const meeting = await startMeeting("alpha", "agenda", undefined, "openai_compatible", "m", baseUrl);
-  const collaboration = await startCollaboration(["alpha", "beta"], "topic", { provider: "openai_compatible", model: "m", baseUrl });
+  const meeting = await startMeeting("Alpha", "agenda", undefined, "openai_compatible", "m", baseUrl);
+  const collaboration = await startCollaboration(["Alpha", "beta"], "topic", { provider: "openai_compatible", model: "m", baseUrl });
   rmSync(log, { force: true });
   mkdirSync(log);
   t.after(() => rmSync(log, { recursive: true, force: true }));

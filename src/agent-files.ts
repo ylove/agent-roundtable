@@ -4,9 +4,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { inspect } from "node:util";
+import { inspect, isDeepStrictEqual } from "node:util";
 import { stringify } from "yaml";
-import { agentKey, assertReadableFrontmatter, listAgents, readFrontmatter } from "./agents.js";
+import { agentKey, assertReadableFrontmatter, listAgents, parseAgentFrontmatter, projectSkillsDir, readFrontmatter, skillSearchDirs } from "./agents.js";
+import { SKILLS_DIR } from "./config.js";
 
 export const MODEL_CHOICES = ["opus", "sonnet", "haiku", "inherit"] as const;
 export const TOOL_ALLOWLIST = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"] as const;
@@ -16,6 +17,7 @@ export const RESERVED_SKILL_NAMES = ["synced", "anthropic-skills"];
 export interface SkillSpec {
   name: string;
   description: string;
+  descriptionDerived?: boolean;
   instructions?: string;
   contributed_by: string[];
 }
@@ -90,7 +92,11 @@ export function validateAgentSpec(
   if (name !== (raw.name as string).trim()) {
     warnings.push(`name normalized to "${name}".`);
   }
-  const description = line(raw.description);
+  const safeDescription = (text: string, field: string): string => {
+    if (/-{3,}/.test(text)) warnings.push(`${field}: --- runs replaced with — for Claude Code frontmatter.`);
+    return text.replace(/-{3,}/g, "—");
+  };
+  const description = safeDescription(line(raw.description), "description");
   if (!description) {
     throw new Error("description must be a non-empty string.");
   }
@@ -209,10 +215,11 @@ export function validateAgentSpec(
       skill.instructions = cap(skill.instructions, 20_000, `Skill "${skill.name}" instructions`);
       if (!skill.description) {
         skill.description = skill.instructions.split(/\r?\n|(?<=[.!?])\s/)[0].slice(0, 200);
+        skill.descriptionDerived = true;
         warnings.push(`Skill "${skill.name}" description derived from instructions.`);
       }
     }
-    skill.description = cap(skill.description, 1000, `Skill "${skill.name}" description`);
+    skill.description = cap(safeDescription(skill.description, `Skill "${skill.name}" description`), 1000, `Skill "${skill.name}" description`);
     spec.skills.push(skill);
   }
   if (spec.skills.length > 6) {
@@ -255,6 +262,20 @@ function credits(names: string[]): string {
   return names.map(n => n.replace(/--|>/g, "")).join(", ");
 }
 
+/** Ensure Claude Code sees exactly the metadata intended by the serializer. */
+export function assertFrontmatterRoundTrip(rendered: string, data: Record<string, unknown>): void {
+  const parsed = parseAgentFrontmatter(rendered);
+  if (!parsed.hasFrontmatter || parsed.parseError || parsed.fenceMismatch || !isDeepStrictEqual(parsed.data, data)) {
+    throw new Error("Frontmatter round-trip failed: Claude Code would read different metadata; fix the serialization first.");
+  }
+}
+
+function serializeFrontmatter(data: Record<string, unknown>): string {
+  const yaml = stringify(data, { lineWidth: 0 });
+  if (yaml.includes("---")) throw new Error("Frontmatter contains '---'; remove it before writing for Claude Code.");
+  return yaml;
+}
+
 /** Render safe YAML metadata and one provenance footer, preserving unmanaged original keys. */
 export function renderAgentFile(
   spec: AgentSpec,
@@ -288,16 +309,21 @@ export function renderAgentFile(
   const tool = opts.preserveFrontmatter !== undefined ? "improve_agent" : "create_agent";
   const footer = `<!-- Created by agent-roundtable ${tool} on ${opts.date} ` +
     `with input from: ${credits(opts.createdFrom)}. -->`;
-  return `---\n${stringify(data, { lineWidth: 0 })}---\n\n${body}\n\n${footer}\n`;
+  const rendered = `---\n${serializeFrontmatter(data)}---\n\n${body}\n\n${footer}\n`;
+  assertFrontmatterRoundTrip(rendered, data);
+  return rendered;
 }
 
 /** Render a new skill's YAML metadata, instructions, title and contributor credits. */
 export function renderSkillFile(skill: SkillSpec, opts: { date: string }): string {
   const title = skill.name.split("-").map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(" ");
-  const frontmatter = stringify({ name: skill.name, description: skill.description }, { lineWidth: 0 });
+  const data = { name: skill.name, description: skill.description };
+  const frontmatter = serializeFrontmatter(data);
   const footer = `<!-- Created by agent-roundtable on ${opts.date}; ` +
     `contributed by: ${credits(skill.contributed_by) || "(unknown)"}. -->`;
-  return `---\n${frontmatter}---\n\n# ${title}\n\n${skill.instructions?.trim() ?? ""}\n\n${footer}\n`;
+  const rendered = `---\n${frontmatter}---\n\n# ${title}\n\n${skill.instructions?.trim() ?? ""}\n\n${footer}\n`;
+  assertFrontmatterRoundTrip(rendered, data);
+  return rendered;
 }
 
 /** Render the definition as readable Markdown for specialist reviews and public summaries. */
@@ -367,10 +393,12 @@ export type AgentFilePlanOptions = { searchDirs?: string[] } & ({
   date: string;
   timestamp: string;
   originalContent?: string;
+  originalMode?: number;
 });
 
 /** Read-only plan containing skill files first and the agent file last. */
 export interface AgentFilePlan extends WriteResult {
+  skillWriteDir: string;
   files: Array<{
     path: string;
     content: string;
@@ -401,7 +429,7 @@ export function detectAgentFilePrefix(agentsDir: string): "" | "subagent-" {
 
 function physical(p: string): string {
   if (fs.existsSync(p)) {
-    return fs.realpathSync(p);
+    return fs.realpathSync.native(p);
   }
   // lstat also detects dangling links, which must not be followed during a write.
   try {
@@ -440,10 +468,32 @@ function backupName(target: string, timestamp: string, kind = "bak"): string {
   return candidate;
 }
 
+/** Select the target project only if neither Claude directory follows a symbolic link. */
+export function improveSkillsWriteDir(targetPath: string, fallback = SKILLS_DIR): { dir: string; warning?: string } {
+  const projectSkills = projectSkillsDir(targetPath);
+  if (!projectSkills) return { dir: path.resolve(fallback) };
+  const claudeDir = path.dirname(projectSkills);
+  const project = path.dirname(claudeDir);
+  const symlink = (p: string): boolean => {
+    try { return fs.lstatSync(p).isSymbolicLink(); }
+    catch (error) { if (code(error) === "ENOENT") return false; throw error; }
+  };
+  const linked = symlink(claudeDir) || symlink(projectSkills);
+  const relative = linked ? "" : path.relative(physical(project), physical(projectSkills));
+  if (linked || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) {
+    return {
+      dir: path.resolve(SKILLS_DIR),
+      warning: `project skills dir ${projectSkills} is a symlink; new skills were written to ${SKILLS_DIR} instead`,
+    };
+  }
+  return { dir: projectSkills };
+}
+
 /** Read the filesystem and plan exactly which files a writer would create or replace. */
 export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): AgentFilePlan {
-  const skillsDir = path.resolve(opts.skillsDir);
-  const warnings: string[] = [];
+  const location = opts.mode === "improve" ? improveSkillsWriteDir(opts.targetPath, opts.skillsDir) : { dir: path.resolve(opts.skillsDir) };
+  const skillsDir = location.dir;
+  const warnings: string[] = location.warning ? [location.warning] : [];
   const files: AgentFilePlan["files"] = [];
   const skills: WriteResult["skills"] = [];
   let agentPath: string;
@@ -482,14 +532,15 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
     content = renderAgentFile({ ...spec, name: agentName }, opts);
   } else {
     agentPath = path.resolve(opts.targetPath);
-    if (!/\.md$/i.test(agentPath) || !fs.existsSync(agentPath) || !fs.statSync(agentPath).isFile()) {
+    if (!/\.md$/i.test(agentPath) ||
+        (fs.existsSync(agentPath) ? !fs.statSync(agentPath).isFile() : opts.originalContent === undefined)) {
       throw new Error(`improve target must be an existing .md agent file: ${agentPath}`);
     }
     if (!/^[0-9A-Za-z-]+$/.test(opts.timestamp)) {
       throw new Error("Invalid backup timestamp; use letters, digits and hyphens only.");
     }
-    if (fs.lstatSync(agentPath).isSymbolicLink()) {
-      const realPath = fs.realpathSync(agentPath);
+    if (fs.existsSync(agentPath) && fs.lstatSync(agentPath).isSymbolicLink()) {
+      const realPath = fs.realpathSync.native(agentPath);
       throw new Error(
         `improve_agent will not edit ${agentPath}: it is a symbolic link to ${realPath}. ` +
           `Pass the real file instead (agent: "${realPath}").`,
@@ -499,9 +550,6 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
     const frontmatter = readFrontmatter(opts.originalContent ?? fs.readFileSync(agentPath, "utf8"));
     assertReadableFrontmatter(frontmatter, agentPath);
     const { data } = frontmatter;
-    if (frontmatter.lenient) {
-      warnings.push(`Original frontmatter of ${agentPath} is not strict YAML; it was read leniently and rewritten as valid YAML`);
-    }
     if (!spec.tools && data.tools == null) {
       warnings.push("tools omitted: the agent inherits all tools");
     }
@@ -517,7 +565,7 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
     if (!skill.name || /[\\/]/.test(skill.name) || skill.name === "." || skill.name === "..") {
       throw new Error(`Unsafe skill name: ${skill.name}`);
     }
-    const existingPath = (opts.searchDirs ?? [skillsDir])
+    const existingPath = [...new Set([...skillSearchDirs(agentPath), ...(opts.searchDirs ?? []), skillsDir])]
       .map(dir => path.resolve(dir, skill.name, "SKILL.md"))
       .find(candidate => fs.existsSync(candidate));
     const reused = !skill.instructions || existingPath !== undefined;
@@ -530,7 +578,7 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
     }
   }
   files.push({ path: agentPath, content, kind: "agent" });
-  return { agentPath, agentName, files, skills, ...(backupPath && { backupPath }), warnings };
+  return { agentPath, agentName, files, skills, skillWriteDir: skillsDir, ...(backupPath && { backupPath }), warnings };
 }
 
 /** Return planned paths and contents without creating directories, files or backups. */
@@ -538,7 +586,8 @@ export function previewFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Array
   return planAgentFiles(spec, opts).files.map(({ path, content }) => ({ path, content }));
 }
 
-function writeSkills(plan: AgentFilePlan, skillsDir: string): void {
+function writeSkills(plan: AgentFilePlan): void {
+  const skillsDir = plan.skillWriteDir;
   const existed = fs.existsSync(skillsDir);
   for (const file of plan.files.filter(f => f.kind === "skill")) {
     inside(skillsDir, file.path);
@@ -563,8 +612,14 @@ function writeSkills(plan: AgentFilePlan, skillsDir: string): void {
 }
 
 function result(plan: AgentFilePlan): WriteResult {
-  const { files: _files, ...rest } = plan;
-  return rest;
+  const { files: _files, skillWriteDir: _skillWriteDir, ...rest } = plan;
+  return {
+    ...rest,
+    agentPath: physical(rest.agentPath),
+    skills: rest.skills.map(skill => ({ ...skill, path: physical(skill.path) })),
+    ...(rest.backupPath && { backupPath: physical(rest.backupPath) }),
+    ...(rest.proposedPath && { proposedPath: physical(rest.proposedPath) }),
+  };
 }
 
 type CreateWriteOptions = Omit<Extract<AgentFilePlanOptions, { mode: "create" }>, "mode">;
@@ -574,7 +629,7 @@ type ImproveWriteOptions = Omit<Extract<AgentFilePlanOptions, { mode: "improve" 
 export function writeNewAgent(spec: AgentSpec, opts: CreateWriteOptions): WriteResult {
   const existed = fs.existsSync(opts.agentsDir);
   const plan = planAgentFiles(spec, { ...opts, mode: "create" });
-  writeSkills(plan, opts.skillsDir);
+  writeSkills(plan);
   fs.mkdirSync(path.resolve(opts.agentsDir), { recursive: true });
   for (let tries = 0; tries < 50; tries++) {
     inside(opts.agentsDir, plan.agentPath);
@@ -635,14 +690,18 @@ function atomicReplace(target: string, content: string, mode: number): void {
 /** Preserve concurrent edits as a proposal; otherwise back up and atomically replace. */
 export function writeImprovedAgent(spec: AgentSpec, opts: ImproveWriteOptions): WriteResult {
   const plan = planAgentFiles(spec, { ...opts, mode: "improve" });
-  writeSkills(plan, opts.skillsDir);
+  writeSkills(plan);
   const content = plan.files[plan.files.length - 1].content;
-  const current = fs.readFileSync(plan.agentPath, "utf8");
+  let current: string | undefined;
+  try { current = fs.readFileSync(plan.agentPath, "utf8"); }
+  catch (error) { if (code(error) !== "ENOENT") throw error; }
+  const mode = opts.originalMode ?? (current !== undefined ? fs.statSync(plan.agentPath).mode : 0o600);
   if (opts.originalContent !== undefined && current !== opts.originalContent) {
     for (;;) {
       const proposedPath = backupName(plan.agentPath, opts.timestamp, "proposed");
       try {
-        fs.writeFileSync(proposedPath, content, { flag: "wx" });
+        fs.writeFileSync(proposedPath, content, { flag: "wx", mode });
+        fs.chmodSync(proposedPath, mode & 0o7777);
         plan.proposedPath = proposedPath;
         delete plan.backupPath;
         plan.warnings.push(`${plan.agentPath} changed while improve_agent was running, so it was not overwritten; the proposed definition is at ${proposedPath}`);
@@ -652,7 +711,6 @@ export function writeImprovedAgent(spec: AgentSpec, opts: ImproveWriteOptions): 
       }
     }
   }
-  const mode = fs.statSync(plan.agentPath).mode;
   for (;;) {
     inside(path.dirname(plan.agentPath), plan.backupPath!);
     try {

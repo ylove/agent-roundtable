@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import fs from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { LoadedAgent } from "../agents.js";
@@ -29,13 +29,29 @@ function capped(text: string, max: number): string {
   return truncate(text, max).slice(0, max);
 }
 
-function readText(path: string): string | undefined {
+/** Read only a bounded prefix, with one extra byte to detect truncation. */
+export function readHead(path: string, maxBytes = 64 * 1024): { text: string; truncated: boolean } | undefined {
+  let fd: number | undefined;
   try {
-    const text = readFileSync(path, "utf-8");
-    return text.trim() ? text : undefined;
+    fd = fs.openSync(path, "r");
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let count = 0;
+    while (count < buffer.length) {
+      const read = fs.readSync(fd, buffer, count, buffer.length - count, null);
+      if (!read) break;
+      count += read;
+    }
+    return { text: buffer.subarray(0, Math.min(count, maxBytes)).toString("utf-8"), truncated: count > maxBytes };
   } catch {
     return undefined;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
+}
+
+function readText(path: string): string | undefined {
+  const text = readHead(path)?.text;
+  return text?.trim() ? text : undefined;
 }
 
 // ----------------------------------------------------------------------------
@@ -48,7 +64,8 @@ export function workspaceSnapshot(dir: string = WORKSPACE_DIR): string | undefin
   if (cached && Date.now() - cached.at < 60_000) return cached.text;
   const parts: string[] = [];
   try {
-    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+    const head = readHead(join(root, "package.json"));
+    const pkg = head && !head.truncated ? JSON.parse(head.text) : undefined;
     const fields = ["name", "description"].flatMap((key) =>
       typeof pkg?.[key] === "string" && pkg[key].trim() ? [`${key}: ${pkg[key]}`] : []);
     if (fields.length) parts.push(fields.join("\n"));
@@ -96,11 +113,23 @@ export function agentMemory(
     join(opts.homeDir ?? homedir(), ".claude", "agent-memory"),
   ];
   const excerpts: string[] = [];
+  const paths = new Set<string>();
   for (const scope of [...new Set(scopes)]) {
     for (const name of names) {
-      const text = readText(join(scope, name, "MEMORY.md"));
+      let path: string;
+      try {
+        path = fs.realpathSync.native(join(scope, name, "MEMORY.md"));
+      } catch {
+        continue;
+      }
+      if (paths.has(path)) continue;
+      paths.add(path);
+      const text = readText(path);
       const excerpt = text?.split(/\r?\n/).slice(0, 200).join("\n");
-      if (excerpt?.trim()) excerpts.push(capped(excerpt, 3000));
+      if (excerpt?.trim()) {
+        const bounded = capped(excerpt, 3000);
+        if (!excerpts.includes(bounded)) excerpts.push(bounded);
+      }
     }
   }
   return excerpts.join("\n\n") || undefined;

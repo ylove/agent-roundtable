@@ -28,11 +28,12 @@ export function assertCollaborationMode(mode: string): asserts mode is Collabora
 // Conversation (collaborations only)
 // ----------------------------------------------------------------------------
 
-export function buildConversationDirective(): string {
+export function buildConversationDirective(opts: { public?: boolean } = {}): string {
   return "\n\n## Conversation mode\n" +
     "Have an unstructured conversation with colleagues, not a meeting or debate. There is no agenda or deliverable. " +
     "React, share specifics from your own work, ask real questions, disagree when you disagree, and move to a new thread when one runs out. " +
-    "Draw on your situation: the product you're building, recent work, the people you work with including the founder or whoever you report to, and open problems.\n\n" +
+    "Draw on your situation: the product you're building, recent work, the people you work with" +
+    (opts.public ? "" : " including the founder or whoever you report to") + ", and open problems.\n\n" +
     "TRUTHFULNESS: Only state as fact what your persona or your \"Your context\" notes establish. " +
     "Say when you don't know and mark guesses as guesses. Never invent past events, metrics or decisions.\n\n" +
     "Usually 2-6 sentences. No headings, no bullet lists, no summaries, and no action-item lists unless asked.";
@@ -41,13 +42,14 @@ export function buildConversationDirective(): string {
 export function pickOpeningAngle(
   available: { activity: boolean; memory: boolean; workspace: boolean },
   topic?: string,
-  rand: () => number = Math.random
+  rand: () => number = Math.random,
+  opts: { public?: boolean } = {}
 ): ConversationAngle {
   if (topic?.trim()) return "theme";
   const choices: Array<[ConversationAngle, number]> = [
     ["recent-work", available.activity || available.memory ? 3 : 0],
     ["product", available.workspace ? 2 : 1],
-    ["founder", 1],
+    ["founder", opts.public ? 0 : 1],
     ["open-problem", 2],
     ["cross-team", 1],
   ];

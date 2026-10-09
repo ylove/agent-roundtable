@@ -81,9 +81,9 @@ test("extractJsonObject accepts fenced, inline, nested, and prose-wrapped object
   assert.deepEqual(extractJsonObject('Before {"nested":{"value":1}} after'), { nested: { value: 1 } });
   assert.deepEqual(extractJsonObject('```json\n{"code":"```json"}\n```'), { code: "```json" });
   assert.throws(() => extractJsonObject("no object"), /No JSON object/);
-  assert.throws(() => extractJsonObject('{"unfinished":'), /No JSON object/);
+  assert.throws(() => extractJsonObject('{"unfinished":'), /Invalid JSON object/);
   assert.throws(() => extractJsonObject("{not JSON}"), /Invalid JSON object/);
-  assert.throws(() => extractJsonObject('{"a":1} {"b":2}'), /Invalid JSON object/);
+  assert.deepEqual(extractJsonObject('{"a":1} {"b":2}'), { a: 1 });
 });
 
 test("notFoundError lists active ids or none, and truncate marks a cut", () => {
@@ -106,7 +106,41 @@ test("parseVerdict tolerates bold, case, and leading lines; longest option wins"
   assert.equal(parseVerdict("Verdict: APPROVE. Looks good", "Verdict", options), "APPROVE");
   assert.equal(parseVerdict("Verdict: APPROVED", "Verdict", options), "UNCLEAR");
   assert.equal(parseVerdict("Prose mentioning Verdict: OBJECT", "Verdict", options), "UNCLEAR");
-  assert.equal(parseVerdict("\n\n\n\n\nVerdict: OBJECT", "Verdict", options), "UNCLEAR");
+  assert.equal(parseVerdict("\n\n\n\n\nVerdict: OBJECT", "Verdict", options), "OBJECT");
   assert.equal(parseVerdict("Sign-off: MAYBE", "Sign-off", options), "UNCLEAR");
   assert.equal(parseVerdict("Review (final): OBJECT", "Review (final)", options), "OBJECT");
+});
+
+test("JSON extraction ignores prose braces and tracks strings inside objects", () => {
+  for (const text of [
+    'Sure! I filled {name}:\n{"a":1}',
+    '```json\n{"a":1}\n```\nLet me know if {x} needs changes.',
+    'Here\'s a "draft: {"a":1}',
+    'Unclosed { prose before {"a":1}',
+  ]) assert.deepEqual(extractJsonObject(text), { a: 1 });
+  assert.deepEqual(extractJsonObject('```json\n{"s":"} and \\" {", "a":1}\n```'), { s: '} and " {', a: 1 });
+  assert.deepEqual(extractJsonObject('prose {x} {"nested":{"a":1}} {"b":2}'), { nested: { a: 1 } });
+  for (const text of ['[1,2]', 'null']) assert.throws(() => extractJsonObject(text), /No JSON object/);
+});
+
+test("verdict normalization supports markdown, Unicode and five non-empty lines", () => {
+  const signoffs = ["APPROVE", "APPROVE WITH RESERVATIONS", "OBJECT"];
+  for (const text of ["__Sign-off:__ OBJECT", "Sign‑off: OBJECT", "## Sign-off: OBJECT", "- Sign-off: OBJECT",
+    "Sign-off: `OBJECT`", "*Sign-off:* OBJECT", "> Sign-off: OBJECT", "+ Sign-off: OBJECT", "1) Sign-off: OBJECT",
+    "Sign off: OBJECT", "SIGNOFF: OBJECT", "> ## - 1. __Sign-off:__ OBJECT",
+    ...["‐", "‑", "‒", "–", "—", "−"].map(h => `Sign${h}off: OBJECT`)]) {
+    assert.equal(parseVerdict(text, "Sign-off", signoffs), "OBJECT", text);
+  }
+  const reviews = ["APPROVE", "APPROVE WITH CHANGES", "OBJECT"];
+  assert.equal(parseVerdict("1. Verdict: APPROVE WITH CHANGES", "Verdict", reviews), "APPROVE WITH CHANGES");
+  assert.equal(parseVerdict("a\n\nb\nc\n\nd\nVerdict: APPROVE WITH CHANGES", "Verdict", reviews), "APPROVE WITH CHANGES");
+  assert.equal(parseVerdict("a\nb\nc\nd\ne\nVerdict: OBJECT", "Verdict", reviews), "UNCLEAR");
+});
+
+
+test("JSON extraction scans braces only, so brackets around an object cannot hide it", () => {
+  for (const text of ['[{"a":1}]', '```json\n[{"a":1}]\n```', 'Here is the spec [see below: {"a":1}]', 'Tags [cfo] then {"a":1} [end']) {
+    assert.deepEqual(extractJsonObject(text), { a: 1 }, text);
+  }
+  assert.throws(() => extractJsonObject('[{"a":}]'), /Invalid JSON object/);
 });

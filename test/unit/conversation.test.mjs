@@ -304,6 +304,7 @@ describe("conversation sessions", () => {
     for (const call of llmCalls(calls)) {
       assert.ok(system(call).includes("PUBLIC SESSION NOTICE"));
       assert.ok(system(call).includes("## Conversation mode"));
+      assert.ok(!system(call).includes("founder"));
       assert.ok(!system(call).includes("## Your context"));
       assert.ok(!system(call).includes("MARKER"));
       for (const message of call.body.messages) assert.ok(!message.content.includes(agentsDir));
@@ -322,4 +323,12 @@ describe("conversation sessions", () => {
     assert.ok(!transcript.includes("PRIVATE-BACKGROUND"));
     assert.ok(!transcript.includes("MARKER"));
   });
+});
+
+test("public angles exclude founder for all source combinations; public directive drops it", () => {
+  for (const activity of [false, true]) for (const memory of [false, true]) for (const workspace of [false, true]) {
+    for (let i = 0; i < 100; i++) assert.notEqual(modes.pickOpeningAngle({ activity, memory, workspace }, undefined, () => i / 100, { public: true }), "founder");
+  }
+  assert.ok(!modes.buildConversationDirective({ public: true }).includes("founder"));
+  assert.ok(modes.buildConversationDirective().includes("including the founder or whoever you report to"));
 });

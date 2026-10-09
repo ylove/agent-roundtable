@@ -47,10 +47,11 @@ type PlanVersion = Ultraplan["versions"][number];
 export interface UltraplanStepResult {
   ultraplanId: string;
   status: "awaiting_plan" | "awaiting_revision";
-  phase: "input" | "review";
+  phase: "input" | "review" | "plan";
   version?: number;
   input?: Input[];
   reviews?: Verdict[];
+  previousReviews?: { version: number; reviews: Verdict[] };
   tally?: Record<string, number>;
   next: string;
   public?: { url: string | null; topic: string };
@@ -76,6 +77,15 @@ let ultraplanCounter = 0;
 
 export const NEXT_AFTER_INPUT = "Write plan v1 that incorporates this input. Tag each step with the agents whose input shaped it, e.g. [cfo]. Then call submit_plan; pass final: true to go straight to sign-off.";
 export const NEXT_AFTER_REVIEW = "Revise the plan to address the amendments (say which you rejected and why), then call submit_plan again, or submit_plan with final: true to collect sign-offs and close.";
+
+export function buildUnreviewedNext(version: number): string {
+  return `Plan v${version} has not been reviewed yet. Call submit_plan without a plan to have v${version} reviewed as-is, ` +
+    "with a revised plan, or with final: true (plan optional) to collect sign-offs.";
+}
+
+export function buildPlannerStoppedError(step: string, error: string): string {
+  return `Planner run stopped during ${step}: ${error}. The session is open: continue with submit_plan or close with end_ultraplan.`;
+}
 
 // ----------------------------------------------------------------------------
 // Pure prompt builders
@@ -122,8 +132,8 @@ export function buildReviewPrompt(
     "Don't rewrite the plan. Don't repeat points that are already handled.";
 }
 
-export function buildSignoffPrompt(task: string, plan: string, version: number, ownInput?: string): string {
-  return taskBlock(task) + `**Final plan v${version}:**\n${plan}\n\n` +
+export function buildSignoffPrompt(task: string, plan: string, version: number, ownInput?: string, context?: string): string {
+  return taskBlock(task, context) + `**Final plan v${version}:**\n${plan}\n\n` +
     (ownInput !== undefined ? `**Your input before the draft:**\n${ownInput}\n\n` : "") +
     "The first line must be EXACTLY one of:\nSign-off: APPROVE | APPROVE WITH RESERVATIONS | OBJECT\n\n" +
     "Reflected from my input: 1-3 bullets or \"Nothing specific\".\n" +
@@ -140,8 +150,8 @@ export function buildPlannerDraftPrompt(
     "Output the plan only.";
 }
 
-export function buildPlannerRevisePrompt(task: string, plan: string, version: number, reviews: Verdict[]): string {
-  return taskBlock(task) + `**Current plan v${version}:**\n${plan}\n\n` +
+export function buildPlannerRevisePrompt(task: string, plan: string, version: number, reviews: Verdict[], context?: string): string {
+  return taskBlock(task, context) + `**Current plan v${version}:**\n${plan}\n\n` +
     reviews.map((review) => `### ${review.agent} (${review.verdict})\n${review.content}\n\n`).join("") +
     `Write plan v${version + 1}: for each amendment accept, modify or reject. Output the full revised plan, ` +
     `then a section \"## Changes from v${version}\" listing each amendment by reviewer and what was done, ` +
@@ -210,7 +220,7 @@ export function renderUltraplanDocument(u: Ultraplan, signoffs: Verdict[], signe
   blocks.push(u.versions.length ? u.versions.map((v) => {
     const prefix = `- v${v.version} by ${label(u, v.author)} — `;
     if (signedOff && v === latest) return prefix + "final, signed off";
-    const reviews = u.entries.filter((e) => e.phase === "review" && e.version === v.version);
+    const reviews = latestReviews(u, v.version);
     return prefix + (reviews.length ? `reviews: ${reviews.map((e) => `${label(u, e.speaker)} ${e.verdict}`).join(", ")}` : "not reviewed");
   }).join("\n") : "(no plan versions)");
   return blocks.join("\n\n");
@@ -237,7 +247,7 @@ async function computePhase(u: Ultraplan, phase: "input" | "review" | "signoff",
     const ownInput = ownEntry(u, "input", agentIndex);
     const prompt = phase === "input" ? buildInputPrompt(u.task, u.agents.map((a) => label(u, a.name)), u.context)
       : phase === "review" ? buildReviewPrompt(u.task, u.context, v!.plan, v!.version, label(u, v!.author), ownInput, ownEntry(u, "review", agentIndex))
-        : buildSignoffPrompt(u.task, v!.plan, v!.version, ownInput);
+        : buildSignoffPrompt(u.task, v!.plan, v!.version, ownInput, u.context);
     const content = await ask(u, agent.systemPrompt, prompt);
     return {
       phase, agentIndex, speaker: agent.name, content, timestamp: new Date(),
@@ -270,14 +280,33 @@ function verdictsFor(u: Ultraplan, entries: UltraplanEntry[]): Verdict[] {
   return entries.map((e) => ({ agent: label(u, e.speaker), verdict: e.verdict ?? "UNCLEAR", content: e.content }));
 }
 
+/** Keep the last review per participant slot, in participant order. */
+function latestReviews(u: Ultraplan, version: number): UltraplanEntry[] {
+  const latest = new Map<number, UltraplanEntry>();
+  for (const entry of u.entries) {
+    if (entry.phase === "review" && entry.version === version && entry.agentIndex !== undefined) {
+      latest.set(entry.agentIndex, entry);
+    }
+  }
+  return [...latest.entries()].sort(([a], [b]) => a - b).map(([, entry]) => entry);
+}
+
 function stepResult(u: Ultraplan): UltraplanStepResult {
   const v = u.versions.at(-1);
-  const reviews = v ? verdictsFor(u, u.entries.filter((e) => e.phase === "review" && e.version === v.version)) : [];
+  const reviews = v ? verdictsFor(u, latestReviews(u, v.version)) : [];
+  const previous = v && !reviews.length
+    ? [...u.versions].reverse().find((earlier) => earlier.version < v.version && latestReviews(u, earlier.version).length)
+    : undefined;
   return {
     ultraplanId: u.id,
-    ...(v ? { status: "awaiting_revision", phase: "review", version: v.version, reviews,
-      tally: tallyVerdicts(reviews.map((r) => r.verdict), REVIEW_VERDICTS), next: NEXT_AFTER_REVIEW } as const
-      : { status: "awaiting_plan", phase: "input", input: inputsFor(u), next: NEXT_AFTER_INPUT } as const),
+    ...(v ? {
+      status: "awaiting_revision", version: v.version, reviews,
+      ...(reviews.length
+        ? { phase: "review", tally: tallyVerdicts(reviews.map((r) => r.verdict), REVIEW_VERDICTS), next: NEXT_AFTER_REVIEW } as const
+        : { phase: "plan", next: buildUnreviewedNext(v.version),
+          ...(previous && { previousReviews: { version: previous.version, reviews: verdictsFor(u, latestReviews(u, previous.version)) } }),
+        } as const),
+    } as const : { status: "awaiting_plan", phase: "input", input: inputsFor(u), next: NEXT_AFTER_INPUT } as const),
     ...(u.publicChannel && { public: { url: u.publicChannel.url, topic: u.publicChannel.topic } }),
   };
 }
@@ -373,7 +402,7 @@ export async function startUltraplan(
       if (round === 0 && draft) commitPlan(u, v);
       commitPhase(u, entries);
       step = `revision to v${v.version + 1}`;
-      await authorPlan(u, buildPlannerRevisePrompt(task, v.plan, v.version, verdictsFor(u, entries)));
+      await authorPlan(u, buildPlannerRevisePrompt(task, v.plan, v.version, verdictsFor(u, entries), u.context));
     }
     step = "sign-off";
     const entries = await computePhase(u, "signoff", u.versions.at(-1)!);
@@ -388,21 +417,25 @@ export async function startUltraplan(
     if (!planner) throw e;
     return {
       ...stepResult(u), ...(u.versions.length && { plan: u.versions.at(-1)!.plan }),
-      error: `Planner run stopped during ${step}: ${e instanceof Error ? e.message : String(e)}. The session is open: continue with submit_plan or close with end_ultraplan.`,
+      error: buildPlannerStoppedError(step, e instanceof Error ? e.message : String(e)),
     };
   } finally {
     busy.delete(id);
   }
 }
 
-export async function submitPlan(id: string, plan: string, final = false): Promise<UltraplanStepResult | UltraplanFinalResult> {
+export async function submitPlan(id: string, plan?: string, final = false): Promise<UltraplanStepResult | UltraplanFinalResult> {
   const u = available(id);
-  if (typeof plan !== "string" || !plan.trim()) throw new Error("plan is required: pass the full text of the next plan version");
+  if (plan !== undefined && plan !== null && typeof plan !== "string") {
+    throw new Error("plan must be a string: the full text of the next plan version");
+  }
+  const supplied = typeof plan === "string" && !!plan.trim();
+  const v = supplied ? nextVersion(u, plan!, "orchestrator") : u.versions.at(-1);
+  if (!v) throw new Error("No plan version exists yet; pass plan.");
   busy.add(id);
   try {
-    const v = nextVersion(u, plan, "orchestrator");
     const entries = await computePhase(u, final ? "signoff" : "review", v);
-    commitPlan(u, v);
+    if (supplied) commitPlan(u, v);
     commitPhase(u, entries);
     return final ? await finalize(u, verdictsFor(u, entries), true) : stepResult(u);
   } finally {

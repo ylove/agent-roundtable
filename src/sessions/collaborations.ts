@@ -211,7 +211,7 @@ export async function startCollaboration(
     let systemPrompt: string;
     if (mode === "conversation") {
       const loaded = await loadAgent(name);
-      systemPrompt = loaded.body + renderSkillsSection(loaded.skills) + buildConversationDirective();
+      systemPrompt = loaded.body + renderSkillsSection(loaded.skills) + buildConversationDirective({ public: !!options.public });
       if (options.grounding !== false && !options.public) {
         const grounding = await buildGrounding(loaded);
         if (grounding.text) systemPrompt += "\n\n" + grounding.text;
@@ -243,7 +243,7 @@ export async function startCollaboration(
     activity: openingSources.includes("activity"),
     memory: openingSources.includes("memory"),
     workspace: openingSources.includes("workspace"),
-  }, topic) : undefined;
+  }, topic, Math.random, { public: isPublic }) : undefined;
   // Created before the first LLM call so the header is the first post. Only topic (never context) is
   // published. Config errors fail the start.
   const publicChannel = options.public

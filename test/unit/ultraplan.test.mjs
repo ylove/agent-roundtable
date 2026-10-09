@@ -270,7 +270,7 @@ test("planner failures return the last committed state and can be continued by t
     const result = await startUltraplan([cfo, skeptic], "Resume autonomous", { ...opts, planner });
     assert.equal(result.error, `Planner run stopped during ${step}: ${errMessage}. The session is open: continue with submit_plan or close with end_ultraplan.`);
     assert.equal(result.status, versions ? "awaiting_revision" : "awaiting_plan");
-    assert.equal(result.phase, versions ? "review" : "input");
+    assert.equal(result.phase, versions ? (countReviews ? "review" : "plan") : "input");
     const u = ultraplans.get(result.ultraplanId);
     assert.equal(listUltraplans()[0].versions, versions);
     assert.equal(u.versions.length, versions);
@@ -278,7 +278,7 @@ test("planner failures return the last committed state and can be continued by t
       assert.equal(result.plan, u.versions.at(-1).plan);
       assert.equal(result.reviews.length, countReviews);
       assert.deepEqual(result.tally, countReviews ? { APPROVE: 0, "APPROVE WITH CHANGES": 1, OBJECT: 1, UNCLEAR: 0 }
-        : { APPROVE: 0, "APPROVE WITH CHANGES": 0, OBJECT: 0, UNCLEAR: 0 });
+        : undefined);
     } else {
       assert.equal(result.plan, undefined);
       assert.equal(result.input.length, 2);
@@ -345,7 +345,7 @@ test("validation uses exact errors, unknown ids list active ids, and all persona
   const message = `Ultraplan not found: nope. Active ultraplans: ${a.ultraplanId}, ${b.ultraplanId}`;
   await assert.rejects(submitPlan("nope", ""), { message });
   await assert.rejects(endUltraplan("nope"), { message });
-  await assert.rejects(submitPlan(a.ultraplanId, " \n "), { message: "plan is required: pass the full text of the next plan version" });
+  await assert.rejects(submitPlan(a.ultraplanId, " \n "), { message: "No plan version exists yet; pass plan." });
   await endUltraplan(a.ultraplanId);
   await endUltraplan(b.ultraplanId);
 });
@@ -372,7 +372,7 @@ test("busy guard rejects concurrent submit and end while start or submit is runn
     await entered.promise;
     const id = listUltraplans()[0].id;
     const message = `Ultraplan ${id} is busy: a phase is still running. Wait for it to finish, then retry.`;
-    await assert.rejects(submitPlan(id, "Plan"), { message });
+    await assert.rejects(submitPlan(id), { message });
     await assert.rejects(endUltraplan(id), { message });
     const releasing = hold;
     hold = undefined;
@@ -383,7 +383,7 @@ test("busy guard rejects concurrent submit and end while start or submit is runn
     entered = deferred();
     const submitting = submitPlan(id, "Plan");
     await entered.promise;
-    await assert.rejects(submitPlan(id, "Another plan"), { message });
+    await assert.rejects(submitPlan(id, undefined, true), { message });
     await assert.rejects(endUltraplan(id), { message });
     const releaseSubmit = hold;
     hold = undefined;
@@ -666,4 +666,133 @@ test("prompt builders include directives, exact verdict choices and optional sec
   assert.equal(NEXT_AFTER_REVIEW, "Revise the plan to address the amendments (say which you rejected and why), then call submit_plan again, or submit_plan with final: true to collect sign-offs and close.");
   assert.deepEqual(REVIEW_VERDICTS, ["APPROVE", "APPROVE WITH CHANGES", "OBJECT"]);
   assert.deepEqual(SIGNOFF_VERDICTS, ["APPROVE", "APPROVE WITH RESERVATIONS", "OBJECT"]);
+});
+
+test("planner v2 review failure exposes unreviewed plan and recovers without a new version", async (t) => {
+  let fail = true;
+  responses(t, d => fail && d.phase === "review" && d.version === 2 ? failure() : undefined);
+  const stopped = await startUltraplan([cfo, skeptic], "Recover review", { ...opts, planner, revisionRounds: 2 });
+  t.after(() => ultraplans.clear());
+  assert.equal(stopped.phase, "plan");
+  assert.equal(stopped.version, 2);
+  assert.deepEqual(stopped.reviews, []);
+  assert.equal(stopped.tally, undefined);
+  assert.equal(stopped.previousReviews.version, 1);
+  assert.deepEqual(stopped.previousReviews.reviews.map(r => r.verdict), ["APPROVE WITH CHANGES", "OBJECT"]);
+  assert.equal(stopped.next, "Plan v2 has not been reviewed yet. Call submit_plan without a plan to have v2 reviewed as-is, with a revised plan, or with final: true (plan optional) to collect sign-offs.");
+  const u = ultraplans.get(stopped.ultraplanId);
+  assert.equal(stopped.plan, u.versions[1].plan);
+  fail = false;
+  const reviewed = await submitPlan(u.id);
+  assert.equal(reviewed.version, 2);
+  assert.equal(reviewed.phase, "review");
+  assert.equal(u.versions.length, 2);
+  assert.equal(u.entries.filter(e => e.phase === "plan").length, 2);
+  const final = await submitPlan(u.id, undefined, true);
+  assert.equal(final.version, 2);
+  assert.ok(final.finalPlan.includes(`- v2 by ${planner} — final, signed off`));
+  assert.ok(!final.finalPlan.includes("v3"));
+});
+
+test("planner sign-off failure recovers on v2 and retains context through draft start", async (t) => {
+  let fail = true;
+  const calls = responses(t, d => fail && d.phase === "signoff" ? failure() : undefined);
+  const stopped = await startUltraplan([cfo], "Recover sign-off", { ...opts, planner, draftPlan: "Draft", context: MARKER });
+  t.after(() => ultraplans.clear());
+  assert.equal(stopped.phase, "plan");
+  fail = false;
+  const final = await submitPlan(stopped.ultraplanId, undefined, true);
+  assert.equal(final.version, 2);
+  assert.ok(!final.finalPlan.includes("v3"));
+  for (const d of llmCalls(calls).map(c => details(c.body)).filter(d => ["revision", "signoff"].includes(d.phase))) {
+    assert.ok(d.prompt.includes("**Context:**"));
+    assert.ok(d.prompt.includes(MARKER));
+  }
+  assert.ok(buildSignoffPrompt("Task", "Plan", 1, undefined, "Constraint").includes("**Context:**\nConstraint"));
+  assert.ok(buildPlannerRevisePrompt("Task", "Plan", 1, [], "Constraint").includes("**Context:**\nConstraint"));
+  assert.ok(!buildSignoffPrompt("Task", "Plan", 1).includes("**Context:**"));
+  assert.ok(!buildPlannerRevisePrompt("Task", "Plan", 1, []).includes("**Context:**"));
+});
+
+test("absent and invalid plans give actionable errors without changing session", async (t) => {
+  responses(t);
+  const first = await startUltraplan([cfo], "Need a version", opts);
+  t.after(() => ultraplans.clear());
+  const u = ultraplans.get(first.ultraplanId);
+  const before = structuredClone(u);
+  for (const plan of [undefined, null, "", " \n "]) {
+    await assert.rejects(submitPlan(u.id, plan), { message: "No plan version exists yet; pass plan." });
+    assert.deepEqual(u, before);
+  }
+  for (const plan of [42, {}, []]) {
+    await assert.rejects(submitPlan(u.id, plan), { message: "plan must be a string: the full text of the next plan version" });
+    assert.deepEqual(u, before);
+  }
+  await submitPlan(u.id, "First version");
+  for (const plan of [null, "", " "]) assert.equal((await submitPlan(u.id, plan)).version, 1);
+  await endUltraplan(u.id);
+});
+
+test("failed no-plan phases are atomic and repeated reviews use latest verdict per agent index", async (t) => {
+  let fail;
+  let latest = false;
+  responses(t, d => {
+    if (d.phase === fail && d.agent === "skeptic") return failure();
+    if (latest && d.phase === "review") return "Verdict: APPROVE\nLatest review";
+  });
+  const first = await startUltraplan([cfo, skeptic, cfo], "Repeat review", { ...opts, draftPlan: "Draft" });
+  t.after(() => ultraplans.clear());
+  const u = ultraplans.get(first.ultraplanId);
+  for (const phase of ["review", "signoff"]) {
+    fail = phase;
+    const before = structuredClone(u);
+    await assert.rejects(submitPlan(u.id, undefined, phase === "signoff"), { message: errMessage });
+    assert.deepEqual(u, before);
+    fail = undefined;
+    latest = true;
+    const result = await submitPlan(u.id, undefined, phase === "signoff");
+    assert.equal(result.version, 1);
+    assert.equal(u.versions.length, 1);
+    if (phase === "review") {
+      assert.deepEqual(result.reviews.map(r => r.agent), [cfo, skeptic, cfo]);
+      assert.deepEqual(result.reviews.map(r => r.verdict), ["APPROVE", "APPROVE", "APPROVE"]);
+      assert.equal(result.tally.APPROVE, 3);
+      const doc = renderUltraplanDocument(u, [], false);
+      assert.ok(doc.includes(`- v1 by orchestrator — reviews: ${cfo} APPROVE, ${skeptic} APPROVE, ${cfo} APPROVE`));
+      assert.ok(!doc.includes("APPROVE WITH CHANGES"));
+    }
+  }
+});
+
+
+test("no-plan review and sign-off hold the busy guard until all calls settle", async (t) => {
+  let hold;
+  let entered;
+  responses(t, async () => {
+    if (hold) { entered.resolve(); await hold.promise; }
+  });
+  const first = await startUltraplan([cfo], "Guard existing version", { ...opts, draftPlan: "Draft" });
+  t.after(() => ultraplans.clear());
+  for (const final of [false, true]) {
+    hold = deferred();
+    entered = deferred();
+    const pending = submitPlan(first.ultraplanId, undefined, final);
+    await entered.promise;
+    await assert.rejects(submitPlan(first.ultraplanId), /is busy/);
+    await assert.rejects(submitPlan(first.ultraplanId, 42), /is busy/);
+    await assert.rejects(endUltraplan(first.ultraplanId), /is busy/);
+    const release = hold;
+    hold = undefined;
+    release.resolve();
+    assert.equal((await pending).version, 1);
+  }
+});
+
+test("a replacement sent straight to sign-off keeps context after a draft start", async (t) => {
+  const calls = responses(t);
+  const first = await startUltraplan([cfo], "Respect constraints", { ...opts, draftPlan: "Original", context: MARKER });
+  await submitPlan(first.ultraplanId, "Replacement", true);
+  const signoff = llmCalls(calls).map(c => details(c.body)).find(d => d.phase === "signoff");
+  assert.ok(signoff.prompt.includes("**Context:**\n" + MARKER));
+  assert.ok(signoff.prompt.includes("Replacement"));
 });

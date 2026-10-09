@@ -76,6 +76,7 @@ const {
   buildArchitectPrompt,
   buildArchitectRevisePrompt,
   buildSpecReviewPrompt,
+  renderPublicSpecSummary,
 } = await import("../../dist/sessions/agent-creation.js");
 const { readFrontmatter } = await import("../../dist/agents.js");
 const { startCollaboration, collaborations, ORCHESTRATOR } = await import("../../dist/sessions/collaborations.js");
@@ -392,7 +393,8 @@ test("performTask starts a private meeting with the newly written agent prompt",
   assert.match(h.requests.other[0].messages[0].content, /Allocate money/);
   assert.match(h.requests.other[0].messages.at(-1).content, /Do the budget[\s\S]*Delegation context/);
   assert.equal(meetings.get(r.meeting.meetingId).publicChannel, undefined);
-  assert.ok(r.next.includes(`continue_meeting`));
+  assert.equal(r.next, `The new agent has already started on the task in meeting ${r.meeting.meetingId}. Continue it with say { meeting_id: "${r.meeting.meetingId}", message } and close it with end_meeting.`);
+  assert.ok(!r.next.includes("Delegate the task"));
   meetings.delete(r.meeting.meetingId);
 });
 
@@ -764,4 +766,48 @@ test("invalid tool restrictions spend the architect retry with the allowlist", a
   assert.equal(h.requests.architect.length, 2);
   assert.match(h.requests.architect[1].messages.at(-1).content, /tools must list tool names from: Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch/);
   assert.deepEqual(r.agent.tools, ["Read", "Grep"]);
+});
+
+test("public summary includes metadata and credits but excludes prompt and skill instructions", () => {
+  const spec = definition({ changes: ["Clear scope"], open_questions: ["Who owns review?"] });
+  const summary = renderPublicSpecSummary(spec, { reusedSkills: ["audit"] });
+  for (const text of ["# marketing-budget", spec.description, "sonnet", "Read", "Grep", "audit", "reused", "allocation", "Allocate money", "created", "cfo: cfo contributed expertise", "Clear scope", "Who owns review?"]) assert.ok(summary.includes(text), text);
+  for (const text of [spec.system_prompt, ...spec.skills.map(s => s.instructions), "## System prompt"]) assert.ok(!summary.includes(text), text);
+  const inherited = renderPublicSpecSummary(definition({ model: undefined, tools: undefined, skills: [{ name: "attached", description: "Existing procedure" }] }));
+  for (const text of ["inherit (not set)", "all tools (inherited)", "attached", "Existing procedure", "reused"]) assert.ok(inherited.includes(text));
+});
+
+test("public improve redacts the final definition and omits private activity from every prompt", async (t) => {
+  const persona = "PRIVATE-PERSONA-MARKER-781";
+  const outcome = "PRIVATE-ACTIVITY-MARKER-982";
+  const target = fixture(join(agentsDir, "privacy-target.md"), `---\nname: privacy-target\ndescription: Private target\n---\nYou keep ${persona}.\n`);
+  recordActivity({ session: "private-past", kind: "meeting", agents: ["privacy-target"], topic: "Private past", outcome, public: false });
+  const h = harness(t, { spec: { name: "privacy-target", description: "Refined description", system_prompt: `You keep ${persona}.`, skills: [], changes: ["Clearer scope"] } });
+  const result = await improveAgent({ ...opts, agent: target, with: ["cfo"], public: true, write: false });
+  assert.ok(result.files.some(f => f.content.includes(persona)));
+  const posts = h.calls.filter(c => c.url.startsWith("http://publisher.test") && c.init.method === "POST");
+  const summary = posts.find(p => p.body.title.includes("summary"));
+  assert.ok(summary);
+  assert.ok(summary.body.message.includes("Refined description"));
+  assert.ok(summary.body.message.includes("cfo contributed expertise"));
+  const transcript = readFileSync(/Saved: (.+?) ·/.exec(result.publicBlock)[1], "utf8");
+  for (const text of [JSON.stringify(posts), transcript]) for (const marker of [persona, outcome, "## System prompt"]) assert.ok(!text.includes(marker), marker);
+  for (const call of h.calls.filter(c => c.url.startsWith("http://llm.test"))) assert.ok(!JSON.stringify(call.body).includes(outcome));
+  for (const call of h.requests.contributions) {
+    const prompt = call.messages.at(-1).content;
+    assert.ok(prompt.includes("2. Corrections (point to the passage by its heading or a short paraphrase and give the replacement guidance; do not reproduce the current text)"));
+    assert.ok(!prompt.includes("quote the current text"));
+    assert.ok(!prompt.includes("## Recent activity"));
+  }
+  for (const call of h.requests.reviews) assert.ok(call.messages.at(-1).content.includes("do not reproduce the current text"));
+  const offset = h.requests.contributions.length;
+  const reviewOffset = h.requests.reviews.length;
+  await improveAgent({ ...opts, agent: target, with: ["cfo"], write: false });
+  for (const call of h.requests.contributions.slice(offset)) {
+    const prompt = call.messages.at(-1).content;
+    assert.ok(prompt.includes("quote the current text"));
+    assert.ok(prompt.includes("## Recent activity"));
+    assert.ok(prompt.includes(outcome));
+  }
+  for (const call of h.requests.reviews.slice(reviewOffset)) assert.ok(call.messages.at(-1).content.includes("quoting the text you would change"));
 });

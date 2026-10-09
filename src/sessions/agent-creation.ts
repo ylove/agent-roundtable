@@ -138,6 +138,7 @@ export interface ImproveContributionPromptOptions extends PromptContext {
   systemPrompt: string;
   skills: Array<{ name: string; description?: string }>;
   activity?: string;
+  public?: boolean;
   isSelf: boolean;
   round?: number;
   rounds?: number;
@@ -155,6 +156,7 @@ export interface ArchitectPromptOptions extends PromptContext {
 
 /** Draft and the reviewer's own contributions for a spec review. */
 export interface SpecReviewPromptOptions {
+  public?: boolean;
   task: string;
   draft: string;
   contributions: Contribution[];
@@ -299,8 +301,7 @@ export function buildImproveContributionPrompt(o: ImproveContributionPromptOptio
     "## Current skills",
     o.skills.map(skill => `- ${skill.name}: ${skill.description ?? ""}`).join("\n") || "(none)",
     "",
-    `## Recent activity\n${o.activity ?? "(no recorded sessions)"}`,
-    "",
+    ...(!o.public ? [`## Recent activity\n${o.activity ?? "(no recorded sessions)"}`, ""] : []),
     background(o, "contributor"),
     "",
   );
@@ -314,7 +315,9 @@ export function buildImproveContributionPrompt(o: ImproveContributionPromptOptio
   lines.push(
     "Contribute under these headings:",
     "1. Gaps",
-    "2. Corrections (quote the current text, give the replacement)",
+    o.public
+      ? "2. Corrections (point to the passage by its heading or a short paraphrase and give the replacement guidance; do not reproduce the current text)"
+      : "2. Corrections (quote the current text, give the replacement)",
     "3. Skills to add or attach",
     "4. Cuts",
     "",
@@ -393,7 +396,9 @@ export function buildSpecReviewPrompt(o: SpecReviewPromptOptions): string {
     labeledInput(o.contributions, "(you are the first contributor)"),
     "",
     "The first line must be EXACTLY Verdict: READY | NEEDS CHANGES (choose one). " +
-      "Then give concrete fixes quoting the text you would change, " +
+      (o.public
+        ? "Then give concrete fixes: point to the passage by its heading or a short paraphrase and give the replacement guidance; do not reproduce the current text. "
+        : "Then give concrete fixes quoting the text you would change, ") +
       "and say whether your contribution is represented accurately.",
   ].join("\n");
 }
@@ -670,7 +675,8 @@ function contributionPrompt(workshop: PreparedWorkshop, participant: Participant
     description: String(target.frontmatter.description ?? ""),
     systemPrompt: target.body,
     skills: target.skills,
-    activity: recentActivityLines(targetKey!),
+    public: workshop.isPublic,
+    activity: workshop.isPublic ? undefined : recentActivityLines(targetKey!),
     isSelf: participant.key === targetKey,
   });
 }
@@ -749,6 +755,7 @@ async function runReviews(workshop: PreparedWorkshop, spec: AgentSpec): Promise<
     const prompt = buildSpecReviewPrompt({
       task: workshop.architectOptions.task,
       draft,
+      public: workshop.isPublic,
       contributions: workshop.ownContributions.get(participant.key) ?? [],
     });
     const content = await callLLM(participant.system, [{ role: "user", content: prompt }], workshop.llmOptions);
@@ -806,22 +813,49 @@ function effectiveTools(spec: AgentSpec, target?: LoadedAgent): string[] | undef
   return undefined;
 }
 
-function nextStep(workshop: PreparedWorkshop, saved: SavedDefinition): string {
-  if (!saved.written) {
+/** All workshop continuation variants, also used to check tool-name references. */
+export function buildWorkshopNext(o: {
+  written: boolean; agentName: string; targetPath?: string; proposedPath?: string; backupPath?: string; meetingId?: string;
+}): string {
+  if (o.meetingId) {
+    return `The new agent has already started on the task in meeting ${o.meetingId}. ` +
+      `Continue it with say { meeting_id: "${o.meetingId}", message } and close it with end_meeting.`;
+  }
+  if (!o.written) {
     return "Nothing was written (write: false). Review `files`, then call again with write: true to save them.";
   }
-  if (saved.plan.proposedPath) {
-    return `${workshop.target!.path} changed while improve_agent was running, so it was not overwritten. ` +
-      `The proposed definition is at ${saved.plan.proposedPath} (a non-.md file, never loaded as an agent): ` +
+  if (o.proposedPath) {
+    return `${o.targetPath} changed while improve_agent was running, so it was not overwritten. ` +
+      `The proposed definition is at ${o.proposedPath} (a non-.md file, never loaded as an agent): ` +
       "compare it with the current file and merge by hand, or run improve_agent again.";
   }
-  if (workshop.target) {
-    return `The improved definition is live; the previous version is at ${saved.plan.backupPath}.`;
+  if (o.targetPath) {
+    return `The improved definition is live; the previous version is at ${o.backupPath}.`;
   }
-  const name = saved.plan.agentName;
-  return `Delegate the task to it now: in Claude Code use the Agent tool with subagent_type "${name}" ` +
+  return `Delegate the task to it now: in Claude Code use the Agent tool with subagent_type "${o.agentName}" ` +
     "(new files in .claude/agents are picked up within seconds), " +
-    `or on the roundtable call start_meeting with agent "${name}".`;
+    `or on the roundtable call start_meeting with agent "${o.agentName}".`;
+}
+
+/** Public metadata and credits only; the full definition stays in the tool result. */
+export function renderPublicSpecSummary(spec: AgentSpec, opts: { reusedSkills?: string[] } = {}): string {
+  const blocks = [
+    `# ${spec.name}`,
+    spec.description,
+    "The system prompt and skill instructions are not posted publicly.",
+    `Model: ${spec.model ?? "inherit (not set)"}`,
+    `Tools: ${spec.tools?.join(", ") ?? "all tools (inherited)"}`,
+    "## Skills",
+    spec.skills.map((skill) => {
+      const status = !skill.instructions || opts.reusedSkills?.includes(skill.name) ? "reused" : "created";
+      return `- ${skill.name}: ${skill.description} (${status})`;
+    }).join("\n") || "(none)",
+    "## Contributions",
+    spec.contributions.map((credit) => `- ${publicLabel(credit.agent)}: ${credit.summary}`).join("\n") || "(none)",
+  ];
+  if (spec.changes?.length) blocks.push("## Changes", spec.changes.map((change) => `- ${change}`).join("\n"));
+  if (spec.open_questions?.length) blocks.push("## Open questions", spec.open_questions.map((question) => `- ${question}`).join("\n"));
+  return blocks.join("\n\n");
 }
 
 function recordWorkshopActivity(workshop: PreparedWorkshop, spec: AgentSpec, saved: SavedDefinition): void {
@@ -882,16 +916,17 @@ async function finishWorkshop(
   const { plan, written } = saved;
   const warnings = [...parsed.warnings, ...plan.warnings];
   recordWorkshopActivity(workshop, spec, saved);
-  let next = nextStep(workshop, saved);
   const meeting = await performTask(workshop, saved, warnings);
-  if (meeting) {
-    next += ` The new agent has already started on the task in meeting ${meeting.meetingId}; ` +
-      "continue it with continue_meeting.";
-  }
+  const next = buildWorkshopNext({
+    written, agentName: plan.agentName, targetPath: workshop.target?.path,
+    proposedPath: plan.proposedPath, backupPath: plan.backupPath, meetingId: meeting?.meetingId,
+  });
   let publicBlock: string | undefined;
   if (workshop.run.channel) {
     const finalSpec = { ...spec, name: workshop.isPublic ? publicLabel(plan.agentName) : plan.agentName };
-    const finalized = await workshop.run.channel.finalize({ summary: renderSpecMarkdown(finalSpec) });
+    const finalized = await workshop.run.channel.finalize({ summary: renderPublicSpecSummary(finalSpec, {
+      reusedSkills: plan.skills.filter((skill) => skill.status === "reused").map((skill) => skill.name),
+    }) });
     publicBlock = formatPublicBlock(workshop.run.channel, finalized);
   }
   const originalModel = workshop.target?.frontmatter.model;

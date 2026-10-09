@@ -107,6 +107,12 @@ async function checkDispatch() {
       assert(start.status === "awaiting_plan" && start.input.length === 2 && debug.active_ultraplans === 1, JSON.stringify(start));
       assert(calls[0].messages[1].content.includes("Private launch context"), JSON.stringify(calls[0]));
     });
+    const beforeMissingPlan = calls.length;
+    const missingPlan = await handleToolCall("submit_plan", { ultraplan_id: start.ultraplanId });
+    check("dispatch submit_plan without a first version asks for a plan before any provider call", () => {
+      assert(missingPlan.isError && missingPlan.content[0].text === "Error: No plan version exists yet; pass plan.", JSON.stringify(missingPlan));
+      assert(calls.length === beforeMissingPlan && ultraplans.get(start.ultraplanId).versions.length === 0, "missing plan reached a provider or created a version");
+    });
     const review = JSON.parse(await call("submit_plan", { ultraplan_id: start.ultraplanId, plan: "v1 [cfo]" }));
     const final = await call("submit_plan", { ultraplan_id: start.ultraplanId, plan: "v2 [cfo, product-lead]", final: true });
     check("dispatch submit_plan reviews then returns the final document verbatim", () => {
@@ -114,6 +120,33 @@ async function checkDispatch() {
       assert(final.startsWith("# Ultraplan: Launch") && final.includes("v2 [cfo, product-lead]") && final.includes("## Sign-offs") && final.includes("## Agent input"), final);
       assert(!ultraplans.has(start.ultraplanId) && replies.length === 0, "session did not close or calls were skipped");
     });
+
+    script("Verdict: APPROVE", "Verdict: OBJECT", "Sign-off: APPROVE");
+    const reuse = JSON.parse(await call("start_ultraplan", { ...providerArgs, agents: ["cfo"], task: "Reuse launch", draft_plan: "Keep this plan" }));
+    const repeated = JSON.parse(await call("submit_plan", { ultraplan_id: reuse.ultraplanId }));
+    check("dispatch submit_plan without plan reviews the same version again", () => {
+      assert(repeated.phase === "review" && repeated.version === reuse.version && repeated.tally.OBJECT === 1, JSON.stringify(repeated));
+      assert(ultraplans.get(reuse.ultraplanId).versions.length === 1, "repeat review added a version");
+    });
+    const reuseFinal = await call("submit_plan", { ultraplan_id: reuse.ultraplanId, final: true });
+    check("dispatch submit_plan without plan signs off the latest version as-is", () => {
+      assert(reuseFinal.startsWith("# Ultraplan: Reuse launch") && reuseFinal.includes("Keep this plan") && reuseFinal.includes("Plan versions: 1") && reuseFinal.includes("## Sign-offs"), reuseFinal);
+      assert(!ultraplans.has(reuse.ultraplanId) && replies.length === 0, "session did not close or calls were skipped");
+    });
+
+    script();
+    for (const [name, args, message] of [
+      ["create_agent", { agents: "cfo", task: "x" }, 'create_agent: "agents" must be an array of non-empty strings'],
+      ["improve_agent", { agent: "cfo", rounds: "two" }, 'improve_agent: "rounds" must be a finite number'],
+      ["start_ultraplan", { agents: ["cfo"], task: 5 }, 'start_ultraplan: "task" must be a string'],
+      ["submit_plan", { ultraplan_id: "x", plan: 5 }, 'submit_plan: "plan" must be a string'],
+    ]) {
+      const result = await handleToolCall(name, args);
+      check(`dispatch ${name} rejects malformed arguments before any provider call`, () => {
+        assert(result.isError && result.content[0].text === `Error: ${message}`, JSON.stringify(result));
+        assert(calls.length === 0, "invalid arguments reached a provider");
+      });
+    }
 
     script("Verdict: APPROVE");
     const draft = JSON.parse(await call("start_ultraplan", { ...providerArgs, agents: ["cfo"], task: "Draft launch", draft_plan: "Existing draft", public: true }));
@@ -237,7 +270,7 @@ try {
   for (const [name, required] of [
     ["start_collaboration", ["agents"]],
     ["start_ultraplan", ["agents", "task"]],
-    ["submit_plan", ["ultraplan_id", "plan"]],
+    ["submit_plan", ["ultraplan_id"]],
     ["end_ultraplan", ["ultraplan_id"]],
     ["create_agent", []],
     ["improve_agent", ["agent"]],

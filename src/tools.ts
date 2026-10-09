@@ -98,8 +98,9 @@ export function formatUltraplanResult(result: UltraplanStepResult | UltraplanFin
 
 export function formatAgentWorkshopResult(result: AgentWorkshopResult): string {
   const action = result.mode === "create" ? "Created" : "Improved";
-  let output = `## ${action} agent: ${result.agent.name}\n\n`;
-  output += `Agent: ${result.agent.path || "(preview, not written)"}\n`;
+  let output = result.proposedPath
+    ? `## Proposed changes for agent: ${result.agent.name}\n\nAgent: not updated (the file changed during the run)\nProposed: ${result.proposedPath}\n`
+    : `## ${action} agent: ${result.agent.name}\n\nAgent: ${result.agent.path || "(preview, not written)"}\n`;
   if (result.backupPath) output += `Backup: ${result.backupPath}\n`;
   if (result.agent.skills.length) {
     output += `Skills: ${result.agent.skills.map((s) => `${s.name} (${s.status})`).join(", ")}\n`;
@@ -143,6 +144,13 @@ function webhookOrigin(raw: string): string {
     return "unparseable URL";
   }
 }
+
+const SKILL_LOOKUP_DESCRIPTION =
+  "Skill lookup follows Claude Code precedence: personal ~/.claude/skills, then .claude/skills beside the agent file when it is in .claude/agents, then ROUNDTABLE_SKILLS_DIR. Any skill found is reused, never overwritten or shadowed. ";
+const WORKSHOP_TOOLS_DESCRIPTION =
+  "Tools fail closed: a list with no allowlisted matches or a value of the wrong type is rejected and the architect retries once. Omitting tools inherits all tools and warns: tools omitted: the agent inherits all tools. ";
+const PUBLIC_WORKSHOP_DESCRIPTION =
+  "Public workshops post contributions, reviews and a redacted summary of the final definition (name, description, model, tools, skill names and status, contribution credits, changes and open questions), without its system prompt or skill instructions. They never post context, personas, fleet listings or source-session transcripts. ";
 
 export const tools: Tool[] = [
   // === Meeting Tools ===
@@ -363,7 +371,7 @@ export const tools: Tool[] = [
   {
     name: "start_collaboration",
     description:
-      "Start a collaboration where agents take turns responding; returns a collaboration ID. Default collaborate builds on ideas. Debate has agents[0] defend a position against challengers; waffle-house distills an idea through repeated attacks and rebuttals. Conversation is an informal chat from each agent's own situation, with short turns and no agenda or deliverable; topic is optional only in conversation mode. In conversation mode, put what you know about the agents' current situation in context (what was just built, what each agent last did). Private conversations default to grounding from workspace, memory and local activity; public conversations never get grounding. Continue, nudge, inspect or end with the collaboration tools.",
+      "Start a collaboration where agents take turns responding; returns a collaboration ID. Default collaborate builds on ideas. Debate has agents[0] defend a position against challengers; waffle-house distills an idea through repeated attacks and rebuttals. Conversation is an informal chat from each agent's own situation, with short turns and no agenda or deliverable; topic is optional only in conversation mode. In conversation mode, put what you know about the agents' current situation in context (what was just built, what each agent last did). Private conversations default to grounding from workspace, memory and local activity; public conversations never get grounding, never open on the founder angle, and their directive does not ask agents to talk about the founder or whoever they report to. Continue, nudge, inspect or end with the collaboration tools.",
     inputSchema: {
       type: "object",
       properties: {
@@ -528,7 +536,7 @@ export const tools: Tool[] = [
   {
     name: "start_ultraplan",
     description:
-      "Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open: continue with submit_plan or close with end_ultraplan. Show the final markdown document to the user verbatim, including every agent's input and sign-off. Public runs post the task and phase outputs, never context.",
+      "Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: \"plan\" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. Public runs post the task and phase outputs, never context.",
     inputSchema: {
       type: "object",
       properties: {
@@ -547,15 +555,15 @@ export const tools: Tool[] = [
   {
     name: "submit_plan",
     description:
-      "Submit the full next plan version to an open ultraplan. You write it from agent input/reviews; tag contributing agents on steps and explain which amendments you accepted or rejected and why. Default final: false collects independent reviews and leaves the session awaiting_revision. Set final: true to collect sign-offs, close, and return the final markdown document; this is allowed straight after input without a review. Show that final document to the user verbatim, including input and sign-offs. A failed phase leaves the previous state intact so you can retry.",
+      "Submit a full next plan version, or omit plan to review or sign off the latest version as-is without creating a version. This also recovers a stopped planner run with phase: \"plan\". If no version exists yet, pass plan. You write revised plans from agent input/reviews; tag contributing agents on steps and explain which amendments you accepted or rejected and why. Default final: false collects independent reviews and leaves the session awaiting_revision. Set final: true to collect sign-offs, close, and return the final markdown document; with a supplied plan this is allowed straight after input without a review. Show that final document to the user verbatim, including input and sign-offs. A failed phase leaves the previous state intact so you can retry.",
     inputSchema: {
       type: "object",
       properties: {
         ultraplan_id: { type: "string", description: "The ultraplanId from start_ultraplan." },
-        plan: { type: "string", description: "Full text of the next plan version, not a patch; must be non-empty." },
+        plan: { type: "string", description: "Optional: omit to have the latest version reviewed as-is (final false) or signed off as-is (final true), without creating a version. Pass the full next version, not a patch. If no version exists yet: No plan version exists yet; pass plan." },
         final: { type: "boolean", description: "Default false: review and leave open. True: collect sign-offs and finalize." },
       },
-      required: ["ultraplan_id", "plan"],
+      required: ["ultraplan_id"],
     },
   },
   {
@@ -573,7 +581,10 @@ export const tools: Tool[] = [
   {
     name: "create_agent",
     description:
-      "Have specialists design a new Claude Code subagent in one call: sequential contributions, architect draft, independent reviews, then revision if needed. Pass agents and task, or from_session (a live collab-N or meeting-N) to inherit participants, topic and discussion; explicit agents are combined with inherited ones. Each contributes expertise, guardrails and skills. Default write: true saves the agent to ROUNDTABLE_AGENTS_DIR and new skills to ROUNDTABLE_SKILLS_DIR; existing agents and skills are never overwritten. write: false previews files without writes. The result gives paths, warnings and next delegation instructions: use Claude Code's Agent tool with subagent_type set to the returned name, or start_meeting. perform_task: true with writes also starts a private roundtable meeting on the task. Public runs mirror contributions, reviews and final spec, never context, personas, fleet listing or source transcript.",
+      "Have specialists design a new Claude Code subagent in one call: sequential contributions, architect draft, independent reviews, then revision if needed. Pass agents and task, or from_session (a live collab-N or meeting-N) to inherit participants, topic and discussion; explicit agents are combined with inherited ones. Each contributes expertise, guardrails and skills. Default write: true saves the agent to ROUNDTABLE_AGENTS_DIR and new skills to ROUNDTABLE_SKILLS_DIR; existing agents are never overwritten. write: false previews files without writes. " +
+      SKILL_LOOKUP_DESCRIPTION + WORKSHOP_TOOLS_DESCRIPTION +
+      "The result reports actual paths, warnings and next delegation instructions: use Claude Code's Agent tool with the returned agent.name as subagent_type when saved in .claude/agents, or start_meeting. perform_task: true with writes starts a private meeting on the task; follow its next instructions with say and end_meeting. " +
+      PUBLIC_WORKSHOP_DESCRIPTION,
     inputSchema: {
       type: "object",
       properties: {
@@ -593,7 +604,13 @@ export const tools: Tool[] = [
   {
     name: "improve_agent",
     description:
-      "Refine an existing Claude Code agent in one call, preserving its identity and useful instructions. By default the target reviews itself candidly; add specialists with with or inherit participants/discussion from a live collab-N or meeting-N via from_session. They suggest gaps, exact replacements, skills and cuts; an architect drafts the definition, participants review independently, and the architect revises if needed. Default write: true backs up the target to <target>.bak-<timestamp> before replacing it; write: false returns file previews without writes. The target may be any existing .md path you name, including outside the agents directory. Original unmanaged frontmatter is preserved; model output only supplies name/description/model/tools/skills. Existing skills are reused and never overwritten. Report paths, warnings and next instructions to the user. Public runs mirror contributions, reviews and final spec, never context, personas, fleet listing or source transcript.",
+      "Refine an existing Claude Code agent in one call, preserving its identity and useful instructions. By default the target reviews itself candidly; add specialists with with or inherit participants/discussion from a live collab-N or meeting-N via from_session. They suggest gaps, replacements, skills and cuts; an architect drafts the definition, participants review independently, and the architect revises if needed. The target may be any existing .md path, including outside the agents directory. write: false previews without writes. " +
+      "Frontmatter rejected by strict YAML (such as an unquoted description containing colon-space) is read leniently as Claude Code reads it: every recovered key is preserved, with a warning, and rewritten as valid YAML. No recoverable keys means refinement is refused; identity collision checks also see recovered names. Model output only supplies name/description/model/tools/skills. " +
+      "Only one improve run per target is allowed; a second fails fast: improve_agent is already running for <key>; wait for it to finish. Default write: true saves <target>.bak-<timestamp>, then atomically replaces via a temp file and rename, keeping the original mode. If the target changed during the run it is not overwritten: changes go to <target>.proposed-<timestamp>, which is not an agent file; next explains recovery. " +
+      SKILL_LOOKUP_DESCRIPTION +
+      "New skills go beside a target in .claude/agents to its project's .claude/skills, otherwise to ROUNDTABLE_SKILLS_DIR. Results report actual paths, warnings and next instructions. " +
+      WORKSHOP_TOOLS_DESCRIPTION + PUBLIC_WORKSHOP_DESCRIPTION +
+      "Public improve runs never include the target's recent activity in any prompt; contributors and reviewers point to passages rather than reproduce them. Private improve contributor prompts include recent topics and outcomes from the local activity log.",
     inputSchema: {
       type: "object",
       properties: {
@@ -620,6 +637,24 @@ export const tools: Tool[] = [
     },
   },
 ];
+
+/** Check declared argument types; engines still handle missing required values. */
+export function checkArgs(tool: string, args: Record<string, unknown> | undefined): void {
+  const properties = tools.find((entry) => entry.name === tool)?.inputSchema.properties ?? {};
+  for (const [field, schema] of Object.entries(properties)) {
+    const value = args?.[field];
+    if (value === undefined || value === null) continue;
+    const type = (schema as { type?: string }).type;
+    let requirement: string | undefined;
+    if (type === "string" && typeof value !== "string") requirement = "a string";
+    if (type === "array" && (!Array.isArray(value) || !Array.from(value).every((item) => typeof item === "string" && item.trim().length > 0))) {
+      requirement = "an array of non-empty strings";
+    }
+    if (type === "number" && (typeof value !== "number" || !Number.isFinite(value))) requirement = "a finite number";
+    if (type === "boolean" && typeof value !== "boolean") requirement = "a boolean";
+    if (requirement) throw new Error(`${tool}: "${field}" must be ${requirement}`);
+  }
+}
 
 export async function handleToolCall(
   name: string,
@@ -893,7 +928,8 @@ export async function handleToolCall(
 
       // === Ultraplan Tools ===
       case "start_ultraplan": {
-        const { agents, task, context, draft_plan, planner, revision_rounds, public: isPublic, provider, model, base_url } = args as {
+        checkArgs(name, args);
+        const { agents, task, context, draft_plan, planner, revision_rounds, public: isPublic, provider, model, base_url } = (args ?? {}) as {
           agents: string[];
           task: string;
           context?: string;
@@ -920,20 +956,23 @@ export async function handleToolCall(
       }
 
       case "submit_plan": {
-        const { ultraplan_id, plan, final } = args as { ultraplan_id: string; plan: string; final?: boolean };
+        checkArgs(name, args);
+        const { ultraplan_id, plan, final } = (args ?? {}) as { ultraplan_id: string; plan?: string; final?: boolean };
         const result = await submitPlan(ultraplan_id, plan, final === true);
         return { content: [{ type: "text", text: formatUltraplanResult(result) }] };
       }
 
       case "end_ultraplan": {
-        const { ultraplan_id } = args as { ultraplan_id: string };
+        checkArgs(name, args);
+        const { ultraplan_id } = (args ?? {}) as { ultraplan_id: string };
         const result = await endUltraplan(ultraplan_id);
         return { content: [{ type: "text", text: formatUltraplanResult(result) }] };
       }
 
       // === Agent Creation and Refinement Tools ===
       case "create_agent": {
-        const { agents, task, context, from_session, name: agentName, rounds, write, perform_task, public: isPublic, provider, model, base_url } = args as {
+        checkArgs(name, args);
+        const { agents, task, context, from_session, name: agentName, rounds, write, perform_task, public: isPublic, provider, model, base_url } = (args ?? {}) as {
           agents?: string[];
           task?: string;
           context?: string;
@@ -956,7 +995,8 @@ export async function handleToolCall(
       }
 
       case "improve_agent": {
-        const { agent, with: specialists, include_self, focus, context, from_session, rounds, write, public: isPublic, provider, model, base_url } = args as {
+        checkArgs(name, args);
+        const { agent, with: specialists, include_self, focus, context, from_session, rounds, write, public: isPublic, provider, model, base_url } = (args ?? {}) as {
           agent: string;
           with?: string[];
           include_self?: boolean;
@@ -971,6 +1011,9 @@ export async function handleToolCall(
           base_url?: string;
         };
         validateProviderOptions(provider, base_url);
+        if (typeof agent !== "string" || !agent.trim()) {
+          throw new Error('improve_agent: "agent" is required: pass the agent name or .md path to improve');
+        }
         const result = await improveAgent({
           agent, with: specialists, includeSelf: include_self, focus, context, fromSession: from_session,
           rounds, write, public: isPublic === true, provider, model, baseUrl: base_url,

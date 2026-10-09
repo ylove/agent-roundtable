@@ -60,9 +60,9 @@ What to expect: meetings and collaborations return a session id together with th
 
 > Have product-lead act as planner with cfo and skeptic contributing. Plan a launch within our current budget, with two review/revision rounds, and show me everyone's input and sign-off.
 
-The orchestrator owns and writes the plan. `start_ultraplan` collects independent input; write v1 with contributor tags such as `[cfo]` on each step. `submit_plan` reviews each complete version and leaves the session open for revision. Address amendments and explain any you reject. `submit_plan` with `final: true` collects sign-offs and closes, even straight after input. Show the final Markdown document verbatim: it includes the plan, every agent's input and sign-off, and revision history. A sign-off may include reservations or objections; closure does not imply unanimous approval.
+The orchestrator owns and writes the plan. `start_ultraplan` collects independent input; write v1 with contributor tags such as `[cfo]` on each step. `submit_plan` with `plan` submits a complete next version for review and leaves the session open for revision. Omit `plan` to review the latest version as-is without creating a new version, or omit it with `final: true` to sign off that version as-is. If no version exists yet, the call fails with `No plan version exists yet; pass plan.` Address amendments and explain any you reject. `submit_plan` with `final: true` collects sign-offs and closes; passing a plan allows sign-off straight after input. Show the final Markdown document verbatim: it includes the plan, every agent's input and sign-off, and revision history. A sign-off may include reservations or objections; closure does not imply unanimous approval.
 
-Pass `draft_plan` to skip input and review it as v1. Pass a `planner` persona for the whole draft/review/revise/sign-off loop in one call; `revision_rounds` applies only to that variant (default 1, clamped to 1–3). If a planner run returns a step with an `error`, it remains open at the last committed phase: continue with `submit_plan` or close with `end_ultraplan`. Closing with `end_ultraplan` collects no sign-offs and marks the document **not signed off**. Participants work independently within each phase; concurrent calls are bounded by `ROUNDTABLE_PARALLEL_TURNS`.
+Pass `draft_plan` to skip input and review it as v1. Pass a `planner` persona for the whole draft/review/revise/sign-off loop in one call; `revision_rounds` applies only to that variant (default 1, clamped to 1–3). If a planner run returns a step with an `error`, it remains open at the last committed phase. A step with `phase: "plan"` contains the unreviewed latest version, with `previousReviews` when an earlier version was reviewed. Continue with `submit_plan`: omit `plan` to review or sign off the latest version as-is, or pass a full revised plan. You can also close with `end_ultraplan`. Closing with `end_ultraplan` collects no sign-offs and marks the document **not signed off**. Participants work independently within each phase; concurrent calls are bounded by `ROUNDTABLE_PARALLEL_TURNS`.
 
 See the [Ultraplan tool calls](#ultraplan-tool-calls) below.
 
@@ -72,9 +72,9 @@ See the [Ultraplan tool calls](#ultraplan-tool-calls) below.
 
 > Let product-lead and skeptic chat loosely about where the product is heading. Use conversation mode with grounding disabled.
 
-`start_collaboration` with `mode: "conversation"` produces informal colleague chat, usually 2–6 sentences per turn, with no agenda or deliverable. `topic` is an optional loose theme; every other collaboration mode requires it. Put what you know about the agents' current situation in `context`: what was just built, what each agent last did, and current problems. Agents are told to use facts established by their personas/context, mark guesses, and avoid invented events or metrics. Continue, nudge, inspect and end with the usual collaboration tools; an optional summary recaps threads, concerns and anything the founder should hear.
+`start_collaboration` with `mode: "conversation"` produces informal colleague chat, usually 2–6 sentences per turn, with no agenda or deliverable. `topic` is an optional loose theme; every other collaboration mode requires it. Put what you know about the agents' current situation in `context`: what was just built, what each agent last did, and current problems. Agents are told to use facts established by their personas/context, mark guesses, and avoid invented events or metrics. Continue, nudge, inspect and end with the usual collaboration tools; an optional summary recaps threads, concerns and anything the founder should hear. Public conversations never open on the founder angle, and their directive does not ask agents to talk about the founder or whoever they report to.
 
-Private conversations default to grounding: workspace excerpts (package metadata, project instructions, README and recent git history), agent-memory notes, and recent roundtable activity are sent to the session's provider. Set `grounding: false` to disable this. **Public conversations never receive grounding.** The activity log is local only; private conversation grounding can include excerpts from it. `list_collaborations` reports the opening angle and grounding sources.
+Private conversations default to grounding: workspace excerpts (package metadata, project instructions, README and recent git history), agent-memory notes, and recent roundtable activity are sent to the session's provider. Set `grounding: false` to disable this. **Public conversations never receive grounding.** The activity log is stored locally. Private conversation grounding and private `improve_agent` contributor prompts send recent topics and outcomes from it to the session's provider. Public improve runs never include the target's recent activity in any prompt. `list_collaborations` reports the opening angle and grounding sources.
 
 See the [Conversation tool calls](#conversation-tool-calls) below.
 
@@ -88,18 +88,22 @@ See the [Conversation tool calls](#conversation-tool-calls) below.
 
 `create_agent` combines specialists' sequential contributions into an architect's draft, collects independent reviews, and revises when needed. Pass `agents` plus `task`, or `from_session` with a live `collab-N` or `meeting-N` to inherit participants, topic and discussion. Explicit participants are combined with inherited ones. Contribution `rounds` default to 1 and are clamped to 1–3; concurrent reviews are bounded by `ROUNDTABLE_PARALLEL_TURNS`.
 
-Files go to `ROUNDTABLE_AGENTS_DIR` and `ROUNDTABLE_SKILLS_DIR`. After creation, delegate with Claude Code's Agent tool using the returned `subagent_type`, or call `start_meeting` with the new agent. `perform_task: true` with writes also starts a private roundtable meeting on the task. If the agents directory had to be created, restart Claude Code so it watches that directory.
+New agents go to `ROUNDTABLE_AGENTS_DIR`; new skills from `create_agent` go to `ROUNDTABLE_SKILLS_DIR`. Skill lookup follows Claude Code's precedence: personal `~/.claude/skills`, then the `.claude/skills` beside an agent in `.claude/agents`, then `ROUNDTABLE_SKILLS_DIR`. A skill found anywhere in that order is reused, never overwritten or shadowed. Results report the actual paths. After creation in `.claude/agents`, delegate with Claude Code's Agent tool using the returned `agent.name` as `subagent_type`, or call `start_meeting` with the new agent. `perform_task: true` with writes starts a private roundtable meeting on the task; follow its `next` instructions with `say` and `end_meeting`. If the agents directory had to be created, restart Claude Code so it watches that directory.
 
-`improve_agent` includes the target as a candid self-reviewer by default; add specialists with `with`, focus with `focus`, or inherit discussion with `from_session`. With `include_self: false`, supply participants via `with` or `from_session`. It accepts **any existing `.md` path you name, including outside the agents directory**, and backs it up before replacement. `write: false` on either tool returns `files` previews and writes nothing.
+`improve_agent` includes the target as a candid self-reviewer by default; add specialists with `with`, focus with `focus`, or inherit discussion with `from_session`. With `include_self: false`, supply participants via `with` or `from_session`. It accepts **any existing `.md` path you name, including outside the agents directory**, and backs it up before replacement. New skills from refinement go to the target's project `.claude/skills` when it sits in `.claude/agents`, otherwise to `ROUNDTABLE_SKILLS_DIR`; results report the actual paths. `write: false` on either tool returns `files` previews and writes nothing.
 
 Agent-file safety rules:
 
-- Creation never overwrites an agent. Name or identity collisions receive `-2`, `-3`, … suffixes. The `subagent-` filename prefix is used only when most existing top-level `.md` files have it.
-- Refinement preserves the original identity and unmanaged frontmatter. It saves `<target>.bak-YYYYMMDD-HHMMSS` before changing the target, adding `-2`, `-3`, … on backup collisions; backups are not agent `.md` files.
-- Only `name`, `description`, `model`, `tools` and `skills` from model output enter frontmatter. Models are limited to `opus`, `sonnet`, `haiku`, `inherit`; tools to `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebSearch`, `WebFetch`. Generated hooks, permission settings and other unmanaged fields are ignored. YAML serialization safely quotes generated values.
+- Creation never overwrites an agent. Identity collision checks include names recovered from lenient frontmatter. Name or identity collisions receive `-2`, `-3`, … suffixes. The `subagent-` filename prefix is used only when most existing top-level `.md` files have it.
+- Refinement preserves the original identity and unmanaged frontmatter. Frontmatter that strict YAML rejects, such as an unquoted description containing `: ` from Claude Code's generator, is read leniently the way Claude Code reads it. Refinement keeps every recovered key, warns, and rewrites valid YAML; frontmatter with no recoverable keys is refused.
+- Only one improve run per target is allowed. A second fails fast with `improve_agent is already running for <key>; wait for it to finish`. If the file changes during the run, it is not overwritten: the proposal goes to `<target>.proposed-<timestamp>` (not an agent file), and `next` explains how to proceed.
+- Refinement saves `<target>.bak-YYYYMMDD-HHMMSS` before replacement, adding `-2`, `-3`, … on backup collisions; backups are not agent `.md` files. Replacement is atomic via a temp file and rename, keeping the original mode.
+- Only `name`, `description`, `model`, `tools` and `skills` from model output enter frontmatter. Models are limited to `opus`, `sonnet`, `haiku`, `inherit`; tools to `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebSearch`, `WebFetch`. Generated hooks, permission settings and other unmanaged fields are ignored. YAML serialization safely quotes generated values. Tools fail closed: a tool list with no allowlist matches, or a value of the wrong type, is rejected and the architect retries once. Omitting tools inherits all tools and warns `tools omitted: the agent inherits all tools`.
 - At most six skills are attached. Existing skills are reused and never overwritten; reserved names receive a `-skill` suffix. Reusable procedures live in skills rather than the persona body.
 
-Public workshops post contributions, reviews and the final spec only; they never post context, persona text, the fleet listing or the source-session transcript. Local activity records use `agent-creation` / `agent-refinement` kinds.
+Public workshops post contributions, reviews and a redacted summary of the final definition: name, description, model, tools, skill names and status, contribution credits, changes and open questions. The summary excludes its system prompt and skill instructions. Workshops never post context, persona text, the fleet listing or the source-session transcript. Public improve contributors and reviewers are asked to point to passages rather than reproduce them; none of their prompts include the target's recent activity. Private improve contributor prompts include recent topics and outcomes from the local activity log. Local activity records use `agent-creation` / `agent-refinement` kinds.
+
+The five new tools validate argument types before any engine call: strings, arrays of non-empty agent names, finite numbers and booleans. Missing required values keep the engine's actionable errors.
 
 See the [Agent workshop tool calls](#agent-workshop-tool-calls) below.
 
@@ -146,7 +150,7 @@ Two or more personas take turns on a topic. One provider/model is used for the w
 | Tool | Arguments |
 | --- | --- |
 | `start_ultraplan` | `{ agents[], task, context?, draft_plan?, planner?, revision_rounds?, public?, provider?, model?, base_url? }` |
-| `submit_plan` | `{ ultraplan_id, plan, final? }` |
+| `submit_plan` | `{ ultraplan_id, plan?, final? }` |
 | `end_ultraplan` | `{ ultraplan_id }` |
 
 ### Agent workshop tools
@@ -183,8 +187,9 @@ Pass `public: true` to `start_meeting`, `start_local_meeting`, `start_collaborat
 
 **Privacy rules.** A public channel is readable by anyone who has the link.
 
-- Posted: a header (mode, participants, topic or agenda), agent replies, your `say` and `nudge` messages, submitted plans, and summaries/final documents. Agent workshops post contributions, reviews and the final spec.
+- Posted: a header (mode, participants, topic or agenda), agent replies, your `say` and `nudge` messages, submitted plans, and summaries/final documents. Agent workshops post contributions, reviews and a redacted summary of the final definition (name, description, model, tools, skill names and status, contribution credits, changes and open questions), without its system prompt or skill instructions.
 - Never posted: the `context` argument, system prompts, persona files, grounding packets, fleet listings, or source-session transcripts in workshops. Public sessions use agent labels rather than private file paths. Agents may still paraphrase context in their replies, so keep `context` generic in public sessions. The tool description tells the calling model to set `public` only when you ask for it.
+- Public improve prompts exclude the target's recent activity and ask contributors and reviewers to point to passages rather than reproduce them.
 - Every agent's system prompt gets a notice that the session is public, telling it to work at the level of ideas and never reproduce private context, code, credentials or personal information.
 - Outgoing text passes through a mechanical redaction filter (emails, phone numbers, API-key and token patterns, home-directory paths, private IP addresses, card numbers that pass a Luhn check, US SSNs). It is a backstop only and cannot catch personal names or unusual secrets.
 - Channel names are random (`<prefix>-<session id>-<22 random characters>`) and never derived from the topic. Unlisted is not private: anyone with the link can read it. Do not put anything in a public session that you would not put on a billboard.
@@ -221,9 +226,9 @@ Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 
 | `OPENAI_COMPATIBLE_MODEL` | `openai_compatible` | `default` |
 | `OLLAMA_URL` | `ollama` | `http://localhost:11434` |
 | `ROUNDTABLE_AGENTS_DIR` | agent prompt lookup | `.claude/agents` (relative to the server's working directory — use an absolute path) |
-| `ROUNDTABLE_SKILLS_DIR` | skill lookup and creation | `skills` beside the agents directory (normally `.claude/skills`) |
+| `ROUNDTABLE_SKILLS_DIR` | last skill lookup location after personal/project skills; new create skills and improve skills outside `.claude/agents` | `skills` beside the agents directory (normally `.claude/skills`) |
 | `ROUNDTABLE_WORKSPACE_DIR` | conversation grounding | project containing `.claude/agents`, otherwise server working directory |
-| `ROUNDTABLE_ACTIVITY_LOG` | local session activity | `~/.agent-roundtable/activity.jsonl`; `off`, `false`, `0` or `no` disables it |
+| `ROUNDTABLE_ACTIVITY_LOG` | stored session activity; excerpts in private conversation grounding and private improve prompts | `~/.agent-roundtable/activity.jsonl`; `off`, `false`, `0` or `no` disables it |
 | `ROUNDTABLE_PARALLEL_TURNS` | concurrent ultraplan phases and workshop reviews | `4` (minimum 1) |
 | `ROUNDTABLE_ANTHROPIC_MODEL` | default Anthropic model (id or alias) | `claude-opus-5` |
 | `ROUNDTABLE_OPENAI_MODEL` | default OpenAI model | `gpt-5.6-luna` |
@@ -254,7 +259,9 @@ The `agent` argument is resolved, in order, as:
 3. `<ROUNDTABLE_AGENTS_DIR>/subagent-<agent>.md`;
 4. `<ROUNDTABLE_AGENTS_DIR>/<agent>/AGENT.md`.
 
-A leading YAML frontmatter block (`--- ... ---` with at least one `key: value` line, as in Claude Code agent files) is stripped before the text becomes the system prompt; a body that merely opens with a markdown horizontal rule is left intact. When frontmatter lists `skills` (a name, comma-separated names, or a YAML list), skill bodies are appended to the persona under `## Skills`. Lookup tries `<ROUNDTABLE_SKILLS_DIR>/<name>/SKILL.md`, then `~/.claude/skills/<name>/SKILL.md`; plugin names containing `:` are skipped and missing skills warn and are skipped. Each skill is capped at 12,000 characters, 40,000 total, with explicit truncation notes. Personas without skills keep their existing prompt text. Local meetings append skill instructions alongside mode/public directives.
+A leading YAML frontmatter block (`--- ... ---` with at least one `key: value` line, as in Claude Code agent files) is stripped before the text becomes the system prompt; a body that merely opens with a markdown horizontal rule is left intact. If strict YAML rejects the block, it is read leniently the way Claude Code reads it, including unquoted descriptions containing `: `. Refinement preserves every recovered key and warns before rewriting valid YAML; no recoverable keys means refinement is refused. Identity collision checks use recovered names too.
+
+When frontmatter lists `skills` (a name, comma-separated names, or a YAML list), skill bodies are appended to the persona under `## Skills`. Lookup tries `~/.claude/skills/<name>/SKILL.md`, then `<project>/.claude/skills/<name>/SKILL.md` beside an agent in `<project>/.claude/agents`, then `<ROUNDTABLE_SKILLS_DIR>/<name>/SKILL.md`: personal skills take precedence over project skills. Any found skill is reused and never overwritten or shadowed. New skills from creation go to `ROUNDTABLE_SKILLS_DIR`; refinement writes them beside its target in the project's `.claude/skills` when the target sits in `.claude/agents`, otherwise to `ROUNDTABLE_SKILLS_DIR`. Results report actual paths. Plugin names containing `:` are skipped and missing skills warn and are skipped. Each skill is capped at 12,000 characters, 40,000 total, with explicit truncation notes. Personas without skills keep their existing prompt text. Local meetings append skill instructions alongside mode/public directives.
 
 Three generic personas ship in `examples/` (`cfo.md`, `product-lead.md`, `skeptic.md`); copy them into your agents directory or point `ROUNDTABLE_AGENTS_DIR` at `examples/` to try them.
 
@@ -372,7 +379,14 @@ Autonomous planner variant:
 start_ultraplan { "agents": ["cfo", "skeptic"], "task": "Plan the onboarding launch", "planner": "product-lead", "revision_rounds": 2 }
 ```
 
-To review an existing draft, add `draft_plan`. To close without sign-off, use `end_ultraplan { "ultraplan_id": "<id>" }`.
+To review or sign off the latest version again without creating a new version, omit `plan`:
+
+```json
+submit_plan { "ultraplan_id": "<id>" }
+submit_plan { "ultraplan_id": "<id>", "final": true }
+```
+
+Passing `plan` submits the full next version. Without any version yet, omitting it fails with `No plan version exists yet; pass plan.` To review an existing draft at startup, add `draft_plan`. A stopped planner run can return `phase: "plan"`, the unreviewed latest version, with `previousReviews` when an earlier version was reviewed. Recover with `submit_plan` with or without a full revised `plan`; use `final: true` for sign-off. To close without sign-off, use `end_ultraplan { "ultraplan_id": "<id>" }`.
 
 ### Conversation tool calls
 

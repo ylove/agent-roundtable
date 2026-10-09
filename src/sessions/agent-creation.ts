@@ -6,7 +6,7 @@ import fs from "node:fs";
 import { join } from "node:path";
 import { AGENTS_DIR, SKILLS_DIR, DEFAULT_MODELS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
 import { agentKey, assertReadableFrontmatter, loadAgent, listAgents, listSkills, readFrontmatter, renderSkillsSection, skillSearchDirs, type LoadedAgent } from "../agents.js";
-import { recordActivity, recentActivityFor } from "../activity.js";
+import { recordActivity, recentActivityForKey } from "../activity.js";
 import { callLLM, type ChatCompletionOptions } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import {
@@ -431,7 +431,7 @@ export function buildArchitectRevisePrompt(o: ArchitectRevisePromptOptions): str
 // ----------------------------------------------------------------------------
 
 function recentActivityLines(key: string): string | undefined {
-  const entries = recentActivityFor(key, 5);
+  const entries = recentActivityForKey(key, 5);
   if (!entries.length) {
     return undefined;
   }
@@ -715,6 +715,26 @@ function parseSpec(output: string, workshop: PreparedWorkshop): ParsedSpec {
     }
   }
   const parsed = validateAgentSpec(raw, { mode: workshop.mode, existingSkills: workshop.existingSkillNames });
+  if (workshop.target) {
+    // Reviews and amendments must see the preserved definition that will be saved.
+    const { spec } = parsed;
+    const { frontmatter, skills } = workshop.target;
+    spec.name = targetIdentity(workshop.target);
+    if (spec.model === undefined && typeof frontmatter.model === "string") {
+      spec.model = frontmatter.model;
+    }
+    spec.tools = effectiveTools(spec, workshop.target);
+    const attached = typeof frontmatter.skills === "string" ? frontmatter.skills.split(",") : frontmatter.skills;
+    const names = Array.isArray(attached)
+      ? attached.filter((name): name is string => typeof name === "string").map(name => name.trim()).filter(Boolean)
+      : [];
+    const proposed = new Map(spec.skills.map(skill => [skill.name, skill]));
+    spec.skills = [...new Set([...names, ...proposed.keys()])].map(name => proposed.get(name) ?? {
+      name,
+      description: skills.find(skill => skill.name === name)?.description ?? "",
+      contributed_by: [],
+    });
+  }
   const nameHint = (workshop.options as CreateAgentOptions).name;
   if (workshop.mode === "create" && nameHint && slugify(nameHint) && slugify(nameHint) !== parsed.spec.name) {
     parsed.spec.name = slugify(nameHint);

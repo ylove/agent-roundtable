@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 // Version (also reported by debug_env and the startup banner)
-export const VERSION = "0.3.0";
+export const VERSION = "0.3.1";
 
 // Agent meetings
 // The default is relative to the server process's cwd (whatever directory the MCP host launched it

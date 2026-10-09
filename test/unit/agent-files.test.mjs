@@ -184,6 +184,52 @@ test("existing skills reuse exact spelling and ignore instructions", () => {
   assert.deepEqual(validate({ skills: [{ name: "checking" }] }, { existingSkills: ["checking"] }).warnings, ["tools omitted: the agent inherits all tools"]);
 });
 
+test("existing skill names are resolved before slugification without conflating names", () => {
+  const r = validate({ skills: [
+    { name: "budget_check" },
+    skill("budget-check"),
+    skill("Budget_Check"),
+    { name: "audit.v2" },
+    { name: "synced" },
+    skill("New Procedure"),
+  ] }, { existingSkills: ["budget_check", "budget-check", "audit.v2", "synced"] });
+  assert.deepEqual(r.spec.skills.map(s => s.name), ["budget_check", "budget-check", "audit.v2", "synced", "new-procedure"]);
+  assert.ok(r.spec.skills.slice(0, 4).every(s => s.instructions === undefined));
+  assert.match(r.warnings.join(" "), /Duplicate skill "budget_check" merged/);
+  const exact = validate({ skills: [{ name: "Budget_Check" }] }, { existingSkills: ["budget_check", "Budget_Check"] });
+  assert.equal(exact.spec.skills[0].name, "Budget_Check");
+  const o = dirs();
+  const original = fixture(join(o.skillsDir, "budget_check", "SKILL.md"), "Existing budget procedure");
+  const attached = validate({ skills: [skill("budget_check")] }, { existingSkills: ["budget_check"] }).spec;
+  const saved = f.writeNewAgent(attached, o);
+  assert.equal(saved.skills[0].status, "reused");
+  assert.deepEqual(readFrontmatter(fs.readFileSync(saved.agentPath, "utf8")).data.skills, ["budget_check"]);
+  assert.equal(fs.readFileSync(original, "utf8"), "Existing budget procedure");
+  assert.equal(fs.existsSync(join(o.skillsDir, "budget-check")), false);
+});
+
+test("previews and saves reuse shared symlinked skills without writing to the library", () => {
+  const o = dirs();
+  const shared = join(root, "shared-library", "shared-audit");
+  const original = fixture(join(shared, "SKILL.md"), "Shared audit procedure");
+  fs.mkdirSync(o.skillsDir, { recursive: true });
+  fs.symlinkSync(shared, join(o.skillsDir, "shared-audit"));
+  const s = spec({ skills: [skill("shared-audit")] });
+  const preview = f.previewFiles(s, { ...o, mode: "create" });
+  assert.equal(preview.length, 1);
+  assert.equal(fs.existsSync(o.agentsDir), false);
+  const saved = f.writeNewAgent(s, o);
+  assert.equal(saved.skills[0].status, "reused");
+  assert.equal(saved.skills[0].path, fs.realpathSync.native(original));
+  const improve = { ...o, mode: "improve", targetPath: saved.agentPath, timestamp: "shared", originalContent: fs.readFileSync(saved.agentPath, "utf8") };
+  assert.equal(f.previewFiles(s, improve).length, 1);
+  assert.equal(f.writeImprovedAgent(s, improve).skills[0].status, "reused");
+  const reused = { ...s, skills: [{ name: "shared-audit", description: "", contributed_by: [] }] };
+  assert.equal(f.previewFiles(reused, { ...o, mode: "create" }).length, 1);
+  assert.equal(fs.readFileSync(original, "utf8"), "Shared audit procedure");
+  assert.deepEqual(fs.readdirSync(shared), ["SKILL.md"]);
+});
+
 test("new skills need instructions, cap text and derive missing descriptions", () => {
   const dropped = validate({ skills: [skill("check", { instructions: " " })] });
   assert.equal(dropped.spec.skills.length, 0);

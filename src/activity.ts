@@ -80,6 +80,12 @@ export function readActivity(path: string | null = ACTIVITY_LOG_PATH): ActivityE
   }
 }
 
-export function recentActivityFor(key: string, limit: number = 5, path: string | null = ACTIVITY_LOG_PATH): ActivityEntry[] {
-  return readActivity(path).filter((entry) => entry.agents.includes(agentKey(key))).reverse().slice(0, Math.max(0, limit));
+/** Normalize a raw agent reference exactly once before looking up activity. */
+export function recentActivityFor(ref: string, limit: number = 5, path: string | null = ACTIVITY_LOG_PATH): ActivityEntry[] {
+  return recentActivityForKey(agentKey(ref), limit, path);
+}
+
+/** Look up an already-canonical key, preserving any remaining filename prefix. */
+export function recentActivityForKey(key: string, limit: number = 5, path: string | null = ACTIVITY_LOG_PATH): ActivityEntry[] {
+  return readActivity(path).filter((entry) => entry.agents.includes(key.toLowerCase())).reverse().slice(0, Math.max(0, limit));
 }

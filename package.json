@@ -1,6 +1,6 @@
 {
   "name": "agent-roundtable",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "MCP server for meetings and collaborations between AI agents — Anthropic, OpenAI, Together AI, Replicate, Ollama, or any OpenAI-compatible endpoint",
   "type": "module",
   "main": "dist/index.js",

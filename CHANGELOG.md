@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Agent refinement reviews and amendments now see the same effective definition that is saved, including preserved identity, model, tools and skill attachments.
+- Reuse existing skills reached through symlinks without applying write containment checks or changing the shared skill files.
+- Resolve existing skill names by exact match, then case-insensitive match, before slugifying new names; preserve punctuation and existing reserved names.
+- Keep already-canonical activity keys intact in refinement and conversation grounding, including keys that retain a `subagent-` prefix.
+
 ## 0.3.0
 
 - Ultraplan: the orchestrator writes plans shaped by specialist input, independent version reviews and final sign-offs; an optional planner persona runs the entire loop in one call. Final documents include input, sign-offs and revision history, with optional public mirroring. `submit_plan` can omit `plan` to review or sign off the latest version as-is without adding a version; stopped planner runs return unreviewed versions with `phase: "plan"` and earlier reviews in `previousReviews` when available, for recovery with `submit_plan` or `end_ultraplan`.

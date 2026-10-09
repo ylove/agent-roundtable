@@ -169,7 +169,10 @@ export function validateAgentSpec(
       warnings.push("Non-object skill dropped.");
       continue;
     }
-    let skillName = typeof entry.name === "string" ? slugify(entry.name) : "";
+    const requestedName = typeof entry.name === "string" ? entry.name.trim() : "";
+    const existingName = ctx.existingSkills.find(name => name === requestedName)
+      ?? ctx.existingSkills.find(name => name.toLowerCase() === requestedName.toLowerCase());
+    let skillName = existingName ?? slugify(requestedName);
     if (!skillName) {
       warnings.push("Skill with empty name dropped.");
       continue;
@@ -177,7 +180,7 @@ export function validateAgentSpec(
     if (skillName !== (entry.name as string).trim()) {
       warnings.push(`Skill name normalized to "${skillName}".`);
     }
-    if (RESERVED_SKILL_NAMES.includes(skillName)) {
+    if (existingName === undefined && RESERVED_SKILL_NAMES.includes(skillName)) {
       skillName += "-skill";
       warnings.push(`Reserved skill name changed to "${skillName}".`);
     }
@@ -559,12 +562,11 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
     content = renderAgentFile(spec, { ...opts, preserveFrontmatter: data, identityName: agentName });
   }
   for (const skill of spec.skills) {
-    const p = path.resolve(skillsDir, skill.name, "SKILL.md");
-    inside(skillsDir, p);
     // A skill name is a single directory component, including reused exact names.
     if (!skill.name || /[\\/]/.test(skill.name) || skill.name === "." || skill.name === "..") {
       throw new Error(`Unsafe skill name: ${skill.name}`);
     }
+    const p = path.resolve(skillsDir, skill.name, "SKILL.md");
     const existingPath = [...new Set([...skillSearchDirs(agentPath), ...(opts.searchDirs ?? []), skillsDir])]
       .map(dir => path.resolve(dir, skill.name, "SKILL.md"))
       .find(candidate => fs.existsSync(candidate));
@@ -574,6 +576,7 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
     }
     skills.push({ name: skill.name, path: existingPath ?? p, status: reused ? "reused" : "created" });
     if (!reused) {
+      inside(skillsDir, p);
       files.push({ path: p, content: renderSkillFile(skill, opts), kind: "skill" });
     }
   }

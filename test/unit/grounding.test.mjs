@@ -13,6 +13,24 @@ const grounding = await import("../../dist/sessions/grounding.js");
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 const put = (path, text) => { fs.mkdirSync(dirname(path), { recursive: true }); fs.writeFileSync(path, text); return path; };
 
+test("grounding looks up canonical activity keys without stripping a remaining prefix", async () => {
+  const { recordActivity, recentActivityFor } = await import("../../dist/activity.js");
+  const { loadAgent } = await import("../../dist/agents.js");
+  const activityPath = join(root, "prefix-history.jsonl");
+  const path = put(join(root, "subagent-subagent-alpha.md"), "You are Alpha.");
+  recordActivity({ session: "double", kind: "meeting", agents: ["subagent-alpha"], topic: "OWN-HISTORY", public: false }, activityPath);
+  recordActivity({ session: "single", kind: "meeting", agents: ["alpha"], topic: "OTHER-HISTORY", public: false }, activityPath);
+  const agent = await loadAgent(path);
+  assert.equal(agent.key, "subagent-alpha");
+  const text = grounding.recentActivityText(agent.key, { activityPath });
+  assert.ok(text.includes("OWN-HISTORY"));
+  assert.ok(!text.includes("OTHER-HISTORY"));
+  const other = grounding.recentActivityText("alpha", { activityPath });
+  assert.ok(other.includes("OTHER-HISTORY"));
+  assert.ok(!other.includes("OWN-HISTORY"));
+  assert.deepEqual(recentActivityFor(path, 5, activityPath).map(entry => entry.session), ["double"]);
+});
+
 test("memory deduplicates canonical paths and identical content but keeps distinct scopes", () => {
   const ws = join(root, "memory");
   const home = join(root, "memory-home");

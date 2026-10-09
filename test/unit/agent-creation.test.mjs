@@ -660,6 +660,60 @@ test("improve fills a missing or empty architect name without spending a retry",
   assert.equal(fallback.requests.architect.length, 1);
 });
 
+test("improve reviews and amends the preserved model, tools and skill attachments", async (t) => {
+  const target = fixture(join(agentsDir, "preserved-review.md"), "---\nname: Preserved_Review\nmodel: haiku\ntools: Read\nskills: [audit, missing-existing]\n---\nOriginal prompt");
+  const h = harness(t, {
+    spec: { name: "different-name", model: undefined, tools: undefined, skills: [] },
+    review: () => "Verdict: NEEDS CHANGES\nKeep the existing attachments and tighten the prompt.",
+  });
+  const result = await improveAgent({ ...opts, agent: target });
+  const draft = h.requests.reviews[0].messages.at(-1).content;
+  for (const text of ["# Preserved_Review", "**Model:** haiku", "**Tools:** Read", "audit (existing skill, reused)", "missing-existing (existing skill, reused)"]) {
+    assert.ok(draft.includes(text), `Review must show ${text}`);
+  }
+  const revision = h.requests.architect[1].messages.at(-1).content;
+  for (const text of ['"name": "Preserved_Review"', '"model": "haiku"', '"Read"', '"name": "audit"', '"name": "missing-existing"']) {
+    assert.ok(revision.includes(text), `Amendment must receive ${text}`);
+  }
+  assert.equal(result.agent.model, "haiku");
+  assert.deepEqual(result.agent.tools, ["Read"]);
+  assert.deepEqual(result.agent.skills.map(s => s.name), ["audit", "missing-existing"]);
+  const saved = readFrontmatter(readFileSync(target, "utf8")).data;
+  assert.equal(saved.name, "Preserved_Review");
+  assert.equal(saved.model, "haiku");
+  assert.equal(saved.tools, "Read");
+  assert.deepEqual(saved.skills, ["audit", "missing-existing"]);
+});
+
+test("improve previews review explicit overrides and preserved comma-separated skills", async (t) => {
+  const target = fixture(join(agentsDir, "preserved-preview.md"), "---\nname: preserved-preview\nmodel: haiku\ntools: [Read]\nskills: audit, missing-preview\n---\nOriginal prompt");
+  const original = readFileSync(target, "utf8");
+  const h = harness(t, { spec: { name: "preserved-preview", model: "opus", tools: ["Grep"], skills: [{ name: "audit" }] } });
+  const result = await improveAgent({ ...opts, agent: target, write: false });
+  const draft = h.requests.reviews[0].messages.at(-1).content;
+  assert.match(draft, /\*\*Model:\*\* opus/);
+  assert.match(draft, /\*\*Tools:\*\* Grep/);
+  assert.match(draft, /audit \(existing skill, reused\)/);
+  assert.match(draft, /missing-preview \(existing skill, reused\)/);
+  assert.deepEqual(result.agent.skills.map(s => s.name), ["audit", "missing-preview"]);
+  const proposed = readFrontmatter(result.files.at(-1).content).data;
+  assert.equal(proposed.model, "opus");
+  assert.equal(proposed.tools, "Grep");
+  assert.deepEqual(proposed.skills, ["audit", "missing-preview"]);
+  assert.equal(readFileSync(target, "utf8"), original);
+});
+
+test("improve activity keeps canonical keys with a remaining subagent prefix distinct", async (t) => {
+  const target = fixture(join(agentsDir, "subagent-subagent-alpha.md"), "---\nname: subagent-alpha\n---\nYou are the double-prefixed agent.");
+  recordActivity({ session: "double-prefix", kind: "meeting", agents: ["subagent-alpha"], topic: "DOUBLE-PREFIX-HISTORY", public: false });
+  recordActivity({ session: "single-prefix", kind: "meeting", agents: ["alpha"], topic: "OTHER-AGENT-HISTORY", public: false });
+  const h = harness(t, { spec: { name: "subagent-alpha", skills: [] } });
+  await improveAgent({ ...opts, agent: target, write: false });
+  const prompt = h.requests.contributions[0].messages.at(-1).content;
+  assert.ok(prompt.includes("DOUBLE-PREFIX-HISTORY"));
+  assert.ok(!prompt.includes("OTHER-AGENT-HISTORY"));
+});
+
 test("improve reports inherited YAML-list tools as an array of strings", async (t) => {
   const target = fixture(join(agentsDir, "list-tools.md"), [
     "---",

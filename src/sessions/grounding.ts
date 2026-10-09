@@ -7,7 +7,7 @@ import fs from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { LoadedAgent } from "../agents.js";
-import { recentActivityFor } from "../activity.js";
+import { recentActivityForKey } from "../activity.js";
 import { WORKSPACE_DIR } from "../config.js";
 import { truncate } from "./workshop.js";
 
@@ -136,7 +136,7 @@ export function agentMemory(
 }
 
 export function recentActivityText(key: string, opts: { activityPath?: string | null } = {}): string | undefined {
-  const lines = recentActivityFor(key, 5, opts.activityPath).map((entry) => {
+  const lines = recentActivityForKey(key, 5, opts.activityPath).map((entry) => {
     const others = entry.agents.filter((agent) => agent !== key);
     return `- ${entry.at.slice(0, 10)} ${entry.kind}${entry.mode ? ` (${entry.mode})` : ""}` +
       ` with ${others.join(", ") || "no other agents"} on "${entry.topic}"` +

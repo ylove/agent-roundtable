@@ -376,7 +376,7 @@ try {
     assert(ollama.isError && /Ollama is not reachable at http:\/\/127\.0\.0\.1:9/.test(ollama.text), ollama.text));
 
   const debug = await server.callTool("debug_env");
-  check("debug_env reports version 0.3.0", () => assert(/"version": "0\.3\.0"/.test(debug.text), debug.text.slice(0, 200)));
+  check("debug_env reports version 0.3.1", () => assert(/"version": "0\.3\.1"/.test(debug.text), debug.text.slice(0, 200)));
   check("debug_env reports integration config and active ultraplans", () => {
     const d = JSON.parse(debug.text);
     assert(d.skills_dir === smokeEnv.ROUNDTABLE_SKILLS_DIR && d.workspace_dir === root, debug.text);

@@ -4,8 +4,9 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { inspect } from "node:util";
 import { stringify } from "yaml";
-import { agentKey, listAgents, readFrontmatter } from "./agents.js";
+import { agentKey, assertReadableFrontmatter, listAgents, readFrontmatter } from "./agents.js";
 
 export const MODEL_CHOICES = ["opus", "sonnet", "haiku", "inherit"] as const;
 export const TOOL_ALLOWLIST = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"] as const;
@@ -112,7 +113,14 @@ export function validateAgentSpec(
       warnings.push("Invalid model dropped; omit model to inherit.");
     }
   }
+  const toolsError = (): Error => new Error(
+    `tools must list tool names from: ${TOOL_ALLOWLIST.join(", ")} ` +
+      `(or be omitted to inherit all tools); got: ${typeof raw.tools === "string" ? raw.tools : inspect(raw.tools)}`,
+  );
   if (!omitted(raw.tools)) {
+    if (typeof raw.tools !== "string" && !Array.isArray(raw.tools)) {
+      throw toolsError();
+    }
     const input = typeof raw.tools === "string"
       ? raw.tools.split(",")
       : Array.isArray(raw.tools) ? raw.tools : [raw.tools];
@@ -133,12 +141,18 @@ export function validateAgentSpec(
         unknown.push(String(value));
       }
     }
+    if (input.length && !tools.length && unknown.length) {
+      throw toolsError();
+    }
     if (unknown.length) {
       warnings.push(`Unknown tools dropped: ${unknown.join(", ")}.`);
     }
     if (tools.length) {
       spec.tools = tools;
     }
+  }
+  if (!spec.tools && ctx.mode === "create") {
+    warnings.push("tools omitted: the agent inherits all tools");
   }
   if (raw.skills !== undefined && !Array.isArray(raw.skills)) {
     warnings.push("skills must be an array; ignored.");
@@ -334,11 +348,12 @@ export interface WriteResult {
     status: "created" | "reused";
   }>;
   backupPath?: string;
+  proposedPath?: string;
   warnings: string[];
 }
 
 /** Inputs for planning a new definition or a replacement with a backup. */
-export type AgentFilePlanOptions = {
+export type AgentFilePlanOptions = { searchDirs?: string[] } & ({
   mode: "create";
   agentsDir: string;
   skillsDir: string;
@@ -351,7 +366,8 @@ export type AgentFilePlanOptions = {
   createdFrom: string[];
   date: string;
   timestamp: string;
-};
+  originalContent?: string;
+});
 
 /** Read-only plan containing skill files first and the agent file last. */
 export interface AgentFilePlan extends WriteResult {
@@ -413,8 +429,8 @@ function inside(base: string, candidate: string): void {
   }
 }
 
-function backupName(target: string, timestamp: string): string {
-  const base = `${target}.bak-${timestamp}`;
+function backupName(target: string, timestamp: string, kind = "bak"): string {
+  const base = `${target}.${kind}-${timestamp}`;
   let candidate = base;
   let n = 2;
   while (fs.existsSync(candidate)) {
@@ -480,8 +496,17 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
       );
     }
     inside(path.dirname(agentPath), agentPath);
-    const { data } = readFrontmatter(fs.readFileSync(agentPath, "utf8"));
-    agentName = typeof data.name === "string" && data.name.trim() ? data.name : agentKey(agentPath);
+    const frontmatter = readFrontmatter(opts.originalContent ?? fs.readFileSync(agentPath, "utf8"));
+    assertReadableFrontmatter(frontmatter, agentPath);
+    const { data } = frontmatter;
+    if (frontmatter.lenient) {
+      warnings.push(`Original frontmatter of ${agentPath} is not strict YAML; it was read leniently and rewritten as valid YAML`);
+    }
+    if (!spec.tools && data.tools == null) {
+      warnings.push("tools omitted: the agent inherits all tools");
+    }
+    agentName = (typeof data.name === "string" || typeof data.name === "number") && String(data.name).trim()
+      ? String(data.name).trim() : agentKey(agentPath);
     backupPath = backupName(agentPath, opts.timestamp);
     content = renderAgentFile(spec, { ...opts, preserveFrontmatter: data, identityName: agentName });
   }
@@ -492,11 +517,14 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
     if (!skill.name || /[\\/]/.test(skill.name) || skill.name === "." || skill.name === "..") {
       throw new Error(`Unsafe skill name: ${skill.name}`);
     }
-    const reused = !skill.instructions || fs.existsSync(p);
+    const existingPath = (opts.searchDirs ?? [skillsDir])
+      .map(dir => path.resolve(dir, skill.name, "SKILL.md"))
+      .find(candidate => fs.existsSync(candidate));
+    const reused = !skill.instructions || existingPath !== undefined;
     if (skill.instructions && reused) {
       warnings.push(`Skill "${skill.name}" already exists; reused without overwriting.`);
     }
-    skills.push({ name: skill.name, path: p, status: reused ? "reused" : "created" });
+    skills.push({ name: skill.name, path: existingPath ?? p, status: reused ? "reused" : "created" });
     if (!reused) {
       files.push({ path: p, content: renderSkillFile(skill, opts), kind: "skill" });
     }
@@ -577,10 +605,54 @@ export function writeNewAgent(spec: AgentSpec, opts: CreateWriteOptions): WriteR
   throw new Error("Could not create the agent after 50 filename collisions; retry with a different name.");
 }
 
-/** Create new skills, save an exclusive backup, then replace the existing agent definition. */
+let tempCounter = 0;
+
+/** Replace only after a complete, flushed temporary file is ready beside the target. */
+function atomicReplace(target: string, content: string, mode: number): void {
+  const tmp = path.join(path.dirname(target), `.${path.basename(target)}.tmp-${process.pid}-${++tempCounter}`);
+  let fd: number | undefined;
+  let created = false;
+  try {
+    fd = fs.openSync(tmp, "wx", mode);
+    created = true;
+    fs.writeFileSync(fd, content);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.chmodSync(tmp, mode & 0o7777);
+    fs.renameSync(tmp, target);
+  } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* Preserve the original failure. */ }
+    }
+    if (created) {
+      try { fs.unlinkSync(tmp); } catch { /* Preserve the original failure. */ }
+    }
+    throw error;
+  }
+}
+
+/** Preserve concurrent edits as a proposal; otherwise back up and atomically replace. */
 export function writeImprovedAgent(spec: AgentSpec, opts: ImproveWriteOptions): WriteResult {
   const plan = planAgentFiles(spec, { ...opts, mode: "improve" });
   writeSkills(plan, opts.skillsDir);
+  const content = plan.files[plan.files.length - 1].content;
+  const current = fs.readFileSync(plan.agentPath, "utf8");
+  if (opts.originalContent !== undefined && current !== opts.originalContent) {
+    for (;;) {
+      const proposedPath = backupName(plan.agentPath, opts.timestamp, "proposed");
+      try {
+        fs.writeFileSync(proposedPath, content, { flag: "wx" });
+        plan.proposedPath = proposedPath;
+        delete plan.backupPath;
+        plan.warnings.push(`${plan.agentPath} changed while improve_agent was running, so it was not overwritten; the proposed definition is at ${proposedPath}`);
+        return result(plan);
+      } catch (error) {
+        if (code(error) !== "EEXIST") throw error;
+      }
+    }
+  }
+  const mode = fs.statSync(plan.agentPath).mode;
   for (;;) {
     inside(path.dirname(plan.agentPath), plan.backupPath!);
     try {
@@ -594,6 +666,6 @@ export function writeImprovedAgent(spec: AgentSpec, opts: ImproveWriteOptions): 
     }
   }
   inside(path.dirname(plan.agentPath), plan.agentPath);
-  fs.writeFileSync(plan.agentPath, plan.files[plan.files.length - 1].content);
+  atomicReplace(plan.agentPath, content, mode);
   return result(plan);
 }

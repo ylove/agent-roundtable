@@ -42,7 +42,7 @@ fixture(join(skillsDir, "drafting", "SKILL.md"), '---\nname: Different Display N
 fixture(join(skillsDir, "checking", "SKILL.md"), "Checking instructions.");
 fixture(join(skillsDir, "deep", "nested", "SKILL.md"), "Do not discover me.");
 fixture(join(fakeHome, ".claude", "skills", "fallback", "SKILL.md"), "Fallback instructions.");
-fixture(join(fakeHome, ".claude", "skills", "drafting", "SKILL.md"), "Lower-priority instructions.");
+fixture(join(fakeHome, ".claude", "skills", "drafting", "SKILL.md"), "Personal drafting instructions.");
 
 const agents = await import("../../dist/agents.js");
 const local = await import("../../dist/sessions/local-meetings.js");
@@ -99,21 +99,26 @@ test("agentKey canonicalizes names, paths, prefixes, and directory-style agents"
 test("readFrontmatter uses YAML for quoted colons, lists, BOM, CRLF, and malformed input", () => {
   const parsed = agents.readFrontmatter('\ufeff---\r\nname: "A: B"\r\nskills: [drafting, checking]\r\n---\r\n\r\nBody\r\n');
   assert.deepEqual(parsed, { data: { name: "A: B", skills: ["drafting", "checking"] }, body: "Body\n", hasFrontmatter: true });
-  assert.deepEqual(agents.readFrontmatter('---\nname: "unclosed\n---\nBody'), { data: {}, body: "Body", hasFrontmatter: true });
+  const unclosed = agents.readFrontmatter('---\nname: "unclosed\n---\nBody');
+  assert.deepEqual(unclosed.data, { name: '"unclosed' });
+  assert.equal(unclosed.body, "Body");
+  assert.equal(unclosed.hasFrontmatter, true);
+  assert.equal(unclosed.lenient, true);
+  assert.ok(unclosed.parseError);
   for (const text of ["Plain\r\n", "---\nA horizontal rule\n---\nBody", "---\nfirst section: prose\n---\nBody", "---\nname: x\nBody", "---\n---\nBody"]) {
     assert.deepEqual(agents.readFrontmatter(text), { data: {}, body: text, hasFrontmatter: false });
     assert.equal(agents.stripFrontmatter(text), text);
   }
 });
 
-test("loadSkills prefers project skills, falls back to user skills, warns once, and skips plugins", async (t) => {
+test("loadSkills prefers personal skills, falls back to project skills, warns once, and skips plugins", async (t) => {
   const warnings = [];
   t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
   const loaded = await agents.loadSkills(["drafting", "fallback", "missing", "plugin:skill"]);
   assert.deepEqual(loaded.map((s) => s.name), ["drafting", "fallback"]);
-  assert.equal(loaded[0].description, "Draft: clear prose");
-  assert.equal(loaded[0].body, "Drafting instructions.\n");
-  assert.equal(loaded[0].path, join(skillsDir, "drafting", "SKILL.md"));
+  assert.equal(loaded[0].description, undefined);
+  assert.equal(loaded[0].body, "Personal drafting instructions.");
+  assert.equal(loaded[0].path, join(fakeHome, ".claude", "skills", "drafting", "SKILL.md"));
   assert.equal(loaded[1].path, join(fakeHome, ".claude", "skills", "fallback", "SKILL.md"));
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /missing.*not found/);
@@ -187,7 +192,7 @@ test("local meetings append skills on every CLI call with debate/public directiv
     assert.equal(argv[1], join(agentsDir, "designer", "AGENT.md"));
     const section = argv[argv.indexOf("--append-system-prompt") + 1];
     assert.ok(section.startsWith("## Skills"));
-    assert.match(section, /Drafting instructions/);
+    assert.match(section, /Personal drafting instructions/);
     assert.ok(!section.includes("skills:"));
   }
   assert.equal(readActivity().find((e) => e.session === standard.meetingId).outcome, "local reply");
@@ -206,4 +211,69 @@ test("local meetings append skills on every CLI call with debate/public directiv
   assert.ok(!calls().at(-1).includes("--append-system-prompt"));
   await local.endLocalMeeting(plain.meetingId);
   assert.equal(readActivity().find((e) => e.session === plain.meetingId).kind, "local-meeting");
+});
+
+test("lenient frontmatter recovers generator metadata and remains visible to loaders", async () => {
+  const { generatorFrontmatter, unreadableFrontmatter } = await import("../fixtures/file-layer.mjs");
+  const parsed = agents.readFrontmatter(generatorFrontmatter);
+  assert.deepEqual(parsed.data, {
+    name: "code-reviewer",
+    description: "Use this agent when: the user asks. Examples: <example>Context: x</example>",
+    tools: "Read, Grep", model: "opus", permissionMode: "plan", color: "red", skills: "ledger"
+  });
+  assert.equal(parsed.lenient, true);
+  assert.ok(parsed.parseError);
+  const typed = agents.readFrontmatter(generatorFrontmatter.replace("color: red", "background: true\ncount: 12\nratio: 1.5\nempty: null"));
+  assert.equal(typed.data.background, true);
+  assert.equal(typed.data.count, 12);
+  assert.equal(typed.data.ratio, 1.5);
+  assert.equal(typed.data.empty, null);
+  const unreadable = agents.readFrontmatter(unreadableFrontmatter);
+  assert.deepEqual(unreadable.data, {});
+  assert.ok(unreadable.parseError);
+  assert.ok(!unreadable.lenient);
+  fixture(join(skillsDir, "ledger", "SKILL.md"), "Ledger instructions.");
+  const p = fixture(join(agentsDir, "generator.md"), generatorFrontmatter);
+  assert.equal((await agents.loadAgent(p)).skills[0].name, "ledger");
+  assert.equal(agents.listAgents().find(a => a.path === p).name, "code-reviewer");
+});
+
+test("line fallback recovers quotes and block lists when flow YAML remains broken", () => {
+  const parsed = agents.readFrontmatter('---\nname: "reviewer" # identity\nbroken: [unclosed\nskills:\n  - ledger\n- checking\nempty:\n---\nBody');
+  assert.equal(parsed.lenient, true);
+  assert.ok(parsed.parseError);
+  assert.deepEqual(parsed.data, { name: "reviewer", broken: "[unclosed", skills: ["ledger", "checking"] });
+  for (const scalar of ['"complete\\" quote" # comment', "'complete '' quote' # comment"]) {
+    assert.equal(agents.readFrontmatter(`---\nname: ${scalar}\ndescription: Use when: needed\n---\nBody`).data.name, 'complete' + (scalar.startsWith('"') ? '"' : " '") + ' quote');
+  }
+});
+
+test("skill search uses personal, target project, then configured directories, deduplicated", async () => {
+  const homeSkills = join(fakeHome, ".claude", "skills");
+  const target = join(root, "other", ".claude", "agents", "reviewer.md");
+  const sibling = join(root, "other", ".claude", "skills");
+  assert.equal(agents.projectSkillsDir(target), sibling);
+  assert.equal(agents.projectSkillsDir(join(root, "agents", "reviewer.md")), undefined);
+  assert.equal(agents.projectSkillsDir(join(root, ".claude", "agents", "reviewer", "AGENT.md")), undefined);
+  assert.deepEqual(agents.skillSearchDirs(target), [homeSkills, sibling, skillsDir]);
+  assert.deepEqual(agents.skillSearchDirs(join(agentsDir, "reviewer.md")), [homeSkills, skillsDir]);
+  assert.deepEqual(agents.skillSearchDirs(join(homeSkills, "..", "agents", "reviewer.md")), [homeSkills, skillsDir]);
+  fixture(join(sibling, "checking", "SKILL.md"), "Other project instructions.");
+  const loaded = await agents.loadSkills(["drafting", "checking"], agents.skillSearchDirs(target));
+  assert.equal(loaded[0].path, join(homeSkills, "drafting", "SKILL.md"));
+  assert.equal(loaded[1].path, join(sibling, "checking", "SKILL.md"));
+  const listed = agents.listSkills(agents.skillSearchDirs(target));
+  assert.equal(listed.filter(s => s.name === "drafting").length, 1);
+  assert.equal(listed.find(s => s.name === "drafting").path, loaded[0].path);
+  assert.equal(listed.find(s => s.name === "checking").path, loaded[1].path);
+  fixture(target, "---\nskills: checking\n---\nBody");
+  assert.equal((await agents.loadAgent(target)).skills[0].body, "Other project instructions.");
+  assert.deepEqual(await agents.loadSkills(["fallback"], skillsDir), []);
+});
+
+test("line fallback strips complete quotes even with an invalid YAML escape", () => {
+  const parsed = agents.readFrontmatter('---\nname: "bad\\q" # identity\nbroken: [unclosed\n---\nBody');
+  assert.deepEqual(parsed.data, { name: "bad\\q", broken: "[unclosed" });
+  assert.equal(parsed.lenient, true);
+  assert.ok(parsed.parseError);
 });

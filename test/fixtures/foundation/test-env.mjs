@@ -9,4 +9,6 @@ process.env.ROUNDTABLE_AGENTS_DIR = join(root, "agents");
 process.env.ROUNDTABLE_SKILLS_DIR = join(root, "skills");
 process.env.ROUNDTABLE_WORKSPACE_DIR = root;
 process.env.ROUNDTABLE_TRANSCRIPTS_DIR = join(root, "transcripts");
+// Personal skills (~/.claude/skills) take precedence over project skills: never read the developer's.
+process.env.HOME = join(root, "home");
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));

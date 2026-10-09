@@ -30,8 +30,61 @@ export function stripFrontmatter(text: string): string {
   return readFrontmatter(text).body;
 }
 
-/** Recognize the same fences as stripFrontmatter; invalid YAML still has its fences stripped. */
-export function readFrontmatter(text: string): { data: Record<string, unknown>; body: string; hasFrontmatter: boolean } {
+export interface Frontmatter {
+  data: Record<string, unknown>;
+  body: string;
+  hasFrontmatter: boolean;
+  parseError?: string;
+  lenient?: boolean;
+}
+
+function metadataObject(parsed: unknown): Record<string, unknown> {
+  return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown> : {};
+}
+
+function quotedScalar(value: string): string | undefined {
+  return /^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')\s*(?:#.*)?$/.exec(value)?.[1];
+}
+
+function fallbackScalar(value: string): string {
+  const quoted = quotedScalar(value);
+  if (!quoted) return value;
+  try {
+    return String(parse(quoted, { logLevel: "error" }));
+  } catch {
+    // Invalid YAML escapes must not prevent the last-resort reader from recovering keys.
+    const unquoted = quoted.slice(1, -1);
+    return quoted.startsWith("'") ? unquoted.replace(/''/g, "'") : unquoted;
+  }
+}
+
+/** Recover top-level strings and block lists when a YAML collection is still malformed. */
+function lineFrontmatter(lines: string[]): Record<string, unknown> {
+  const data = new Map<string, unknown>();
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(lines[i]);
+    if (!match) continue;
+    const [, key, value] = match;
+    if (value.trim()) {
+      data.set(key, fallbackScalar(value.trim()));
+      continue;
+    }
+    const items: string[] = [];
+    for (let next = i + 1; next < lines.length; next++) {
+      if (!lines[next].trim()) continue;
+      const item = /^\s*-\s+(.+)$/.exec(lines[next]);
+      if (!item) break;
+      items.push(fallbackScalar(item[1].trim()));
+      i = next;
+    }
+    if (items.length) data.set(key, items);
+  }
+  return Object.fromEntries(data);
+}
+
+/** Recognize the same fences as stripFrontmatter; recover Claude Code's lossy scalars. */
+export function readFrontmatter(text: string): Frontmatter {
   const unchanged = { data: {}, body: text, hasFrontmatter: false };
   const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const lines = body.split(/\r?\n/);
@@ -42,20 +95,46 @@ export function readFrontmatter(text: string): { data: Record<string, unknown>; 
       if (!sawKey) return unchanged;
       let next = i + 1;
       while (next < lines.length && lines[next].trim() === "") next++;
-      let data: Record<string, unknown> = {};
+      const block = lines.slice(1, i);
+      const result = { body: lines.slice(next).join("\n"), hasFrontmatter: true };
       try {
-        const parsed: unknown = parse(lines.slice(1, i).join("\n"), { logLevel: "error" });
-        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-          data = parsed as Record<string, unknown>;
+        return { data: metadataObject(parse(block.join("\n"), { logLevel: "error" })), ...result };
+      } catch (error) {
+        const parseError = error instanceof Error ? error.message : String(error);
+        const quoted = block.map(line => {
+          const match = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(line);
+          if (!match) return line;
+          const [, key, rawValue] = match;
+          const value = rawValue.trim();
+          if (!value || quotedScalar(value) || /^[|>[{&*#]/.test(value) ||
+              /^(?:true|false|null|~|[-+]?\d+(?:\.\d*)?|[-+]?\.\d+)$/i.test(value)) {
+            return line;
+          }
+          return `${key}: ${JSON.stringify(value)}`;
+        });
+        let data: Record<string, unknown>;
+        try {
+          data = metadataObject(parse(quoted.join("\n"), { logLevel: "error" }));
+        } catch {
+          data = lineFrontmatter(block);
         }
-      } catch {
-        // Keep the persona usable even if its metadata needs repair.
+        if (!Object.keys(data).length) data = lineFrontmatter(block);
+        return { data, ...result, parseError, ...(Object.keys(data).length && { lenient: true }) };
       }
-      return { data, body: lines.slice(next).join("\n"), hasFrontmatter: true };
     }
     if (/^[A-Za-z_][\w-]*\s*:/.test(lines[i])) sawKey = true;
   }
   return unchanged;
+}
+
+/** Fail before improving a definition whose metadata cannot be recovered. */
+export function assertReadableFrontmatter(frontmatter: Frontmatter, file: string): void {
+  if (frontmatter.hasFrontmatter && frontmatter.parseError && !Object.keys(frontmatter.data).length) {
+    throw new Error(
+      `improve_agent cannot read the frontmatter of ${file}: ${frontmatter.parseError}. ` +
+        'Quote values that contain ": " (or fix the YAML) and retry; nothing was written.',
+    );
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -69,12 +148,33 @@ export interface LoadedSkill {
   body: string;
 }
 
-export async function loadSkills(names: string[], skillsDir: string = SKILLS_DIR): Promise<LoadedSkill[]> {
+/** The skill directory beside a directly contained .claude/agents definition. */
+export function projectSkillsDir(agentPath: string): string | undefined {
+  const dir = dirname(resolve(agentPath));
+  return basename(dir) === "agents" && basename(dirname(dir)) === ".claude"
+    ? join(dirname(dir), "skills") : undefined;
+}
+
+/** Claude Code precedence: personal skills, target project, configured project. */
+export function skillSearchDirs(agentPath?: string): string[] {
+  const project = agentPath ? projectSkillsDir(agentPath) : undefined;
+  return [...new Set([
+    join(homedir(), ".claude", "skills"),
+    ...(project ? [project] : []),
+    SKILLS_DIR,
+  ].map(dir => resolve(dir)))];
+}
+
+export async function loadSkills(
+  names: string[],
+  dirs: string | readonly string[] = skillSearchDirs(),
+): Promise<LoadedSkill[]> {
+  const searchDirs = typeof dirs === "string" ? [dirs] : dirs;
   const skills: LoadedSkill[] = [];
   for (const ref of names) {
     const name = ref.trim();
     if (name.includes(":")) continue;
-    const candidates = [join(skillsDir, name, "SKILL.md"), join(homedir(), ".claude", "skills", name, "SKILL.md")];
+    const candidates = searchDirs.map(dir => join(dir, name, "SKILL.md"));
     let loaded = false;
     // Names are directory names, never paths supplied by a persona.
     if (name && name !== "." && name !== ".." && !/[\\/]/.test(name)) {
@@ -85,11 +185,13 @@ export async function loadSkills(names: string[], skillsDir: string = SKILLS_DIR
           loaded = true;
           break;
         } catch {
-          // Try the user-level fallback before warning.
+          // Try the next location before warning.
         }
       }
     }
-    if (!loaded) console.error(`[Agents] Skill "${name}" not found or unreadable. Add ${name}/SKILL.md to the skills directory.`);
+    if (!loaded) {
+      console.error(`[Agents] Skill "${name}" not found or unreadable. Add ${name}/SKILL.md to one of the searched directories: ${searchDirs.map(dir => resolve(dir)).join(", ")}.`);
+    }
   }
   return skills;
 }
@@ -144,7 +246,7 @@ export async function loadAgent(ref: string): Promise<LoadedAgent> {
     if (isFile(resolved)) {
       const raw = await readFile(resolved, "utf-8");
       const { data: frontmatter, body } = readFrontmatter(raw);
-      const skills = await loadSkills(skillNames(frontmatter.skills));
+      const skills = await loadSkills(skillNames(frontmatter.skills), skillSearchDirs(resolved));
       return { ref, key: agentKey(resolved), path: resolved, raw, body, frontmatter, skills };
     }
   }
@@ -188,7 +290,7 @@ export function listAgents(agentsDir: string = AGENTS_DIR): Array<{ key: string;
     if (!isFile(path)) continue;
     try {
       const { data } = readFrontmatter(readFileSync(path, "utf-8"));
-      agents.push({ key: agentKey(path), path, ...(typeof data.name === "string" && { name: data.name }), ...metadataDescription(data) });
+      agents.push({ key: agentKey(path), path, ...((typeof data.name === "string" || typeof data.name === "number") && String(data.name).trim() && { name: String(data.name).trim() }), ...metadataDescription(data) });
     } catch (e) {
       console.error(`[Agents] Cannot read agent "${entry}": ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -196,16 +298,23 @@ export function listAgents(agentsDir: string = AGENTS_DIR): Array<{ key: string;
   return agents;
 }
 
-export function listSkills(skillsDir: string = SKILLS_DIR): Array<{ name: string; description?: string; path: string }> {
+export function listSkills(
+  dirs: string | readonly string[] = skillSearchDirs(),
+): Array<{ name: string; description?: string; path: string }> {
   const skills: Array<{ name: string; description?: string; path: string }> = [];
-  for (const name of directoryEntries(skillsDir)) {
-    const path = resolve(skillsDir, name, "SKILL.md");
-    if (!isFile(path)) continue;
-    try {
-      const { data } = readFrontmatter(readFileSync(path, "utf-8"));
-      skills.push({ name, path, ...metadataDescription(data) });
-    } catch (e) {
-      console.error(`[Agents] Cannot read skill "${name}": ${e instanceof Error ? e.message : String(e)}`);
+  const seen = new Set<string>();
+  for (const dir of typeof dirs === "string" ? [dirs] : dirs) {
+    for (const name of directoryEntries(dir)) {
+      if (seen.has(name)) continue;
+      const path = resolve(dir, name, "SKILL.md");
+      if (!isFile(path)) continue;
+      try {
+        const { data } = readFrontmatter(readFileSync(path, "utf-8"));
+        skills.push({ name, path, ...metadataDescription(data) });
+        seen.add(name);
+      } catch (e) {
+        console.error(`[Agents] Cannot read skill "${name}": ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
   return skills;

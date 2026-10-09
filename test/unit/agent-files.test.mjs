@@ -115,7 +115,7 @@ test("model canonicalization accepts all choices and drops invalid types", () =>
   for (const model of [null, "", " \t "]) {
     const r = validate({ model });
     assert.ok(!("model" in r.spec));
-    assert.deepEqual(r.warnings, []);
+    assert.deepEqual(r.warnings, ["tools omitted: the agent inherits all tools"]);
   }
 });
 
@@ -125,13 +125,14 @@ test("tools accept arrays and comma strings, canonicalize, dedupe and drop unkno
   assert.match(r.warnings.join(" "), /Teleport, 5/);
   assert.deepEqual(validate({ tools: " bash, websearch, WebFetch " }).spec.tools, ["Bash", "WebSearch", "WebFetch"]);
   assert.deepEqual(validate({ tools: f.TOOL_ALLOWLIST }).spec.tools, [...f.TOOL_ALLOWLIST]);
-  for (const tools of [[], "", ["unknown"], null]) {
+  for (const tools of [[], "", null]) {
     assert.ok(!("tools" in validate({ tools }).spec));
   }
+  assert.throws(() => validate({ tools: ["unknown"] }), /tools must list tool names from/);
   for (const tools of [null, "", " \t ", ",, ,"]) {
     const r = validate({ tools });
     assert.ok(!("tools" in r.spec));
-    assert.deepEqual(r.warnings, []);
+    assert.deepEqual(r.warnings, ["tools omitted: the agent inherits all tools"]);
   }
   const commaTools = validate({ tools: "Read,,Grep, ," });
   assert.deepEqual(commaTools.spec.tools, ["Read", "Grep"]);
@@ -156,7 +157,7 @@ test("skills reject invalid containers and entries and normalize names", () => {
 test("reserved skill names receive the skill suffix", () => {
   const r = validate({ skills: f.RESERVED_SKILL_NAMES.map(n => skill(n)) });
   assert.deepEqual(r.spec.skills.map(s => s.name), ["synced-skill", "anthropic-skills-skill"]);
-  assert.equal(r.warnings.length, 2);
+  assert.equal(r.warnings.length, 3);
 });
 
 test("duplicate skills merge the first non-empty text and contributor union", () => {
@@ -180,7 +181,7 @@ test("existing skills reuse exact spelling and ignore instructions", () => {
   assert.equal(r.spec.skills[0].description, "");
   assert.equal(r.spec.skills[0].instructions, undefined);
   assert.match(r.warnings.join(" "), /instructions ignored; existing skills are never overwritten/);
-  assert.equal(validate({ skills: [{ name: "checking" }] }, { existingSkills: ["checking"] }).warnings.length, 0);
+  assert.deepEqual(validate({ skills: [{ name: "checking" }] }, { existingSkills: ["checking"] }).warnings, ["tools omitted: the agent inherits all tools"]);
 });
 
 test("new skills need instructions, cap text and derive missing descriptions", () => {
@@ -219,7 +220,7 @@ test("contributions require strings, collapse summaries and cap both fields", ()
   assert.deepEqual(r.spec.contributions[0], { agent: "cfo", summary: "a b" });
   assert.equal(r.spec.contributions[1].agent.length, 100);
   assert.equal(r.spec.contributions[1].summary.length, 500);
-  assert.equal(r.warnings.length, 1);
+  assert.equal(r.warnings.length, 2);
   assert.deepEqual(validate().spec.contributions, []);
 });
 
@@ -506,4 +507,120 @@ test("improve refuses a symbolic link and tells the caller to pass the real file
   });
   assert.equal(fs.readFileSync(realFile, "utf8"), "Original agent bytes.");
   assert.deepEqual(listing(root), before);
+});
+
+test("lenient improve preserves recovered keys, warns, and collisions see the identity", async () => {
+  const { generatorFrontmatter, unreadableFrontmatter } = await import("../fixtures/file-layer.mjs");
+  const o = dirs();
+  const targetPath = fixture(join(o.agentsDir, "old-filename.md"), generatorFrontmatter);
+  const options = { ...o, mode: "improve", targetPath, timestamp: "now" };
+  const plan = f.planAgentFiles(spec(), options);
+  const warning = `Original frontmatter of ${targetPath} is not strict YAML; it was read leniently and rewritten as valid YAML`;
+  assert.ok(plan.warnings.includes(warning));
+  const r = f.writeImprovedAgent(spec(), options);
+  assert.equal(r.agentName, "code-reviewer");
+  assert.ok(r.warnings.includes(warning));
+  const data = readFrontmatter(fs.readFileSync(targetPath, "utf8")).data;
+  assert.equal(data.name, "code-reviewer");
+  for (const key of ["tools", "permissionMode", "color", "model"]) {
+    assert.equal(data[key], readFrontmatter(generatorFrontmatter).data[key]);
+  }
+  assert.deepEqual(data.skills, ["ledger"]);
+  // Restore the lenient file so the collision test exercises recovery too.
+  fs.writeFileSync(targetPath, generatorFrontmatter);
+  assert.equal(f.writeNewAgent(spec({ name: "code-reviewer" }), o).agentName, "code-reviewer-2");
+  fs.writeFileSync(targetPath, unreadableFrontmatter);
+  assert.throws(() => f.planAgentFiles(spec(), options), /cannot read the frontmatter.*Quote values.*retry; nothing was written/s);
+  assert.throws(() => f.previewFiles(spec(), options), /cannot read the frontmatter/);
+  assert.throws(() => f.writeImprovedAgent(spec(), options), /cannot read the frontmatter/);
+  assert.equal(fs.readFileSync(targetPath, "utf8"), unreadableFrontmatter);
+});
+
+test("tools fail closed on malformed or entirely unknown restrictions", () => {
+  for (const tools of ["Read Grep", "Read; Grep", ["TodoWrite"], ["mcp__x"], [5], 5, {}]) {
+    assert.throws(() => validate({ tools }), /tools must list tool names from: Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch.*got:/);
+  }
+  for (const tools of [undefined, [], null, "", " \t "]) {
+    const created = validate({ tools });
+    assert.equal(created.spec.tools, undefined);
+    assert.ok(created.warnings.includes("tools omitted: the agent inherits all tools"));
+    assert.deepEqual(validate({ tools }, { mode: "improve" }).warnings, []);
+  }
+  const o = dirs();
+  const targetPath = fixture(join(o.agentsDir, "inherit.md"), "Body");
+  const options = { ...o, mode: "improve", targetPath, timestamp: "now" };
+  assert.ok(f.planAgentFiles(spec(), options).warnings.includes("tools omitted: the agent inherits all tools"));
+  fs.writeFileSync(targetPath, "---\ntools: Read\n---\nBody");
+  assert.ok(!f.planAgentFiles(spec(), options).warnings.includes("tools omitted: the agent inherits all tools"));
+});
+
+test("concurrent edits preserve the original and save an exclusive proposal plus skills", () => {
+  const o = dirs();
+  const originalContent = "---\nname: original-identity\ntools: Read\ncolor: red\n---\nOriginal";
+  const targetPath = fixture(join(o.agentsDir, "target.md"), originalContent);
+  const edited = "---\nname: edited-identity\n---\nUser edit";
+  fs.writeFileSync(targetPath, edited);
+  const options = { ...o, targetPath, timestamp: "now", originalContent };
+  fixture(targetPath + ".proposed-now", "Previous proposal");
+  const r = f.writeImprovedAgent(spec({ system_prompt: "Proposed body", skills: [skill("preserved-work")] }), options);
+  assert.equal(fs.readFileSync(targetPath, "utf8"), edited);
+  assert.equal(r.proposedPath, targetPath + ".proposed-now-2");
+  assert.equal(r.backupPath, undefined);
+  assert.ok(!listing(o.agentsDir).some(p => p.includes(".bak-")));
+  const proposed = readFrontmatter(fs.readFileSync(r.proposedPath, "utf8"));
+  assert.equal(proposed.data.name, "original-identity");
+  assert.equal(proposed.data.tools, "Read");
+  assert.equal(proposed.data.color, "red");
+  assert.match(proposed.body, /Proposed body/);
+  assert.ok(r.warnings.includes(`${targetPath} changed while improve_agent was running, so it was not overwritten; the proposed definition is at ${r.proposedPath}`));
+  assert.ok(fs.existsSync(r.skills[0].path));
+  assert.equal(fs.readFileSync(targetPath + ".proposed-now", "utf8"), "Previous proposal");
+});
+
+test("atomic improve flushes its temp file and preserves mode", (t) => {
+  const o = dirs();
+  const targetPath = fixture(join(o.agentsDir, "mode.md"), "Original bytes");
+  fs.chmodSync(targetPath, 0o640);
+  let flushed = false;
+  const sync = fs.fsyncSync;
+  t.mock.method(fs, "fsyncSync", fd => { flushed = true; return sync(fd); });
+  const r = f.writeImprovedAgent(spec(), { ...o, targetPath, timestamp: "now" });
+  assert.equal(flushed, true);
+  assert.equal(fs.statSync(targetPath).mode & 0o7777, 0o640);
+  assert.equal(fs.readFileSync(r.backupPath, "utf8"), "Original bytes");
+  assert.ok(!listing(o.agentsDir).some(p => p.includes(".tmp-")));
+});
+
+test("rename failure leaves original byte-identical and removes temp file", (t) => {
+  const o = dirs();
+  const original = "---\nname: kept\n---\nOriginal bytes\n";
+  const targetPath = fixture(join(o.agentsDir, "safe.md"), original);
+  t.mock.method(fs, "renameSync", () => { throw new Error("Simulated rename failure"); });
+  assert.throws(() => f.writeImprovedAgent(spec(), { ...o, targetPath, timestamp: "now" }), /Simulated rename failure/);
+  assert.equal(fs.readFileSync(targetPath, "utf8"), original);
+  assert.ok(!listing(o.agentsDir).some(p => p.includes(".tmp-")));
+});
+
+test("personal-only skills are reused at their actual path and other projects receive new skills", async () => {
+  const { skillSearchDirs, projectSkillsDir } = await import("../../dist/agents.js");
+  const o = dirs();
+  const personal = fixture(join(process.env.HOME, ".claude", "skills", "personal-only", "SKILL.md"), "Personal procedure");
+  const r = f.writeNewAgent(spec({ skills: [skill("personal-only")] }), { ...o, searchDirs: skillSearchDirs() });
+  assert.deepEqual(r.skills[0], { name: "personal-only", path: personal, status: "reused" });
+  assert.equal(fs.existsSync(join(o.skillsDir, "personal-only", "SKILL.md")), false);
+  assert.equal(fs.readFileSync(personal, "utf8"), "Personal procedure");
+  const targetPath = fixture(join(root, "other-project", ".claude", "agents", "reviewer.md"), "Body");
+  const improved = f.writeImprovedAgent(spec({ skills: [skill("new-procedure")] }), {
+    ...o, targetPath, timestamp: "now", skillsDir: projectSkillsDir(targetPath), searchDirs: skillSearchDirs(targetPath)
+  });
+  assert.equal(improved.skills[0].path, join(root, "other-project", ".claude", "skills", "new-procedure", "SKILL.md"));
+  assert.ok(fs.existsSync(improved.skills[0].path));
+});
+
+test("tool type errors always include the allowlist, including non-JSON values", () => {
+  const circular = {};
+  circular.self = circular;
+  for (const tools of [1n, circular]) {
+    assert.throws(() => validate({ tools }), /tools must list tool names from: Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch/);
+  }
 });

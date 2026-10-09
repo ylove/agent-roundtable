@@ -2,8 +2,9 @@
 // One-call agent creation and refinement workshops
 // ============================================================================
 
+import fs from "node:fs";
 import { AGENTS_DIR, SKILLS_DIR, DEFAULT_MODELS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
-import { agentKey, loadAgent, listAgents, listSkills, renderSkillsSection, type LoadedAgent } from "../agents.js";
+import { agentKey, assertReadableFrontmatter, loadAgent, listAgents, listSkills, projectSkillsDir, readFrontmatter, renderSkillsSection, skillSearchDirs, type LoadedAgent } from "../agents.js";
 import { recordActivity, recentActivityFor } from "../activity.js";
 import { callLLM, type ChatCompletionOptions } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
@@ -75,6 +76,7 @@ export interface AgentWorkshopResult {
     }>;
   };
   backupPath?: string;
+  proposedPath?: string;
   contributions: Array<{
     agent: string;
     summary: string;
@@ -503,7 +505,8 @@ function fleet(items: Array<{ name: string; description?: string }>): string {
 
 function targetIdentity(target: LoadedAgent): string {
   const name = target.frontmatter.name;
-  return typeof name === "string" && name.trim() ? name : target.key;
+  return (typeof name === "string" || typeof name === "number") && String(name).trim()
+    ? String(name).trim() : target.key;
 }
 
 function currentDefinition(target: LoadedAgent, label: string, identity: string): string {
@@ -593,11 +596,14 @@ async function prepareWorkshop(
       `improve_agent can only edit a .md agent file; "${improve.agent}" resolved to ${target.path}.`,
     );
   }
+  if (target) {
+    assertReadableFrontmatter(readFrontmatter(target.raw), target.path);
+  }
   const participants = await loadParticipants(refs, isPublic);
   const provider = options.provider || "anthropic";
   const model = options.model || DEFAULT_MODELS[provider];
   const rounds = Number.isNaN(options.rounds) ? 1 : Math.min(3, Math.max(1, Math.floor(options.rounds ?? 1)));
-  const existingSkills = listSkills();
+  const existingSkills = listSkills(skillSearchDirs(target?.path));
   const sessionId = mode === "create" ? `create-${++createCounter}` : `improve-${++improveCounter}`;
   const targetLabel = target ? display(improve.agent, isPublic) : "";
   const agents = listAgents().sort((a, b) => a.key.localeCompare(b.key));
@@ -769,12 +775,14 @@ function saveDefinition(workshop: PreparedWorkshop, spec: AgentSpec): SavedDefin
     ? {
       mode: "improve",
       targetPath: workshop.target.path,
-      skillsDir: SKILLS_DIR,
+      skillsDir: projectSkillsDir(workshop.target.path) ?? SKILLS_DIR,
+      searchDirs: skillSearchDirs(workshop.target.path),
+      originalContent: workshop.target.raw,
       createdFrom,
       date,
       timestamp: formatBackupTimestamp(new Date()),
     }
-    : { mode: "create", agentsDir: AGENTS_DIR, skillsDir: SKILLS_DIR, createdFrom, date };
+    : { mode: "create", agentsDir: AGENTS_DIR, skillsDir: SKILLS_DIR, searchDirs: skillSearchDirs(), createdFrom, date };
   if (workshop.options.write === false) {
     const plan = planAgentFiles(spec, opts);
     const files = plan.files.map(({ path, content }) => ({ path, content }));
@@ -802,6 +810,11 @@ function nextStep(workshop: PreparedWorkshop, saved: SavedDefinition): string {
   if (!saved.written) {
     return "Nothing was written (write: false). Review `files`, then call again with write: true to save them.";
   }
+  if (saved.plan.proposedPath) {
+    return `${workshop.target!.path} changed while improve_agent was running, so it was not overwritten. ` +
+      `The proposed definition is at ${saved.plan.proposedPath} (a non-.md file, never loaded as an agent): ` +
+      "compare it with the current file and merge by hand, or run improve_agent again.";
+  }
   if (workshop.target) {
     return `The improved definition is live; the previous version is at ${saved.plan.backupPath}.`;
   }
@@ -814,7 +827,9 @@ function nextStep(workshop: PreparedWorkshop, saved: SavedDefinition): string {
 function recordWorkshopActivity(workshop: PreparedWorkshop, spec: AgentSpec, saved: SavedDefinition): void {
   const { written, plan } = saved;
   let outcome: string;
-  if (workshop.target) {
+  if (plan.proposedPath) {
+    outcome = `proposed changes to ${workshop.targetKey} (target changed during the run)`;
+  } else if (workshop.target) {
     const verb = written ? "improved" : "drafted";
     outcome = `${verb} ${workshop.targetKey}: ${spec.changes?.length ?? 0} changes`;
   } else {
@@ -887,7 +902,7 @@ async function finishWorkshop(
     sessionId: workshop.sessionId,
     agent: {
       name: plan.agentName,
-      path: written ? plan.agentPath : null,
+      path: written && !plan.proposedPath ? plan.agentPath : null,
       description: spec.description,
       ...(model !== undefined && { model }),
       ...(tools !== undefined && { tools }),
@@ -896,6 +911,7 @@ async function finishWorkshop(
         : { name: skill.name, path: null, status: "preview" as const }),
     },
     ...(written && plan.backupPath && { backupPath: plan.backupPath }),
+    ...(plan.proposedPath && { proposedPath: plan.proposedPath }),
     contributions: spec.contributions,
     reviews: reviews.map(({ agent, verdict }) => ({ agent, verdict })),
     ...(spec.changes && { changes: spec.changes }),
@@ -922,19 +938,28 @@ export async function improveAgent(o: ImproveAgentOptions): Promise<AgentWorksho
   return workshop("improve", o);
 }
 
+const improveLocks = new Set<string>();
+
 async function workshop(
   mode: "create" | "improve",
   options: CreateAgentOptions | ImproveAgentOptions,
 ): Promise<AgentWorkshopResult> {
   const prepared = await prepareWorkshop(mode, options);
-  if (prepared.isPublic) {
-    prepared.run.channel = openPublicChannel(prepared.sessionId, {
-      mode: mode === "create" ? "agent-creation" : "agent-refinement",
-      participants: prepared.participants.map(participant => participant.label),
-      topic: mode === "create" ? prepared.task : `improve ${prepared.targetLabel}`,
-    });
+  const lockPath = prepared.target ? fs.realpathSync(prepared.target.path) : undefined;
+  if (lockPath) {
+    if (improveLocks.has(lockPath)) {
+      throw new Error(`improve_agent is already running for ${agentKey(prepared.target!.path)}; wait for it to finish`);
+    }
+    improveLocks.add(lockPath);
   }
   try {
+    if (prepared.isPublic) {
+      prepared.run.channel = openPublicChannel(prepared.sessionId, {
+        mode: mode === "create" ? "agent-creation" : "agent-refinement",
+        participants: prepared.participants.map(participant => participant.label),
+        topic: mode === "create" ? prepared.task : `improve ${prepared.targetLabel}`,
+      });
+    }
     await runContributions(prepared);
     let parsed = await runArchitect(prepared, buildArchitectPrompt(prepared.architectOptions));
     const reviews = await runReviews(prepared, parsed.spec);
@@ -948,5 +973,7 @@ async function workshop(
       void prepared.run.channel.finalize();
     }
     throw error;
+  } finally {
+    if (lockPath) improveLocks.delete(lockPath);
   }
 }

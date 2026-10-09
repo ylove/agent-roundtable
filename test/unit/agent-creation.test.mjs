@@ -672,3 +672,96 @@ test("improve reports inherited YAML-list tools as an array of strings", async (
   assert.equal(r.agent.model, undefined);
   assert.deepEqual(r.warnings, []);
 });
+
+test("improve refuses unreadable frontmatter before fetch or a public channel", async (t) => {
+  const { unreadableFrontmatter } = await import("../fixtures/file-layer.mjs");
+  const target = fixture(join(agentsDir, "unreadable.md"), unreadableFrontmatter);
+  const h = harness(t);
+  await assert.rejects(improveAgent({ ...opts, agent: target, public: true }), /cannot read the frontmatter.*Quote values.*retry; nothing was written/s);
+  assert.equal(h.calls.length, 0);
+  assert.equal(readFileSync(target, "utf8"), unreadableFrontmatter);
+});
+
+test("improve lock rejects a concurrent preview and releases after completion", async (t) => {
+  const target = fixture(join(agentsDir, "locked.md"), "Original");
+  let release;
+  let entered;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const h = harness(t, { architect: async n => {
+    if (n === 1) { entered(); await gate; }
+    return JSON.stringify(definition({ name: "locked", skills: [] }));
+  } });
+  const first = improveAgent({ ...opts, agent: target, write: false });
+  await waiting;
+  try {
+    await assert.rejects(improveAgent({ ...opts, agent: target, write: false, public: true }), {
+      message: "improve_agent is already running for locked; wait for it to finish"
+    });
+    assert.equal(h.calls.length, 2);
+  } finally {
+    release();
+    await first;
+  }
+  await improveAgent({ ...opts, agent: target, write: false });
+  assert.equal(h.requests.architect.length, 2);
+});
+
+test("failed improve releases the target lock", async (t) => {
+  const target = fixture(join(agentsDir, "failed-lock.md"), "Original");
+  harness(t, { architect: () => "invalid" });
+  await assert.rejects(improveAgent({ ...opts, agent: target, write: false }), /after one retry/);
+  t.mock.restoreAll();
+  harness(t, { spec: { skills: [] } });
+  await improveAgent({ ...opts, agent: target, write: false });
+});
+
+test("mid-run edits produce a proposal result and preserve workshop metadata", async (t) => {
+  const target = fixture(join(agentsDir, "edited-during-run.md"), "---\nname: initial-identity\ntools: Read\n---\nOriginal");
+  const edited = "---\nname: user-identity\n---\nUSER EDIT";
+  harness(t, { architect: () => {
+    writeFileSync(target, edited);
+    return JSON.stringify(definition({ name: "initial-identity", tools: undefined, skills: [] }));
+  } });
+  const r = await improveAgent({ ...opts, agent: target });
+  assert.equal(readFileSync(target, "utf8"), edited);
+  assert.equal(r.agent.path, null);
+  assert.equal(r.backupPath, undefined);
+  assert.ok(r.proposedPath.startsWith(target + ".proposed-"));
+  assert.equal(readFrontmatter(readFileSync(r.proposedPath, "utf8")).data.name, "initial-identity");
+  assert.equal(readFrontmatter(readFileSync(r.proposedPath, "utf8")).data.tools, "Read");
+  assert.equal(r.next, `${target} changed while improve_agent was running, so it was not overwritten. The proposed definition is at ${r.proposedPath} (a non-.md file, never loaded as an agent): compare it with the current file and merge by hand, or run improve_agent again.`);
+  assert.equal(readActivity().find(e => e.session === r.sessionId).outcome, "proposed changes to edited-during-run (target changed during the run)");
+});
+
+test("workshops list and reuse personal skills by name without recreating them", async (t) => {
+  const personal = fixture(join(process.env.HOME, ".claude", "skills", "personal-ledger", "SKILL.md"), "---\ndescription: Personal ledger procedure\n---\nPERSONAL PROCEDURE");
+  const h = harness(t, { spec: { name: "personal-consumer", skills: [{ name: "personal-ledger" }] } });
+  const r = await createAgent({ ...opts, agents: ["cfo"], task: "Reuse the ledger" });
+  assert.match(h.requests.architect[0].messages.at(-1).content, /## Existing skills[\s\S]*- personal-ledger: Personal ledger procedure/);
+  assert.match(h.requests.contributions[0].messages.at(-1).content, /- personal-ledger: Personal ledger procedure/);
+  assert.deepEqual(r.agent.skills, [{ name: "personal-ledger", path: personal, status: "reused" }]);
+  assert.equal(existsSync(join(skillsDir, "personal-ledger", "SKILL.md")), false);
+  assert.match(readFileSync(personal, "utf8"), /PERSONAL PROCEDURE/);
+});
+
+test("improve writes new skills alongside a target in another project", async (t) => {
+  const target = fixture(join(root, "other-project", ".claude", "agents", "external.md"), "---\nname: external\n---\nExternal persona");
+  const existing = fixture(join(root, "other-project", ".claude", "skills", "external-existing", "SKILL.md"), "---\ndescription: External procedure\n---\nExisting procedure");
+  const h = harness(t, { spec: { skills: [{ name: "external-existing" }, { name: "external-new", instructions: "Check external details." }] } });
+  const r = await improveAgent({ ...opts, agent: target });
+  assert.match(h.requests.architect[0].messages.at(-1).content, /external-existing: External procedure/);
+  assert.equal(r.agent.skills[0].path, existing);
+  assert.equal(r.agent.skills[0].status, "reused");
+  assert.equal(r.agent.skills[1].path, join(root, "other-project", ".claude", "skills", "external-new", "SKILL.md"));
+  assert.ok(existsSync(r.agent.skills[1].path));
+  assert.equal(existsSync(join(skillsDir, "external-new", "SKILL.md")), false);
+});
+
+test("invalid tool restrictions spend the architect retry with the allowlist", async (t) => {
+  const h = harness(t, { architect: n => JSON.stringify(definition({ name: "retry-tools", tools: n === 1 ? ["TodoWrite"] : "Read, Grep", skills: [] })) });
+  const r = await createAgent({ ...opts, agents: ["cfo"], task: "Check", write: false });
+  assert.equal(h.requests.architect.length, 2);
+  assert.match(h.requests.architect[1].messages.at(-1).content, /tools must list tool names from: Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch/);
+  assert.deepEqual(r.agent.tools, ["Read", "Grep"]);
+});

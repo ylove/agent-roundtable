@@ -11,12 +11,14 @@ import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
 import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
-import { CALLER } from "../prototypes/index.js";
 import {
   closePrototypeTracker,
-  openPrototypeTracker,
-  postPrototypeAttachments,
+  meetingPrototypeStatus,
+  openSessionSurfaces,
   prototypeSystemSuffix,
+  publicSummary,
+  recordMeetingAgentReply,
+  recordMeetingCallerMessage,
   type PrototypeTracker,
 } from "./prototype-mode.js";
 
@@ -108,27 +110,21 @@ export async function startMeeting(
   if (isPublic) systemPrompt += publicDirectiveSuffix();
   if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic });
   const meetingId = `meeting-${++meetingCounter}`;
-  // Prototype board before the public channel: a prototype config error must not leave a public header behind.
-  const prototype = isPrototype
-    ? await openPrototypeTracker({
-        sessionId: meetingId,
-        mode,
-        participants: [isPublic ? publicLabel(agent) : agent],
-        assessorIsCaller: true,
-        public: isPublic,
-        topic: agenda,
-      })
-    : undefined;
-  // Created before the first LLM call so the header is the first post. Config errors fail the start.
-  let publicChannel: PublicChannel | undefined;
-  try {
-    publicChannel = isPublic
-      ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda })
-      : undefined;
-  } catch (e) {
-    await closePrototypeTracker(prototype, "ended");
-    throw e;
-  }
+  // Board, then public channel, both before the first LLM call so the header is the first post. Config
+  // errors fail the start (a public config error closes the board first).
+  const { prototype, publicChannel } = await openSessionSurfaces(
+    isPrototype
+      ? {
+          sessionId: meetingId,
+          mode,
+          participants: [isPublic ? publicLabel(agent) : agent],
+          assessorIsCaller: true,
+          public: isPublic,
+          topic: agenda,
+        }
+      : undefined,
+    () => (isPublic ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda }) : undefined)
+  );
   const resolvedModel = model || DEFAULT_MODELS[provider];
 
   let userMessage = agenda;
@@ -169,10 +165,10 @@ export async function startMeeting(
     ...(prototype && { prototype }),
   };
   meetings.set(meetingId, meeting);
-  if (prototype) await prototype.onTurn(CALLER, agenda, 0);
+  const record = recorderFor(meeting);
   // Publish the agenda only: userMessage also carries the private context and the debate suffix.
-  recordMeetingMessage(meeting, { role: "user", content: userMessage }, agenda);
-  await recordAgentReply(meeting, assistantMessage);
+  await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
+  await recordMeetingAgentReply(meeting, assistantMessage, record);
 
   return {
     meetingId,
@@ -182,42 +178,16 @@ export async function startMeeting(
   };
 }
 
-/**
- * Record the agent's reply. Prototype meetings run the tracker first (it may materialize a prototype),
- * post the URL-free public form, then any screenshots under the same public turn number.
- */
-async function recordAgentReply(meeting: Meeting, content: string): Promise<void> {
-  const tracker = meeting.prototype;
-  if (!tracker) {
-    recordMeetingMessage(meeting, { role: "assistant", content });
-    return;
-  }
-  const turnKey = meeting.messages.length;
-  const result = await tracker.onTurn(0, content, turnKey);
-  const publicText = meeting.publicChannel ? tracker.publicView(content, turnKey) : undefined;
-  recordMeetingMessage(meeting, { role: "assistant", content }, publicText);
-  postPrototypeAttachments(meeting.publicChannel, meeting.messages.length, meeting.agent, result.attachments);
+/** The meeting's own choke point, as the shared prototype recorders take it. */
+function recorderFor(meeting: Meeting): (message: Message, publicText?: string) => void {
+  return (message, publicText) => recordMeetingMessage(meeting, message, publicText);
 }
 
 /**
- * Record a caller message. Prototype meetings parse it first (the caller's verdicts can destroy assessed
- * prototypes), then give the agent its prototype status after the message; only the caller's own words
- * (board URLs scrubbed) are published.
+ * The meeting history as agents see it: resolved prototypes in earlier turns are stubs. Used for every
+ * LLM call, the end summary and from_session, so destroyed prototype source never re-enters a prompt.
  */
-async function recordCallerMessage(meeting: Meeting, message: string): Promise<void> {
-  const tracker = meeting.prototype;
-  if (!tracker) {
-    recordMeetingMessage(meeting, { role: "user", content: message });
-    return;
-  }
-  const turnKey = meeting.messages.length;
-  await tracker.onTurn(CALLER, message, turnKey);
-  const publicText = meeting.publicChannel ? tracker.publicView(message, turnKey) : undefined;
-  recordMeetingMessage(meeting, { role: "user", content: message + tracker.statusPromptFor(0) }, publicText);
-}
-
-/** What the LLM sees: resolved prototypes in earlier turns are stubs. */
-function llmHistory(meeting: Meeting): Message[] {
+export function meetingHistoryView(meeting: Meeting): Message[] {
   const tracker = meeting.prototype;
   return meeting.messages.map((m, i) => ({
     role: m.role,
@@ -234,15 +204,21 @@ export async function continueMeeting(
     throw new Error(`Meeting not found: ${meetingId}`);
   }
 
-  await recordCallerMessage(meeting, message);
+  const record = recorderFor(meeting);
+  await recordMeetingCallerMessage(meeting, message, record);
+
+  // Prototype meetings: the agent's prototype status rides on this request's last (caller) message only.
+  const request = meetingHistoryView(meeting);
+  const status = meetingPrototypeStatus(meeting);
+  if (status && request.length > 0) request[request.length - 1].content += status;
 
   const assistantMessage = await callLLM(
     meeting.systemPrompt,
-    llmHistory(meeting),
+    request,
     { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
   );
 
-  await recordAgentReply(meeting, assistantMessage);
+  await recordMeetingAgentReply(meeting, assistantMessage, record);
 
   return assistantMessage;
 }
@@ -259,7 +235,7 @@ export async function endMeeting(
   // Prototype mode: destroy whatever is still live first; the summary and activity see the stubbed history.
   const tracker = meeting.prototype;
   if (tracker) await closePrototypeTracker(tracker, "ended");
-  const history = llmHistory(meeting);
+  const history = meetingHistoryView(meeting);
 
   let summary = "";
   if (requestSummary) {
@@ -295,7 +271,7 @@ export async function endMeeting(
   let text = summary || `Meeting ${meetingId} with ${meeting.agent} ended.`;
   if (tracker) text += `\n\n${tracker.outcomesMarkdown()}`;
   if (meeting.publicChannel) {
-    const r = await meeting.publicChannel.finalize({ summary: summary || undefined });
+    const r = await meeting.publicChannel.finalize({ summary: publicSummary(tracker, summary || undefined) });
     return `${text}\n\n${formatPublicBlock(meeting.publicChannel, r)}`;
   }
   return text;

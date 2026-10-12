@@ -2,7 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
-import { mkdtempSync, writeFileSync, readFileSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, chmodSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { json, stubFetch } from "./helpers.mjs";
 
@@ -135,6 +135,7 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     process.env.PATH = `${dir}:${oldPath}`;
     t.after(() => {
       process.env.PATH = oldPath;
+      rmSync(dir, { recursive: true, force: true });
     });
     const argvs = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
 

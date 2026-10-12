@@ -188,7 +188,9 @@ async function checkDispatch() {
     const board = await realFetch(proto.prototypes?.board_url ?? "http://127.0.0.1:9/").then((r) => r.status, () => 0);
     const viewer = await realFetch(proto.prototypes?.live?.[0]?.url ?? "http://127.0.0.1:9/").then((r) => r.status, () => 0);
     check("dispatch start_collaboration prototype: true returns a live board", () => {
+      // The board URL carries a capability token path; only returned URLs are ever used.
       assert(/^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]+\/$/.test(proto.prototypes?.board_url ?? ""), JSON.stringify(proto));
+      assert(proto.prototypes.live[0]?.url?.startsWith(proto.prototypes.board_url), JSON.stringify(proto.prototypes));
       assert(proto.prototypes.live.length === 1 && proto.prototypes.live[0].label === "P1 v1" && board === 200 && viewer === 200, `${board}/${viewer} ${JSON.stringify(proto.prototypes)}`);
       assert(calls[0].messages[0].content.includes("## Prototype mode"), "directive missing");
     });

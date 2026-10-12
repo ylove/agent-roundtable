@@ -141,11 +141,11 @@ const PUBLIC_PROP = {
 const PROTOTYPE_PROP = {
   type: "boolean",
   description:
-    "Default false. Prototype mode: agents show proposals as ephemeral artifacts — a scaled-down page served on localhost, " +
+    "Default false. Prototype mode: agents show proposals as ephemeral artifacts — a scaled-down page shown in a sandboxed frame on a localhost board, " +
     "the code/IaC that would produce the proposal (never executed), a Mermaid diagram, or a text draft — and the other participants " +
     "(in meetings: you) give verdicts; the proposer then revises, scraps or shortlists. Results include a prototypes block with the board URL: show it to the human. " +
     "Prototypes are destroyed as soon as assessment completes. Do not relay the human's feedback on prototypes into the session until it ends; " +
-    "end_* lists outcomes and the shortlist for the human. Combinable with public (public posts get code, diagram links and screenshots, never the localhost board). " +
+    "end_* lists outcomes and the shortlist for the human. Combinable with public (public posts get code, diagram links and screenshots of web prototypes, never the localhost board). " +
     "Not supported with mode conversation.",
 } as const;
 

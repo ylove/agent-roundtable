@@ -145,7 +145,7 @@ describe("collaboration prototype flow", () => {
     // The directive is on every system prompt; the start result carries the board and the live item.
     assert.ok(sys(calls[0]).startsWith("You are Sample.\n"));
     assert.ok(sys(calls[0]).includes("## Prototype mode"));
-    assert.match(r.prototypes.board_url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
+    assert.match(r.prototypes.board_url, /^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]+\/$/);
     assert.equal(r.prototypes.live.length, 1);
     assert.equal(r.prototypes.live[0].label, "P1 v1");
     assert.equal(r.prototypes.live[0].kind, "web");

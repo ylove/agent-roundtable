@@ -73,7 +73,7 @@ export class NtfyPublisher implements Publisher {
       res = await fetch(`${this.base}/${channel.id}`, {
         method: "PUT",
         headers: {
-          Filename: asciiFilename(a.filename),
+          Filename: safeFilename(a.filename),
           Title: headerValue(msg.title),
           Message: headerValue(msg.content),
           Firebase: "no",
@@ -109,9 +109,14 @@ export class NtfyPublisher implements Publisher {
       errText = body.slice(0, 200);
     }
     if (res.status === 429) {
-      const daily = code === 42908 || /daily|quota/i.test(errText);
+      // An attachment only stops the channel on the daily message quota (42908). Any other 429 on an
+      // attachment (bandwidth or attachment limits, e.g. 42905) fails that one file, never later posts.
+      const daily = code === 42908 || (!attachment && /daily|quota/i.test(errText));
       if (daily) {
         return { ok: false, retryable: false, stop: "quota", error: `daily message limit reached (${errText || "HTTP 429"})` };
+      }
+      if (attachment) {
+        return { ok: false, retryable: false, error: `attachment rejected by the ntfy server (HTTP 429${errText ? `: ${errText}` : ""})` };
       }
     }
     if (attachment && (res.status === 413 || /too large/i.test(errText))) {
@@ -156,9 +161,15 @@ export class NtfyPublisher implements Publisher {
   }
 }
 
-/** ASCII-only file name for the Filename header. */
-function asciiFilename(name: string): string {
-  return name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 100) || "attachment.bin";
+/** An ASCII file name safe for a header: the base name, with letters, digits, ".", "_" and "-" only. */
+export function safeFilename(raw: string): string {
+  const s = String(raw ?? "")
+    .split(/[\\/]/)
+    .pop()!
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[-.]+/, "")
+    .slice(0, 100);
+  return s || "attachment.bin";
 }
 
 /**

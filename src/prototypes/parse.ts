@@ -229,7 +229,12 @@ export function parsePrototypeBlock(text: string): ParseResult {
   const matches = [...src.matchAll(blockRe())];
   if (matches.length === 0) {
     if (UNCLOSED_RE.test(src)) {
-      return { found: true, ok: false, error: "the <prototype> block is not closed: end it with </prototype>", warnings };
+      return {
+        found: true,
+        ok: false,
+        error: "the prototype block is not closed (or was cut off by the reply length cap): end it with </prototype> and keep it compact",
+        warnings,
+      };
     }
     return { found: false, warnings };
   }
@@ -287,9 +292,45 @@ export function parsePrototypeBlock(text: string): ParseResult {
   return { found: true, ok: true, prototype, warnings };
 }
 
-/** True when the text holds at least one complete <prototype> block. */
-export function hasPrototypeBlock(text: string): boolean {
-  return blockRe().test(String(text ?? ""));
+// An opening tag outside inline code. It starts an unclosed block when it carries attributes, is cut off
+// before its ">", or is followed by a <file> element; a bare "<prototype>" in prose is only a mention.
+const OPEN_TAG_RE = /(?<!\x60)<prototype(?=[\s>/]|$)/gi;
+
+function unclosedStart(segment: string): number {
+  for (const m of segment.matchAll(OPEN_TAG_RE)) {
+    const rest = segment.slice(m.index);
+    const end = rest.indexOf(">");
+    if (end < 0 || rest.slice(0, end).includes("=") || /<file[\s>/]/i.test(rest)) return m.index;
+  }
+  return -1;
+}
+
+/**
+ * Replace every prototype construct so no raw block survives: the first complete block (the one the
+ * parser uses) becomes `first` (null keeps it as is), later complete blocks become `extra`, and an
+ * unclosed block (from its opening tag up to the next complete block or the end of the text) becomes
+ * `unclosed`, or `unclosedOnly` when the text has no complete block at all.
+ */
+export function scrubPrototypeBlocks(
+  text: string,
+  opts: { first: string | null; extra: string; unclosed: string; unclosedOnly?: string }
+): string {
+  const src = String(text ?? "");
+  const blocks = [...src.matchAll(blockRe())];
+  const tail = blocks.length ? opts.unclosed : opts.unclosedOnly ?? opts.unclosed;
+  let out = "";
+  let pos = 0;
+  const gap = (end: number) => {
+    const segment = src.slice(pos, end);
+    const i = unclosedStart(segment);
+    return i < 0 ? segment : segment.slice(0, i) + tail;
+  };
+  blocks.forEach((m, n) => {
+    out += gap(m.index);
+    out += n === 0 ? opts.first ?? m[0] : opts.extra;
+    pos = m.index + m[0].length;
+  });
+  return out + gap(src.length);
 }
 
 /**

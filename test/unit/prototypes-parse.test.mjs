@@ -5,6 +5,7 @@ import {
   parseVerdictFor,
   parseDecisionFor,
   replacePrototypeBlock,
+  scrubPrototypeBlocks,
   validatePath,
   cleanFileContent,
   isMermaidSource,
@@ -149,6 +150,26 @@ test("verdicts: decorated lines at the END of a long turn, unicode dashes, versi
   assert.equal(parseVerdictFor("Verdict on P1: maybe later", "P1").verdict, "UNCLEAR");
   // snake_case in reasons survives
   assert.equal(parseVerdictFor("Verdict on P1: REVISE — rename coupon_code", "P1").reason, "rename coupon_code");
+});
+
+test("scrubPrototypeBlocks: complete, extra and unclosed blocks are all replaced; mentions are kept", () => {
+  const opts = { first: "[FIRST]", extra: "[EXTRA]", unclosed: "[CUT]", unclosedOnly: "[CUT-ONLY]" };
+  const a = `<prototype title="a"><file path="a.sql">A</file></prototype>`;
+  const b = `<prototype title="b"><file path="b.sql">B</file></prototype>`;
+  assert.equal(scrubPrototypeBlocks(`x ${a} y ${b} z`, opts), "x [FIRST] y [EXTRA] z");
+  assert.equal(scrubPrototypeBlocks(`x ${a} y ${b} z`, { ...opts, first: null }), `x ${a} y [EXTRA] z`);
+  // A trailing unclosed block, with or without complete blocks before it.
+  assert.equal(scrubPrototypeBlocks(`x ${a} y <prototype title="c"><file path="c.sql">SECRET`, opts), "x [FIRST] y [CUT]");
+  assert.equal(scrubPrototypeBlocks(`x\n<prototype title="c">\n<file path="c.sql">SECRET`, opts), "x\n[CUT-ONLY]");
+  // An unclosed block before a complete one (the parser uses the complete one): both are replaced.
+  assert.equal(scrubPrototypeBlocks(`x <prototype title="c"><file path="c.sql">SECRET\n${a} z`, opts), "x [CUT][FIRST] z");
+  // Cut inside the opening tag, or a bare tag followed by files.
+  assert.equal(scrubPrototypeBlocks(`x <prototype title="hal`, opts), "x [CUT-ONLY]");
+  assert.equal(scrubPrototypeBlocks(`x <prototype>\n<file path="a.html">SECRET`, opts), "x [CUT-ONLY]");
+  // Mentions are not blocks.
+  for (const s of ["I will emit a `<prototype>` block.", "A bare <prototype> mention.", "no block at all", ""]) {
+    assert.equal(scrubPrototypeBlocks(s, opts), s);
+  }
 });
 
 test("decisions: REVISE / SCRAP / SHORTLIST, null when absent", () => {

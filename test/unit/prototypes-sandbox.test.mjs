@@ -1,27 +1,60 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ensurePrototypeRoot,
   createSessionDir,
   materializeFiles,
+  releaseSessionDir,
   removeDir,
   removeDirSync,
   sweepStaleSessionDirs,
 } from "../../dist/prototypes/sandbox.js";
 
-const tmp = () => mkdtemp(join(tmpdir(), "rt-proto-sb-"));
+const made = [];
+after(() => {
+  for (const d of made) rmSync(d, { recursive: true, force: true });
+});
+const tmp = async () => {
+  const d = await mkdtemp(join(tmpdir(), "rt-proto-sb-"));
+  made.push(d);
+  return d;
+};
+const posix = process.platform !== "win32";
 
 test("ensurePrototypeRoot: creates the root with a .gitignore of *", async () => {
   const base = await tmp();
   const root = await ensurePrototypeRoot(join(base, "nested", "protos"));
   assert.ok(existsSync(root));
   assert.equal(await readFile(join(root, ".gitignore"), "utf8"), "*\n");
-  if (process.platform !== "win32") assert.equal((await stat(root)).mode & 0o777, 0o700);
+  if (posix) assert.equal((await stat(root)).mode & 0o777, 0o700);
+});
+
+test("ensurePrototypeRoot: forces an existing root to 0700; refuses a symlink, a file and another user's directory", { skip: !posix }, async () => {
+  const base = await tmp();
+  const open = join(base, "open");
+  await mkdir(open, { mode: 0o755 });
+  await chmod(open, 0o755);
+  await ensurePrototypeRoot(open);
+  assert.equal((await stat(open)).mode & 0o777, 0o700);
+
+  const target = join(base, "target");
+  await mkdir(target);
+  await symlink(target, join(base, "link"));
+  await assert.rejects(() => ensurePrototypeRoot(join(base, "link")), /symbolic link/);
+  assert.equal(existsSync(join(target, ".gitignore")), false, "nothing written through the link");
+
+  await writeFile(join(base, "file"), "x");
+  await assert.rejects(() => ensurePrototypeRoot(join(base, "file")), /not a directory/);
+
+  if (process.getuid?.() !== 0) {
+    // A system directory owned by root: refused before anything is changed.
+    await assert.rejects(() => ensurePrototypeRoot("/usr/bin"), /owned by another user/);
+  }
 });
 
 test("ensurePrototypeRoot: refuses a root inside a git work tree", async () => {
@@ -41,15 +74,17 @@ test("ensurePrototypeRoot: the default root comes from ROUNDTABLE_PROTOTYPE_DIR 
   assert.ok(!root.includes(process.cwd()), "never under the repository");
 });
 
-test("createSessionDir: mkdtemp per session with owner.json", async () => {
+test("createSessionDir: mkdtemp (0700) per session with owner.json (pid, host, createdAt)", async () => {
   const root = await ensurePrototypeRoot(join(await tmp(), "r"));
   const a = await createSessionDir(root, "collab-1");
   const b = await createSessionDir(root, "collab-1");
   assert.notEqual(a, b);
   assert.match(a, /collab-1-[^/\\]+$/);
+  if (posix) assert.equal((await stat(a)).mode & 0o777, 0o700);
   const owner = JSON.parse(await readFile(join(a, "owner.json"), "utf8"));
   assert.equal(owner.pid, process.pid);
-  assert.ok(owner.createdAt);
+  assert.equal(owner.host, hostname());
+  assert.ok(!Number.isNaN(Date.parse(owner.createdAt)));
   const weird = await createSessionDir(root, "../../evil id");
   assert.ok(weird.startsWith(root));
 });
@@ -118,27 +153,57 @@ function deadPid() {
   });
 }
 
-test("sweepStaleSessionDirs: removes dirs of dead pids, keeps live ones and unowned dirs", async () => {
+const HOUR = 60 * 60 * 1000;
+
+/** A session-shaped directory (mkdtemp-style name) with an optional owner.json and a P1v1 directory. */
+async function sessionLike(root, name, owner, { ageMs = 0, extra } = {}) {
+  const dir = join(root, name);
+  await mkdir(join(dir, "P1v1", "files"), { recursive: true });
+  if (owner !== undefined) await writeFile(join(dir, "owner.json"), typeof owner === "string" ? owner : JSON.stringify(owner));
+  if (extra) await writeFile(join(dir, extra), "not ours");
+  if (ageMs) {
+    const t = new Date(Date.now() - ageMs);
+    await utimes(dir, t, t);
+  }
+  return dir;
+}
+
+test("sweepStaleSessionDirs: same host and dead pid, any host after 24 h, unowned after 1 h; never live or foreign dirs", async () => {
   const root = await ensurePrototypeRoot(join(await tmp(), "r"));
+  const host = hostname();
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 25 * HOUR).toISOString();
+  const dead = await deadPid();
+
   const mine = await createSessionDir(root, "mine");
-  const dead = join(root, "dead-abc");
-  await mkdir(dead);
-  await writeFile(join(dead, "owner.json"), JSON.stringify({ pid: await deadPid(), createdAt: "x" }));
-  const parent = join(root, "parent-abc");
-  await mkdir(parent);
-  await writeFile(join(parent, "owner.json"), JSON.stringify({ pid: process.ppid, createdAt: "x" }));
-  const unowned = join(root, "unowned");
-  await mkdir(unowned);
-  const garbage = join(root, "garbage");
-  await mkdir(garbage);
-  await writeFile(join(garbage, "owner.json"), "{not json");
+  const mineOld = await createSessionDir(root, "mine-old");
+  await writeFile(join(mineOld, "owner.json"), JSON.stringify({ pid: process.pid, host, createdAt: old }));
+  const deadHere = await sessionLike(root, "dead-abc123", { pid: dead, host, createdAt: now });
+  const parent = await sessionLike(root, "parent-abc123", { pid: process.ppid, host, createdAt: now });
+  const elsewhere = await sessionLike(root, "remote-abc123", { pid: dead, host: "another-host", createdAt: now });
+  const elsewhereOld = await sessionLike(root, "remote-old123", { pid: 1, host: "another-host", createdAt: old });
+  const liveOld = await sessionLike(root, "liveold-abc123", { pid: process.ppid, host, createdAt: old });
+  const samePid = await sessionLike(root, "samepid-abc123", { pid: process.pid, host, createdAt: now });
+  const unownedYoung = await sessionLike(root, "unowned-abc123", undefined);
+  const unownedOld = await sessionLike(root, "unowned-old123", undefined, { ageMs: 2 * HOUR });
+  const garbageOld = await sessionLike(root, "garbage-old123", "{not json", { ageMs: 2 * HOUR });
+  const foreignOld = await sessionLike(root, "foreign-old123", { pid: dead, host, createdAt: old }, { extra: "notes.txt" });
+  const foreignName = join(root, "not-a-session");
+  await mkdir(foreignName);
+  const t = new Date(Date.now() - 48 * HOUR);
+  await utimes(foreignName, t, t);
 
   const n = await sweepStaleSessionDirs(root);
-  assert.equal(n, 1);
-  assert.equal(existsSync(dead), false);
-  assert.ok(existsSync(mine));
-  assert.ok(existsSync(parent));
-  assert.ok(existsSync(unowned));
-  assert.ok(existsSync(garbage));
+  const gone = [deadHere, elsewhereOld, liveOld, unownedOld, garbageOld];
+  const kept = [mine, mineOld, parent, elsewhere, samePid, unownedYoung, foreignOld, foreignName];
+  for (const d of gone) assert.equal(existsSync(d), false, `removed: ${d}`);
+  for (const d of kept) assert.ok(existsSync(d), `kept: ${d}`);
+  assert.equal(n, gone.length);
   assert.equal(await sweepStaleSessionDirs(join(root, "does-not-exist")), 0);
+
+  // Once this process releases its own session, the 24-hour rule applies to it like any other.
+  releaseSessionDir(mineOld);
+  assert.equal(await sweepStaleSessionDirs(root), 1);
+  assert.equal(existsSync(mineOld), false);
+  assert.ok(existsSync(mine));
 });

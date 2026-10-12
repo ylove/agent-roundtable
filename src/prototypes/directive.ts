@@ -19,11 +19,15 @@ export function buildPrototypeDirective(opts: { assessorIsCaller: boolean; publi
     "</prototype>",
     "",
     "Choosing the kind:",
-    "- web: a scaled-down page showing just the one page or element being proposed. Self-contained HTML, CSS and JavaScript: no external network calls, no CDNs, no fetching other files (inline any data), no localStorage. It runs in a sandboxed frame at desktop and mobile widths.",
+    "- web: a scaled-down page showing just the one page or element being proposed, shown at desktop and mobile widths. " +
+      "It runs in a sandboxed, network-restricted frame that can load only its own files, so: " +
+      'self-contained HTML, CSS and JavaScript; classic <script> tags only (no type="module", no ES import); ' +
+      "inline any data (no fetch or XHR of other files); no external network calls or CDNs; no localStorage, sessionStorage or cookies.",
     "- code: when a running page isn't feasible, the artifact that WOULD produce the proposal when executed (for example CREATE TABLE or CREATE DATABASE statements, or Terraform). It is never executed.",
     "- diagram: abstract or non-replicable proposals, as Mermaid source in a single .mmd file.",
     "- text: text proposals, as draft 1 in a single .md or .txt file.",
     "Rules: 1 to 10 files, at most 100 KB in total, relative paths only (letters, digits, \".\", \"_\", \"-\"; at most 4 levels; no \"..\"). Put each file's raw content inside its <file> element.",
+    "Replies have a length cap, so keep the whole block compact (aim for under about 20 KB): a block cut off before </prototype> is rejected.",
     "",
     "If the proposal involves user interaction, <demo> is REQUIRED: walk through it for at least three user types or modalities " +
       "(for example an impatient user, a drunk or otherwise impaired user, an expert, a non-technical user; on mobile, on desktop, with the network interrupted), " +

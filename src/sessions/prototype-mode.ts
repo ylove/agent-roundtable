@@ -180,7 +180,12 @@ export function meetingPrototypeStatus(meeting: PrototypeMeetingSession): string
 // Public output
 // ----------------------------------------------------------------------------
 
-/** Post a turn's screenshots right after its text (public sessions only). Never throws. */
+/**
+ * Post a turn's screenshots right after its text, under the same turn number (public sessions only).
+ * Each is titled by its own caption ("P1 v1 screenshot (desktop)"), not the proposer's label: reusing
+ * the label would make the channel add "#2"/"#3" uniqueness suffixes that read like duplicate-persona
+ * names. `speaker` is the fallback for a blank caption. Never throws.
+ */
 export function postPrototypeAttachments(
   channel: PublicChannel | undefined,
   turn: number,
@@ -191,7 +196,7 @@ export function postPrototypeAttachments(
   for (const a of attachments) {
     channel.recordAttachment({
       turn,
-      speaker: publicLabel(speaker),
+      speaker: publicLabel(a.caption?.trim() ? a.caption : speaker),
       filename: a.filename,
       contentType: a.contentType,
       bytes: a.bytes,

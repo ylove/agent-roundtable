@@ -446,12 +446,19 @@ describe("public prototype collaboration", () => {
       const r = await realOnTurn.apply(this, args);
       if (r.created) {
         viewerUrl = r.created.url;
-        r.attachments.push({ filename: `${r.created.label}.png`, contentType: "image/png", bytes: Buffer.from([1, 2, 3]), caption: `${r.created.label} screenshot (desktop)` });
+        for (const view of ["desktop", "mobile"]) {
+          r.attachments.push({ filename: `${r.created.label.replace(/ /g, "")}-${view}.png`, contentType: "image/png", bytes: Buffer.from([1, 2, 3]), caption: `${r.created.label} screenshot (${view})` });
+        }
       }
       return r;
     });
+    // Spy on what is posted, and let the channel really upload it (to the stubbed ntfy).
     const attachments = [];
-    t.mock.method(PublicChannel.prototype, "recordAttachment", (entry) => attachments.push(entry));
+    const realRecordAttachment = PublicChannel.prototype.recordAttachment;
+    t.mock.method(PublicChannel.prototype, "recordAttachment", function (entry) {
+      attachments.push(entry);
+      return realRecordAttachment.call(this, entry);
+    });
 
     const r = await startCollaboration([A, B], "checkout coupons", { ...opts, maxRounds: 2, public: true, prototype: true });
     const id = r.collaborationId;
@@ -464,12 +471,14 @@ describe("public prototype collaboration", () => {
       assert.ok(notice >= 0 && amendment > notice && s.indexOf("## Prototype mode") > amendment, s);
     }
     await continueCollaboration(id, 1); // Plain proposes (message 1), then Sample assesses (message 2)
-    // Plain proposed at message index 1, so its screenshot is posted as public turn 2 under its public label.
-    const injected = attachments.filter((a) => a.filename === "P1 v1.png");
-    assert.equal(injected.length, 1);
-    assert.equal(injected[0].turn, 2);
-    assert.equal(injected[0].speaker, publicLabel(B));
-    assert.equal(injected[0].contentType, "image/png");
+    // Plain proposed at message index 1, so its screenshots are posted as public turn 2, each titled by its
+    // own caption (never the proposer's label, which would get "#2"/"#3" uniqueness suffixes).
+    const injected = attachments.filter((a) => a.filename.startsWith("P1v1-"));
+    assert.deepEqual(injected.map((a) => [a.turn, a.speaker, a.contentType]), [
+      [2, "P1 v1 screenshot (desktop)", "image/png"],
+      [2, "P1 v1 screenshot (mobile)", "image/png"],
+    ]);
+    assert.ok(injected.every((a) => a.speaker === publicLabel(a.speaker)), "clean under publicLabel");
     // Nothing is under assessment now, so the nudge is accepted; a pasted viewer URL is scrubbed from the post.
     assert.ok(viewerUrl.startsWith(board), viewerUrl);
     await nudgeCollaboration(id, `The human is watching ${viewerUrl} now`);
@@ -488,6 +497,16 @@ describe("public prototype collaboration", () => {
     assert.match(all, /Summary: the human can watch \[[^\]]+\] and \[[^\]]+\] until the end\./, "the summary was posted, scrubbed");
     const port = new URL(board).port;
     assert.ok(!all.includes(`:${port}`), "board port never posted");
+
+    // Titles as ntfy received them: JSON posts carry `title`; attachment uploads carry an RFC 2047 Title header.
+    const decodeHeader = (v) =>
+      String(v).replace(/=\?UTF-8\?B\?([^?]*)\?=\s*/g, (_, b64) => Buffer.from(b64, "base64").toString("utf8"));
+    const sent = calls.filter((c) => isNtfy(c) && c.init.method !== "GET");
+    const uploadTitles = sent.filter((c) => c.init.method === "PUT").map((c) => decodeHeader(c.init.headers.Title));
+    assert.deepEqual(uploadTitles, ["#02 · P1 v1 screenshot (desktop)", "#02 · P1 v1 screenshot (mobile)"]);
+    const titles = [...sent.map((c) => c.body?.title).filter(Boolean), ...uploadTitles];
+    assert.ok(titles.length > uploadTitles.length);
+    for (const title of titles) assert.doesNotMatch(title, / #\d+(?: \(\d+\/\d+\))?$/, `no uniqueness suffix in "${title}" (no duplicated persona)`);
   });
 });
 

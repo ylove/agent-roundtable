@@ -24,8 +24,8 @@ import {
   type WriteResult,
 } from "../agent-files.js";
 import { mapLimit, extractJsonObject, truncate, parseVerdict } from "./workshop.js";
-import { collaborations, ORCHESTRATOR } from "./collaborations.js";
-import { meetings, startMeeting } from "./meetings.js";
+import { collaborationHistoryView, collaborations, ORCHESTRATOR } from "./collaborations.js";
+import { meetingHistoryView, meetings, startMeeting } from "./meetings.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 
 /** Inputs for designing a new agent with specialists and an architect. */
@@ -476,17 +476,18 @@ function sourceSession(id: string | undefined, isPublic: boolean): SourceSession
   let text: string;
   const collab = collaborations.get(id);
   const meeting = meetings.get(id);
+  // Prototype sessions: the views agents see, so destroyed prototype source never re-enters a prompt.
   if (collab) {
     refs = collab.agents.map(agent => agent.name);
     topic = collab.topic.trim();
-    text = collab.messages.map(message => {
+    text = collaborationHistoryView(collab).map(message => {
       const speaker = message.agent === ORCHESTRATOR ? "orchestrator" : display(message.agent, isPublic);
       return `**${speaker}:** ${message.content}`;
     }).join("\n\n");
   } else if (meeting) {
     refs = [meeting.agent];
     topic = meeting.agenda?.trim() ?? "";
-    text = meeting.messages.map(message => {
+    text = meetingHistoryView(meeting).map(message => {
       const speaker = message.role === "user" ? "caller" : display(meeting.agent, isPublic);
       return `**${speaker}:** ${message.content}`;
     }).join("\n\n");

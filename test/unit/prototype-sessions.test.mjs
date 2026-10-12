@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { request } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { json, stubFetch } from "./helpers.mjs";
 
@@ -31,8 +31,10 @@ const {
   getCollaborationTranscript,
   collaborations,
 } = await import("../../dist/sessions/collaborations.js");
-const { startMeeting, continueMeeting, endMeeting, listMeetings } = await import("../../dist/sessions/meetings.js");
-const { listLocalMeetings } = await import("../../dist/sessions/local-meetings.js");
+const { startMeeting, continueMeeting, endMeeting, listMeetings, meetings } = await import("../../dist/sessions/meetings.js");
+const { listLocalMeetings, localMeetings } = await import("../../dist/sessions/local-meetings.js");
+const { createAgent } = await import("../../dist/sessions/agent-creation.js");
+const { serializeTurn } = await import("../../dist/sessions/prototype-mode.js");
 const { handleToolCall, tools } = await import("../../dist/tools.js");
 const prototypes = await import("../../dist/prototypes/index.js");
 const { PublicChannel, publicLabel } = await import("../../dist/publishers/index.js");
@@ -59,6 +61,11 @@ const isLlm = (c) => c.url.startsWith(LLM);
 const isNtfy = (c) => c.url.startsWith(NTFY);
 const sys = (call) => call.body.messages[0].content;
 const lastUser = (call) => call.body.messages.at(-1).content;
+/** The board URL is http://127.0.0.1:<port>/ optionally followed by a capability path; tests only use returned URLs. */
+const BOARD_URL = /^http:\/\/127\.0\.0\.1:\d+\/(?:[A-Za-z0-9_-]+\/)*$/;
+const FINAL_ROUND = "This is the final round: do not start a new prototype";
+const OWNERSHIP = "Only a prototype's proposer decides on it";
+const llmReply = (content) => json(200, { choices: [{ message: { content } }] });
 
 /** LLM calls get the scripted replies in order ("ok" once they run out); ntfy accepts everything. */
 function script(replies, extra) {
@@ -66,7 +73,7 @@ function script(replies, extra) {
   return (url, init) => {
     const r = extra?.(url, init);
     if (r) return r;
-    if (url.startsWith(LLM)) return json(200, { choices: [{ message: { content: replies[n++] ?? "ok" } }] });
+    if (url.startsWith(LLM)) return llmReply(replies[n++] ?? "ok");
     if (url.startsWith(NTFY)) return init.method === "GET" ? new Response("", { status: 200 }) : json(200, { id: "x", time: 1 });
     throw new Error(`Unexpected fetch: ${url}`);
   };
@@ -145,7 +152,7 @@ describe("collaboration prototype flow", () => {
     // The directive is on every system prompt; the start result carries the board and the live item.
     assert.ok(sys(calls[0]).startsWith("You are Sample.\n"));
     assert.ok(sys(calls[0]).includes("## Prototype mode"));
-    assert.match(r.prototypes.board_url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
+    assert.match(r.prototypes.board_url, BOARD_URL);
     assert.equal(r.prototypes.live.length, 1);
     assert.equal(r.prototypes.live[0].label, "P1 v1");
     assert.equal(r.prototypes.live[0].kind, "web");
@@ -191,7 +198,7 @@ describe("collaboration prototype flow", () => {
     const finalPrompt = lastUser(calls[3]);
     assert.ok(finalPrompt.includes('[Prototype P1 v1 "Inline coupon field" (web, 1 file)'), finalPrompt);
     assert.ok(!finalPrompt.includes(MARK), "resolved source never re-sent");
-    assert.ok(finalPrompt.includes("This is the final round: do not start a new prototype"));
+    assert.ok(finalPrompt.includes(FINAL_ROUND));
     assert.equal(mid.status, "completed");
     assert.deepEqual(mid.prototypes.destroyed_this_call, ["P1 v1"]);
     assert.equal(mid.prototypes.live.length, 0);
@@ -380,6 +387,7 @@ describe("local meeting (fake claude on PATH)", () => {
     process.env.PATH = `${dir}:${oldPath}`;
     t.after(() => {
       process.env.PATH = oldPath;
+      rmSync(dir, { recursive: true, force: true });
     });
     const argvs = () => readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     const appendOf = (a) => a[a.indexOf("--append-system-prompt") + 1];
@@ -401,11 +409,15 @@ describe("local meeting (fake claude on PATH)", () => {
     assert.ok(p1.includes("Decide now"));
     assert.ok(appendOf(argvs()[1]).includes("## Prototype mode"), "directive on every call");
     assert.ok(say1.startsWith("Decision on P1: SHORTLIST — approved\n\n---\nPrototypes: "));
+    // The status was added to that CLI prompt only: the stored caller message is the caller's words.
+    assert.equal(localMeetings.get(id).messages[2].content, "Verdict on P1: APPROVE — clear");
 
     await handleToolCall("say_local", { meeting_id: id, message: "Great." });
     const p2 = argvs()[2].at(-1);
     assert.ok(p2.includes("[Prototype P1 v1"), p2);
     assert.ok(!p2.includes(MARK));
+    assert.ok(p2.includes("**User:** Verdict on P1: APPROVE — clear\n\n**Assistant:**"), "no stale status in the history");
+    assert.ok(!p2.includes("## Prototype status"), "nothing pending, no status anywhere in the prompt");
 
     const end = (await handleToolCall("end_local_meeting", { meeting_id: id })).content[0].text;
     assert.ok(end.includes("## Shortlist for the human") && end.includes(MARK));
@@ -414,18 +426,28 @@ describe("local meeting (fake claude on PATH)", () => {
 });
 
 describe("public prototype collaboration", () => {
-  test("posts a URL-free Markdown reference, screenshots under the turn, amendment after the public notice", async (t) => {
+  test("posts a URL-free Markdown reference, screenshots under the turn, amendment after the public notice, scrubbed summary", async (t) => {
+    let viewerUrl = "";
+    let board = "";
+    // The summarizer pastes the board and viewer URLs: the published summary must not carry them.
+    const summaryText = () => `Summary: the human can watch ${board} and ${viewerUrl} until the end.`;
     const calls = stubFetch(t, script([
       "Opening thoughts: the checkout is too long.",
       webBlock(),
       "Verdict on P1: APPROVE — clean",
       "Decision on P1: SHORTLIST — approved",
-    ]));
+    ], (url, init) =>
+      url.startsWith(LLM) && JSON.parse(init.body).messages.at(-1).content.includes("**Full transcript:**")
+        ? llmReply(summaryText())
+        : undefined));
     // Screenshots are off in tests: inject one through the tracker and capture what is posted.
     const realOnTurn = prototypes.PrototypeTracker.prototype.onTurn;
     t.mock.method(prototypes.PrototypeTracker.prototype, "onTurn", async function (...args) {
       const r = await realOnTurn.apply(this, args);
-      if (r.created) r.attachments.push({ filename: `${r.created.label}.png`, contentType: "image/png", bytes: Buffer.from([1, 2, 3]), caption: `${r.created.label} screenshot (desktop)` });
+      if (r.created) {
+        viewerUrl = r.created.url;
+        r.attachments.push({ filename: `${r.created.label}.png`, contentType: "image/png", bytes: Buffer.from([1, 2, 3]), caption: `${r.created.label} screenshot (desktop)` });
+      }
       return r;
     });
     const attachments = [];
@@ -434,7 +456,7 @@ describe("public prototype collaboration", () => {
     const r = await startCollaboration([A, B], "checkout coupons", { ...opts, maxRounds: 2, public: true, prototype: true });
     const id = r.collaborationId;
     assert.ok(r.public.url.startsWith(NTFY + "/"));
-    const board = r.prototypes.board_url;
+    board = r.prototypes.board_url;
     for (const call of calls.filter(isLlm)) {
       const s = sys(call);
       const notice = s.indexOf("PUBLIC SESSION NOTICE");
@@ -448,12 +470,14 @@ describe("public prototype collaboration", () => {
     assert.equal(injected[0].turn, 2);
     assert.equal(injected[0].speaker, publicLabel(B));
     assert.equal(injected[0].contentType, "image/png");
-    // Nothing is under assessment now, so the nudge is accepted; a pasted board URL is scrubbed from the post.
-    await nudgeCollaboration(id, `The human is watching ${board}p/P1v1/ now`);
+    // Nothing is under assessment now, so the nudge is accepted; a pasted viewer URL is scrubbed from the post.
+    assert.ok(viewerUrl.startsWith(board), viewerUrl);
+    await nudgeCollaboration(id, `The human is watching ${viewerUrl} now`);
     await continueCollaboration(id, 1);
-    const end = await endCollaboration(id);
+    const end = await endCollaboration(id, true);
     assert.match(end.publicBlock, /Public transcript: http:\/\/ntfy\.test\//);
     assert.match(end.prototypeOutcomes, /SHORTLIST/);
+    assert.equal(end.summary, summaryText(), "the caller still gets the summary as written");
 
     const posted = calls.filter((c) => isNtfy(c) && c.init.method !== "GET").map((c) => JSON.stringify(c.body ?? ""));
     const all = posted.join("\n");
@@ -461,8 +485,195 @@ describe("public prototype collaboration", () => {
     assert.ok(!all.includes("<prototype"), "raw block never posted");
     assert.ok(!/127\.0\.0\.1|localhost/i.test(all), "no local address posted");
     assert.ok(all.includes("The human is watching [local prototype board] now"), "the nudge was posted, scrubbed");
+    assert.match(all, /Summary: the human can watch \[[^\]]+\] and \[[^\]]+\] until the end\./, "the summary was posted, scrubbed");
     const port = new URL(board).port;
     assert.ok(!all.includes(`:${port}`), "board port never posted");
+  });
+});
+
+describe("final-round cutoff", () => {
+  test("2 agents, max_rounds 2: a proposal in turn 2 is still assessed and decided; the last round may not start one", async (t) => {
+    const calls = stubFetch(t, script([
+      "Opening thoughts: the checkout is too long.",
+      webBlock(),
+      "Verdict on P1: APPROVE — clear",
+      "Decision on P1: SHORTLIST — approved",
+    ]));
+    const r = await startCollaboration([A, B], "checkout coupons", { ...opts, maxRounds: 2, prototype: true });
+    const done = await continueCollaboration(r.collaborationId, 2);
+    assert.equal(done.status, "completed");
+    const prompts = calls.filter(isLlm).map(lastUser);
+    assert.equal(prompts.length, 4);
+    // A proposal needs n-1 assessor turns plus the proposer's decision turn: turn 2 still leaves 2.
+    assert.ok(!prompts[0].includes(FINAL_ROUND) && !prompts[1].includes(FINAL_ROUND), "turns 1 and 2 may still propose");
+    assert.ok(prompts[2].includes(FINAL_ROUND) && prompts[3].includes(FINAL_ROUND), "the last n turns may not");
+    // The assessor is told decisions are not theirs; the proposer that the decision is theirs alone.
+    assert.ok(prompts[2].includes(OWNERSHIP) && prompts[3].includes(OWNERSHIP));
+    assert.ok(!prompts[0].includes(OWNERSHIP), "no ownership line without prototype activity");
+    const end = await endCollaboration(r.collaborationId);
+    assert.match(end.prototypeOutcomes, /SHORTLIST/);
+    assert.ok(end.prototypeOutcomes.split("## Shortlist for the human")[1].includes(MARK), "shortlisted, not closed undecided");
+  });
+
+  test("2 agents, max_rounds 1: the opening turn is already the final round", async (t) => {
+    const calls = stubFetch(t, script(["Opening thoughts."]));
+    const r = await startCollaboration([A, B], "t", { ...opts, maxRounds: 1, prototype: true });
+    assert.ok(lastUser(calls[0]).includes(FINAL_ROUND));
+    await endCollaboration(r.collaborationId);
+  });
+});
+
+describe("auto-run failure", () => {
+  test("a private auto-run that fails after the opening turn removes the session, its board and its sandbox", async (t) => {
+    let n = 0;
+    stubFetch(t, (url) => {
+      if (!url.startsWith(LLM)) throw new Error(`Unexpected fetch: ${url}`);
+      return ++n === 1 ? llmReply(webBlock()) : json(500, { error: "down" });
+    });
+    const before = sessionDirs();
+    const rows = listCollaborations().length;
+    const r = await handleToolCall("start_collaboration", {
+      agents: [A, B], topic: "t", prototype: true, auto_run_rounds: 1, provider: "openai_compatible", model: "m", base_url: LLM,
+    });
+    assert.equal(r.isError, true);
+    assert.equal(n, 2, "the opening turn ran, the second failed");
+    assert.equal(listCollaborations().length, rows, "no orphan prototype session");
+    assert.equal(prototypes.activePrototypeTrackers().length, 0, "board closed");
+    assert.equal(liveCopies().length, 0, "sandbox removed");
+    assert.equal(sessionDirs(), before);
+  });
+});
+
+describe("turn keys", () => {
+  test("serializeTurn runs steps of one session in order and survives a failing step", async () => {
+    const session = {};
+    const order = [];
+    let release;
+    const gate = new Promise((res) => (release = res));
+    const first = serializeTurn(session, async () => {
+      await gate;
+      order.push("first");
+      throw new Error("first failed");
+    });
+    const second = serializeTurn(session, () => order.push("second"));
+    const other = serializeTurn({}, () => order.push("other session"));
+    await other;
+    assert.deepEqual(order, ["other session"], "another session never waits");
+    release();
+    await assert.rejects(first, /first failed/);
+    await second;
+    assert.deepEqual(order, ["other session", "first", "second"]);
+  });
+
+  test("a nudge issued while an agent turn is being processed waits for it and never shifts its key", async (t) => {
+    stubFetch(t, script([
+      "Opening thoughts.",
+      webBlock(),
+      "Verdict on P1: REJECT — too small",
+      "Decision on P1: SCRAP — agreed",
+    ]));
+    const r = await startCollaboration([A, B], "checkout coupons", { ...opts, maxRounds: 3, prototype: true });
+    const id = r.collaborationId;
+    const collab = collaborations.get(id);
+    // Hold the tracker on Plain's proposing turn.
+    let release;
+    const gate = new Promise((res) => (release = res));
+    let entered;
+    const pending = new Promise((res) => (entered = res));
+    let held = false;
+    const realOnTurn = prototypes.PrototypeTracker.prototype.onTurn;
+    t.mock.method(prototypes.PrototypeTracker.prototype, "onTurn", async function (...args) {
+      if (!held && String(args[1]).includes("<prototype")) {
+        held = true;
+        entered();
+        await gate;
+      }
+      return realOnTurn.apply(this, args);
+    });
+    const turn = advanceCollaboration(collab);
+    await pending;
+    let nudgeSettled = false;
+    const nudge = nudgeCollaboration(id, "keep it short");
+    nudge.then(() => (nudgeSettled = true), () => (nudgeSettled = true));
+    await new Promise((res) => setImmediate(res));
+    assert.equal(nudgeSettled, false, "the nudge waits for the pending turn");
+    assert.equal(collab.messages.length, 1, "nothing recorded while the turn is pending");
+    release();
+    await turn;
+    // The turn proposed P1, so the nudge is now held instead of landing at the turn's index.
+    await assert.rejects(nudge, /nudges are held/);
+    assert.equal(collab.messages.length, 2);
+    assert.ok(collab.messages[1].content.includes(MARK));
+
+    await continueCollaboration(id, 1); // Sample rejects (P1 destroyed), Plain scraps
+    const transcript = getCollaborationTranscript(id);
+    assert.ok(transcript[1].content.includes("[Prototype P1 v1"), transcript[1].content);
+    assert.ok(transcript.every((m) => !m.content.includes(MARK)), "the proposing turn is stubbed at its own index");
+    await endCollaboration(id);
+  });
+});
+
+describe("caller messages and history", () => {
+  test("API meeting: the prototype status rides on the outgoing request only, never in history or the summary", async (t) => {
+    const calls = stubFetch(t, script([webBlock(), "Decision on P1: SCRAP — fine", "Noted.", "Summary text"]));
+    const m = await startMeeting(A, "checkout coupons", undefined, "openai_compatible", "m", LLM, "standard", undefined, false, true);
+    await continueMeeting(m.meetingId, "Verdict on P1: REJECT — too busy");
+    assert.ok(lastUser(calls[1]).startsWith("Verdict on P1: REJECT — too busy\n\n## Prototype status"), "status on this request");
+    assert.equal(meetings.get(m.meetingId).messages[2].content, "Verdict on P1: REJECT — too busy", "stored: the caller's words");
+    await continueMeeting(m.meetingId, "Thanks.");
+    assert.equal(calls[2].body.messages[3].content, "Verdict on P1: REJECT — too busy", "resent without its old status");
+    await endMeeting(m.meetingId, true);
+    const summaryCall = calls.at(-1);
+    assert.ok(summaryCall.body.messages.every((x) => !x.content.includes("## Prototype status")));
+  });
+
+  test("public prototype meeting: the published summary carries no board URL", async (t) => {
+    let board = "";
+    const calls = stubFetch(t, script([webBlock()], (url, init) =>
+      url.startsWith(LLM) && JSON.parse(init.body).messages.at(-1).content.startsWith("Please provide a brief summary")
+        ? llmReply(`Summary: watch ${board} for P1.`)
+        : undefined));
+    const m = await startMeeting(A, "checkout coupons", undefined, "openai_compatible", "m", LLM, "standard", undefined, true, true);
+    board = m.prototypes.board_url;
+    const out = await endMeeting(m.meetingId, true);
+    assert.ok(out.startsWith(`Summary: watch ${board} for P1.`), "the caller gets the summary as written");
+    const all = calls.filter((c) => isNtfy(c) && c.init.method !== "GET").map((c) => JSON.stringify(c.body ?? "")).join("\n");
+    assert.match(all, /Summary: watch \[[^\]]+\] for P1\./);
+    assert.ok(!/127\.0\.0\.1|localhost/i.test(all), "no local address posted");
+  });
+});
+
+describe("from_session reads the stubbed views", () => {
+  /** Capture the first create_agent prompt, then fail the call so the workshop stops there. */
+  async function firstWorkshopPrompt(t, fromSession) {
+    t.mock.restoreAll();
+    const seen = stubFetch(t, () => json(500, { error: "stop here" }));
+    await assert.rejects(createAgent({ ...opts, fromSession, write: false }));
+    assert.ok(seen.length >= 1);
+    return seen[0].body.messages.at(-1).content;
+  }
+
+  test("collaboration: destroyed prototype source never reaches create_agent prompts", async (t) => {
+    stubFetch(t, script([webBlock(), "Verdict on P1: REJECT — no", "Decision on P1: SCRAP — ok"]));
+    const r = await startCollaboration([A, B], "checkout coupons", { ...opts, maxRounds: 3, prototype: true });
+    await continueCollaboration(r.collaborationId, 1); // Plain rejects (destroyed), Sample scraps
+    const prompt = await firstWorkshopPrompt(t, r.collaborationId);
+    assert.ok(prompt.includes("I propose an inline coupon field"), "the discussion is there");
+    assert.ok(prompt.includes("[Prototype P1 v1"), "as a stub");
+    assert.ok(!prompt.includes(MARK), "no destroyed source");
+    await endCollaboration(r.collaborationId);
+  });
+
+  test("meeting: stubs and the caller's own words only", async (t) => {
+    stubFetch(t, script([webBlock(), "Decision on P1: SCRAP — fine"]));
+    const m = await startMeeting(A, "checkout coupons", undefined, "openai_compatible", "m", LLM, "standard", undefined, false, true);
+    await continueMeeting(m.meetingId, "Verdict on P1: REJECT — too busy");
+    const prompt = await firstWorkshopPrompt(t, m.meetingId);
+    assert.ok(prompt.includes("**caller:** Verdict on P1: REJECT — too busy"));
+    assert.ok(prompt.includes("[Prototype P1 v1"));
+    assert.ok(!prompt.includes(MARK));
+    assert.ok(!prompt.includes("## Prototype status"));
+    await endMeeting(m.meetingId);
   });
 });
 

@@ -15,9 +15,11 @@ import {
   NUDGE_HELD_ERROR,
   PROTOTYPE_CONVERSATION_ERROR,
   closePrototypeTracker,
-  openPrototypeTracker,
+  openSessionSurfaces,
   postPrototypeAttachments,
   prototypeSystemSuffix,
+  publicSummary,
+  serializeTurn,
   type PrototypeTracker,
 } from "./prototype-mode.js";
 import {
@@ -160,19 +162,26 @@ function agentTurnBudget(collaboration: Collaboration): number {
   return collaboration.mode === "waffle-house" ? 1 + collaboration.maxRounds * n : collaboration.maxRounds * n;
 }
 
+/** Added to every non-empty prototype status: decisions are the proposer's alone. */
+const DECISION_OWNERSHIP_LINE =
+  "Only a prototype's proposer decides on it (SHORTLIST, SCRAP or REVISE): decide only on your own prototypes, " +
+  "and on another participant's prototype give a verdict only.";
+
 /**
  * Prototype status for the agent about to speak ("" outside prototype mode), without its leading blank
- * lines. When the remaining budget cannot give every other agent a turn after this one, a prototype
- * proposed now could never be fully assessed, so the agent is told not to start one.
+ * lines. A prototype proposed now needs a turn from each of the other n-1 agents to be assessed, then
+ * one more from its proposer to decide: when fewer than n agent turns remain after this one, the agent
+ * is told not to start one (it could never be shortlisted).
  */
 function prototypeStatusFor(collaboration: Collaboration, agentIndex: number): string {
   const tracker = collaboration.prototype;
   if (!tracker) return "";
   let status = tracker.statusPromptFor(agentIndex).replace(/^\n+/, "");
+  if (status) status += `\n${DECISION_OWNERSHIP_LINE}`;
   const remainingAfter = agentTurnBudget(collaboration) - countAgentTurns(collaboration) - 1;
-  if (remainingAfter < collaboration.agents.length - 1) {
+  if (remainingAfter < collaboration.agents.length) {
     const line =
-      "This is the final round: do not start a new prototype or a revision (nobody would assess it). " +
+      "This is the final round: do not start a new prototype or a revision (there are not enough turns left to assess it and decide on it). " +
       "Give any verdicts you still owe, and decide SHORTLIST or SCRAP on your own assessed prototypes.";
     status = status ? `${status}\n${line}` : `## Prototype status\n${line}`;
   }
@@ -186,7 +195,8 @@ function historyContent(collaboration: Collaboration, message: CollaborationMess
 
 /**
  * Run the tracker on an agent turn BEFORE it is recorded, record it (with the URL-free public form in
- * public sessions), then post any screenshots under the same public turn number.
+ * public sessions), then post any screenshots under the same public turn number. Serialized with nudges
+ * so the turn is recorded at exactly the index the tracker keyed it by.
  */
 async function recordAgentTurn(collaboration: Collaboration, message: CollaborationMessage): Promise<void> {
   const tracker = collaboration.prototype;
@@ -194,11 +204,13 @@ async function recordAgentTurn(collaboration: Collaboration, message: Collaborat
     recordCollaborationMessage(collaboration, message);
     return;
   }
-  const turnKey = collaboration.messages.length;
-  const result = await tracker.onTurn(message.agentIndex ?? 0, message.content, turnKey);
-  const publicText = collaboration.publicChannel ? tracker.publicView(message.content, turnKey) : undefined;
-  recordCollaborationMessage(collaboration, message, publicText);
-  postPrototypeAttachments(collaboration.publicChannel, collaboration.messages.length, message.agent, result.attachments);
+  await serializeTurn(collaboration, async () => {
+    const turnKey = collaboration.messages.length;
+    const result = await tracker.onTurn(message.agentIndex ?? 0, message.content, turnKey);
+    const publicText = collaboration.publicChannel ? tracker.publicView(message.content, turnKey) : undefined;
+    recordCollaborationMessage(collaboration, message, publicText);
+    postPrototypeAttachments(collaboration.publicChannel, collaboration.messages.length, message.agent, result.attachments);
+  });
 }
 
 function computeCurrentRound(collaboration: Collaboration): number {
@@ -314,21 +326,18 @@ export async function startCollaboration(
     memory: openingSources.includes("memory"),
     workspace: openingSources.includes("workspace"),
   }, topic, Math.random, { public: isPublic }) : undefined;
-  // Prototype board before the public channel: a prototype config error must not leave a public header behind.
-  const prototype = isPrototype
-    ? await openPrototypeTracker({ sessionId: collaborationId, mode, participants: roleNames, assessorIsCaller: false, public: isPublic, topic })
-    : undefined;
-  // Created before the first LLM call so the header is the first post. Only topic (never context) is
-  // published. Config errors fail the start.
-  let publicChannel: PublicChannel | undefined;
-  try {
-    publicChannel = options.public
-      ? openPublicChannel(collaborationId, { mode, participants: roleNames, topic: topic || "(open conversation)" })
-      : undefined;
-  } catch (e) {
-    await closePrototypeTracker(prototype, "ended");
-    throw e;
-  }
+  // Prototype board, then public channel, both before the first LLM call so the header is the first post.
+  // Only topic (never context) is published. Config errors fail the start (a public config error closes
+  // the board first).
+  const { prototype, publicChannel } = await openSessionSurfaces(
+    isPrototype
+      ? { sessionId: collaborationId, mode, participants: roleNames, assessorIsCaller: false, public: isPublic, topic }
+      : undefined,
+    () =>
+      options.public
+        ? openPublicChannel(collaborationId, { mode, participants: roleNames, topic: topic || "(open conversation)" })
+        : undefined
+  );
 
   const collaboration: Collaboration = {
     id: collaborationId,
@@ -422,7 +431,15 @@ export async function startCollaboration(
         await advanceCollaboration(collaboration);
       }
     } catch (e) {
-      if (!publicChannel) throw e;
+      if (!publicChannel) {
+        // The caller never receives this id. A private prototype session is removed with its board and
+        // sandbox (it cannot prototype without them); a plain session is left as before.
+        if (prototype) {
+          collaborations.delete(collaborationId);
+          await closePrototypeTracker(prototype, "ended");
+        }
+        throw e;
+      }
       // Turns are already on the public topic: keep the id and URL reachable instead of losing them.
       collaboration.status = "paused";
       autoRunError = e instanceof Error ? e.message : String(e);
@@ -598,7 +615,13 @@ export async function nudgeCollaboration(
   if (!collaboration) {
     throw new Error(`Collaboration not found: ${collaborationId}`);
   }
+  // Prototype sessions: wait for an agent turn the tracker is still processing, so the nudge neither
+  // takes that turn's message index nor slips past a prototype the turn has just proposed.
+  if (collaboration.prototype) return serializeTurn(collaboration, () => injectNudge(collaboration, message));
+  return injectNudge(collaboration, message);
+}
 
+function injectNudge(collaboration: Collaboration, message: string): CollaborationMessage {
   // Prototype mode: the human's feedback must not reach the session while an artifact is being assessed.
   const tracker = collaboration.prototype;
   if (tracker?.hasLiveUnderAssessment()) {
@@ -703,7 +726,7 @@ export async function endCollaboration(
   const outcomes = tracker ? { prototypeOutcomes: tracker.outcomesMarkdown() } : undefined;
 
   if (collaboration.publicChannel) {
-    const publicResult = await collaboration.publicChannel.finalize({ summary });
+    const publicResult = await collaboration.publicChannel.finalize({ summary: publicSummary(tracker, summary) });
     return {
       transcript,
       summary,
@@ -767,5 +790,13 @@ export function getCollaborationTranscript(
   if (!collaboration) {
     throw new Error(`Collaboration not found: ${collaborationId}`);
   }
+  return collaborationHistoryView(collaboration);
+}
+
+/**
+ * A copy of the messages as agents see them: in prototype sessions resolved prototypes are stubs, so
+ * destroyed source never re-enters a prompt (transcripts, from_session).
+ */
+export function collaborationHistoryView(collaboration: Collaboration): CollaborationMessage[] {
   return collaboration.prototype ? stubbedTranscript(collaboration) : [...collaboration.messages];
 }

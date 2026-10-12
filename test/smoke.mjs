@@ -32,7 +32,12 @@ const smokeEnv = {
   ROUNDTABLE_ACTIVITY_LOG: join(root, "activity.jsonl"),
   ROUNDTABLE_TRANSCRIPTS_DIR: join(root, "transcripts"),
   ROUNDTABLE_PARALLEL_TURNS: "2",
+  // Prototype sandboxes stay under the temp root; never spawn a browser or headless Chrome.
+  ROUNDTABLE_PROTOTYPE_DIR: join(root, "prototypes"),
+  ROUNDTABLE_PROTOTYPE_SCREENSHOTS: "0",
+  ROUNDTABLE_PROTOTYPE_OPEN: "",
 };
+const PROTOTYPE_START_TOOLS = ["start_meeting", "start_local_meeting", "start_collaboration"];
 // Load .env once, then pin test config before index.js imports config.ts. Stub every child fetch,
 // including Ollama reachability; a developer's .env must never enable network or home-directory writes.
 const preload = join(root, "offline.mjs");
@@ -174,6 +179,27 @@ async function checkDispatch() {
       assert(system.includes("## Conversation mode") && !system.includes("## Your context"), system);
       assert(calls[0].messages[1].content.includes("Just shipped onboarding"), JSON.stringify(calls[0]));
     });
+    const block =
+      'A one-field launch checklist.\n<prototype title="Launch checklist" kind="web">\n' +
+      '<file path="index.html"><!doctype html><h1>Launch checklist</h1><input type="checkbox"> Pricing approved</file>\n' +
+      "<demo>Busy founder: ticks it on mobile. Expert: keyboard only. Non-technical: one obvious box.</demo>\n</prototype>";
+    script(block);
+    const proto = JSON.parse(await call("start_collaboration", { ...providerArgs, agents: ["cfo", "product-lead"], topic: "Launch checklist", prototype: true }));
+    const board = await realFetch(proto.prototypes?.board_url ?? "http://127.0.0.1:9/").then((r) => r.status, () => 0);
+    const viewer = await realFetch(proto.prototypes?.live?.[0]?.url ?? "http://127.0.0.1:9/").then((r) => r.status, () => 0);
+    check("dispatch start_collaboration prototype: true returns a live board", () => {
+      // The board URL carries a capability token path; only returned URLs are ever used.
+      assert(/^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]+\/$/.test(proto.prototypes?.board_url ?? ""), JSON.stringify(proto));
+      assert(proto.prototypes.live[0]?.url?.startsWith(proto.prototypes.board_url), JSON.stringify(proto.prototypes));
+      assert(proto.prototypes.live.length === 1 && proto.prototypes.live[0].label === "P1 v1" && board === 200 && viewer === 200, `${board}/${viewer} ${JSON.stringify(proto.prototypes)}`);
+      assert(calls[0].messages[0].content.includes("## Prototype mode"), "directive missing");
+    });
+    const protoEnd = await call("end_collaboration", { collaboration_id: proto.collaborationId });
+    const afterEnd = await realFetch(proto.prototypes.board_url).then((r) => r.status, () => 0);
+    check("dispatch end_collaboration destroys the board and lists prototype outcomes", () => {
+      assert(protoEnd.includes("## Prototype outcomes") && protoEnd.includes("## Shortlist for the human") && afterEnd === 0, `${afterEnd} ${protoEnd}`);
+    });
+
     script("CFO contribution", "Product contribution", "CFO second contribution", "Product second contribution", spec, "Verdict: READY", "Verdict: READY");
     const previewText = await call("create_agent", { ...providerArgs, from_session: conversation.collaborationId, task: "Own launch checks", name: "launch-owner", context: "Design context", rounds: 2, write: false, perform_task: true });
     const preview = workshopResult(previewText);
@@ -260,6 +286,13 @@ try {
     assert(JSON.stringify(p?.mode?.enum) === JSON.stringify(["collaborate", "debate", "waffle-house", "conversation"]), JSON.stringify(p?.mode));
     assert(p?.debate_focus?.type === "string", "missing debate_focus");
   });
+  check("meeting and collaboration starters have a boolean prototype parameter", () => {
+    for (const name of PROTOTYPE_START_TOOLS) {
+      const p = byName[name]?.inputSchema?.properties?.prototype;
+      assert(p?.type === "boolean" && /Not supported with mode conversation/.test(p.description), `${name}: ${JSON.stringify(p)}`);
+    }
+    for (const name of NEW_START_TOOLS) assert(!byName[name]?.inputSchema?.properties?.prototype, `${name} must not take prototype`);
+  });
   check("all session starters have a boolean public parameter", () => {
     for (const name of ["start_meeting", "start_local_meeting", "start_collaboration", ...NEW_START_TOOLS]) {
       const p = byName[name]?.inputSchema?.properties?.public;
@@ -332,6 +365,8 @@ try {
     ["improve_agent", { agent: "missing-agent" }, 'Agent prompt not found for "missing-agent"'],
     ["improve_agent", { agent: "cfo", include_self: false }, "improve_agent needs at least one participant"],
     ["start_collaboration", { agents: ["cfo", "skeptic"] }, 'topic is required (only mode "conversation" may omit it)'],
+    ["start_collaboration", { agents: ["cfo", "skeptic"], mode: "conversation", prototype: true }, 'prototype: true is not supported with mode "conversation"'],
+    ["start_meeting", { agent: "cfo", agenda: "x", prototype: "yes" }, 'start_meeting: "prototype" must be a boolean'],
   ]) {
     const r = await server.callTool(tool, args);
     check(`${tool} validates ${expected} without calling a provider`, () => assert(r.isError && r.text.includes(expected), r.text));
@@ -376,7 +411,7 @@ try {
     assert(ollama.isError && /Ollama is not reachable at http:\/\/127\.0\.0\.1:9/.test(ollama.text), ollama.text));
 
   const debug = await server.callTool("debug_env");
-  check("debug_env reports version 0.3.1", () => assert(/"version": "0\.3\.1"/.test(debug.text), debug.text.slice(0, 200)));
+  check("debug_env reports version 0.4.0", () => assert(/"version": "0\.4\.0"/.test(debug.text), debug.text.slice(0, 200)));
   check("debug_env reports integration config and active ultraplans", () => {
     const d = JSON.parse(debug.text);
     assert(d.skills_dir === smokeEnv.ROUNDTABLE_SKILLS_DIR && d.workspace_dir === root, debug.text);
@@ -386,6 +421,12 @@ try {
     const banner = server.stderr();
     assert(banner.includes(`Skills dir: ${smokeEnv.ROUNDTABLE_SKILLS_DIR}`) && banner.includes(`Workspace dir: ${root}`), banner);
     assert(banner.includes(`Activity log: ${smokeEnv.ROUNDTABLE_ACTIVITY_LOG}`), banner);
+  });
+  check("debug_env and the banner report prototype mode", () => {
+    const p = JSON.parse(debug.text).prototypes;
+    assert(p && p.dir === smokeEnv.ROUNDTABLE_PROTOTYPE_DIR && p.screenshots === false && p.open_browser === false && p.active_boards === 0, debug.text);
+    const banner = server.stderr();
+    assert(banner.includes(`Prototype mode: dir ${smokeEnv.ROUNDTABLE_PROTOTYPE_DIR}, chrome `) && banner.includes("screenshots off, auto-open off"), banner);
   });
   check("debug_env does not leak key material", () =>
     assert(!/sk-[A-Za-z0-9_-]{8,}|r8_[A-Za-z0-9]{8,}/.test(debug.text), "key-like string in debug_env output"));

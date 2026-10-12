@@ -1,14 +1,15 @@
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { json, stubFetch } from "./helpers.mjs";
 
 // Must be set before the first import of config.js.
 const TRANSCRIPTS = mkdtempSync(resolve(tmpdir(), "rt-transcripts-"));
 process.env.ROUNDTABLE_TRANSCRIPTS_DIR = TRANSCRIPTS;
+after(() => rmSync(TRANSCRIPTS, { recursive: true, force: true }));
 process.env.ROUNDTABLE_NTFY_URL = "http://ntfy.test";
 process.env.ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS = "5000";
 delete process.env.ROUNDTABLE_PUBLISHER;

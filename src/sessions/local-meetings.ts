@@ -10,6 +10,16 @@ import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
 import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
+import {
+  closePrototypeTracker,
+  meetingPrototypeStatus,
+  openSessionSurfaces,
+  prototypeSystemSuffix,
+  publicSummary,
+  recordMeetingAgentReply,
+  recordMeetingCallerMessage,
+  type PrototypeTracker,
+} from "./prototype-mode.js";
 
 export interface LocalMeeting {
   id: string;
@@ -28,6 +38,8 @@ export interface LocalMeeting {
   appendSystemPrompt?: string;
   /** Set when the meeting was started with public: true. */
   publicChannel?: PublicChannel;
+  /** Set when the meeting was started with prototype: true (the caller assesses the agent's prototypes). */
+  prototype?: PrototypeTracker;
 }
 
 export const localMeetings = new Map<string, LocalMeeting>();
@@ -139,16 +151,20 @@ export async function executeClaudeCLI(
 /**
  * Build conversation context for multi-turn local meetings.
  * Since CLI doesn't maintain state, we include full conversation history in the prompt.
+ * `lastMessageSuffix` is added to the last history entry in this prompt only (prototype meetings: the
+ * agent's prototype status after the caller's latest message); it is never stored.
  */
-export function buildLocalMeetingContext(meeting: LocalMeeting, newMessage?: string): string {
+export function buildLocalMeetingContext(meeting: LocalMeeting, newMessage?: string, lastMessageSuffix?: string): string {
   let context = "";
 
-  // Add conversation history
+  // Add conversation history (prototype meetings: resolved prototypes appear as stubs)
   if (meeting.messages.length > 0) {
     context += "## Previous Conversation\n\n";
-    for (const msg of meeting.messages) {
+    const last = meeting.messages.length - 1;
+    for (const [i, msg] of meeting.messages.entries()) {
       const role = msg.role === "user" ? "User" : "Assistant";
-      context += `**${role}:** ${msg.content}\n\n`;
+      const content = meeting.prototype ? meeting.prototype.historyView(msg.content, i) : msg.content;
+      context += `**${role}:** ${content}${i === last && lastMessageSuffix ? lastMessageSuffix : ""}\n\n`;
     }
     context += "---\n\n";
   }
@@ -167,19 +183,41 @@ export async function startLocalMeeting(
   context?: string,
   mode: MeetingMode = "standard",
   debateFocus?: string,
-  isPublic: boolean = false
-): Promise<{ meetingId: string; response: string; public?: { url: string | null; topic: string } }> {
+  isPublic: boolean = false,
+  isPrototype: boolean = false
+): Promise<{
+  meetingId: string;
+  response: string;
+  public?: { url: string | null; topic: string };
+  /** Prototype meetings only. */
+  prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
+}> {
   assertMeetingMode(mode);
   const agentInfo = await loadAgent(agent);
   const meetingId = `local-${++localMeetingCounter}`;
   const challengerDirective = mode === "debate" ? buildChallengerDirective(debateFocus) : undefined;
   const skillsSection = renderSkillsSection(agentInfo.skills);
-  const appendSystemPrompt = [skillsSection.trim(), challengerDirective?.trim(), isPublic ? publicDirectiveSuffix().trim() : undefined]
-    .filter(Boolean).join("\n\n") || undefined;
-  // Created before the first CLI call so the header is the first post. Config errors fail the start.
-  const publicChannel = isPublic
-    ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda })
-    : undefined;
+  const appendSystemPrompt = [
+    skillsSection.trim(),
+    challengerDirective?.trim(),
+    isPublic ? publicDirectiveSuffix().trim() : undefined,
+    isPrototype ? prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic }).trim() : undefined,
+  ].filter(Boolean).join("\n\n") || undefined;
+  // Board, then public channel, both before the first CLI call so the header is the first post. Config
+  // errors fail the start (a public config error closes the board first).
+  const { prototype, publicChannel } = await openSessionSurfaces(
+    isPrototype
+      ? {
+          sessionId: meetingId,
+          mode,
+          participants: [isPublic ? publicLabel(agent) : agent],
+          assessorIsCaller: true,
+          public: isPublic,
+          topic: agenda,
+        }
+      : undefined,
+    () => (isPublic ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda }) : undefined)
+  );
 
   let userMessage = agenda;
   if (context) {
@@ -195,6 +233,7 @@ export async function startLocalMeeting(
     assistantMessage = await executeClaudeCLI(agentInfo.path, userMessage, undefined, appendSystemPrompt);
   } catch (e) {
     if (publicChannel) void publicChannel.finalize();
+    await closePrototypeTracker(prototype, "ended");
     throw e;
   }
 
@@ -211,17 +250,25 @@ export async function startLocalMeeting(
     ...(challengerDirective !== undefined && { challengerDirective }),
     ...(appendSystemPrompt !== undefined && { appendSystemPrompt }),
     ...(publicChannel && { publicChannel }),
+    ...(prototype && { prototype }),
   };
   localMeetings.set(meetingId, meeting);
+  const record = recorderFor(meeting);
   // Publish the agenda only: userMessage also carries the private context and the debate suffix.
-  recordLocalMeetingMessage(meeting, { role: "user", content: userMessage }, agenda);
-  recordLocalMeetingMessage(meeting, { role: "assistant", content: assistantMessage });
+  await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
+  await recordMeetingAgentReply(meeting, assistantMessage, record);
 
   return {
     meetingId,
     response: assistantMessage,
     ...(publicChannel && { public: { url: publicChannel.url, topic: publicChannel.topic } }),
+    ...(prototype && { prototypes: prototype.takeCallSummary() }),
   };
+}
+
+/** The local meeting's own choke point, as the shared prototype recorders take it. */
+function recorderFor(meeting: LocalMeeting): (message: Message, publicText?: string) => void {
+  return (message, publicText) => recordLocalMeetingMessage(meeting, message, publicText);
 }
 
 export async function continueLocalMeeting(
@@ -233,13 +280,15 @@ export async function continueLocalMeeting(
     throw new Error(`Local meeting not found: ${meetingId}`);
   }
 
-  // Build full context including history
-  recordLocalMeetingMessage(meeting, { role: "user", content: message });
-  const fullPrompt = buildLocalMeetingContext(meeting);
+  // Build full context including history (prototype meetings: the agent's prototype status rides on the
+  // caller's latest message in this prompt only, never in the stored history)
+  const record = recorderFor(meeting);
+  await recordMeetingCallerMessage(meeting, message, record);
+  const fullPrompt = buildLocalMeetingContext(meeting, undefined, meetingPrototypeStatus(meeting));
 
   const assistantMessage = await executeClaudeCLI(meeting.agentPromptPath, fullPrompt, undefined, meeting.appendSystemPrompt);
 
-  recordLocalMeetingMessage(meeting, { role: "assistant", content: assistantMessage });
+  await recordMeetingAgentReply(meeting, assistantMessage, record);
 
   return assistantMessage;
 }
@@ -252,6 +301,10 @@ export async function endLocalMeeting(
   if (!meeting) {
     throw new Error(`Local meeting not found: ${meetingId}`);
   }
+
+  // Prototype mode: destroy whatever is still live first; the summary and activity see the stubbed history.
+  const tracker = meeting.prototype;
+  if (tracker) await closePrototypeTracker(tracker, "ended");
 
   let summary = "";
   if (requestSummary && meeting.messages.length > 0) {
@@ -266,17 +319,27 @@ export async function endLocalMeeting(
     mode: meeting.mode,
     agents: [agentKey(meeting.agent)],
     topic: meeting.agenda ?? "",
-    outcome: summary || meeting.messages.slice().reverse().find((m) => m.role === "assistant")?.content,
+    outcome: summary || lastAgentReply(meeting),
     public: meeting.publicChannel !== undefined,
   });
   localMeetings.delete(meetingId);
 
-  const text = summary || `Local meeting ${meetingId} with ${meeting.agent} ended.`;
+  let text = summary || `Local meeting ${meetingId} with ${meeting.agent} ended.`;
+  if (tracker) text += `\n\n${tracker.outcomesMarkdown()}`;
   if (meeting.publicChannel) {
-    const r = await meeting.publicChannel.finalize({ summary: summary || undefined });
+    const r = await meeting.publicChannel.finalize({ summary: publicSummary(tracker, summary || undefined) });
     return `${text}\n\n${formatPublicBlock(meeting.publicChannel, r)}`;
   }
   return text;
+}
+
+/** The agent's last reply as agents see it (resolved prototypes stubbed). */
+function lastAgentReply(meeting: LocalMeeting): string | undefined {
+  for (let i = meeting.messages.length - 1; i >= 0; i--) {
+    const m = meeting.messages[i];
+    if (m.role === "assistant") return meeting.prototype ? meeting.prototype.historyView(m.content, i) : m.content;
+  }
+  return undefined;
 }
 
 export function listLocalMeetings(): Array<{
@@ -286,6 +349,9 @@ export function listLocalMeetings(): Array<{
   startedAt: string;
   mode: MeetingMode;
   public: boolean;
+  prototype: boolean;
+  /** Prototype meetings, while the board is up. */
+  board_url?: string;
   type: "local";
 }> {
   return Array.from(localMeetings.values()).map((m) => ({
@@ -295,6 +361,8 @@ export function listLocalMeetings(): Array<{
     startedAt: m.startedAt.toISOString(),
     mode: m.mode,
     public: m.publicChannel !== undefined,
+    prototype: m.prototype !== undefined,
+    ...(m.prototype && !m.prototype.closed && { board_url: m.prototype.boardUrl }),
     type: "local" as const,
   }));
 }

@@ -16,7 +16,7 @@ import {
   WEBHOOK_URL,
   WEBHOOK_VIEW_URL,
 } from "../config.js";
-import { NtfyPublisher } from "./ntfy.js";
+import { NtfyPublisher, safeFilename } from "./ntfy.js";
 import { PublishQueue, chunkText, type QueueOptions } from "./queue.js";
 import { errMessage } from "./shared.js";
 import { mergeCounts, redact } from "./redact.js";
@@ -202,12 +202,7 @@ export class PublicChannel {
       mergeCounts(this.redactions, counts);
       const content = text.trim() ? text : "_(no content)_";
 
-      // Keep (turn, speaker) unique so the public record can be matched back to local entries.
-      let speaker = cleanSpeaker(entry.speaker);
-      for (let n = 2; this.usedLabels.has(`${entry.turn}\u0000${speaker}`); n++) {
-        speaker = `${cleanSpeaker(entry.speaker)} #${n}`;
-      }
-      this.usedLabels.add(`${entry.turn}\u0000${speaker}`);
+      const speaker = this.uniqueSpeaker(entry.turn, entry.speaker);
 
       const id = this.nextId++;
       const timestamp = (this.opts.now ?? (() => new Date()))().toISOString();
@@ -228,6 +223,61 @@ export class PublicChannel {
       this.queue.enqueue(id, msgs);
     } catch (e) {
       console.error(`[Publish] record failed: ${errMessage(e)}`);
+    }
+  }
+
+  /** Keep (turn, speaker) unique so the public record can be matched back to local entries. */
+  private uniqueSpeaker(turn: number, raw: string): string {
+    let speaker = cleanSpeaker(raw);
+    for (let n = 2; this.usedLabels.has(`${turn}\u0000${speaker}`); n++) {
+      speaker = `${cleanSpeaker(raw)} #${n}`;
+    }
+    this.usedLabels.add(`${turn}\u0000${speaker}`);
+    return speaker;
+  }
+
+  /**
+   * Record a file (e.g. a prototype screenshot): the caption is redacted and kept as a local transcript
+   * entry, and the file is queued in order as a single, never-chunked message. Synchronous; never throws.
+   */
+  recordAttachment(entry: {
+    turn: number;
+    speaker: string;
+    filename: string;
+    contentType: string;
+    bytes: Buffer;
+    caption: string;
+  }): void {
+    try {
+      if (this.finalizing) return;
+      const filename = safeFilename(entry.filename);
+      const { text, counts } = redact(entry.caption ?? "");
+      mergeCounts(this.redactions, counts);
+      const caption = text.replace(/\s+/g, " ").trim() || filename;
+      const speaker = this.uniqueSpeaker(entry.turn, entry.speaker);
+      const id = this.nextId++;
+      const timestamp = (this.opts.now ?? (() => new Date()))().toISOString();
+      this.lastTurn = Math.max(this.lastTurn, entry.turn);
+      this.local.push({ id, turn: entry.turn, speaker, kind: "attachment", content: caption, timestamp, delivered: false });
+      this.queue.enqueue(id, [
+        {
+          title: formatTitle(entry.turn, speaker),
+          content: caption,
+          turn: entry.turn,
+          part: 1,
+          parts: 1,
+          speaker,
+          kind: "attachment",
+          timestamp,
+          attachment: {
+            filename,
+            contentType: entry.contentType || "application/octet-stream",
+            bytes: Buffer.isBuffer(entry.bytes) ? entry.bytes : Buffer.from(entry.bytes ?? []),
+          },
+        },
+      ]);
+    } catch (e) {
+      console.error(`[Publish] recordAttachment failed: ${errMessage(e)}`);
     }
   }
 

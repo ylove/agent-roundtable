@@ -2,7 +2,7 @@
 // Configuration (reads process.env only; imports no local modules)
 // ============================================================================
 
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 // Version (also reported by debug_env and the startup banner)
@@ -102,4 +102,22 @@ export const TRANSCRIPTS_DIR =
 export const PUBLISH_FLUSH_TIMEOUT_MS = parseInt(
   process.env.ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS || "30000",
   10
+);
+
+// Prototype mode: ephemeral artifacts agents propose, served read-only on 127.0.0.1 (see src/prototypes/)
+// Sandbox root; must be outside any git work tree (checked when a prototype session starts).
+export const PROTOTYPE_DIR =
+  process.env.ROUNDTABLE_PROTOTYPE_DIR || join(tmpdir(), "agent-roundtable-prototypes");
+/** Safety cap: a prototype still live after this long is destroyed. */
+export const PROTOTYPE_TTL_MS = Math.max(
+  1,
+  parseInt(process.env.ROUNDTABLE_PROTOTYPE_TTL_MS || "1800000", 10) || 1_800_000
+);
+/** Open the prototype board in the default browser when a session starts (opt-in). */
+export const PROTOTYPE_OPEN = /^(1|true|yes|on)$/i.test((process.env.ROUNDTABLE_PROTOTYPE_OPEN || "").trim());
+/** Chrome/Chromium binary for public-session screenshots; empty means auto-detect. */
+export const CHROME_PATH_OVERRIDE = process.env.ROUNDTABLE_CHROME_PATH || "";
+/** Screenshots of web and diagram prototypes in public sessions (on unless switched off). */
+export const PROTOTYPE_SCREENSHOTS = !/^(0|false|no|off)$/i.test(
+  (process.env.ROUNDTABLE_PROTOTYPE_SCREENSHOTS || "").trim()
 );

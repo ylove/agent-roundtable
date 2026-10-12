@@ -41,6 +41,7 @@ export class NtfyPublisher implements Publisher {
   }
 
   async send(channel: Channel, msg: OutgoingMessage): Promise<SendResult> {
+    if (msg.attachment) return this.sendAttachment(channel, msg);
     let res: Response;
     try {
       res = await fetch(`${this.base}/`, {
@@ -61,6 +62,37 @@ export class NtfyPublisher implements Publisher {
       await res.body?.cancel().catch(() => {});
       return { ok: true };
     }
+    return this.failure(res);
+  }
+
+  /** Upload a file: PUT to the topic with the bytes as the body; title and caption travel as headers. */
+  private async sendAttachment(channel: Channel, msg: OutgoingMessage): Promise<SendResult> {
+    const a = msg.attachment!;
+    let res: Response;
+    try {
+      res = await fetch(`${this.base}/${channel.id}`, {
+        method: "PUT",
+        headers: {
+          Filename: asciiFilename(a.filename),
+          Title: headerValue(msg.title),
+          Message: headerValue(msg.content),
+          Firebase: "no",
+          ...this.authHeaders(),
+        },
+        body: new Uint8Array(a.bytes),
+        signal: AbortSignal.timeout(this.opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS),
+      });
+    } catch (e) {
+      return { ok: false, retryable: true, error: `network error: ${errMessage(e)}` };
+    }
+    if (res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return { ok: true };
+    }
+    return this.failure(res, true);
+  }
+
+  private async failure(res: Response, attachment = false): Promise<SendResult> {
     let body = "";
     try {
       body = await res.text();
@@ -81,6 +113,13 @@ export class NtfyPublisher implements Publisher {
       if (daily) {
         return { ok: false, retryable: false, stop: "quota", error: `daily message limit reached (${errText || "HTTP 429"})` };
       }
+    }
+    if (attachment && (res.status === 413 || /too large/i.test(errText))) {
+      return {
+        ok: false,
+        retryable: false,
+        error: `attachment rejected as too large by the ntfy server (HTTP ${res.status}${errText ? `: ${errText}` : ""})`,
+      };
     }
     const fail = failFromStatus(res.status, res.statusText, parseRetryAfter(res.headers.get("Retry-After")));
     if (!fail.ok && errText) fail.error += `: ${errText}`;
@@ -115,4 +154,29 @@ export class NtfyPublisher implements Publisher {
       return null;
     }
   }
+}
+
+/** ASCII-only file name for the Filename header. */
+function asciiFilename(name: string): string {
+  return name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 100) || "attachment.bin";
+}
+
+/**
+ * A header-safe value: printable ASCII as is; anything else as RFC 2047 encoded words (UTF-8, base64),
+ * which ntfy decodes. Words carry at most 45 bytes each, split on code-point boundaries.
+ */
+export function headerValue(value: string): string {
+  const v = String(value ?? "").replace(/[\r\n\t]+/g, " ").replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (/^[\x20-\x7e]*$/.test(v)) return v;
+  const words: string[] = [];
+  let cur = "";
+  for (const ch of v) {
+    if (Buffer.byteLength(cur + ch, "utf8") > 45) {
+      words.push(cur);
+      cur = "";
+    }
+    cur += ch;
+  }
+  if (cur) words.push(cur);
+  return words.map((w) => `=?UTF-8?B?${Buffer.from(w, "utf8").toString("base64")}?=`).join(" ");
 }

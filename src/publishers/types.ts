@@ -1,6 +1,6 @@
 // Shared types for the publisher layer (public session channels).
 
-export type EntryKind = "turn" | "header" | "nudge" | "caller" | "summary";
+export type EntryKind = "turn" | "header" | "nudge" | "caller" | "summary" | "attachment";
 
 /** One thing recorded into a public session. */
 export interface PublicEntry {
@@ -30,6 +30,8 @@ export interface OutgoingMessage {
   speaker: string;
   kind: EntryKind;
   timestamp: string;
+  /** A file to post with this message (kind "attachment"; never chunked). `content` is its caption. */
+  attachment?: { filename: string; contentType: string; bytes: Buffer };
 }
 
 export type SendResult =

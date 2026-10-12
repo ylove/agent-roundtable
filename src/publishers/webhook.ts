@@ -61,6 +61,14 @@ export class WebhookPublisher implements Publisher {
           kind: msg.kind,
           content: msg.content,
           timestamp: msg.timestamp,
+          // Attachments: metadata only, never the bytes.
+          ...(msg.attachment && {
+            attachment: {
+              filename: msg.attachment.filename,
+              contentType: msg.attachment.contentType,
+              size: msg.attachment.bytes.length,
+            },
+          }),
         }),
         signal: AbortSignal.timeout(this.opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS),
       });

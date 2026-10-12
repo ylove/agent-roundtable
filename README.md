@@ -48,6 +48,14 @@ Once the server is registered you do not call the tools yourself: you ask for wh
 
 > Start a debate meeting with the cfo about our pricing agenda.
 
+**Prototype mode** — agents show their proposals instead of only describing them:
+
+> Run a prototype collaboration on agent-roundtable between product-lead and skeptic on the checkout redesign; have them prototype their proposals.
+
+> Start a meeting with the product-lead about the pricing page, with prototypes on. Ask them to show me the page.
+
+> Run a public prototype waffle-house on the roundtable: the skeptic defends "one-click checkout" against the cfo and product-lead, with prototypes.
+
 **Diagnostics:**
 
 > Run debug_env on agent-roundtable and tell me which providers are configured.
@@ -77,6 +85,47 @@ See the [Ultraplan tool calls](#ultraplan-tool-calls) below.
 Private conversations default to grounding: workspace excerpts (package metadata, project instructions, README and recent git history), agent-memory notes, and recent roundtable activity are sent to the session's provider. Set `grounding: false` to disable this. **Public conversations never receive grounding.** The activity log is stored locally. Private conversation grounding and private `improve_agent` contributor prompts send recent topics and outcomes from it to the session's provider. Public improve runs never include the target's recent activity in any prompt. `list_collaborations` reports the opening angle and grounding sources.
 
 See the [Conversation tool calls](#conversation-tool-calls) below.
+
+## Prototype mode
+
+> Run a prototype collaboration on agent-roundtable between product-lead and skeptic on the checkout redesign; have them prototype their proposals.
+
+`prototype: true` on `start_meeting`, `start_local_meeting` or `start_collaboration` lets agents show a proposal as well as describe it. It is orthogonal to `mode`: it works with standard and debate meetings and with collaborate, debate and waffle-house collaborations, and is rejected with `mode: "conversation"`, which has no deliverable. The default is `false`, and with it unset nothing changes.
+
+**What agents produce.** An agent attaches one `<prototype>` block to a turn (at most one per turn, 1-10 files, 100 KB total, relative paths only):
+
+```
+<prototype title="Inline coupon field" kind="web" entry="index.html" revises="P1">
+<file path="index.html">...</file>
+<demo>walkthroughs: impatient user, screen-reader user, expert on mobile with the network dropping</demo>
+</prototype>
+```
+
+- `web`: the proposal can be shown in a page. A scaled-down page with just the proposed page or element.
+- `code`: otherwise, the artifact that would produce the proposal, such as SQL or Terraform. It is never executed.
+- `diagram`: abstract proposals, as Mermaid source.
+- `text`: text proposals, as draft 1.
+
+When the proposal involves user interaction, a `<demo>` walkthrough is required, covering at least three user types or modalities: for example impatient, impaired, expert or non-technical users; mobile, desktop or an interrupted network. The server assigns ids (`P1`, `P2`, ...). `revises="P1"` creates a new version, `P1 v2`. Assessors reply with `Verdict on P1: APPROVE | REVISE | REJECT — reason`; the proposer then answers with `Decision on P1: REVISE | SCRAP | SHORTLIST — reason`.
+
+**Lifecycle.** A prototype is materialized into a sandbox, shown on the board, and assessed by every other participant. In collaborations that is every other agent; in meetings it is you, the caller, through `say`. It is **destroyed as soon as assessment completes**: the sandbox directory is removed and the board shows the prototype as destroyed (HTTP 410) with the verdicts. The proposer then revises (a new version), scraps, or shortlists. A TTL cap (`ROUNDTABLE_PROTOTYPE_TTL_MS`) destroys anything abandoned. Everything is destroyed when the session ends or the server stops, and directories left by a crashed server are swept on the next start.
+
+**The board.** Results include `prototypes.board_url` (`http://127.0.0.1:<port>/`), available from the first result. The page refreshes itself. Web prototypes appear in desktop and mobile frames, diagrams are rendered in the browser (Mermaid is loaded from a pinned CDN version), and code and drafts are shown as text, alongside the demos and the verdicts so far. The board is read-only: you can watch, but give feedback only after the session ends. Set `ROUNDTABLE_PROTOTYPE_OPEN=1` to open it automatically at session start. A collaboration runs several turns per call, so a prototype may be proposed and destroyed within a single `continue_collaboration`; keep the board open to watch.
+
+**Feedback hold.** Every result carries a notice telling the orchestrator to show you the board URL and not to relay your feedback on prototypes into the session until it ends. `nudge_collaboration` is refused while a prototype is under assessment. `end_*` returns **Prototype outcomes** (per id and version: proposer, kind, verdicts, decision, status) and a **Shortlist for the human** with the final source, the diagram (with a mermaid.live link) or the draft. Transcripts show resolved prototypes as one-line stubs.
+
+**Agent history.** Once a prototype is resolved, its source is replaced in what agents see by a one-line stub (title, kind, file count, verdicts, decision), which keeps token use bounded. An open prototype is shown in full, and each turn prompt lists the prototypes awaiting that agent's verdict or decision.
+
+**Safety.**
+
+- Files live in a sandbox under the OS temp directory (`ROUNDTABLE_PROTOTYPE_DIR`). The server refuses a root inside a git work tree, the root has a `.gitignore`, and nothing is committed or pushed.
+- Nothing agents write is ever executed. The server only serves static files and, in public sessions, renders web pages in headless Chrome.
+- The board binds to `127.0.0.1`, checks the `Host` header, sends a restrictive Content-Security-Policy, and accepts only GET and HEAD.
+- Agents assess the source and the demos. Screenshots are not sent to providers.
+
+**Public prototype sessions.** The localhost board is never posted. The public channel gets a Markdown reference for each prototype: title, kind, files, demo, code capped at about 8 KB, a mermaid.live link for diagrams, and the draft for text proposals. When Chrome is available, desktop and mobile screenshots of web prototypes are posted as ntfy attachments; a webhook receives a text reference with attachment metadata and no bytes. Files are redacted before they are materialized, so the board, the screenshots and the posted code all come from redacted source. Public prototype agents are told they may write fresh prototype code but never reproduce existing or private source. ntfy servers limit attachments (on `ntfy.sh` they expire after a few hours and count toward anonymous visitor limits); check your ntfy server's attachment settings.
+
+See the [Prototype tool calls](#prototype-tool-calls) below.
 
 ## Agent creation and refinement
 
@@ -115,7 +164,7 @@ The caller talks to one agent persona. Provider and model are fixed at `start_me
 
 | Tool | Arguments |
 | --- | --- |
-| `start_meeting` | `{ agent, agenda, context?, mode?, debate_focus?, public?, provider?, model?, base_url? }` |
+| `start_meeting` | `{ agent, agenda, context?, mode?, debate_focus?, prototype?, public?, provider?, model?, base_url? }` |
 | `say` | `{ meeting_id, message }` |
 | `end_meeting` | `{ meeting_id, request_summary? }` |
 | `list_meetings` | — |
@@ -126,7 +175,7 @@ Spawns the local `claude` CLI with `--system-prompt-file`, so the conversation r
 
 | Tool | Arguments |
 | --- | --- |
-| `start_local_meeting` | `{ agent, agenda, context?, mode?, debate_focus?, public? }` |
+| `start_local_meeting` | `{ agent, agenda, context?, mode?, debate_focus?, prototype?, public? }` |
 | `say_local` | `{ meeting_id, message }` |
 | `end_local_meeting` | `{ meeting_id, request_summary? }` |
 | `list_local_meetings` | — |
@@ -137,7 +186,7 @@ Two or more personas take turns on a topic. One provider/model is used for the w
 
 | Tool | Arguments |
 | --- | --- |
-| `start_collaboration` | `{ agents[], topic?, context?, grounding?, max_rounds?, auto_run_rounds?, mode?, debate_focus?, public?, provider?, model?, base_url? }` |
+| `start_collaboration` | `{ agents[], topic?, context?, grounding?, max_rounds?, auto_run_rounds?, mode?, debate_focus?, prototype?, public?, provider?, model?, base_url? }` |
 | `continue_collaboration` | `{ collaboration_id, rounds? }` |
 | `nudge_collaboration` | `{ collaboration_id, message }` |
 | `pause_collaboration` | `{ collaboration_id }` |
@@ -170,12 +219,14 @@ Two or more personas take turns on a topic. One provider/model is used for the w
 
 | Tool | Returns |
 | --- | --- |
-| `debug_env` | version, whether each key is configured (presence only, never any part of the value), Ollama reachability, default models, agents/skills/workspace dirs, activity log path or `off`, parallel turn limit, active sessions including ultraplans, public-session publisher settings |
+| `debug_env` | version, whether each key is configured (presence only, never any part of the value), Ollama reachability, default models, agents/skills/workspace dirs, activity log path or `off`, parallel turn limit, active sessions including ultraplans, public-session publisher settings, a `prototypes` block (directory, Chrome, screenshots, auto-open, TTL, active boards) |
 
 ## Modes
 
 - **debate** (meetings, local meetings, collaborations): the agent, or every agent after `agents[0]`, acts as a challenger that stress-tests a position instead of helping build it. `agents[0]` is the proponent. `debate_focus` optionally narrows the challenge.
 - **waffle-house** (collaborations only): an adversarial gauntlet. `agents[0]` defends an idea, every other agent attacks it. Each round every attacker attacks, then the defender answers the whole volley (rebut, concede or revise) and restates its "Current position (vN)". A session runs `1 + max_rounds x N` agent turns and always ends on the defender's rebuttal; the defender writes the summary (final form of the idea, what changed and which attack forced it, unanswered attacks, confidence). Needs 2+ agents. Attackers may be blunt about the idea; identity attacks, threats and slurs are out of bounds.
+
+- **prototype** (a flag, not a mode): agents show proposals as prototypes; combines with the modes above except conversation. See [Prototype mode](#prototype-mode).
 
 - **conversation** (collaborations only): informal chat from the agents' own situation; optional topic and private grounding. See [Conversation mode](#conversation-mode).
 
@@ -195,6 +246,8 @@ Pass `public: true` to `start_meeting`, `start_local_meeting`, `start_collaborat
 - Channel names are random (`<prefix>-<session id>-<22 random characters>`) and never derived from the topic. Unlisted is not private: anyone with the link can read it. Do not put anything in a public session that you would not put on a billboard.
 - Publishing never fails or blocks a session. If posting fails, the session continues and the failure shows up in the end-of-session block; the local transcript marks undelivered entries.
 - If a server exits before a public session is ended, the transcript is not saved; the public channel just expires.
+
+**Prototype sessions.** With `prototype: true`, public channels get a Markdown reference per prototype and, when Chrome is available, screenshot attachments; the localhost board is never posted. See [Prototype mode](#prototype-mode).
 
 **ntfy (default).** Messages go to `ROUNDTABLE_NTFY_URL` (default `https://ntfy.sh`) as JSON with `Firebase: no`, so they are not forwarded to Google. Open `<server>/<topic>` in a browser to watch; the page renders Markdown. Limits on the anonymous `ntfy.sh` server: 250 messages per day, a burst of 60 requests then one every 5 seconds, and messages are cached for 12 hours. Replies longer than about 3.8 KB are split into ordered parts. The server retries on 429 (honoring `Retry-After`) and stops posting for the session if the daily limit is reached or auth is rejected, then marks the channel degraded. Self-host ntfy or set a token to lift the limits.
 
@@ -247,6 +300,11 @@ Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 
 | `ROUNDTABLE_PUBLIC_TOPIC_PREFIX` | prefix of the generated public channel name | `roundtable` |
 | `ROUNDTABLE_TRANSCRIPTS_DIR` | where public-session transcripts are saved | `~/.agent-roundtable/transcripts` |
 | `ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS` | max wait for pending posts when a public session ends | `30000` |
+| `ROUNDTABLE_PROTOTYPE_DIR` | prototype sandbox root (refused inside a git work tree) | `<os temp dir>/agent-roundtable-prototypes` |
+| `ROUNDTABLE_PROTOTYPE_TTL_MS` | prototype safety cap: abandoned prototypes are destroyed after this long | `1800000` |
+| `ROUNDTABLE_PROTOTYPE_OPEN` | open the prototype board in a browser at session start | off (`1` enables) |
+| `ROUNDTABLE_CHROME_PATH` | Chrome/Chromium binary for public-session screenshots | auto-detect Google Chrome / Chromium |
+| `ROUNDTABLE_PROTOTYPE_SCREENSHOTS` | screenshots of web prototypes; only used by public prototype sessions | on |
 
 `.env` is loaded from the package directory (next to `package.json`) with `override: true`, so values there win over anything the MCP host passes in its `env` block. `.env` is gitignored and is the single source of truth for secrets. See `.env.example`.
 
@@ -397,6 +455,44 @@ end_collaboration { "collaboration_id": "<id>", "request_summary": true }
 ```
 
 Add `topic` for a loose theme, or `grounding: false` to skip workspace, memory and activity excerpts.
+
+### Prototype tool calls
+
+```json
+start_collaboration { "agents": ["product-lead", "skeptic"], "topic": "Checkout redesign", "prototype": true, "max_rounds": 2, "auto_run_rounds": 1 }
+```
+
+Every result for a prototype session carries a `prototypes` block:
+
+```json
+"prototypes": {
+  "board_url": "http://127.0.0.1:52814/",
+  "live": [{ "id": "P2", "version": 1, "title": "Inline coupon field", "kind": "web", "proposer": "product-lead", "status": "live" }],
+  "destroyed_this_call": [{ "id": "P1", "version": 1, "title": "Express checkout", "kind": "web" }],
+  "notice": "Show the human the board URL. Do not relay the human's feedback on prototypes into this session until it ends."
+}
+```
+
+Continue as usual; a prototype may be proposed, assessed and destroyed inside one call:
+
+```json
+continue_collaboration { "collaboration_id": "<id>", "rounds": 1 }
+```
+
+In a prototype meeting you are the assessor. Reply to the agent's prototype with a verdict line:
+
+```json
+start_meeting { "agent": "product-lead", "agenda": "Pricing page", "prototype": true }
+say           { "meeting_id": "<id>", "message": "Verdict on P1: REVISE — the annual toggle is easy to miss on mobile." }
+```
+
+`nudge_collaboration` is refused while a prototype is under assessment. Ending returns the outcomes and the shortlist:
+
+```json
+end_collaboration { "collaboration_id": "<id>", "request_summary": true }
+```
+
+The result adds a **Prototype outcomes** section and a **Shortlist for the human** with the final source, diagram or draft of each shortlisted prototype.
 
 ### Agent workshop tool calls
 

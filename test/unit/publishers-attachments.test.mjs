@@ -1,17 +1,26 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stubFetch } from "./helpers.mjs";
 import { createPublicChannel } from "../../dist/publishers/index.js";
-import { headerValue } from "../../dist/publishers/ntfy.js";
+import { headerValue, safeFilename } from "../../dist/publishers/ntfy.js";
 import { formatTitle } from "../../dist/publishers/transcript.js";
 
 const ok = () => new Response("{}", { status: 200 });
 const ntfyCfg = { kind: "ntfy", ntfyUrl: "https://ntfy.example.test", topicPrefix: "rt" };
 const webhookCfg = { kind: "webhook", webhookUrl: "https://hooks.example.test/in", topicPrefix: "rt" };
-const tmp = () => mkdtemp(join(tmpdir(), "rt-att-"));
+const made = [];
+after(() => {
+  for (const d of made) rmSync(d, { recursive: true, force: true });
+});
+const tmp = async () => {
+  const d = await mkdtemp(join(tmpdir(), "rt-att-"));
+  made.push(d);
+  return d;
+};
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 3, 255]);
 const ndjson = (events) => events.map((e) => JSON.stringify(e)).join("\n") + "\n";
 
@@ -108,6 +117,63 @@ test("ntfy attachment: 413 is a clear, non-retryable failure; daily quota stops 
   const res2 = await ch2.finalize();
   assert.equal(res2.degraded, true);
   assert.equal(calls.filter((c) => c.init.method === "POST").length, 0);
+});
+
+test("ntfy attachment: a 429 other than the daily message quota (42908) fails that file only", async (t) => {
+  for (const body of [
+    { code: 42905, http: 429, error: "limit reached: daily bandwidth reached" },
+    { code: 42907, http: 429, error: "limit reached: too many attachments" },
+    { error: "limit reached: daily bandwidth quota" },
+  ]) {
+    t.mock.restoreAll();
+    let puts = 0;
+    const posted = [];
+    stubFetch(t, (url, init) => {
+      if (init.method === "PUT") {
+        puts++;
+        return new Response(JSON.stringify(body), { status: 429 });
+      }
+      if (init.method === "POST") posted.push(JSON.parse(init.body).message);
+      return url.includes("/json?") ? new Response("", { status: 200 }) : ok();
+    });
+    const ch = createPublicChannel("s1", { participants: ["a", "b"] }, { config: ntfyCfg, transcriptsDir: await tmp(), postHeader: false, sleep: async () => {} });
+    ch.record({ turn: 1, speaker: "a", content: "turn one" });
+    ch.recordAttachment(shot({ turn: 1, speaker: "a" }));
+    ch.recordAttachment(shot({ turn: 1, speaker: "a", filename: "P1v1-mobile.png" }));
+    ch.record({ turn: 2, speaker: "b", content: "turn two" });
+    ch.record({ turn: 3, speaker: "a", content: "turn three" });
+    const res = await ch.finalize();
+    assert.equal(res.degraded, false, JSON.stringify(body));
+    assert.equal(puts, 2, "each attachment tried once, never retried");
+    assert.deepEqual(posted, ["turn one", "turn two", "turn three"], "text posts continue");
+    assert.equal(res.failed, 2);
+    assert.ok(!res.warnings.some((w) => /degraded/.test(w)), res.warnings.join("; "));
+  }
+});
+
+test("ntfy text: a 429 that names the daily quota still stops the channel (unchanged)", async (t) => {
+  let posts = 0;
+  stubFetch(t, (url, init) => {
+    if (init.method === "POST") {
+      posts++;
+      return new Response(JSON.stringify({ error: "limit reached: daily message quota reached" }), { status: 429 });
+    }
+    return new Response("", { status: 200 });
+  });
+  const ch = createPublicChannel("s1", { participants: ["a"] }, { config: ntfyCfg, transcriptsDir: await tmp(), postHeader: false, sleep: async () => {} });
+  ch.record({ turn: 1, speaker: "a", content: "one" });
+  ch.record({ turn: 2, speaker: "a", content: "two" });
+  const res = await ch.finalize();
+  assert.equal(res.degraded, true);
+  assert.equal(posts, 1);
+});
+
+test("safeFilename: one sanitizer for the channel and the ntfy header", () => {
+  assert.equal(safeFilename("P1v1-desktop.png"), "P1v1-desktop.png");
+  assert.equal(safeFilename("../../évil name.png"), "vil-name.png");
+  assert.equal(safeFilename("dir\\sub/..hidden"), "hidden");
+  assert.equal(safeFilename(""), "attachment.bin");
+  assert.equal(safeFilename(null), "attachment.bin");
 });
 
 test("webhook attachment: JSON metadata only, never the bytes", async (t) => {

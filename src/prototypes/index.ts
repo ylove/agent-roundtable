@@ -22,7 +22,7 @@ export {
   parseVerdictFor,
   parseDecisionFor,
   replacePrototypeBlock,
-  hasPrototypeBlock,
+  scrubPrototypeBlocks,
   validatePath,
   type ParsedPrototype,
   type ParseResult,

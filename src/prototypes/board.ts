@@ -1,26 +1,38 @@
 // Read-only prototype board: one HTTP server per session on 127.0.0.1 (random port).
 // Serves a live list of prototypes, a viewer per prototype version and the static files of web
 // prototypes. GET/HEAD only, Host-header checked (blocks DNS rebinding), no CORS, no caching.
-// Everything rendered from agent content is HTML-escaped.
+// Every route lives under a random capability token (http://127.0.0.1:<port>/<token>/); anything
+// else is 404. Everything rendered from agent content is HTML-escaped.
+//
+// The board is also the deny-all proxy of the screenshot browser (see screenshot.ts): a proxied
+// (absolute-form) request is served only when it targets this board's own prototype files; every
+// other target, and every CONNECT or upgrade, is answered 403.
 import { spawn } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { lstat, readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { isAbsolute, relative, resolve } from "node:path";
+import type { Duplex } from "node:stream";
 import { diagramFile, mermaidSourceOf, validatePath } from "./parse.js";
 import type { PrototypeFile, PrototypeRecord } from "./types.js";
 
-export const MERMAID_MODULE_URL = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+export const MERMAID_BASE_URL = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/";
+export const MERMAID_MODULE_URL = `${MERMAID_BASE_URL}dist/mermaid.esm.min.mjs`;
 
 export const VIEWER_CSP =
-  "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data:; frame-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'";
+  `default-src 'self'; script-src 'self' 'unsafe-inline' ${MERMAID_BASE_URL}; style-src 'self' 'unsafe-inline'; ` +
+  "img-src 'self' data:; frame-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
+/**
+ * Prototype files. `sandbox` gives the page an opaque origin wherever it is shown (the viewer's iframe or
+ * a top-level screenshot), so it behaves the same in both and can never read the board (state.json).
+ */
 export const APP_CSP =
   "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
-  "connect-src 'self'; form-action 'none'; base-uri 'none'";
-const BOARD_CSP =
+  "connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-forms allow-modals";
+export const BOARD_CSP =
   "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
-  "connect-src 'self'; frame-src 'none'; form-action 'none'; base-uri 'none'";
+  "connect-src 'self'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
 /** Prototype pages run in an opaque origin: no access to the board, no top-level navigation, no popups. */
 const IFRAME_SANDBOX = "allow-scripts allow-forms allow-modals";
 
@@ -47,7 +59,11 @@ const COMMON_HEADERS: Record<string, string> = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
+  "Cross-Origin-Resource-Policy": "same-origin",
 };
+
+/** A prototype page's own subresources: its opaque (sandboxed) origin is cross-origin to them. */
+const APP_SUBRESOURCE_CORP = "cross-origin";
 
 const CONTENT_TYPES: Record<string, string> = {
   html: "text/html; charset=utf-8",
@@ -154,17 +170,17 @@ function decisionHtml(p: BoardPrototype): string {
 const encodePath = (p: string) => p.split("/").map(encodeURIComponent).join("/");
 
 // Board page: reload when the state revision changes (no agent content is ever built in client JS).
-const BOARD_SCRIPT = `(function(){var rev=document.body.getAttribute("data-rev");var t=setInterval(function(){
-fetch("/state.json",{cache:"no-store"}).then(function(r){return r.json()}).then(function(s){if(String(s.rev)!==rev)location.reload()})
+const BOARD_SCRIPT = `(function(){var rev=document.body.getAttribute("data-rev");var base=document.body.getAttribute("data-base");
+var t=setInterval(function(){fetch(base+"state.json",{cache:"no-store"}).then(function(r){return r.json()}).then(function(s){if(String(s.rev)!==rev)location.reload()})
 .catch(function(){clearInterval(t);var n=document.getElementById("live-note");if(n)n.textContent="The board has closed (the session ended)."})},2000)})();`;
 
 // Viewer: refresh the status and verdicts in place (textContent only), reload once the prototype is destroyed.
-const VIEWER_SCRIPT = `(function(){var key=document.body.getAttribute("data-key");
+const VIEWER_SCRIPT = `(function(){var key=document.body.getAttribute("data-key");var base=document.body.getAttribute("data-base");
 function fit(){document.querySelectorAll(".scaler").forEach(function(el){var w=+el.getAttribute("data-w"),h=+el.getAttribute("data-h");
 var avail=el.parentElement.clientWidth||w;var s=Math.min(1,avail/w);var f=el.querySelector("iframe");f.style.transform="scale("+s+")";
 el.style.width=Math.floor(w*s)+"px";el.style.height=Math.floor(h*s)+"px"})}
 window.addEventListener("resize",fit);fit();
-var t=setInterval(function(){fetch("/state.json",{cache:"no-store"}).then(function(r){return r.json()}).then(function(s){
+var t=setInterval(function(){fetch(base+"state.json",{cache:"no-store"}).then(function(r){return r.json()}).then(function(s){
 var p=null;for(var i=0;i<s.prototypes.length;i++)if(s.prototypes[i].key===key)p=s.prototypes[i];
 if(!p||p.destroyed){location.reload();return}
 document.getElementById("status").textContent=p.statusText;
@@ -180,11 +196,17 @@ const MERMAID_SCRIPT =
   `mermaid.initialize({startOnLoad:false,securityLevel:"strict",theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default"});` +
   `await mermaid.run({querySelector:".mermaid"});`;
 
+/** Route of a prototype's own files, under the token: "/p/<key>/app" or "/p/<key>/app/<path>". */
+const APP_ROUTE_RE = /^\/p\/P\d{1,4}v\d{1,4}\/app(?:\/|$)/;
+
 export class PrototypeBoard {
   private state: BoardState = { prototypes: [] };
   private rev = 0;
   private port = 0;
   private closing?: Promise<void>;
+  /** Capability token: the first path segment of every route. */
+  private readonly token = randomBytes(18).toString("base64url");
+  private readonly tokenBytes = Buffer.from(this.token);
 
   private constructor(
     private readonly meta: BoardMeta,
@@ -196,6 +218,9 @@ export class PrototypeBoard {
     const server = createServer();
     const board = new PrototypeBoard(meta, server);
     server.on("request", (req, res) => board.handle(req, res));
+    // As a proxy, the board never opens tunnels or upgrades connections.
+    server.on("connect", (_req: IncomingMessage, socket: Duplex) => refuseSocket(socket));
+    server.on("upgrade", (_req: IncomingMessage, socket: Duplex) => refuseSocket(socket));
     return new Promise((resolvePromise, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", () => {
@@ -209,9 +234,14 @@ export class PrototypeBoard {
     });
   }
 
-  /** "http://127.0.0.1:<port>/" */
+  /** "http://127.0.0.1:<port>/<token>/" */
   get url(): string {
-    return `http://127.0.0.1:${this.port}/`;
+    return `http://127.0.0.1:${this.port}${this.base}`;
+  }
+
+  /** "/<token>/": the path prefix of every route. */
+  private get base(): string {
+    return `/${this.token}/`;
   }
 
   update(state: BoardState): void {
@@ -282,7 +312,37 @@ export class PrototypeBoard {
     });
   }
 
+  /**
+   * Refuse a proxied request: 403 with an empty body. Chrome then shows its own error page; a 403 with a
+   * body is committed as a document, which intermittently stalls a headless capture until its timeout.
+   */
+  private refuseProxied(res: ServerResponse): void {
+    res.writeHead(403, { ...COMMON_HEADERS, "Content-Length": "0" });
+    res.end();
+  }
+
+  private tokenMatches(segment: string): boolean {
+    const b = Buffer.from(segment);
+    return b.length === this.tokenBytes.length && timingSafeEqual(b, this.tokenBytes);
+  }
+
   private async route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let target = req.url ?? "/";
+    // Absolute-form: a request from the screenshot browser, which uses this board as its proxy.
+    // Only this board itself is reachable that way; everything else is refused.
+    const proxied = !target.startsWith("/");
+    if (proxied) {
+      let u: URL | null = null;
+      try {
+        u = new URL(target);
+      } catch {
+        u = null;
+      }
+      if (!u || u.protocol !== "http:" || u.host !== `127.0.0.1:${this.port}` || u.username || u.password) {
+        return this.refuseProxied(res);
+      }
+      target = u.pathname + u.search;
+    }
     const host = String(req.headers.host ?? "").toLowerCase();
     if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) {
       return this.text(req, res, 421, "Misdirected request: this board only answers on its own local address.");
@@ -292,22 +352,31 @@ export class PrototypeBoard {
     }
     let pathname: string;
     try {
-      pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+      pathname = new URL(target, "http://127.0.0.1").pathname;
     } catch {
       return this.text(req, res, 400, "Bad request");
     }
-    if (pathname === "/") return this.html(req, res, 200, this.boardPage(), BOARD_CSP);
-    if (pathname === "/state.json") {
+    // Capability token: "/<token>" then the route; anything else does not exist.
+    const t = /^\/([^/]*)(\/.*)?$/.exec(pathname);
+    if (!t || !this.tokenMatches(t[1])) return this.text(req, res, 404, "Not found");
+    const sub = t[2];
+    // The screenshot browser may load prototype files only: never the board, its state or a viewer.
+    if (proxied && (sub === undefined || !APP_ROUTE_RE.test(sub))) return this.refuseProxied(res);
+    if (sub === undefined) {
+      res.writeHead(308, { ...COMMON_HEADERS, Location: this.base, "Content-Length": "0" });
+      return void res.end();
+    }
+    if (sub === "/") return this.html(req, res, 200, this.boardPage(), BOARD_CSP);
+    if (sub === "/state.json") {
       return this.send(req, res, 200, JSON.stringify(this.publicState()), "application/json; charset=utf-8");
     }
-    const m = /^\/p\/(P\d{1,4}v\d{1,4})(?:\/(.*))?$/.exec(pathname);
+    const m = /^\/p\/(P\d{1,4}v\d{1,4})(?:\/(.*))?$/.exec(sub);
     if (!m) return this.text(req, res, 404, "Not found");
     const p = this.state.prototypes.find((x) => x.key === m[1]);
     if (!p) return this.text(req, res, 404, "Not found");
     if (!p.live) return this.html(req, res, 410, this.destroyedPage(p), VIEWER_CSP);
     const rest = m[2];
     if (rest === undefined || rest === "") return this.html(req, res, 200, this.viewerPage(p), VIEWER_CSP);
-    if (rest === "render" && p.kind === "diagram") return this.html(req, res, 200, this.renderPage(p), VIEWER_CSP);
     if (rest === "app" || rest.startsWith("app/")) return this.serveApp(req, res, p, rest.slice(4));
     return this.text(req, res, 404, "Not found");
   }
@@ -341,7 +410,13 @@ export class PrototypeBoard {
     if (!this.state.prototypes.find((x) => x.key === p.key)?.live) {
       return this.text(req, res, 410, "Destroyed after assessment");
     }
-    return this.send(req, res, 200, bytes, contentTypeFor(path), { "Content-Security-Policy": APP_CSP });
+    const type = contentTypeFor(path);
+    return this.send(req, res, 200, bytes, type, {
+      "Content-Security-Policy": APP_CSP,
+      // A page is a navigation (CORP does not apply); its CSS, scripts and images are loaded by its
+      // opaque origin, which "same-origin" would block.
+      ...(!type.startsWith("text/html") && { "Cross-Origin-Resource-Policy": APP_SUBRESOURCE_CORP }),
+    });
   }
 
   /** state.json: metadata only. Never any file content; file names only while live. */
@@ -373,7 +448,7 @@ export class PrototypeBoard {
         awaiting: p.awaiting,
         ...(p.decision && { decision: p.decision }),
         ...(p.supersededBy && { supersededBy: p.supersededBy }),
-        url: `/p/${p.key}/`,
+        url: `${this.base}p/${p.key}/`,
       })),
     };
   }
@@ -400,13 +475,13 @@ export class PrototypeBoard {
               (p.live && p.awaiting.length ? `<p class="meta">Awaiting verdicts from: ${esc(p.awaiting.join(", "))}</p>` : "") +
               verdictsHtml(p).replace(' id="verdicts"', "") +
               decisionHtml(p) +
-              (p.live ? `<p><a href="/p/${esc(p.key)}/">Open prototype</a></p>` : `<p class="meta">Destroyed.</p>`) +
+              (p.live ? `<p><a href="${esc(this.base)}p/${esc(p.key)}/">Open prototype</a></p>` : `<p class="meta">Destroyed.</p>`) +
               `</article>`
           )
           .join("")}</div>`
       : `<p class="empty">No prototypes yet. They appear here as the participants propose them.</p>`;
     return page("Prototype board", this.header() + `<h2>Prototypes</h2>` + cards, {
-      bodyAttrs: ` data-rev="${this.rev}"`,
+      bodyAttrs: ` data-rev="${this.rev}" data-base="${esc(this.base)}"`,
       script: BOARD_SCRIPT,
     });
   }
@@ -422,7 +497,7 @@ export class PrototypeBoard {
     let content = "";
     let moduleScript: string | undefined;
     if (p.kind === "web" && live.entry) {
-      const src = `/p/${p.key}/app/${encodePath(live.entry)}`;
+      const src = `${this.base}p/${p.key}/app/${encodePath(live.entry)}`;
       const frame = (cls: string, label: string, w: number, h: number) =>
         `<figure class="${cls}"><figcaption>${label} ${w}×${h}</figcaption>` +
         `<div class="scaler" data-w="${w}" data-h="${h}"><iframe sandbox="${IFRAME_SANDBOX}" src="${esc(src)}" ` +
@@ -439,7 +514,7 @@ export class PrototypeBoard {
       content = `<h2>${p.kind === "text" ? "Draft" : "Source (never executed)"}</h2>${this.filesHtml(live.files, true)}`;
     }
     const body =
-      `<p class="meta"><a href="/">← Board</a></p>` +
+      `<p class="meta"><a href="${esc(this.base)}">← Board</a></p>` +
       `<h1>${esc(p.label)} · ${esc(p.title)}</h1>` +
       `<p class="meta">${esc(p.kind)} · proposed by ${esc(p.proposer)}</p>` +
       `<p class="notice">Read-only. Feedback opens when the session ends. This prototype is destroyed as soon as it has been assessed.</p>` +
@@ -449,28 +524,15 @@ export class PrototypeBoard {
       (p.demo.trim() ? `<h2>Demo walkthroughs</h2><div class="demo">${esc(p.demo)}</div>` : "") +
       content;
     return page(`${p.label} · ${p.title}`, body, {
-      bodyAttrs: ` data-key="${esc(p.key)}"`,
+      bodyAttrs: ` data-key="${esc(p.key)}" data-base="${esc(this.base)}"`,
       script: VIEWER_SCRIPT,
       ...(moduleScript && { moduleScript }),
     });
   }
 
-  /** Bare diagram page (used for screenshots). */
-  private renderPage(p: BoardPrototype): string {
-    const f = diagramFile(p.live!.files);
-    const code = f ? mermaidSourceOf(f.content) ?? "" : "";
-    return (
-      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${esc(p.label)}</title>` +
-      `<style>body{margin:0;padding:24px;background:#fff;color:#111;font-family:system-ui,sans-serif}</style></head>` +
-      `<body><pre class="mermaid">${esc(code)}</pre><script type="module">` +
-      `import mermaid from "${MERMAID_MODULE_URL}";mermaid.initialize({startOnLoad:false,securityLevel:"strict",theme:"default"});` +
-      `await mermaid.run({querySelector:".mermaid"});</script></body></html>`
-    );
-  }
-
   private destroyedPage(p: BoardPrototype): string {
     const body =
-      `<p class="meta"><a href="/">← Board</a></p>` +
+      `<p class="meta"><a href="${esc(this.base)}">← Board</a></p>` +
       `<h1>${esc(destroyedHeading(p))}</h1>` +
       `<p><strong>${esc(p.label)}</strong> · ${esc(p.title)} · ${esc(p.kind)} · proposed by ${esc(p.proposer)}</p>` +
       `<p><span class="badge s-${esc(p.status)}">${esc(statusText(p))}</span></p>` +
@@ -481,9 +543,19 @@ export class PrototypeBoard {
   }
 }
 
+/** Answer a CONNECT or upgrade with 403 and close the socket. */
+function refuseSocket(socket: Duplex): void {
+  socket.on("error", () => {});
+  try {
+    socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+  } catch {
+    socket.destroy();
+  }
+}
+
 /** Open the board in the default browser. Best effort: detached, errors ignored; only our own local URL. */
 export function openInBrowser(url: string): void {
-  if (!/^http:\/\/127\.0\.0\.1:\d{1,5}\/$/.test(url)) return;
+  if (!/^http:\/\/127\.0\.0\.1:\d{1,5}\/[A-Za-z0-9_-]{8,64}\/$/.test(url)) return;
   try {
     const opts = { detached: true, stdio: "ignore" as const, windowsHide: true };
     const child =

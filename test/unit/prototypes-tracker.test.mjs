@@ -1,6 +1,7 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,12 +9,21 @@ import {
   PrototypeTracker,
   CALLER,
   activePrototypeTrackers,
+  buildPrototypeDirective,
   destroyAllPrototypes,
   prototypeDiagnostics,
   PROTOTYPE_NOTICE,
 } from "../../dist/prototypes/index.js";
 
-const root = () => mkdtemp(join(tmpdir(), "rt-proto-tr-"));
+const made = [];
+after(() => {
+  for (const d of made) rmSync(d, { recursive: true, force: true });
+});
+const root = async () => {
+  const d = await mkdtemp(join(tmpdir(), "rt-proto-tr-"));
+  made.push(d);
+  return d;
+};
 
 async function mk(t, opts = {}) {
   const tr = await PrototypeTracker.create({
@@ -43,8 +53,9 @@ const protoDirs = (tr) => (existsSync(tr.sessionDir) ? readdirSync(tr.sessionDir
 
 test("tracker: 2-agent flow — propose, assess (destroyed from disk), SHORTLIST", async (t) => {
   const tr = await mk(t);
-  assert.match(tr.boardUrl, /^http:\/\/127\.0\.0\.1:\d+\/$/);
+  assert.match(tr.boardUrl, /^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{20,}\/$/);
   assert.equal(await status(tr.boardUrl), 200);
+  assert.equal(await status(new URL(tr.boardUrl).origin + "/"), 404, "nothing is served without the token");
 
   const r1 = await tr.onTurn(0, `Here is my idea.\n\n${webBlock()}\n\nThoughts?`, 1);
   assert.equal(r1.created.label, "P1 v1");
@@ -169,7 +180,7 @@ test("tracker: invalid blocks and invalid revisions are rejected with a remember
   assert.equal(r.created, undefined);
   assert.match(r.rejected, /invalid file path/);
   assert.match(tr.statusPromptFor(0), /Your last prototype block was rejected: invalid file path/);
-  assert.equal(tr.historyView(`try\n${bad}`, 1), "try\n[Prototype block rejected: " + r.rejected + "]");
+  assert.equal(tr.historyView(`try\n${bad}`, 1), "try\n[Prototype block not accepted: " + r.rejected + "]");
   assert.deepEqual(protoDirs(tr), []);
 
   await tr.onTurn(1, codeBlock(), 2); // bob proposes P1 (alice's error cleared on her next turn)
@@ -273,4 +284,136 @@ test("tracker: refuses a root inside a git work tree", async () => {
     () => PrototypeTracker.create({ sessionId: "s", mode: "collaborate", participants: ["a", "b"], assessorIsCaller: false, public: false, openBrowser: false, root: join(repo, "p") }),
     /git work tree/
   );
+});
+
+const views = (tr, text, key) => [tr.publicView(text, key), tr.historyView(text, key)];
+
+test("views: a cut-off (unclosed) block never goes out raw", async (t) => {
+  const tr = await mk(t, { public: true });
+  const cut = `Here it is\n<prototype title="x" kind="web">\n<file path="index.html"><h1>${"BIG ".repeat(5000)}</h1></file>\n`;
+  const r = await tr.onTurn(0, cut, 1);
+  assert.match(r.rejected, /not closed/);
+  const [pub, hist] = views(tr, cut, 1);
+  assert.equal(hist, `Here it is\n[Prototype block not accepted: ${r.rejected}]`);
+  assert.equal(pub, `Here it is\n_[Prototype block not accepted: ${r.rejected}]_`);
+  // Cut off inside the opening tag, or mid-line: still scrubbed.
+  for (const text of [`Look: <prototype title="half`, `Look: <prototype kind="web"><file path="a.html">secret`]) {
+    for (const v of views(tr, text, 2)) {
+      assert.ok(!v.includes("<prototype") && !v.includes("secret"), v);
+      assert.match(v, /^Look: _?\[Prototype block not accepted: (incomplete|not processed)\]_?$/);
+    }
+  }
+  // Prose mentions are not blocks and stay as they are.
+  for (const text of ["I will emit a `<prototype>` block next turn.", "A bare <prototype> mention, no files."]) {
+    assert.equal(tr.historyView(text, 3), text);
+    assert.equal(tr.publicView(text, 3), text);
+  }
+});
+
+test("views: rejected, extra, unprocessed and post-close blocks become placeholders", async (t) => {
+  const tr = await mk(t, { public: true });
+  // Rejected for size: the 200 KB block never reaches either view.
+  const big = `before <prototype title="y" kind="web"><file path="index.html">${"Z".repeat(200000)}</file></prototype> after`;
+  const r = await tr.onTurn(0, big, 1);
+  assert.match(r.rejected, /limit is/);
+  assert.equal(tr.historyView(big, 1), `before [Prototype block not accepted: ${r.rejected}] after`);
+  assert.equal(tr.publicView(big, 1), `before _[Prototype block not accepted: ${r.rejected}]_ after`);
+
+  // Accepted block, then an extra block and a trailing cut-off block in the same turn.
+  const multi = `${webBlock()}\nalso\n${codeBlock("second")}\nand\n<prototype title="third" kind="code"><file path="x.sql">TAIL-SECRET`;
+  const r2 = await tr.onTurn(1, multi, 2);
+  assert.equal(r2.created.label, "P1 v1");
+  const hist = tr.historyView(multi, 2);
+  assert.equal(hist.split("<prototype").length, 2, "only the accepted (live) block stays in full");
+  assert.ok(hist.includes("[extra prototype block ignored]") && hist.includes("[Prototype block not accepted: incomplete]"));
+  assert.ok(!hist.includes("TAIL-SECRET") && !hist.includes("CREATE TABLE"));
+  const pub = tr.publicView(multi, 2);
+  assert.ok(!pub.includes("<prototype") && !pub.includes("TAIL-SECRET") && !pub.includes("CREATE TABLE"), pub);
+  assert.match(pub, /\*\*Prototype P1 v1 — Inline coupon field\*\*/);
+  assert.match(pub, /_\[extra prototype block omitted\]_/);
+  assert.match(pub, /_\[Prototype block not accepted: incomplete\]_$/);
+
+  // A turn the tracker never processed (here: after close) has no record at all.
+  await tr.close("ended");
+  assert.deepEqual(await tr.onTurn(0, webBlock("late"), 3), { destroyed: [], attachments: [] });
+  assert.equal(tr.historyView(`x ${webBlock("late")} y`, 3), "x [Prototype block not accepted: not processed] y");
+  assert.equal(tr.publicView(`x ${webBlock("late")} y`, 3), "x _[Prototype block not accepted: not processed]_ y");
+});
+
+test("views: a caller's block in a meeting is never passed through", async (t) => {
+  const tr = await mk(t, { sessionId: "meeting-1", mode: "standard", participants: ["cfo"], assessorIsCaller: true });
+  await tr.onTurn(CALLER, `try this\n${webBlock("from the caller")}`, 1);
+  assert.equal(tr.historyView(`try this\n${webBlock("from the caller")}`, 1), "try this\n[Prototype block not accepted: not processed]");
+});
+
+test("names: a repeated persona is suffixed in prompts, board, outcomes, summary and public views", async (t) => {
+  const tr = await mk(t, { participants: ["sample", "sample"] });
+  await tr.onTurn(0, webBlock(), 1);
+  const live = tr.takeCallSummary().live[0];
+  assert.equal(live.proposer, "sample");
+  assert.deepEqual(live.awaiting_verdicts_from, ["sample #2"]);
+  assert.match(tr.statusPromptFor(0), /awaiting verdicts from sample #2\)/);
+  assert.match(tr.statusPromptFor(1), /by sample\. Give a line/);
+  const st = await (await fetch(`${tr.boardUrl}state.json`)).json();
+  assert.deepEqual(st.session.participants, ["sample", "sample #2"]);
+  assert.deepEqual(st.prototypes[0].awaiting, ["sample #2"]);
+  await tr.onTurn(1, "Verdict on P1: REJECT — no", 2);
+  assert.match(tr.statusPromptFor(0), /- sample #2: REJECT — no/);
+  await tr.onTurn(0, "Decision on P1: SCRAP — fine", 3);
+  assert.match(tr.outcomesMarkdown(), /\*\*P1 v1\*\* · sample · web · "Inline coupon field" · verdicts: sample #2 REJECT \(no\)/);
+
+  // Public labels that collide (same agent file name in two directories) are suffixed too.
+  const pub = await mk(t, { public: true, participants: ["/x/agents/cfo.md", "/y/agents/cfo.md"] });
+  await pub.onTurn(1, webBlock(), 1);
+  assert.match(pub.publicView(webBlock(), 1), /proposed by cfo #2_/);
+  assert.equal(pub.takeCallSummary().live[0].proposer, "/y/agents/cfo.md");
+});
+
+test("close during materialize: the prototype is never registered as live and nothing stays on disk", async (t) => {
+  const files = Array.from({ length: 10 }, (_, i) => `<file path="f${i}.html">${"x".repeat(9000)}</file>`).join("");
+  const block = `<prototype title="race" kind="web" entry="f0.html">${files}</prototype>`;
+  for (let yields = 0; yields < 30; yields++) {
+    const tr = await mk(t);
+    const turn = tr.onTurn(0, block, 1);
+    for (let i = 0; i < yields; i++) await new Promise((r) => setImmediate(r));
+    await tr.close("ended");
+    const r = await turn;
+    assert.equal(tr.hasLiveUnderAssessment(), false, `yields ${yields}`);
+    assert.deepEqual(tr.takeCallSummary().live, [], `yields ${yields}`);
+    if (r.created) assert.match(tr.outcomesMarkdown(), /status: closed at session end/);
+    for (let i = 0; i < 50 && existsSync(tr.sessionDir); i++) await new Promise((res) => setTimeout(res, 10));
+    assert.equal(existsSync(tr.sessionDir), false, `yields ${yields}: session dir removed`);
+  }
+});
+
+test("config: ROUNDTABLE_PROTOTYPE_TTL_MS has a one-minute floor and warns once, on stderr only", () => {
+  const config = new URL("../../dist/config.js", import.meta.url).href;
+  const run = (value) => {
+    const env = { ...process.env };
+    if (value === undefined) delete env.ROUNDTABLE_PROTOTYPE_TTL_MS;
+    else env.ROUNDTABLE_PROTOTYPE_TTL_MS = value;
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", `const c = await import(${JSON.stringify(config)}); console.log(c.PROTOTYPE_TTL_MS);`], { env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return { ttl: Number(r.stdout.trim()), stdout: r.stdout, warnings: r.stderr.split("\n").filter((l) => l.includes("ROUNDTABLE_PROTOTYPE_TTL_MS")) };
+  };
+  const unset = run(undefined);
+  assert.deepEqual([unset.ttl, unset.warnings.length], [1_800_000, 0]);
+  const ok = run("120000");
+  assert.deepEqual([ok.ttl, ok.warnings.length], [120_000, 0]);
+  for (const [value, want] of [["5", 60_000], ["59999", 60_000], ["0", 60_000], ["abc", 1_800_000], ["-1", 1_800_000], ["1e9", 1_800_000], ["99999999999", 2_147_483_647]]) {
+    const r = run(value);
+    assert.equal(r.ttl, want, value);
+    assert.equal(r.warnings.length, 1, `${value}: one warning`);
+    assert.match(r.stdout, /^\d+\n$/, "nothing but the value on stdout (the MCP channel)");
+  }
+});
+
+test("directive: classic scripts only, inline data, no storage, compact blocks", () => {
+  const d = buildPrototypeDirective({ assessorIsCaller: false, public: false });
+  assert.match(d, /sandboxed, network-restricted frame/);
+  assert.match(d, /classic <script> tags only \(no type="module", no ES import\)/);
+  assert.match(d, /inline any data \(no fetch or XHR of other files\)/);
+  assert.match(d, /no localStorage, sessionStorage or cookies/);
+  assert.match(d, /at most 100 KB in total/);
+  assert.match(d, /aim for under about 20 KB\): a block cut off before <\/prototype> is rejected/);
 });

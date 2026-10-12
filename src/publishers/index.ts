@@ -16,7 +16,7 @@ import {
   WEBHOOK_URL,
   WEBHOOK_VIEW_URL,
 } from "../config.js";
-import { NtfyPublisher } from "./ntfy.js";
+import { NtfyPublisher, safeFilename } from "./ntfy.js";
 import { PublishQueue, chunkText, type QueueOptions } from "./queue.js";
 import { errMessage } from "./shared.js";
 import { mergeCounts, redact } from "./redact.js";
@@ -134,17 +134,6 @@ function looksLikePath(s: string): boolean {
 }
 
 const cleanSpeaker = publicLabel;
-
-/** An ASCII file name safe for a header: letters, digits, ".", "_" and "-" only. */
-function safeFilename(raw: string): string {
-  const s = String(raw ?? "")
-    .split(/[\\/]/)
-    .pop()!
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/^[-.]+/, "")
-    .slice(0, 100);
-  return s || "attachment.bin";
-}
 
 // Channels that have not been finalized yet, so a shutdown can flush them (best effort).
 const openChannels = new Set<PublicChannel>();

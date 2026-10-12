@@ -108,16 +108,40 @@ export const PUBLISH_FLUSH_TIMEOUT_MS = parseInt(
 // Sandbox root; must be outside any git work tree (checked when a prototype session starts).
 export const PROTOTYPE_DIR =
   process.env.ROUNDTABLE_PROTOTYPE_DIR || join(tmpdir(), "agent-roundtable-prototypes");
-/** Safety cap: a prototype still live after this long is destroyed. */
-export const PROTOTYPE_TTL_MS = Math.max(
-  1,
-  parseInt(process.env.ROUNDTABLE_PROTOTYPE_TTL_MS || "1800000", 10) || 1_800_000
-);
+export const PROTOTYPE_TTL_DEFAULT_MS = 1_800_000;
+export const PROTOTYPE_TTL_MIN_MS = 60_000;
+/** setTimeout's ceiling: a longer delay would fire after 1 ms. */
+export const PROTOTYPE_TTL_MAX_MS = 2_147_483_647;
+
+/** ROUNDTABLE_PROTOTYPE_TTL_MS, clamped to [1 min, ~24.8 days]; warns once on stderr (stdout is the MCP channel). */
+function prototypeTtlMs(raw: string): number {
+  const v = raw.trim();
+  if (!v) return PROTOTYPE_TTL_DEFAULT_MS;
+  const n = /^\d+$/.test(v) ? Number(v) : NaN;
+  if (!Number.isSafeInteger(n)) {
+    console.error(
+      `[Prototype] ROUNDTABLE_PROTOTYPE_TTL_MS is not a whole number of milliseconds; using the default ${PROTOTYPE_TTL_DEFAULT_MS} ms.`
+    );
+    return PROTOTYPE_TTL_DEFAULT_MS;
+  }
+  if (n < PROTOTYPE_TTL_MIN_MS) {
+    console.error(`[Prototype] ROUNDTABLE_PROTOTYPE_TTL_MS=${n} is below the minimum; using ${PROTOTYPE_TTL_MIN_MS} ms.`);
+    return PROTOTYPE_TTL_MIN_MS;
+  }
+  if (n > PROTOTYPE_TTL_MAX_MS) {
+    console.error(`[Prototype] ROUNDTABLE_PROTOTYPE_TTL_MS=${n} is above the maximum; using ${PROTOTYPE_TTL_MAX_MS} ms.`);
+    return PROTOTYPE_TTL_MAX_MS;
+  }
+  return n;
+}
+
+/** Safety cap: a prototype still live after this long is destroyed (at least one minute). */
+export const PROTOTYPE_TTL_MS = prototypeTtlMs(process.env.ROUNDTABLE_PROTOTYPE_TTL_MS || "");
 /** Open the prototype board in the default browser when a session starts (opt-in). */
 export const PROTOTYPE_OPEN = /^(1|true|yes|on)$/i.test((process.env.ROUNDTABLE_PROTOTYPE_OPEN || "").trim());
 /** Chrome/Chromium binary for public-session screenshots; empty means auto-detect. */
 export const CHROME_PATH_OVERRIDE = process.env.ROUNDTABLE_CHROME_PATH || "";
-/** Screenshots of web and diagram prototypes in public sessions (on unless switched off). */
+/** Screenshots of web prototypes in public sessions (on unless switched off). */
 export const PROTOTYPE_SCREENSHOTS = !/^(0|false|no|off)$/i.test(
   (process.env.ROUNDTABLE_PROTOTYPE_SCREENSHOTS || "").trim()
 );

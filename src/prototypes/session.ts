@@ -3,7 +3,7 @@
 // and public views of the transcript in step. Never throws into a session.
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { PROTOTYPE_DIR, PROTOTYPE_OPEN, PROTOTYPE_SCREENSHOTS, PROTOTYPE_TTL_MS } from "../config.js";
+import { PROTOTYPE_DIR, PROTOTYPE_OPEN, PROTOTYPE_SCREENSHOTS, PROTOTYPE_TTL_MAX_MS, PROTOTYPE_TTL_MS } from "../config.js";
 import { publicLabel } from "../publishers/index.js";
 import { redact } from "../publishers/redact.js";
 import { PrototypeBoard, openInBrowser, type BoardPrototype } from "./board.js";
@@ -11,7 +11,7 @@ import {
   parseDecisionFor,
   parsePrototypeBlock,
   parseVerdictFor,
-  replacePrototypeBlock,
+  scrubPrototypeBlocks,
   type ParsedPrototype,
 } from "./parse.js";
 import { renderOutcomesMarkdown, renderPublicPrototype, renderStub } from "./render.js";
@@ -20,11 +20,12 @@ import {
   createSessionDir,
   ensurePrototypeRoot,
   materializeFiles,
+  releaseSessionDir,
   removeDir,
   removeDirSync,
   sweepStaleSessionDirs,
 } from "./sandbox.js";
-import { DESKTOP_VIEWPORT, MOBILE_VIEWPORT, captureScreenshots, findChrome } from "./screenshot.js";
+import { ChromeProcesses, DESKTOP_VIEWPORT, MOBILE_VIEWPORT, captureScreenshots, findChrome } from "./screenshot.js";
 import type { Decision, PrototypeFile, PrototypeKind, PrototypeRecord, PrototypeStatus, Verdict } from "./types.js";
 
 export type { Decision, PrototypeKind, PrototypeStatus, Verdict } from "./types.js";
@@ -88,6 +89,26 @@ interface Proto extends PrototypeRecord {
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const sweptRoots = new Set<string>();
 
+/** Placeholder for a prototype block that did not become a prototype (agent history and public views). */
+const notAcceptedPlaceholder = (reason: string) => `[Prototype block not accepted: ${reason}]`;
+/** Reason shown for an unclosed (cut-off) block. */
+const INCOMPLETE = "incomplete";
+/** Reason shown for a complete block the tracker never processed (session closed, processing failed, caller turn). */
+const NOT_PROCESSED = "not processed";
+/** Reason shown for further blocks in a turn whose first block was rejected. */
+const ONE_PER_TURN = "only one prototype per turn";
+
+/** Unique display names: a repeated name gets " #2", " #3", … ("sample", "sample #2"). */
+function uniqueNames(names: string[]): string[] {
+  const used = new Set<string>();
+  return names.map((name) => {
+    let s = name;
+    for (let n = 2; used.has(s); n++) s = `${name} #${n}`;
+    used.add(s);
+    return s;
+  });
+}
+
 export class PrototypeTracker {
   private readonly protos: Proto[] = [];
   private readonly byTurn = new Map<number, { key?: string; rejected?: string }>();
@@ -100,15 +121,22 @@ export class PrototypeTracker {
   private readonly ttlMs: number;
   private readonly screenshots: boolean;
   private readonly now: () => number;
+  /** Display names by speaker index (duplicates suffixed), and their public forms. */
+  private readonly names: string[];
+  private readonly publicNames: string[];
+  /** Screenshot browsers in flight: killed before the sandbox is removed. */
+  private readonly chrome = new ChromeProcesses();
 
   private constructor(
     private readonly opts: TrackerOptions,
     readonly sessionDir: string,
     private readonly board: PrototypeBoard
   ) {
-    this.ttlMs = Math.max(1, opts.ttlMs ?? PROTOTYPE_TTL_MS);
+    this.ttlMs = Math.min(PROTOTYPE_TTL_MAX_MS, Math.max(1, opts.ttlMs ?? PROTOTYPE_TTL_MS));
     this.screenshots = opts.screenshots ?? PROTOTYPE_SCREENSHOTS;
     this.now = opts.now ?? Date.now;
+    this.names = uniqueNames(opts.participants.map(String));
+    this.publicNames = uniqueNames(opts.participants.map((n) => publicLabel(String(n))));
   }
 
   /** Ensure the root, create the session dir, start the board, register for shutdown, maybe open a browser. */
@@ -124,10 +152,11 @@ export class PrototypeTracker {
       board = await PrototypeBoard.start({
         sessionId: opts.sessionId,
         mode: opts.mode,
-        participants: [...opts.participants],
+        participants: uniqueNames(opts.participants.map(String)),
         ...(opts.topic !== undefined && { topic: opts.topic }),
       });
     } catch (e) {
+      releaseSessionDir(sessionDir);
       await removeDir(sessionDir);
       throw new Error(`Cannot start the prototype board: ${errText(e)}`);
     }
@@ -283,6 +312,12 @@ export class PrototypeTracker {
       await removeDir(dir);
       throw e;
     }
+    // The session may have closed while the files were being written: never register a live prototype then.
+    if (this.isClosed) {
+      await removeDir(dir);
+      this.reject(result, s, turnKey, "the session ended before the prototype was ready");
+      return;
+    }
     if (!base) this.nextNum++;
     const pub = this.opts.public;
     const p: Proto = {
@@ -319,19 +354,19 @@ export class PrototypeTracker {
     this.byTurn.set(turnKey, { key });
     this.pushBoard();
 
-    // Screenshots (public sessions): read into memory before anything can destroy the directory.
-    if (pub && this.screenshots && (p.kind === "web" || p.kind === "diagram")) {
+    // Screenshots (public sessions, web prototypes; diagrams are posted as mermaid.live links): read
+    // into memory before anything can destroy the directory.
+    if (pub && this.screenshots && p.kind === "web") {
       const chrome = findChrome();
       if (chrome) {
         try {
           const shotsDir = join(dir, "shots");
           await mkdir(shotsDir, { mode: 0o700 });
-          const url =
-            p.kind === "web"
-              ? `${this.board.url}p/${key}/app/${(p.entry ?? "index.html").split("/").map(encodeURIComponent).join("/")}`
-              : `${this.board.url}p/${key}/render`;
-          const viewports = p.kind === "web" ? [DESKTOP_VIEWPORT, MOBILE_VIEWPORT] : [DESKTOP_VIEWPORT];
-          const shots = await captureScreenshots(url, shotsDir, viewports, { chromePath: chrome });
+          const url = `${this.board.url}p/${key}/app/${(p.entry ?? "index.html").split("/").map(encodeURIComponent).join("/")}`;
+          const shots = await captureScreenshots(url, shotsDir, [DESKTOP_VIEWPORT, MOBILE_VIEWPORT], {
+            chromePath: chrome,
+            processes: this.chrome,
+          });
           for (const shot of shots) {
             try {
               result.attachments.push({
@@ -393,9 +428,9 @@ export class PrototypeTracker {
     return Array.from({ length: n }, (_, i) => i).filter((i) => i !== s);
   }
 
-  private nameOf(i: number): string {
+  private nameOf(i: number, forPublic = false): string {
     if (i === CALLER) return "caller";
-    return this.opts.participants[i] ?? `participant ${i + 1}`;
+    return (forPublic ? this.publicNames : this.names)[i] ?? `participant ${i + 1}`;
   }
 
   // --------------------------------------------------------------------------
@@ -403,7 +438,6 @@ export class PrototypeTracker {
   // --------------------------------------------------------------------------
 
   private toRecord(p: Proto, forPublic = false): PrototypeRecord {
-    const label = (name: string) => (forPublic ? publicLabel(name) : name);
     return {
       id: p.id,
       version: p.version,
@@ -411,7 +445,7 @@ export class PrototypeTracker {
       key: p.key,
       title: p.title,
       kind: p.kind,
-      proposer: label(p.proposer),
+      proposer: this.nameOf(p.proposerIndex, forPublic),
       files: p.files,
       fileCount: p.fileCount,
       ...(p.entry !== undefined && { entry: p.entry }),
@@ -419,7 +453,7 @@ export class PrototypeTracker {
       status: p.status,
       verdicts: p.assessors
         .filter((a) => p.verdictMap.has(a))
-        .map((a) => ({ assessor: label(this.nameOf(a)), ...p.verdictMap.get(a)! })),
+        .map((a) => ({ assessor: this.nameOf(a, forPublic), ...p.verdictMap.get(a)! })),
       ...(p.decision && { decision: p.decision }),
       ...(p.supersededBy && { supersededBy: p.supersededBy }),
     };
@@ -491,33 +525,65 @@ export class PrototypeTracker {
     return lines.length ? `\n\n## Prototype status\n${lines.join("\n")}` : "";
   }
 
-  /** Agent-facing history: resolved prototypes become one-line stubs; live and undecided ones stay in full. */
-  historyView(text: string, turnKey: number): string {
-    const rec = this.byTurn.get(turnKey);
-    if (!rec) return text;
-    if (rec.rejected !== undefined) {
-      return replacePrototypeBlock(text, `[Prototype block rejected: ${rec.rejected}]`, "[extra prototype block ignored]");
-    }
-    const p = this.protos.find((x) => x.key === rec.key);
-    if (!p || p.status === "live" || p.status === "awaiting_decision") return text;
-    return replacePrototypeBlock(text, renderStub(this.toRecord(p)), "[extra prototype block ignored]");
+  /** The prototype accepted from this turn, if any. */
+  private acceptedAt(turnKey: number): Proto | undefined {
+    const key = this.byTurn.get(turnKey)?.key;
+    return key ? this.protos.find((x) => x.key === key) : undefined;
   }
 
-  /** Public mirror text: any block becomes a Markdown reference (redacted source); board URLs are removed. */
+  /**
+   * Scrub every prototype construct of a turn whose block was not accepted: complete blocks become
+   * "[Prototype block not accepted: <reason>]" and an unclosed (cut-off) block "… incomplete".
+   */
+  private scrubUnaccepted(text: string, turnKey: number, wrap: (s: string) => string): string {
+    const rejected = this.byTurn.get(turnKey)?.rejected;
+    return scrubPrototypeBlocks(text, {
+      first: wrap(notAcceptedPlaceholder(rejected ?? NOT_PROCESSED)),
+      extra: wrap(notAcceptedPlaceholder(rejected !== undefined ? ONE_PER_TURN : NOT_PROCESSED)),
+      unclosed: wrap(notAcceptedPlaceholder(INCOMPLETE)),
+      unclosedOnly: wrap(notAcceptedPlaceholder(rejected ?? INCOMPLETE)),
+    });
+  }
+
+  /**
+   * Agent-facing history: resolved prototypes become one-line stubs; live and undecided ones stay in
+   * full. Never a raw block otherwise: extra, unclosed, rejected and unprocessed blocks become placeholders.
+   */
+  historyView(text: string, turnKey: number): string {
+    const p = this.acceptedAt(turnKey);
+    if (!p) return this.scrubUnaccepted(text, turnKey, (s) => s);
+    const keep = p.status === "live" || p.status === "awaiting_decision";
+    return scrubPrototypeBlocks(text, {
+      first: keep ? null : renderStub(this.toRecord(p)),
+      extra: "[extra prototype block ignored]",
+      unclosed: notAcceptedPlaceholder(INCOMPLETE),
+    });
+  }
+
+  /**
+   * Public mirror text: the accepted block becomes a Markdown reference (redacted source), every other
+   * prototype construct a placeholder (never the raw block); board URLs are removed.
+   */
   publicView(text: string, turnKey: number): string {
-    let out = text;
-    const rec = this.byTurn.get(turnKey);
-    if (rec?.key) {
-      const p = this.protos.find((x) => x.key === rec.key);
-      if (p) out = replacePrototypeBlock(out, renderPublicPrototype(this.toRecord(p, true)), "_[extra prototype block omitted]_");
-    } else if (rec?.rejected !== undefined) {
-      out = replacePrototypeBlock(out, `_[prototype block rejected: ${rec.rejected}]_`, "_[extra prototype block omitted]_");
-    }
+    const p = this.acceptedAt(turnKey);
+    const italic = (s: string) => `_${s}_`;
+    const out = p
+      ? scrubPrototypeBlocks(text, {
+          first: renderPublicPrototype(this.toRecord(p, true)),
+          extra: "_[extra prototype block omitted]_",
+          unclosed: italic(notAcceptedPlaceholder(INCOMPLETE)),
+        })
+      : this.scrubUnaccepted(text, turnKey, italic);
     return this.scrubBoardUrl(out);
   }
 
   private scrubBoardUrl(s: string): string {
-    const port = /:(\d+)\/$/.exec(this.board.url)?.[1];
+    let port = "";
+    try {
+      port = new URL(this.board.url).port;
+    } catch {
+      port = "";
+    }
     if (!port) return s;
     const re = new RegExp(String.raw`(?:https?:\/\/)?(?:127\.0\.0\.1|localhost):${port}\b[^\s)"'\x60<>\]]*`, "gi");
     return s.replace(re, "[local prototype board]");
@@ -565,15 +631,22 @@ export class PrototypeTracker {
   // Shutdown
   // --------------------------------------------------------------------------
 
-  /** Destroy every live artifact (status -> closed unless terminal), stop the board, remove the session dir. Idempotent. */
-  close(reason: "ended" | "completed" | "shutdown"): Promise<void> {
-    if (!this.closing) this.closing = this.doClose(reason);
+  /**
+   * Destroy every live artifact (status -> closed unless terminal), kill screenshot browsers, stop the
+   * board, remove the session dir. Idempotent. Every reason closes the same way.
+   */
+  close(reason: "ended" | "completed" | "shutdown"): Promise<void>;
+  close(): Promise<void> {
+    if (!this.closing) this.closing = this.doClose();
     return this.closing;
   }
 
-  private async doClose(_reason: "ended" | "completed" | "shutdown"): Promise<void> {
+  private async doClose(): Promise<void> {
     this.isClosed = true;
     unregisterTracker(this);
+    // Before any removal: a browser still running would recreate the directories it writes to.
+    this.chrome.killAll();
+    releaseSessionDir(this.sessionDir);
     const dirs: string[] = [];
     for (const p of this.protos) {
       if (p.timer) clearTimeout(p.timer);
@@ -599,6 +672,8 @@ export class PrototypeTracker {
   closeSync(): void {
     this.isClosed = true;
     unregisterTracker(this);
+    this.chrome.killAll();
+    releaseSessionDir(this.sessionDir);
     for (const p of this.protos) {
       if (p.timer) clearTimeout(p.timer);
       p.timer = undefined;

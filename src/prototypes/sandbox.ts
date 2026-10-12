@@ -1,7 +1,8 @@
 // Prototype sandbox on disk: a root outside any git work tree, one mkdtemp directory per session,
 // one directory per prototype version. Files are written, never executed.
-import { existsSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { existsSync, realpathSync, rmSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PROTOTYPE_DIR } from "../config.js";
 import { redact } from "../publishers/redact.js";
@@ -39,33 +40,66 @@ export function findGitWorkTree(p: string): string | null {
   }
 }
 
+/** Refuse a root that is a symlink, not a directory, or owned by another user. False when it does not exist. */
+async function checkRootEntry(abs: string, given: string): Promise<boolean> {
+  let st;
+  try {
+    st = await lstat(abs);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw e;
+  }
+  const refuse = (why: string) =>
+    new Error(`Refusing to use the prototype directory "${given}": ${why}. Set ROUNDTABLE_PROTOTYPE_DIR to a directory you own.`);
+  if (st.isSymbolicLink()) throw refuse("it is a symbolic link");
+  if (!st.isDirectory()) throw refuse("it is not a directory");
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (uid !== undefined && st.uid !== uid) throw refuse("it is owned by another user");
+  return true;
+}
+
 /**
- * Prepare the sandbox root: refuse a root inside a git work tree, create it (0700) and write a
- * `.gitignore` of `*`. Returns the real path of the root. Throws a clear error on refusal.
+ * Prepare the sandbox root: refuse a root inside a git work tree, a symlinked root and a root owned by
+ * another user; create it (or force it) to mode 0700 and write a `.gitignore` of `*`. Returns the real
+ * path of the root. Throws a clear error on refusal.
  */
 export async function ensurePrototypeRoot(root: string = PROTOTYPE_DIR): Promise<string> {
-  const real = realpathOfNearest(root);
-  const git = findGitWorkTree(real);
+  const abs = resolve(root);
+  const git = findGitWorkTree(realpathOfNearest(abs));
   if (git) {
     throw new Error(
       `Refusing to use the prototype directory "${root}": it is inside a git work tree (${git}). ` +
         `Prototype files must never touch a repository; set ROUNDTABLE_PROTOTYPE_DIR to a directory outside any repository.`
     );
   }
-  await mkdir(real, { recursive: true, mode: 0o700 });
+  if (!(await checkRootEntry(abs, root))) {
+    await mkdir(abs, { recursive: true, mode: 0o700 });
+    await checkRootEntry(abs, root); // whatever is there now must pass the same checks
+  }
+  await chmod(abs, 0o700);
+  const real = realpathSync(abs);
   await writeFile(join(real, ".gitignore"), "*\n", { mode: 0o600 });
   return real;
 }
 
 const sanitize = (s: string) => (String(s ?? "").replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "session");
 
-/** Create a fresh directory for one session and record the owning pid in owner.json. */
+/** Session directories this process created and has not released: the sweep never touches them. */
+const ownSessionDirs = new Set<string>();
+
+/** Create a fresh 0700 directory for one session and record its owner (pid, host, time) in owner.json. */
 export async function createSessionDir(root: string, sessionId: string): Promise<string> {
   const dir = await mkdtemp(join(root, sanitize(sessionId) + "-"));
-  await writeFile(join(dir, "owner.json"), JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }), {
-    mode: 0o600,
-  });
+  ownSessionDirs.add(dir);
+  await chmod(dir, 0o700);
+  const owner = { pid: process.pid, host: hostname(), createdAt: new Date().toISOString() };
+  await writeFile(join(dir, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
   return dir;
+}
+
+/** The session is over (its directory is being removed): from now on the sweep may take what is left. */
+export function releaseSessionDir(dir: string): void {
+  ownSessionDirs.delete(dir);
 }
 
 function contained(dir: string, target: string): boolean {
@@ -154,41 +188,81 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+/** A session directory left without a readable owner.json is swept once it is older than this. */
+export const UNOWNED_SESSION_MAX_AGE_MS = 60 * 60 * 1000;
+/** Any session directory, whatever its host or pid, is swept once it is older than this. */
+export const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** mkdtemp names: the sanitized session id, "-", six random characters. */
+const SESSION_DIR_NAME = /^[A-Za-z0-9_-]{1,40}-[A-Za-z0-9]{6}$/;
+const PROTOTYPE_DIR_NAME = /^P\d{1,4}v\d{1,4}$/;
+
 /**
- * Remove session directories left behind by dead processes (owner.json pid no longer alive).
- * Directories without a readable owner.json are left alone. Never throws; returns the count removed.
+ * True when a directory holds nothing but a session's own entries (owner.json and P<n>v<n>
+ * directories). The sweep removes nothing else, so a root shared with other files stays safe.
  */
-export async function sweepStaleSessionDirs(root: string = PROTOTYPE_DIR): Promise<number> {
+async function looksLikeSessionDir(dir: string): Promise<boolean> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.every(
+      (e) => (e.name === "owner.json" && e.isFile()) || (PROTOTYPE_DIR_NAME.test(e.name) && e.isDirectory())
+    );
+  } catch {
+    return false;
+  }
+}
+
+interface Owner {
+  pid?: unknown;
+  host?: unknown;
+  createdAt?: unknown;
+}
+
+/** Whether one session directory is stale (see sweepStaleSessionDirs). */
+async function isStale(dir: string, now: number, host: string): Promise<boolean> {
+  const st = await lstat(dir);
+  let owner: Owner | null = null;
+  try {
+    const parsed: unknown = JSON.parse(await readFile(join(dir, "owner.json"), "utf8"));
+    if (parsed && typeof parsed === "object") owner = parsed as Owner;
+  } catch {
+    owner = null;
+  }
+  if (!owner) return now - st.mtimeMs > UNOWNED_SESSION_MAX_AGE_MS;
+  const pid = typeof owner.pid === "number" && Number.isInteger(owner.pid) && owner.pid > 0 ? owner.pid : 0;
+  const created = typeof owner.createdAt === "string" ? Date.parse(owner.createdAt) : NaN;
+  const age = now - (Number.isFinite(created) ? created : st.mtimeMs);
+  if (age > SESSION_MAX_AGE_MS) return true;
+  return owner.host === host && pid > 0 && pid !== process.pid && !pidAlive(pid);
+}
+
+/**
+ * Remove prototype session directories left behind. Never one of this process's own live sessions, and
+ * only directories whose contents look like a session (owner.json and P<n>v<n> directories). One goes when
+ *  - its owner.json names this host and a pid that is no longer running (and is not this process), or
+ *  - it is older than 24 hours, whatever its host or pid (hosts and containers sharing the root), or
+ *  - it has no readable owner.json and is older than 1 hour (an interrupted start or exit).
+ * Never throws; returns the count removed.
+ */
+export async function sweepStaleSessionDirs(root: string = PROTOTYPE_DIR, now: number = Date.now()): Promise<number> {
   let removed = 0;
   try {
     if (!existsSync(root)) return 0;
-    const entries = await readdir(root, { withFileTypes: true });
+    const base = realpathSync(root);
+    const host = hostname();
+    const entries = await readdir(base, { withFileTypes: true });
     for (const ent of entries) {
-      if (!ent.isDirectory()) continue;
-      const dir = join(root, ent.name);
+      if (!ent.isDirectory() || !SESSION_DIR_NAME.test(ent.name)) continue;
+      const dir = join(base, ent.name);
+      if (ownSessionDirs.has(dir)) continue;
       try {
-        const owner = JSON.parse(await readFile(join(dir, "owner.json"), "utf8")) as { pid?: unknown };
-        const pid = typeof owner.pid === "number" ? owner.pid : NaN;
-        if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
-        if (pidAlive(pid)) continue;
-        if (await removeDir(dir)) removed++;
+        if ((await isStale(dir, now, host)) && (await looksLikeSessionDir(dir)) && (await removeDir(dir))) removed++;
       } catch {
-        /* no or unreadable owner.json: not ours to remove */
+        /* vanished meanwhile or unreadable: leave it */
       }
     }
   } catch (e) {
     console.error(`[Prototype] sweep of ${root} failed: ${errText(e)}`);
   }
   return removed;
-}
-
-/** Child directories of a root (for diagnostics and tests). */
-export function listSessionDirs(root: string = PROTOTYPE_DIR): string[] {
-  try {
-    return readdirSync(root, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => join(root, e.name));
-  } catch {
-    return [];
-  }
 }

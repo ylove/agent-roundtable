@@ -12,6 +12,15 @@ import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type Publi
 import type { CollaborationMode, CollaborationRole, ConversationAngle } from "./modes.js";
 import { buildGrounding, type Grounding } from "./grounding.js";
 import {
+  NUDGE_HELD_ERROR,
+  PROTOTYPE_CONVERSATION_ERROR,
+  closePrototypeTracker,
+  openPrototypeTracker,
+  postPrototypeAttachments,
+  prototypeSystemSuffix,
+  type PrototypeTracker,
+} from "./prototype-mode.js";
+import {
   assertCollaborationMode,
   buildConversationDirective,
   buildConversationOpeningPrompt,
@@ -68,6 +77,8 @@ export interface Collaboration {
   groundingSources?: Grounding["sources"];
   /** Set when the collaboration was started with public: true. */
   publicChannel?: PublicChannel;
+  /** Set when the collaboration was started with prototype: true. */
+  prototype?: PrototypeTracker;
 }
 
 export const collaborations = new Map<string, Collaboration>();
@@ -89,17 +100,21 @@ export function setCollaborationRecordHook(hook: CollaborationRecordHook | undef
   recordHook = hook;
 }
 
-/** Append a message to the transcript. Hook failures are swallowed: recording must never break a session. */
+/**
+ * Append a message to the transcript. Hook failures are swallowed: recording must never break a session.
+ * publicText overrides what is posted (prototype sessions post a URL-free reference instead of the raw block).
+ */
 export function recordCollaborationMessage(
   collaboration: Collaboration,
-  message: CollaborationMessage
+  message: CollaborationMessage,
+  publicText?: string
 ): CollaborationMessage {
   collaboration.messages.push(message);
   // Public mirror. Turn numbers are monotonic over all messages (nudges included) so the public record stays in order.
   collaboration.publicChannel?.record({
     turn: collaboration.messages.length,
     speaker: message.agent,
-    content: message.content,
+    content: publicText ?? message.content,
     kind: message.agent === ORCHESTRATOR ? "nudge" : "turn",
   });
   if (recordHook) {
@@ -137,6 +152,53 @@ export function isCollaborationComplete(collaboration: Collaboration): boolean {
     return agentTurns >= 1 + collaboration.maxRounds * n;
   }
   return Math.floor(agentTurns / n) >= collaboration.maxRounds;
+}
+
+/** Total agent turns the session runs (the threshold isCollaborationComplete checks). */
+function agentTurnBudget(collaboration: Collaboration): number {
+  const n = collaboration.agents.length;
+  return collaboration.mode === "waffle-house" ? 1 + collaboration.maxRounds * n : collaboration.maxRounds * n;
+}
+
+/**
+ * Prototype status for the agent about to speak ("" outside prototype mode), without its leading blank
+ * lines. When the remaining budget cannot give every other agent a turn after this one, a prototype
+ * proposed now could never be fully assessed, so the agent is told not to start one.
+ */
+function prototypeStatusFor(collaboration: Collaboration, agentIndex: number): string {
+  const tracker = collaboration.prototype;
+  if (!tracker) return "";
+  let status = tracker.statusPromptFor(agentIndex).replace(/^\n+/, "");
+  const remainingAfter = agentTurnBudget(collaboration) - countAgentTurns(collaboration) - 1;
+  if (remainingAfter < collaboration.agents.length - 1) {
+    const line =
+      "This is the final round: do not start a new prototype or a revision (nobody would assess it). " +
+      "Give any verdicts you still owe, and decide SHORTLIST or SCRAP on your own assessed prototypes.";
+    status = status ? `${status}\n${line}` : `## Prototype status\n${line}`;
+  }
+  return status;
+}
+
+/** Agent-facing text of a recorded message: resolved prototypes appear as stubs. */
+function historyContent(collaboration: Collaboration, message: CollaborationMessage, index: number): string {
+  return collaboration.prototype ? collaboration.prototype.historyView(message.content, index) : message.content;
+}
+
+/**
+ * Run the tracker on an agent turn BEFORE it is recorded, record it (with the URL-free public form in
+ * public sessions), then post any screenshots under the same public turn number.
+ */
+async function recordAgentTurn(collaboration: Collaboration, message: CollaborationMessage): Promise<void> {
+  const tracker = collaboration.prototype;
+  if (!tracker) {
+    recordCollaborationMessage(collaboration, message);
+    return;
+  }
+  const turnKey = collaboration.messages.length;
+  const result = await tracker.onTurn(message.agentIndex ?? 0, message.content, turnKey);
+  const publicText = collaboration.publicChannel ? tracker.publicView(message.content, turnKey) : undefined;
+  recordCollaborationMessage(collaboration, message, publicText);
+  postPrototypeAttachments(collaboration.publicChannel, collaboration.messages.length, message.agent, result.attachments);
 }
 
 function computeCurrentRound(collaboration: Collaboration): number {
@@ -178,6 +240,7 @@ export async function startCollaboration(
     debateFocus?: string;
     public?: boolean;
     grounding?: boolean;
+    prototype?: boolean;
   } = {}
 ): Promise<{
   collaborationId: string;
@@ -186,6 +249,8 @@ export async function startCollaboration(
   public?: { url: string | null; topic: string };
   /** Set when a public session's auto-run stopped on a provider error (session left paused). */
   error?: string;
+  /** Prototype sessions only. */
+  prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
   if (agentNames.length < 2) {
     throw new Error("Collaboration requires at least 2 agents");
@@ -198,6 +263,10 @@ export async function startCollaboration(
   assertCollaborationMode(mode);
   if (mode !== "conversation" && !topic?.trim()) {
     throw new Error('topic is required (only mode "conversation" may omit it)');
+  }
+  const isPrototype = options.prototype === true;
+  if (isPrototype && mode === "conversation") {
+    throw new Error(PROTOTYPE_CONVERSATION_ERROR);
   }
   topic = topic?.trim() ? topic : "";
   const debateFocus = options.debateFocus;
@@ -232,6 +301,7 @@ export async function startCollaboration(
       if (i > 0) systemPrompt += buildAttackerDirective();
     }
     if (options.public) systemPrompt += publicDirectiveSuffix();
+    if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: false, public: !!options.public });
     agents.push({ name, systemPrompt, ...(role !== undefined && { role }) });
   }
 
@@ -244,11 +314,21 @@ export async function startCollaboration(
     memory: openingSources.includes("memory"),
     workspace: openingSources.includes("workspace"),
   }, topic, Math.random, { public: isPublic }) : undefined;
+  // Prototype board before the public channel: a prototype config error must not leave a public header behind.
+  const prototype = isPrototype
+    ? await openPrototypeTracker({ sessionId: collaborationId, mode, participants: roleNames, assessorIsCaller: false, public: isPublic, topic })
+    : undefined;
   // Created before the first LLM call so the header is the first post. Only topic (never context) is
   // published. Config errors fail the start.
-  const publicChannel = options.public
-    ? openPublicChannel(collaborationId, { mode, participants: roleNames, topic: topic || "(open conversation)" })
-    : undefined;
+  let publicChannel: PublicChannel | undefined;
+  try {
+    publicChannel = options.public
+      ? openPublicChannel(collaborationId, { mode, participants: roleNames, topic: topic || "(open conversation)" })
+      : undefined;
+  } catch (e) {
+    await closePrototypeTracker(prototype, "ended");
+    throw e;
+  }
 
   const collaboration: Collaboration = {
     id: collaborationId,
@@ -268,6 +348,7 @@ export async function startCollaboration(
     ...(conversationAngle !== undefined && { conversationAngle, groundingSources }),
     ...(debateFocus !== undefined && { debateFocus }),
     ...(publicChannel && { publicChannel }),
+    ...(prototype && { prototype }),
   };
 
   collaborations.set(collaborationId, collaboration);
@@ -304,6 +385,8 @@ export async function startCollaboration(
     initialPrompt += `Please share your initial thoughts on this topic. Be substantive but concise. `;
     initialPrompt += `Other agents will respond, and you'll have opportunities to refine your position.`;
   }
+  const openingStatus = prototypeStatusFor(collaboration, 0);
+  if (openingStatus) initialPrompt += `\n\n${openingStatus}`;
 
   // Get first agent's response
   const firstAgent = agents[0];
@@ -315,13 +398,14 @@ export async function startCollaboration(
       { provider, model: resolvedModel, baseUrl }
     );
   } catch (e) {
-    // Nothing was said: do not leave an orphan session or an unfinalized public topic behind.
+    // Nothing was said: do not leave an orphan session, an unfinalized public topic or a board behind.
     collaborations.delete(collaborationId);
     if (publicChannel) void publicChannel.finalize();
+    await closePrototypeTracker(prototype, "ended");
     throw e;
   }
 
-  recordCollaborationMessage(collaboration, {
+  await recordAgentTurn(collaboration, {
     agentIndex: 0,
     agent: firstAgent.name,
     content: firstMessage,
@@ -351,6 +435,7 @@ export async function startCollaboration(
     status: collaboration.status,
     ...(autoRunError !== undefined && { error: `Auto-run stopped: ${autoRunError}. The session is paused; use nudge_collaboration to resume or end_collaboration to close it.` }),
     ...(publicChannel && { public: { url: publicChannel.url, topic: publicChannel.topic } }),
+    ...(prototype && { prototypes: prototype.takeCallSummary() }),
   };
 }
 
@@ -366,6 +451,7 @@ export async function advanceCollaboration(
 
   if (isCollaborationComplete(collaboration)) {
     collaboration.status = "completed";
+    if (collaboration.prototype) await closePrototypeTracker(collaboration.prototype, "completed");
     return null;
   }
 
@@ -392,14 +478,17 @@ export async function advanceCollaboration(
   }
   conversationContext += mode === "conversation" ? `Conversation so far:\n\n` : `**Discussion so far:**\n\n`;
 
-  for (const msg of collaboration.messages) {
+  for (const [i, msg] of collaboration.messages.entries()) {
     // Waffle-house: label by role so a persona that both defends and attacks can tell its own turns apart.
     const speaker =
       mode === "waffle-house" && msg.agentIndex !== undefined && collaboration.agents[msg.agentIndex]
         ? roleLabel(mode, collaboration.agents[msg.agentIndex], pub)
         : nameFor(msg.agent, pub);
-    conversationContext += `**${speaker}:** ${msg.content}\n\n`;
+    conversationContext += `**${speaker}:** ${historyContent(collaboration, msg, i)}\n\n`;
   }
+  // Prototype mode: verdicts owed, decisions due and validation errors, before the closing instruction.
+  const protoStatus = prototypeStatusFor(collaboration, collaboration.currentAgentIndex);
+  if (protoStatus) conversationContext += `${protoStatus}\n\n`;
 
   if (mode === "conversation") {
     conversationContext += "---\n\n" + buildConversationTurnPrompt();
@@ -431,7 +520,7 @@ export async function advanceCollaboration(
     timestamp: new Date(),
   };
 
-  recordCollaborationMessage(collaboration, newMessage);
+  await recordAgentTurn(collaboration, newMessage);
 
   // Move to next agent
   collaboration.currentAgentIndex =
@@ -441,6 +530,10 @@ export async function advanceCollaboration(
   // and flip to completed as soon as the last budgeted turn lands.
   collaboration.currentRound = computeCurrentRound(collaboration);
   if (isCollaborationComplete(collaboration)) collaboration.status = "completed";
+  // Completion destroys every remaining artifact and stops the board (end_collaboration still lists outcomes).
+  if (collaboration.prototype && collaboration.status === "completed") {
+    await closePrototypeTracker(collaboration.prototype, "completed");
+  }
 
   return newMessage;
 }
@@ -453,10 +546,19 @@ export async function continueCollaboration(
   status: string;
   currentRound: number;
   maxRounds: number;
+  /** Prototype sessions only. */
+  prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
   const collaboration = collaborations.get(collaborationId);
   if (!collaboration) {
     throw new Error(`Collaboration not found: ${collaborationId}`);
+  }
+  const tracker = collaboration.prototype;
+
+  // Nudges (the usual way to resume) are held while a prototype is under assessment, so continuing
+  // resumes a paused prototype session in that state instead of leaving it stuck until the TTL.
+  if (tracker && collaboration.status === "paused" && tracker.hasLiveUnderAssessment()) {
+    collaboration.status = "running";
   }
 
   if (collaboration.status !== "running") {
@@ -465,6 +567,7 @@ export async function continueCollaboration(
       status: collaboration.status,
       currentRound: collaboration.currentRound,
       maxRounds: collaboration.maxRounds,
+      ...(tracker && { prototypes: tracker.takeCallSummary() }),
     };
   }
 
@@ -483,6 +586,7 @@ export async function continueCollaboration(
     status: collaboration.status,
     currentRound: collaboration.currentRound,
     maxRounds: collaboration.maxRounds,
+    ...(tracker && { prototypes: tracker.takeCallSummary() }),
   };
 }
 
@@ -495,13 +599,25 @@ export async function nudgeCollaboration(
     throw new Error(`Collaboration not found: ${collaborationId}`);
   }
 
+  // Prototype mode: the human's feedback must not reach the session while an artifact is being assessed.
+  const tracker = collaboration.prototype;
+  if (tracker?.hasLiveUnderAssessment()) {
+    throw new Error(NUDGE_HELD_ERROR);
+  }
+
   // Add orchestrator message to the thread
   const orchestratorMessage: CollaborationMessage = {
     agent: ORCHESTRATOR,
     content: message,
     timestamp: new Date(),
   };
-  recordCollaborationMessage(collaboration, orchestratorMessage);
+  // Public prototype sessions: a pasted board URL never reaches the public mirror.
+  const turnKey = collaboration.messages.length;
+  recordCollaborationMessage(
+    collaboration,
+    orchestratorMessage,
+    tracker && collaboration.publicChannel ? tracker.publicView(message, turnKey) : undefined
+  );
 
   // Resume if paused
   if (collaboration.status === "paused") {
@@ -523,15 +639,27 @@ export function pauseCollaboration(collaborationId: string): string {
 export async function endCollaboration(
   collaborationId: string,
   requestSummary: boolean = false
-): Promise<{ transcript: CollaborationMessage[]; summary?: string; publicBlock?: string; publicResult?: FinalizeResult }> {
+): Promise<{
+  transcript: CollaborationMessage[];
+  summary?: string;
+  publicBlock?: string;
+  publicResult?: FinalizeResult;
+  /** Prototype sessions only: "## Prototype outcomes" and "## Shortlist for the human" (full shortlisted source). */
+  prototypeOutcomes?: string;
+}> {
   const collaboration = collaborations.get(collaborationId);
   if (!collaboration) {
     throw new Error(`Collaboration not found: ${collaborationId}`);
   }
 
+  // Prototype mode: destroy whatever is still live first; every message from here on is the stubbed view.
+  const tracker = collaboration.prototype;
+  if (tracker) await closePrototypeTracker(tracker, "ended");
+  const messages = tracker ? stubbedTranscript(collaboration) : collaboration.messages;
+
   let summary: string | undefined;
 
-  if (requestSummary && collaboration.messages.length > 0) {
+  if (requestSummary && messages.length > 0) {
     // Ask the first agent to summarize (they initiated; in debate/waffle-house they are the proponent/defender)
     const summarizer = collaboration.agents[0];
 
@@ -550,7 +678,7 @@ export async function endCollaboration(
     }
     summaryPrompt += `**Full transcript:**\n\n`;
 
-    for (const msg of collaboration.messages) {
+    for (const msg of messages) {
       summaryPrompt += `**${nameFor(msg.agent, !!collaboration.publicChannel)}:** ${msg.content}\n\n`;
     }
 
@@ -567,11 +695,12 @@ export async function endCollaboration(
     mode: collaboration.mode,
     agents: collaboration.agents.map((agent) => agentKey(agent.name)),
     topic: collaboration.topic,
-    outcome: summary || collaboration.messages.slice().reverse().find((m) => m.agent !== ORCHESTRATOR)?.content,
+    outcome: summary || messages.slice().reverse().find((m) => m.agent !== ORCHESTRATOR)?.content,
     public: collaboration.publicChannel !== undefined,
   });
-  const transcript = [...collaboration.messages];
+  const transcript = [...messages];
   collaborations.delete(collaborationId);
+  const outcomes = tracker ? { prototypeOutcomes: tracker.outcomesMarkdown() } : undefined;
 
   if (collaboration.publicChannel) {
     const publicResult = await collaboration.publicChannel.finalize({ summary });
@@ -580,9 +709,15 @@ export async function endCollaboration(
       summary,
       publicResult,
       publicBlock: formatPublicBlock(collaboration.publicChannel, publicResult),
+      ...outcomes,
     };
   }
-  return { transcript, summary };
+  return { transcript, summary, ...outcomes };
+}
+
+/** The transcript as agents see it: resolved prototypes are stubs (shortlisted source is in the outcomes). */
+function stubbedTranscript(collaboration: Collaboration): CollaborationMessage[] {
+  return collaboration.messages.map((m, i) => ({ ...m, content: historyContent(collaboration, m, i) }));
 }
 
 export function listCollaborations(): Array<{
@@ -600,6 +735,9 @@ export function listCollaborations(): Array<{
   conversationAngle?: ConversationAngle;
   grounding?: Grounding["sources"];
   public: boolean;
+  prototype: boolean;
+  /** Prototype sessions, while the board is up. */
+  board_url?: string;
   baseUrl?: string;
 }> {
   return Array.from(collaborations.values()).map((c) => ({
@@ -616,6 +754,8 @@ export function listCollaborations(): Array<{
     mode: c.mode,
     ...(c.mode === "conversation" && { conversationAngle: c.conversationAngle, grounding: c.groundingSources }),
     public: c.publicChannel !== undefined,
+    prototype: c.prototype !== undefined,
+    ...(c.prototype && !c.prototype.closed && { board_url: c.prototype.boardUrl }),
     ...(c.baseUrl !== undefined && { baseUrl: c.baseUrl }),
   }));
 }
@@ -627,5 +767,5 @@ export function getCollaborationTranscript(
   if (!collaboration) {
     throw new Error(`Collaboration not found: ${collaborationId}`);
   }
-  return [...collaboration.messages];
+  return collaboration.prototype ? stubbedTranscript(collaboration) : [...collaboration.messages];
 }

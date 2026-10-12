@@ -11,6 +11,14 @@ import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
 import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
+import { CALLER } from "../prototypes/index.js";
+import {
+  closePrototypeTracker,
+  openPrototypeTracker,
+  postPrototypeAttachments,
+  prototypeSystemSuffix,
+  type PrototypeTracker,
+} from "./prototype-mode.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -33,6 +41,8 @@ export interface Meeting {
   debateFocus?: string;
   /** Set when the meeting was started with public: true. */
   publicChannel?: PublicChannel;
+  /** Set when the meeting was started with prototype: true (the caller assesses the agent's prototypes). */
+  prototype?: PrototypeTracker;
 }
 
 export const meetings = new Map<string, Meeting>();
@@ -81,19 +91,44 @@ export async function startMeeting(
   baseUrl?: string,
   mode: MeetingMode = "standard",
   debateFocus?: string,
-  isPublic: boolean = false
-): Promise<{ meetingId: string; response: string; public?: { url: string | null; topic: string } }> {
+  isPublic: boolean = false,
+  isPrototype: boolean = false
+): Promise<{
+  meetingId: string;
+  response: string;
+  public?: { url: string | null; topic: string };
+  /** Prototype meetings only. */
+  prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
+}> {
   assertMeetingMode(mode);
   let systemPrompt = await loadAgentPrompt(agent);
   if (mode === "debate") {
     systemPrompt += buildChallengerDirective(debateFocus);
   }
   if (isPublic) systemPrompt += publicDirectiveSuffix();
+  if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic });
   const meetingId = `meeting-${++meetingCounter}`;
-  // Created before the first LLM call so the header is the first post. Config errors fail the start.
-  const publicChannel = isPublic
-    ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda })
+  // Prototype board before the public channel: a prototype config error must not leave a public header behind.
+  const prototype = isPrototype
+    ? await openPrototypeTracker({
+        sessionId: meetingId,
+        mode,
+        participants: [isPublic ? publicLabel(agent) : agent],
+        assessorIsCaller: true,
+        public: isPublic,
+        topic: agenda,
+      })
     : undefined;
+  // Created before the first LLM call so the header is the first post. Config errors fail the start.
+  let publicChannel: PublicChannel | undefined;
+  try {
+    publicChannel = isPublic
+      ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda })
+      : undefined;
+  } catch (e) {
+    await closePrototypeTracker(prototype, "ended");
+    throw e;
+  }
   const resolvedModel = model || DEFAULT_MODELS[provider];
 
   let userMessage = agenda;
@@ -112,8 +147,9 @@ export async function startMeeting(
       { provider, model: resolvedModel, baseUrl }
     );
   } catch (e) {
-    // The meeting never started; close the channel so nothing dangles.
+    // The meeting never started; close the channel (and the prototype board) so nothing dangles.
     if (publicChannel) void publicChannel.finalize();
+    await closePrototypeTracker(prototype, "ended");
     throw e;
   }
 
@@ -130,17 +166,63 @@ export async function startMeeting(
     mode,
     ...(debateFocus !== undefined && { debateFocus }),
     ...(publicChannel && { publicChannel }),
+    ...(prototype && { prototype }),
   };
   meetings.set(meetingId, meeting);
+  if (prototype) await prototype.onTurn(CALLER, agenda, 0);
   // Publish the agenda only: userMessage also carries the private context and the debate suffix.
   recordMeetingMessage(meeting, { role: "user", content: userMessage }, agenda);
-  recordMeetingMessage(meeting, { role: "assistant", content: assistantMessage });
+  await recordAgentReply(meeting, assistantMessage);
 
   return {
     meetingId,
     response: assistantMessage,
     ...(publicChannel && { public: { url: publicChannel.url, topic: publicChannel.topic } }),
+    ...(prototype && { prototypes: prototype.takeCallSummary() }),
   };
+}
+
+/**
+ * Record the agent's reply. Prototype meetings run the tracker first (it may materialize a prototype),
+ * post the URL-free public form, then any screenshots under the same public turn number.
+ */
+async function recordAgentReply(meeting: Meeting, content: string): Promise<void> {
+  const tracker = meeting.prototype;
+  if (!tracker) {
+    recordMeetingMessage(meeting, { role: "assistant", content });
+    return;
+  }
+  const turnKey = meeting.messages.length;
+  const result = await tracker.onTurn(0, content, turnKey);
+  const publicText = meeting.publicChannel ? tracker.publicView(content, turnKey) : undefined;
+  recordMeetingMessage(meeting, { role: "assistant", content }, publicText);
+  postPrototypeAttachments(meeting.publicChannel, meeting.messages.length, meeting.agent, result.attachments);
+}
+
+/**
+ * Record a caller message. Prototype meetings parse it first (the caller's verdicts can destroy assessed
+ * prototypes), then give the agent its prototype status after the message; only the caller's own words
+ * (board URLs scrubbed) are published.
+ */
+async function recordCallerMessage(meeting: Meeting, message: string): Promise<void> {
+  const tracker = meeting.prototype;
+  if (!tracker) {
+    recordMeetingMessage(meeting, { role: "user", content: message });
+    return;
+  }
+  const turnKey = meeting.messages.length;
+  await tracker.onTurn(CALLER, message, turnKey);
+  const publicText = meeting.publicChannel ? tracker.publicView(message, turnKey) : undefined;
+  recordMeetingMessage(meeting, { role: "user", content: message + tracker.statusPromptFor(0) }, publicText);
+}
+
+/** What the LLM sees: resolved prototypes in earlier turns are stubs. */
+function llmHistory(meeting: Meeting): Message[] {
+  const tracker = meeting.prototype;
+  return meeting.messages.map((m, i) => ({
+    role: m.role,
+    content: tracker ? tracker.historyView(m.content, i) : m.content,
+  }));
 }
 
 export async function continueMeeting(
@@ -152,18 +234,15 @@ export async function continueMeeting(
     throw new Error(`Meeting not found: ${meetingId}`);
   }
 
-  recordMeetingMessage(meeting, { role: "user", content: message });
+  await recordCallerMessage(meeting, message);
 
   const assistantMessage = await callLLM(
     meeting.systemPrompt,
-    meeting.messages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    })),
+    llmHistory(meeting),
     { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
   );
 
-  recordMeetingMessage(meeting, { role: "assistant", content: assistantMessage });
+  await recordAgentReply(meeting, assistantMessage);
 
   return assistantMessage;
 }
@@ -177,10 +256,15 @@ export async function endMeeting(
     throw new Error(`Meeting not found: ${meetingId}`);
   }
 
+  // Prototype mode: destroy whatever is still live first; the summary and activity see the stubbed history.
+  const tracker = meeting.prototype;
+  if (tracker) await closePrototypeTracker(tracker, "ended");
+  const history = llmHistory(meeting);
+
   let summary = "";
   if (requestSummary) {
     const summaryMessages = [
-      ...meeting.messages.map((m) => ({
+      ...history.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       })),
@@ -203,12 +287,13 @@ export async function endMeeting(
     mode: meeting.mode,
     agents: [agentKey(meeting.agent)],
     topic: meeting.agenda ?? "",
-    outcome: summary || meeting.messages.slice().reverse().find((m) => m.role === "assistant")?.content,
+    outcome: summary || history.slice().reverse().find((m) => m.role === "assistant")?.content,
     public: meeting.publicChannel !== undefined,
   });
   meetings.delete(meetingId);
 
-  const text = summary || `Meeting ${meetingId} with ${meeting.agent} ended.`;
+  let text = summary || `Meeting ${meetingId} with ${meeting.agent} ended.`;
+  if (tracker) text += `\n\n${tracker.outcomesMarkdown()}`;
   if (meeting.publicChannel) {
     const r = await meeting.publicChannel.finalize({ summary: summary || undefined });
     return `${text}\n\n${formatPublicBlock(meeting.publicChannel, r)}`;
@@ -225,6 +310,9 @@ export function listMeetings(): Array<{
   model: string;
   mode: MeetingMode;
   public: boolean;
+  prototype: boolean;
+  /** Prototype meetings, while the board is up. */
+  board_url?: string;
   baseUrl?: string;
 }> {
   return Array.from(meetings.values()).map((m) => ({
@@ -236,6 +324,8 @@ export function listMeetings(): Array<{
     model: m.model,
     mode: m.mode,
     public: m.publicChannel !== undefined,
+    prototype: m.prototype !== undefined,
+    ...(m.prototype && !m.prototype.closed && { board_url: m.prototype.boardUrl }),
     ...(m.baseUrl !== undefined && { baseUrl: m.baseUrl }),
   }));
 }

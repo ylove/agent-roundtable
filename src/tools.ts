@@ -64,6 +64,8 @@ import {
   type UltraplanFinalResult,
 } from "./sessions/ultraplan.js";
 import { createAgent, improveAgent, type AgentWorkshopResult } from "./sessions/agent-creation.js";
+import { prototypeTrailer } from "./sessions/prototype-mode.js";
+import { prototypeDiagnostics } from "./prototypes/index.js";
 
 const PROVIDER_PROPS = {
   provider: {
@@ -136,6 +138,22 @@ const PUBLIC_PROP = {
     "The result includes public.url so the human can watch live.",
 } as const;
 
+const PROTOTYPE_PROP = {
+  type: "boolean",
+  description:
+    "Default false. Prototype mode: agents show proposals as ephemeral artifacts — a scaled-down page served on localhost, " +
+    "the code/IaC that would produce the proposal (never executed), a Mermaid diagram, or a text draft — and the other participants " +
+    "(in meetings: you) give verdicts; the proposer then revises, scraps or shortlists. Results include a prototypes block with the board URL: show it to the human. " +
+    "Prototypes are destroyed as soon as assessment completes. Do not relay the human's feedback on prototypes into the session until it ends; " +
+    "end_* lists outcomes and the shortlist for the human. Combinable with public (public posts get code, diagram links and screenshots, never the localhost board). " +
+    "Not supported with mode conversation.",
+} as const;
+
+/** Only the new flag is type-checked on the legacy start tools, so their other arguments behave exactly as before. */
+function checkPrototypeArg(tool: string, args: Record<string, unknown> | undefined): void {
+  checkArgs(tool, { prototype: args?.prototype });
+}
+
 /** Origin only: webhook URLs often carry the secret in the path or query. */
 function webhookOrigin(raw: string): string {
   try {
@@ -157,7 +175,7 @@ export const tools: Tool[] = [
   {
     name: "start_meeting",
     description:
-      "Start a meeting with an agent. Returns a meeting ID for follow-up messages. Use this to begin a synchronous conversation with another agent (CFO, FP&A, Product, etc.). Pass mode: \"debate\" to have the agent stress-test your agenda as a challenger instead.",
+      "Start a meeting with an agent. Returns a meeting ID for follow-up messages. Use this to begin a synchronous conversation with another agent (CFO, FP&A, Product, etc.). Pass mode: \"debate\" to have the agent stress-test your agenda as a challenger instead. Pass prototype: true to have the agent show its proposals as ephemeral prototypes that you assess.",
     inputSchema: {
       type: "object",
       properties: {
@@ -178,6 +196,7 @@ export const tools: Tool[] = [
         mode: MEETING_MODE_PROPS.mode,
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
+        prototype: PROTOTYPE_PROP,
         provider: {
           type: "string",
           enum: PROVIDER_IDS,
@@ -199,7 +218,9 @@ export const tools: Tool[] = [
   },
   {
     name: "say",
-    description: "Continue a conversation in an active meeting.",
+    description:
+      "Continue a conversation in an active meeting. In a prototype meeting you assess the agent's prototypes: give `Verdict on Pn: APPROVE|REVISE|REJECT — reason` " +
+      "on its own line, grounded in the artifact and its demo; the reply ends with a Prototypes block (the board URL, live prototypes and those destroyed this call).",
     inputSchema: {
       type: "object",
       properties: {
@@ -217,7 +238,7 @@ export const tools: Tool[] = [
   },
   {
     name: "end_meeting",
-    description: "End a meeting and optionally get a summary.",
+    description: "End a meeting and optionally get a summary. Prototype meetings also return the prototype outcomes and the shortlist for the human.",
     inputSchema: {
       type: "object",
       properties: {
@@ -246,7 +267,7 @@ export const tools: Tool[] = [
   {
     name: "start_local_meeting",
     description:
-      "Start a LOCAL meeting with an agent using the installed Claude CLI. This uses your Claude Pro/Max subscription instead of API credits. Returns a meeting ID for follow-up messages. Ideal for cost-conscious lengthy conversations. Pass mode: \"debate\" to have the agent stress-test your agenda as a challenger instead.",
+      "Start a LOCAL meeting with an agent using the installed Claude CLI. This uses your Claude Pro/Max subscription instead of API credits. Returns a meeting ID for follow-up messages. Ideal for cost-conscious lengthy conversations. Pass mode: \"debate\" to have the agent stress-test your agenda as a challenger instead. Pass prototype: true to have the agent show its proposals as ephemeral prototypes that you assess.",
     inputSchema: {
       type: "object",
       properties: {
@@ -267,13 +288,16 @@ export const tools: Tool[] = [
         mode: MEETING_MODE_PROPS.mode,
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
+        prototype: PROTOTYPE_PROP,
       },
       required: ["agent", "agenda"],
     },
   },
   {
     name: "say_local",
-    description: "Continue a conversation in an active LOCAL meeting (CLI-based).",
+    description:
+      "Continue a conversation in an active LOCAL meeting (CLI-based). In a prototype meeting give `Verdict on Pn: APPROVE|REVISE|REJECT — reason` " +
+      "for the agent's prototypes; the reply ends with a Prototypes block.",
     inputSchema: {
       type: "object",
       properties: {
@@ -291,7 +315,7 @@ export const tools: Tool[] = [
   },
   {
     name: "end_local_meeting",
-    description: "End a LOCAL meeting and optionally get a summary.",
+    description: "End a LOCAL meeting and optionally get a summary. Prototype meetings also return the prototype outcomes and the shortlist for the human.",
     inputSchema: {
       type: "object",
       properties: {
@@ -371,7 +395,7 @@ export const tools: Tool[] = [
   {
     name: "start_collaboration",
     description:
-      "Start a collaboration where agents take turns responding; returns a collaboration ID. Default collaborate builds on ideas. Debate has agents[0] defend a position against challengers; waffle-house distills an idea through repeated attacks and rebuttals. Conversation is an informal chat from each agent's own situation, with short turns and no agenda or deliverable; topic is optional only in conversation mode. In conversation mode, put what you know about the agents' current situation in context (what was just built, what each agent last did). Private conversations default to grounding from workspace, memory and local activity; public conversations never get grounding, never open on the founder angle, and their directive does not ask agents to talk about the founder or whoever they report to. Continue, nudge, inspect or end with the collaboration tools.",
+      "Start a collaboration where agents take turns responding; returns a collaboration ID. Default collaborate builds on ideas. Debate has agents[0] defend a position against challengers; waffle-house distills an idea through repeated attacks and rebuttals. Conversation is an informal chat from each agent's own situation, with short turns and no agenda or deliverable; topic is optional only in conversation mode. In conversation mode, put what you know about the agents' current situation in context (what was just built, what each agent last did). Private conversations default to grounding from workspace, memory and local activity; public conversations never get grounding, never open on the founder angle, and their directive does not ask agents to talk about the founder or whoever they report to. Pass prototype: true (not with conversation) to have agents show proposals as ephemeral prototypes that the other agents assess. Continue, nudge, inspect or end with the collaboration tools.",
     inputSchema: {
       type: "object",
       properties: {
@@ -419,6 +443,7 @@ export const tools: Tool[] = [
           description: "Optional: what the challenge should concentrate on (only used with mode debate).",
         },
         public: PUBLIC_PROP,
+        prototype: PROTOTYPE_PROP,
         provider: {
           type: "string",
           enum: PROVIDER_IDS,
@@ -441,7 +466,7 @@ export const tools: Tool[] = [
   {
     name: "continue_collaboration",
     description:
-      "Continue an active collaboration for additional rounds. Agents take turns responding.",
+      "Continue an active collaboration for additional rounds. Agents take turns responding. In a prototype session it also resumes a paused session while a prototype is under assessment.",
     inputSchema: {
       type: "object",
       properties: {
@@ -460,7 +485,7 @@ export const tools: Tool[] = [
   {
     name: "nudge_collaboration",
     description:
-      "Inject a message from the orchestrator into the collaboration. Use to redirect discussion, ask clarifying questions, or provide additional context.",
+      "Inject a message from the orchestrator into the collaboration. Use to redirect discussion, ask clarifying questions, or provide additional context. In a prototype session nudges are refused while a prototype is under assessment; never use a nudge to relay the human's feedback on prototypes before the session ends.",
     inputSchema: {
       type: "object",
       properties: {
@@ -493,7 +518,7 @@ export const tools: Tool[] = [
   },
   {
     name: "end_collaboration",
-    description: "End a collaboration and optionally get a summary of the discussion.",
+    description: "End a collaboration and optionally get a summary of the discussion. Prototype sessions also return the prototype outcomes and the shortlist for the human (resolved prototypes appear as stubs in the transcript).",
     inputSchema: {
       type: "object",
       properties: {
@@ -664,7 +689,8 @@ export async function handleToolCall(
     switch (name) {
       // === Meeting Tools ===
       case "start_meeting": {
-        const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic } = args as {
+        checkPrototypeArg(name, args);
+        const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype } = args as {
           agent: string;
           agenda: string;
           context?: string;
@@ -674,8 +700,9 @@ export async function handleToolCall(
           mode?: MeetingMode;
           debate_focus?: string;
           public?: boolean;
+          prototype?: boolean;
         };
-        const result = await startMeeting(agent, agenda, context, provider, model, base_url, mode, debate_focus, isPublic === true);
+        const result = await startMeeting(agent, agenda, context, provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
@@ -687,8 +714,9 @@ export async function handleToolCall(
           message: string;
         };
         const response = await continueMeeting(meeting_id, message);
+        const tracker = meetings.get(meeting_id)?.prototype;
         return {
-          content: [{ type: "text", text: response }],
+          content: [{ type: "text", text: tracker ? response + prototypeTrailer(tracker) : response }],
         };
       }
 
@@ -720,15 +748,17 @@ export async function handleToolCall(
 
       // === Local Meeting Tools (CLI-based) ===
       case "start_local_meeting": {
-        const { agent, agenda, context, mode, debate_focus, public: isPublic } = args as {
+        checkPrototypeArg(name, args);
+        const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype } = args as {
           agent: string;
           agenda: string;
           context?: string;
           mode?: MeetingMode;
           debate_focus?: string;
           public?: boolean;
+          prototype?: boolean;
         };
-        const result = await startLocalMeeting(agent, agenda, context, mode, debate_focus, isPublic === true);
+        const result = await startLocalMeeting(agent, agenda, context, mode, debate_focus, isPublic === true, prototype === true);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
@@ -740,8 +770,9 @@ export async function handleToolCall(
           message: string;
         };
         const response = await continueLocalMeeting(meeting_id, message);
+        const tracker = localMeetings.get(meeting_id)?.prototype;
         return {
-          content: [{ type: "text", text: response }],
+          content: [{ type: "text", text: tracker ? response + prototypeTrailer(tracker) : response }],
         };
       }
 
@@ -797,7 +828,8 @@ export async function handleToolCall(
 
       // === Collaboration Tools ===
       case "start_collaboration": {
-        const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, base_url, mode, debate_focus, grounding, public: isPublic } = args as {
+        checkPrototypeArg(name, args);
+        const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, base_url, mode, debate_focus, grounding, public: isPublic, prototype } = args as {
           agents: string[];
           topic?: string;
           context?: string;
@@ -810,6 +842,7 @@ export async function handleToolCall(
           debate_focus?: string;
           grounding?: boolean;
           public?: boolean;
+          prototype?: boolean;
         };
 
         const result = await startCollaboration(agents, topic, {
@@ -824,6 +857,7 @@ export async function handleToolCall(
           debateFocus: debate_focus,
           grounding,
           public: isPublic === true,
+          ...(prototype === true && { prototype: true }),
         });
 
         return {
@@ -887,6 +921,9 @@ export async function handleToolCall(
         }
         if (result.summary) {
           output += `## Summary\n\n${result.summary}`;
+        }
+        if (result.prototypeOutcomes) {
+          output += `${result.summary ? "\n\n" : ""}${result.prototypeOutcomes}`;
         }
         if (result.publicBlock) {
           output += `\n\n${result.publicBlock}`;
@@ -1072,6 +1109,7 @@ export async function handleToolCall(
             topic_prefix: PUBLIC_TOPIC_PREFIX,
             transcripts_dir: TRANSCRIPTS_DIR,
           },
+          prototypes: prototypeDiagnostics(),
           local_meetings: claudeCliAvailable
             ? "available (claude CLI found)"
             : "NOT available (claude CLI not in PATH)",

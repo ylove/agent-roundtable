@@ -431,7 +431,8 @@ export interface EventPayloads {
   "budget.extended": { by: string; usd: number };
 
   "watchdog.action": { rule: string; action: string; target: string };
-  "watchdog.circuit_opened": { driver: string; reason: string; until: string };
+  /** `opens` (added in WS09): consecutive opens since the circuit last closed, this one included. */
+  "watchdog.circuit_opened": { driver: string; reason: string; until: string; opens?: number };
   "watchdog.circuit_closed": { driver: string };
   "watchdog.deadlock_detected": { cycle: string[] };
   "watchdog.stall_detected": { agent: string; task?: string };
@@ -562,6 +563,12 @@ export interface BudgetLedger {
   by_task: Record<string, number>;
   by_team: Record<string, number>;
   thresholds_crossed: number[];
+  /**
+   * Added in WS09: the execution budget (extensions included) that thresholds_crossed refers to.
+   * A threshold crossed at another total starts a new epoch, so the warnings re-arm after an
+   * extension.
+   */
+  thresholds_budget_usd?: number;
   extensions_usd: number;
 }
 
@@ -589,7 +596,11 @@ export interface BlackboardState {
   budget: BudgetLedger;
   notes: Array<{ seq: number; agent: string; topic: string; text: string; refs: string[] }>;
   inbox: Record<string, Array<{ seq: number; kind: "directive" | "decision"; id: string; text: string; requires_ack?: boolean }>>;
-  watchdog: { circuits: Record<string, { open: boolean; until?: string; reason?: string }>; deadlocks: string[][] };
+  /**
+   * circuits[].opens (added in WS09): consecutive opens since the last close, for the backoff. On a
+   * closed circuit, until is the end of its last open period.
+   */
+  watchdog: { circuits: Record<string, { open: boolean; until?: string; reason?: string; opens?: number }>; deadlocks: string[][] };
   /**
    * Added in WS03: split task id → the ids of its parts (task.split). When a contract version
    * is adopted, dependencies on a split task are rewritten to its parts.

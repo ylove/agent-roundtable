@@ -58,7 +58,9 @@ export async function runScript(store, { from = 0, stopAfter = Infinity } = {}) 
   const blob = await store.putBlob(scrubbedJSON(makeContract()), { redact: false });
   const lease = { id: "L1", agent: "w1", task: "a", paths: ["src/a/**"], mode: "exclusive", branch: "rt/abc123/a", reason: "edit the nav", granted_seq: 0 };
   const request = { id: "R1", agent: "w2", task: "b", paths: ["src/a/x.ts"], mode: "shared", reason: "read the props", requested_seq: 0, blocking: ["L1"] };
-  const submitted = (commit) => ({ task: "a", commit, diff_blob: blob, stat: "1 file changed", files: ["src/a/x.ts"], rewrites: [] });
+  // Two different diffs: only a changed diff_blob counts as a new patch.
+  const diffs = { c1: `sha256:${"1".repeat(64)}`, c2: blob };
+  const submitted = (commit) => ({ task: "a", commit, diff_blob: diffs[commit], stat: "1 file changed", files: ["src/a/x.ts"], rewrites: [] });
   const failed = { command_id: "test", scope: "task", task: "a", exit: 1, signature: "sig-1" };
   const escalation = {
     id: "E1", task: "b", agent: "w2", kind: "ambiguity", with: "orchestrator", summary: "Which props?",

@@ -494,7 +494,9 @@ The runner never pushes to the base branch, and nothing auto-merges.
 - An action is `emit` (event drafts) or a process operation: `kill_worker`, `resume_worker`, `spawn_retry`, `stop_spawning`, `lead_fallback` or `wake_orchestrator`. Each carries a `rule` and a deterministic `key`. Watchdog escalation ids derive from the key, which is how a rule knows it has already escalated. `actionsToDrafts` adds one `watchdog.action` per action for the audit trail.
 - The runner evaluates inside `transact` against the fresh state, commits the drafts, then performs the process operations.
 - The lead fallback first re-routes the escalation to `authority.lead` (`wake: false`), which marks it handled. A huddle that times out concludes `NO_OUTCOME`, and its escalation is routed to the orchestrator.
-- Budget thresholds fire once per run. Spending through an extension escalates again. The circuit counts failures since the last success.
+- Budget thresholds fire once per run. Spending through an extension escalates again. The circuit counts failures since the last success, and no worker is respawned onto a driver whose circuit is open or opening in the same pass.
+- A deadlock is reported once per occurrence. The same set of tasks is reported again only after the escalation for its last report is resolved or withdrawn. A task blocked on a dependency that failed or was cancelled escalates.
+- The leases of a finished task (accepted, failed or cancelled) expire. Claims do not expire while the run or the task is paused, and a resume restarts their TTL.
 - The lease grants and overlap check here are a conservative stand-in until the WS06 lease engine replaces them.
 
 ## 12. Escalations and huddles

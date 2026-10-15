@@ -38,6 +38,7 @@ import {
   emitAction,
   escalationAction,
   own,
+  putOwn,
   sortedKeys,
   type WatchdogAction,
 } from "./watchdog-actions.js";
@@ -70,7 +71,7 @@ export interface AgentObservation {
   lastOutputAt?: number;
   /** Last write of agents/<id>/heartbeat (ms). */
   lastHeartbeatAt?: number;
-  /** Stalls already detected on the agent's current task (watchdog.stall_detected events). */
+  /** Stalls already detected on the agent's current task, across its attempts (watchdog.stall_detected events). */
   stalls?: number;
   /** When the last of them was detected (ms). */
   lastStallAt?: number;
@@ -198,10 +199,6 @@ function watcherAlive(w: WatcherObservation | undefined, now: number, cfg: Watch
   return w?.alive === true && (w.lastSeenAt === undefined || now - w.lastSeenAt <= cfg.watcherStaleMs);
 }
 
-function setOwn<V>(map: Record<string, V>, key: string, value: V): void {
-  Object.defineProperty(map, key, { value, enumerable: true, writable: true, configurable: true });
-}
-
 const minutes = (ms: number): string => `${Math.round(ms / MIN)} min`;
 
 // ---------------------------------------------------------------------------
@@ -209,9 +206,10 @@ const minutes = (ms: number): string => `${Math.round(ms / MIN)} min`;
 // ---------------------------------------------------------------------------
 
 /**
- * An external claim (ttl_s > 0) not renewed within its ttl expires: its leases expire, its queued
- * lease requests are withdrawn, and the task returns to ready (the WIP stays in the worktree).
- * Leases of accepted or cancelled tasks expire. Then queued requests are granted in queue order
+ * An external claim (ttl_s > 0) not renewed within its ttl expires, unless the run or the task is
+ * paused: its leases expire, its queued lease requests are withdrawn, and the task returns to
+ * ready (the WIP stays in the worktree). Leases of finished tasks (accepted, failed, cancelled)
+ * expire; a retried task requests its leases again. Then queued requests are granted in queue order
  * when nothing they wait on is still held and they conflict neither with a held lease nor with an
  * earlier request that is still waiting (no overtaking).
  */
@@ -222,7 +220,7 @@ function leaseRules(state: BlackboardState, now: number, obs: Observations): Wat
 
   for (const task of sortedKeys(state.claims)) {
     const claim = state.claims[task];
-    if (!(claim.ttl_s > 0)) continue;
+    if (!(claim.ttl_s > 0) || isPaused(state, task)) continue;
     const renewedAt = own(obs.claims, task)?.renewedAt ?? seqTime(obs, claim.granted_seq);
     if (renewedAt === undefined || now - renewedAt <= claim.ttl_s * 1000) continue;
     const key = `claim_expiry:${task}:${claim.granted_seq}`;
@@ -244,8 +242,7 @@ function leaseRules(state: BlackboardState, now: number, obs: Observations): Wat
 
   for (const id of sortedKeys(state.leases)) {
     if (ending.has(id)) continue;
-    const st = own(state.tasks, state.leases[id].task)?.state;
-    if (st !== "accepted" && st !== "cancelled") continue;
+    if (!isTerminal(state, state.leases[id].task)) continue;
     ending.add(id);
     const key = `lease_orphan:${id}`;
     out.push(emitAction("lease_orphan", key, id, [draft("lease.expired", { lease_id: id }, key)]));
@@ -298,7 +295,8 @@ function deadWorker(
   claim: Claim,
   rt: TaskRuntime,
   rec: AgentRecord | undefined,
-  lost: boolean
+  lost: boolean,
+  opening: ReadonlySet<string>
 ): WatchdogAction[] {
   const { task, agent } = claim;
   const maxAttempts = state.contract?.budget.max_attempts ?? CONTRACT_DEFAULTS.max_attempts;
@@ -306,7 +304,8 @@ function deadWorker(
   const next = attempt + 1;
   const how = lost ? "was lost (its process is gone)" : "exited before submitting";
   const key = `worker_dead:${task}:${attempt}`;
-  const before = lost ? [draft("agent.exited", { agent, task, code: null, reason: "lost" }, key)] : [];
+  const lostEvent = () => [draft("agent.exited", { agent, task, code: null, reason: "lost" }, key)];
+  const before = lost ? lostEvent() : [];
 
   if (next > maxAttempts) {
     const why = `Worker ${agent} ${how} on attempt ${attempt} of ${maxAttempts}.`;
@@ -322,12 +321,16 @@ function deadWorker(
     });
     return esc ? [esc] : [];
   }
-  // No respawn into an exhausted budget or an open circuit; the budget and circuit rules escalate.
-  const spawnable = remainingUsd(state, { task, agent }) > 0 && (rec === undefined || circuitStatus(state, rec.driver, now) !== "open");
-  if (!spawnable) return before.length ? [emitAction("worker_dead", key, task, before)] : [];
+  // No respawn into an exhausted budget, an open circuit, or one this pass opens (the worker may
+  // have died of the very failure that trips it); the budget and circuit rules escalate. A lost
+  // worker is still recorded, under its own key, so the later retry is not mistaken for it.
+  const circuitOk = rec === undefined || (circuitStatus(state, rec.driver, now) !== "open" && !opening.has(rec.driver));
+  if (!(remainingUsd(state, { task, agent }) > 0 && circuitOk)) {
+    return lost ? [emitAction("worker_dead", `${key}:lost`, task, lostEvent())] : [];
+  }
   const why = `Worker ${agent} ${how}; resuming its session as attempt ${next} of ${maxAttempts}.`;
   return [
-    emitAction("worker_dead", key, task, [...before, draft("task.retried", { task, attempt: next, why }, key)]),
+    emitAction("worker_dead", `${key}:retry`, task, [...before, draft("task.retried", { task, attempt: next, why }, key)]),
     { type: "spawn_retry", rule: "worker_dead", key: `${key}:spawn`, target: task, task, attempt: next },
   ];
 }
@@ -365,12 +368,19 @@ function stalledWorker(state: BlackboardState, now: number, claim: Claim, o: Age
 /**
  * For each runner claim on a claimed or in-progress task that is not paused:
  *  - the agent exited or left, or its pid is gone ("lost"): retry with attempt+1 (spawn_retry
- *    resumes the session), or fail the task and escalate once attempts are used up;
+ *    resumes the session), or fail the task and escalate once attempts are used up; no retry
+ *    while the budget is spent or the driver's circuit is open (or opening in this pass);
  *  - the pid lives but there has been no output or heartbeat for stallMs: kill and resume; on
  *    the task's second stall, kill, block and escalate instead.
  * Agents with busy set, and claims whose agent the observations do not cover, are left alone.
  */
-function workerRules(state: BlackboardState, now: number, obs: Observations, cfg: WatchdogConfig): WatchdogAction[] {
+function workerRules(
+  state: BlackboardState,
+  now: number,
+  obs: Observations,
+  cfg: WatchdogConfig,
+  opening: ReadonlySet<string>
+): WatchdogAction[] {
   const out: WatchdogAction[] = [];
   for (const task of sortedKeys(state.claims)) {
     const claim = state.claims[task];
@@ -382,7 +392,7 @@ function workerRules(state: BlackboardState, now: number, obs: Observations, cfg
     if (o?.busy) continue;
     const exited = rec?.status === "exited" || rec?.status === "left";
     const lost = rec?.status === "running" && o !== undefined && !o.alive;
-    if (exited || lost) out.push(...deadWorker(state, now, claim, rt, rec, lost));
+    if (exited || lost) out.push(...deadWorker(state, now, claim, rt, rec, lost, opening));
     else if (rec?.status === "running" && o?.alive) out.push(...stalledWorker(state, now, claim, o, cfg));
   }
   return out;
@@ -392,6 +402,18 @@ function workerRules(state: BlackboardState, now: number, obs: Observations, cfg
 // Rules: dependencies, repeated failure, ping-pong
 // ---------------------------------------------------------------------------
 
+/** Deps with each split task replaced by its parts (task.split records them in state.splits). */
+function expandDeps(state: BlackboardState, deps: readonly string[]): string[] {
+  const out: string[] = [];
+  const visit = (d: string, depth: number): void => {
+    const parts = own(state.splits, d);
+    if (parts && depth < 16) for (const p of parts) visit(p, depth + 1);
+    else if (!out.includes(d)) out.push(d);
+  };
+  for (const d of deps) visit(d, 0);
+  return out;
+}
+
 function depSatisfied(state: BlackboardState, dep: string): boolean {
   const t = own(state.tasks, dep);
   if (t) return t.state === "accepted";
@@ -399,13 +421,35 @@ function depSatisfied(state: BlackboardState, dep: string): boolean {
   return i !== undefined && i.version >= 1;
 }
 
-/** A task blocked only on deps (task ids or interface names) is unblocked once all are accepted or published. */
+/**
+ * A task blocked only on deps (task ids, split tasks through their parts, or interface names) is
+ * unblocked once all are accepted or published. A dep that failed or was cancelled will never
+ * finish: that escalates to the orchestrator instead (the task stays blocked on its deps).
+ */
 function dependencyRules(state: BlackboardState): WatchdogAction[] {
   const out: WatchdogAction[] = [];
   for (const task of sortedKeys(state.tasks)) {
     const rt = state.tasks[task];
-    const deps = rt.blocked_by?.deps;
-    if (rt.state !== "blocked" || !deps?.length || rt.blocked_by?.escalation !== undefined) continue;
+    const raw = rt.blocked_by?.deps;
+    if (rt.state !== "blocked" || !raw?.length || rt.blocked_by?.escalation !== undefined) continue;
+    const deps = expandDeps(state, raw);
+    const dead = deps.filter((d) => {
+      const st = own(state.tasks, d)?.state;
+      return st === "failed" || st === "cancelled";
+    });
+    if (dead.length) {
+      const esc = escalationAction(state, "dependency_wait", {
+        key: `dependency_wait:${task}:${dead.join(",")}`,
+        task,
+        kind: "blocker",
+        with: "orchestrator",
+        target: state.contract?.scope.orchestrator,
+        summary: `Task ${task} is blocked on ${dead.map((d) => `${d} (${state.tasks[d].state})`).join(", ")}, which will not finish.`,
+        options: ["Retry the dependency", "Drop the dependency with amend_contract", "Cancel the task"],
+      });
+      if (esc) out.push(esc);
+      continue;
+    }
     if (!deps.every((d) => depSatisfied(state, d))) continue;
     const key = `dependency_wait:${task}`;
     out.push(emitAction("dependency_wait", key, task, [draft("task.unblocked", { task }, key)]));
@@ -572,9 +616,15 @@ export function evaluate(state: BlackboardState, now: number, obs: Observations 
   if (state.status === "completed" || state.status === "failed" || state.status === "aborted") return [];
   const c: WatchdogConfig = { ...WATCHDOG_DEFAULTS, ...cfg };
   const circuit: CircuitConfig = { windowMs: c.circuitWindowMs, failures: c.circuitFailures, baseMs: c.circuitBaseMs, maxMs: c.circuitMaxMs };
+  const circuits = circuitRules(state, now, { outcomes: obs.outcomes, history: obs.circuits }, circuit);
+  const opening = new Set(
+    circuits.flatMap((a) =>
+      a.type === "emit" ? a.events.flatMap((e) => (e.type === "watchdog.circuit_opened" ? [e.payload.driver] : [])) : []
+    )
+  );
   const actions = [
     ...leaseRules(state, now, obs),
-    ...workerRules(state, now, obs, c),
+    ...workerRules(state, now, obs, c, opening),
     ...dependencyRules(state),
     ...repeatedFailureRules(state, c),
     ...diffPingPongRules(state, obs),
@@ -582,7 +632,7 @@ export function evaluate(state: BlackboardState, now: number, obs: Observations 
     ...huddleTimeoutRules(state, now, obs, c),
     ...leadFallbackRules(state, now, obs, c),
     ...budgetRules(state),
-    ...circuitRules(state, now, { outcomes: obs.outcomes, history: obs.circuits }, circuit),
+    ...circuits,
   ];
   if (!actions.some((a) => UNSETTLED.has(a.rule))) actions.push(...deadlockRules(state, obs.needs));
   const seen = new Set<string>();
@@ -596,8 +646,8 @@ export function evaluate(state: BlackboardState, now: number, obs: Observations 
 
 /**
  * The observations derivable from the log, merged under `base` (the runner's process
- * observations, which win): seq times of claims, claim renewals (the claim, then any event the
- * claiming agent emits), huddle start and escalation routing times, diff history, open
+ * observations, which win): seq times of claims, claim renewals (the claim, any event the
+ * claiming agent emits, and a resume of the run or the task), huddle start and escalation routing times, diff history, open
  * dependency needs, stall counts for base's agents on their current task, driver outcomes and
  * circuit history. Pass the log since the run started; a shorter window undercounts.
  */
@@ -617,18 +667,24 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
     const at = Date.parse(e.ts);
     if (e.source.kind === "agent") {
       const t = claimOf.get(e.source.id);
-      if (t !== undefined) setOwn(claims, t, { renewedAt: at });
+      if (t !== undefined) putOwn(claims, t, { renewedAt: at });
     }
     switch (e.type) {
       case "task.claimed":
         seqTimes[e.seq] = at;
-        setOwn(claims, e.payload.task, { renewedAt: at });
+        putOwn(claims, e.payload.task, { renewedAt: at });
         claimOf.set(e.payload.agent, e.payload.task);
         currentTask.set(e.payload.agent, e.payload.task);
         break;
       case "agent.spawned":
         currentTask.set(e.payload.agent, e.payload.task);
         break;
+      case "execution.resumed": {
+        // Claim TTLs restart on resume (design §3).
+        const scope = e.payload.scope;
+        for (const t of new Set(claimOf.values())) if (scope === "all" || scope.includes(t)) putOwn(claims, t, { renewedAt: at });
+        break;
+      }
       case "task.reassigned":
         claimOf.delete(e.payload.from);
         claimOf.set(e.payload.to, e.payload.task);
@@ -642,13 +698,13 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
         for (const [a, t] of claimOf) if (t === e.payload.task) claimOf.delete(a);
         break;
       case "huddle.started":
-        setOwn(huddles, e.payload.id, { startedAt: at });
+        putOwn(huddles, e.payload.id, { startedAt: at });
         break;
       case "escalation.routed":
-        setOwn(escalations, e.payload.id, { routedAt: at });
+        putOwn(escalations, e.payload.id, { routedAt: at });
         break;
       case "task.submitted":
-        if (!Object.hasOwn(diffs, e.payload.task)) setOwn(diffs, e.payload.task, []);
+        if (!Object.hasOwn(diffs, e.payload.task)) putOwn(diffs, e.payload.task, []);
         diffs[e.payload.task].push(e.payload.diff_blob);
         break;
       case "dependency.requested":
@@ -672,11 +728,11 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
   for (const a of sortedKeys(base.agents)) {
     const t = currentTask.get(a);
     const s = t !== undefined ? stalls.get(t) : undefined;
-    setOwn(agents, a, s ? { stalls: s.count, lastStallAt: s.lastAt, ...base.agents![a] } : { ...base.agents![a] });
+    putOwn(agents, a, s ? { stalls: s.count, lastStallAt: s.lastAt, ...base.agents![a] } : { ...base.agents![a] });
   }
   for (const t of sortedKeys(base.claims)) {
     const mine = own(claims, t)?.renewedAt ?? -Infinity;
-    setOwn(claims, t, { renewedAt: Math.max(mine, base.claims![t].renewedAt) });
+    putOwn(claims, t, { renewedAt: Math.max(mine, base.claims![t].renewedAt) });
   }
   const derived = outcomesFromEvents(events);
   return {

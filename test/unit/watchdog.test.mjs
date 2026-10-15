@@ -141,7 +141,7 @@ test("a renewed, unknown or runner claim does not expire", () => {
 });
 
 test("leases of finished tasks expire and free their waiters", () => {
-  const s = makeState({ tasks: [task("done", { state: "accepted" }), task("next")] });
+  const s = makeState({ tasks: [task("done", { state: "failed" }), task("next")] });
   claim(s, "next", "w-next");
   s.leases = { L2: lease("L2", "done", "w-done", ["src/**"]) };
   s.lease_queue = [request("R1", "next", "w-next", ["src/x/**"], "exclusive", ["L2"], 40)];
@@ -853,3 +853,70 @@ for (const c of conformance) {
     assert.deepEqual(evaluate(real, T0 + 1000, (c.next ?? c.obs)()), [], "idempotent on the real blackboard");
   });
 }
+
+// ---------------------------------------------------------------------------
+// Review follow-ups
+// ---------------------------------------------------------------------------
+
+test("claims do not expire while the run or the task is paused; a resume restarts the ttl", () => {
+  const obs = { seqTimes: { 10: T0 - 16 * MIN } };
+  const paused = Object.assign(leaseScenario(), { status: "paused" });
+  assert.deepEqual(evaluate(paused, T0, obs).filter((a) => a.rule === "claim_expiry"), []);
+  const taskPaused = Object.assign(leaseScenario(), { paused_tasks: ["a"] });
+  assert.deepEqual(evaluate(taskPaused, T0, obs).filter((a) => a.rule === "claim_expiry"), []);
+
+  const s = makeState({ tasks: [task("e")] });
+  claim(s, "e", "ext-1", { ttl_s: 900, granted_seq: 4 });
+  const events = [
+    ev(4, 45, "task.claimed", { task: "e", agent: "ext-1", attempt: 1, ttl_s: 900 }),
+    ev(5, 40, "execution.paused", { scope: "all", reason: "lunch" }),
+    ev(6, 5, "execution.resumed", { scope: "all" }),
+  ];
+  assert.deepEqual(observeEvents(events).claims.e, { renewedAt: T0 - 5 * MIN });
+  assert.deepEqual(evaluate(s, T0, observeEvents(events)), []);
+});
+
+test("a worker that died of the failure that trips its driver's circuit is not respawned into it", () => {
+  const s = workerState({ status: "exited" });
+  const actions = evaluate(s, T0, { outcomes: [{ driver: "claude-code", at: T0 - MIN, kind: "rate_limit", message: "429 Too Many Requests" }] });
+  assert.deepEqual(actions.map((a) => a.rule), ["circuit"]);
+  // Once the circuit is half-open, the retry goes ahead (one trial).
+  const later = settle(s, actions);
+  const trial = evaluate(later, T0 + 2 * MIN, {});
+  assert.deepEqual(opsOf(trial).map((a) => [a.type, a.attempt]), [["spawn_retry", 2]]);
+});
+
+test("a held lost worker and its later retry have distinct keys", () => {
+  const s = workerState();
+  s.budget.spent_usd = 100;
+  const obs = { agents: { "w-t": { alive: false } } };
+  const held = evaluate(s, T0, obs).filter((a) => a.rule === "worker_dead");
+  assert.deepEqual(held.map((a) => [a.key, eventTypes([a])]), [["worker_dead:t:1:lost", ["agent.exited"]]]);
+  const after = settle(s, held);
+  after.budget.extensions_usd = 50;
+  const retry = evaluate(after, T0, obs).filter((a) => a.rule === "worker_dead");
+  assert.deepEqual(retry.map((a) => a.key), ["worker_dead:t:1:retry", "worker_dead:t:1:spawn"]);
+});
+
+test("a task blocked on a dep that failed or was cancelled escalates; a split dep waits for its parts", () => {
+  const blocked = (deps, ...tasks) => {
+    const s = makeState({ tasks: [...tasks, task("t", { state: "blocked", blocked_by: { deps } })] });
+    return s;
+  };
+  for (const st of ["failed", "cancelled"]) {
+    const s = blocked(["a"], task("a", { state: st }));
+    const actions = evaluate(s, T0, {});
+    const [esc] = escalations(actions);
+    assert.equal(esc.kind, "blocker", st);
+    assert.equal(esc.task, "t");
+    assert.match(esc.summary, new RegExp(`a \\(${st}\\), which will not finish`));
+    assert.deepEqual(eventTypes(actions), ["escalation.raised"], "the task stays blocked on its deps");
+    assert.deepEqual(evaluate(settle(s, actions), T0, {}), []);
+  }
+
+  const split = blocked(["a"], task("a", { state: "cancelled" }), task("a1", { state: "accepted" }), task("a2", { state: "in_progress" }));
+  split.splits = { a: ["a1", "a2"] };
+  assert.deepEqual(evaluate(split, T0, {}), [], "waiting for a2");
+  split.tasks.a2.state = "accepted";
+  assert.deepEqual(eventTypes(evaluate(split, T0, {})), ["task.unblocked"]);
+});

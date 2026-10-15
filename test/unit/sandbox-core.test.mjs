@@ -106,8 +106,11 @@ test("runSandboxed clamps the timeout and output cap before calling the backend"
   await runSandboxed(b, { argv: ["npm", "test"], workdir: wd, timeoutMs: 0 });
   await runSandboxed(b, { argv: ["npm", "test"], workdir: wd, timeoutMs: 3_600_000, maxOutputBytes: 10 ** 12 });
   await runSandboxed(b, { argv: ["npm", "test"], workdir: wd, timeoutMs: 600_000 }, { maxTimeoutMs: 120_000 });
-  assert.deepEqual(b.calls.map((c) => c.timeoutMs), [600_000, 900_000, 120_000]);
-  assert.deepEqual(b.calls.map((c) => c.maxOutputBytes), [2 * 1024 * 1024, 16 * 1024 * 1024, 2 * 1024 * 1024]);
+  // A NaN ceiling (e.g. arithmetic on a missing deadline) means the maximum, not "fire now".
+  await runSandboxed(b, { argv: ["npm", "test"], workdir: wd, timeoutMs: 600_000 }, { maxTimeoutMs: Number.NaN, backstopGraceMs: Number.NaN });
+  await runCommandSpec(b, { id: "unit", argv: ["npm", "test"], timeout_s: 30 }, wd, { maxTimeoutMs: Number.NaN });
+  assert.deepEqual(b.calls.map((c) => c.timeoutMs), [600_000, 900_000, 120_000, 600_000, 30_000]);
+  assert.deepEqual(b.calls.map((c) => c.maxOutputBytes), [2 * 1024 * 1024, 16 * 1024 * 1024, 2 * 1024 * 1024, 2 * 1024 * 1024, 2 * 1024 * 1024]);
   assert.ok(b.calls.every((c) => c.signal instanceof AbortSignal));
 });
 

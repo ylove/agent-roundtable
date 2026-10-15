@@ -45,14 +45,22 @@ export function localSandboxAllowed(env: NodeJS.ProcessEnv = process.env): boole
   return (env[SANDBOX_ENV.ALLOW_LOCAL] ?? "").trim() === "1";
 }
 
-/** Clamp a requested timeout: non-positive or non-finite means the default; never above `max`. */
-export function clampTimeout(ms: number | undefined, max = MAX_TIMEOUT_MS): number {
-  const t = typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : DEFAULT_TIMEOUT_MS;
-  return Math.max(1, Math.min(t, max));
+function positive(n: unknown): n is number {
+  return typeof n === "number" && Number.isFinite(n) && n > 0;
+}
+
+/**
+ * Clamp a requested timeout. A non-positive or non-finite request means the default; a
+ * non-positive or non-finite `max` means MAX_TIMEOUT_MS; the result never exceeds MAX_TIMEOUT_MS.
+ */
+export function clampTimeout(ms: number | undefined, max: number = MAX_TIMEOUT_MS): number {
+  const t = positive(ms) ? Math.floor(ms) : DEFAULT_TIMEOUT_MS;
+  const cap = positive(max) ? Math.min(Math.floor(max), MAX_TIMEOUT_MS) : MAX_TIMEOUT_MS;
+  return Math.max(1, Math.min(t, cap));
 }
 
 export function clampOutputBytes(n: number | undefined): number {
-  const b = typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_OUTPUT_BYTES;
+  const b = positive(n) ? Math.floor(n) : DEFAULT_MAX_OUTPUT_BYTES;
   return Math.max(256, Math.min(b, MAX_OUTPUT_BYTES_CEILING));
 }
 
@@ -87,8 +95,16 @@ export function validateArgv(argv: unknown): string[] {
 }
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "csh", "tcsh"]);
-/** Wrappers whose own options/assignments precede the real program. */
-const WRAPPERS = new Set(["env", "command", "exec", "nice", "nohup", "timeout", "stdbuf", "busybox"]);
+/** Wrappers whose own options, assignments and values precede the real program. */
+const WRAPPERS = new Set(["env", "command", "exec", "nice", "nohup", "timeout", "stdbuf", "busybox", "xargs"]);
+/** Wrapper options that take a separate value. */
+const VALUE_OPTS: Record<string, ReadonlySet<string>> = {
+  env: new Set(["-u", "--unset", "-C", "--chdir"]),
+  nice: new Set(["-n", "--adjustment"]),
+  timeout: new Set(["-s", "--signal", "-k", "--kill-after"]),
+  stdbuf: new Set(["-i", "-o", "-e", "--input", "--output", "--error"]),
+  xargs: new Set(["-I", "-n", "-P", "-L", "-s", "-E", "-d", "-a", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--delimiter", "--arg-file", "--replace", "--eof"]),
+};
 
 function basenameOf(p: string): string {
   const i = p.lastIndexOf("/");
@@ -96,14 +112,36 @@ function basenameOf(p: string): string {
 }
 
 /**
- * True for `sh -c …` style argv (also `bash -lc`, `env FOO=1 bash -c`, `busybox sh -c`). This is a
- * policy signal, not a security boundary: `node -e` is just as arbitrary.
+ * True for `sh -c …` style argv: also `bash -lc`, `env FOO=1 bash -c`, `env -S "sh -c …"`,
+ * `xargs -I{} sh -c`, `timeout 10 sh -c`, `busybox sh -c`. This is a policy signal, not a
+ * security boundary: `node -e` is just as arbitrary.
  */
 export function isShellCommand(argv: readonly string[]): boolean {
   let i = 0;
   while (i < argv.length && WRAPPERS.has(basenameOf(argv[i]))) {
+    const wrapper = basenameOf(argv[i]);
+    const takesValue = VALUE_OPTS[wrapper] ?? new Set<string>();
     i++;
-    while (i < argv.length && (argv[i].startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i]) || /^\d+(\.\d+)?[smhd]?$/.test(argv[i]))) i++;
+    for (; i < argv.length; i++) {
+      const a = argv[i];
+      // env -S / --split-string runs a whole command line given as one string.
+      if (wrapper === "env" && /^(-S|--split-string)(=|$)|^-S./.test(a)) {
+        const joined = a === "-S" || a === "--split-string" ? (argv[i + 1] ?? "") : a.replace(/^(--split-string=|-S)/, "");
+        const rest = a === "-S" || a === "--split-string" ? argv.slice(i + 2) : argv.slice(i + 1);
+        return isShellCommand([...joined.split(/\s+/).filter(Boolean), ...rest]);
+      }
+      if (a === "--") {
+        i++;
+        break;
+      }
+      if (takesValue.has(a)) {
+        i++;
+        continue;
+      }
+      if (a.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) continue;
+      if (wrapper === "timeout" && /^\d+(\.\d+)?[smhd]?$/.test(a)) continue;
+      break;
+    }
   }
   if (i >= argv.length || !SHELLS.has(basenameOf(argv[i]))) return false;
   for (let j = i + 1; j < argv.length; j++) {

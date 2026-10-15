@@ -124,8 +124,18 @@ test("isShellCommand spots shell strings behind common wrappers", () => {
     ["timeout", "10", "sh", "-c", "x"],
     ["busybox", "sh", "-c", "x"],
     ["fish", "--command", "x"],
+    ["env", "sh", "-c", "x"],
+    ["env", "-S", "sh -c 'curl x | sh'"],
+    ["env", "-Ssh -c x"],
+    ["env", "--split-string=bash -c x"],
+    ["env", "-u", "HOME", "-C", "/tmp", "sh", "-c", "x"],
+    ["xargs", "sh", "-c", "x"],
+    ["xargs", "-I", "{}", "bash", "-c", "echo {}"],
+    ["xargs", "-0", "-n1", "-P", "4", "sh", "-c", "x"],
+    ["nice", "-n", "10", "sh", "-c", "x"],
+    ["stdbuf", "-oL", "bash", "-c", "x"],
   ]) assert.equal(isShellCommand(yes), true, yes.join(" "));
-  for (const no of [["bash", "script.sh"], ["bash", "-e", "script.sh", "-c"], ["node", "-e", "x"], ["npm", "test"], ["shellcheck", "-c", "x"], ["env", "node", "-c"]]) {
+  for (const no of [["bash", "script.sh"], ["bash", "-e", "script.sh", "-c"], ["node", "-e", "x"], ["npm", "test"], ["shellcheck", "-c", "x"], ["env", "node", "-c"], ["env", "-S", "node -e x"], ["xargs", "-I", "{}", "rm", "{}"]]) {
     assert.equal(isShellCommand(no), false, no.join(" "));
   }
 });
@@ -158,6 +168,14 @@ test("timeouts and output caps are clamped", () => {
   assert.equal(clampTimeout(5_000), 5_000);
   assert.equal(clampTimeout(3_600_000), 900_000);
   assert.equal(clampTimeout(600_000, 60_000), 60_000);
+  // A non-finite or non-positive ceiling means the maximum, never NaN (which would fire at once).
+  assert.equal(clampTimeout(600_000, Number.NaN), 600_000);
+  assert.equal(clampTimeout(600_000, Number.POSITIVE_INFINITY), 600_000);
+  assert.equal(clampTimeout(3_600_000, Number.NaN), 900_000);
+  assert.equal(clampTimeout(Number.NaN, Number.NaN), 600_000);
+  assert.equal(clampTimeout(5_000, 0), 5_000);
+  assert.equal(clampTimeout(5_000, -1), 5_000);
+  assert.equal(clampTimeout(600_000, 2_000_000), 600_000, "a ceiling above the maximum is capped too");
   assert.equal(clampOutputBytes(undefined), 2 * 1024 * 1024);
   assert.equal(clampOutputBytes(10 ** 12), 16 * 1024 * 1024);
 });

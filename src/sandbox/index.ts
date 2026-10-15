@@ -143,9 +143,11 @@ export async function runSandboxed(backend: SandboxBackend, req: SandboxRunReque
     }
     console.error(`[Sandbox] warning: ${argv[0]} -c runs a shell string inside the container; prefer structured argv`);
   }
-  const timeoutMs = clampTimeout(req.timeoutMs, Math.min(opts.maxTimeoutMs ?? MAX_TIMEOUT_MS, MAX_TIMEOUT_MS));
+  // clampTimeout treats a missing or non-finite ceiling as MAX_TIMEOUT_MS (never NaN).
+  const timeoutMs = clampTimeout(req.timeoutMs, opts.maxTimeoutMs ?? MAX_TIMEOUT_MS);
   const maxOutputBytes = clampOutputBytes(req.maxOutputBytes);
-  const grace = opts.backstopGraceMs ?? BACKSTOP_GRACE_MS;
+  const g = opts.backstopGraceMs;
+  const grace = typeof g === "number" && Number.isFinite(g) && g >= 0 ? g : BACKSTOP_GRACE_MS;
   const started = Date.now();
   if (sandboxShuttingDown()) {
     return { exit: null, timedOut: false, durationMs: 0, output: "sandbox is shutting down", truncated: false, backend: backend.id };

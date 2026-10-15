@@ -30,13 +30,22 @@ import {
   type TaskState,
 } from "./types.js";
 import { budgetRules, remainingUsd } from "./budget.js";
-import { circuitRules, circuitStatus, outcomesFromEvents, type CircuitConfig, type CircuitHistory, type DriverOutcome } from "./circuit.js";
+import {
+  classifyFailure,
+  circuitRules,
+  circuitStatus,
+  outcomesFromEvents,
+  type CircuitConfig,
+  type CircuitHistory,
+  type DriverOutcome,
+} from "./circuit.js";
 import { deadlockRules, type DependencyNeed } from "./deadlock.js";
 import {
   TERMINAL_TASK_STATES,
   draft,
   emitAction,
   escalationAction,
+  escalationId,
   own,
   putOwn,
   sortedKeys,
@@ -54,7 +63,7 @@ export {
   type WatchdogActionType,
   type WatchdogRule,
 } from "./watchdog-actions.js";
-export type { CircuitHistory, DriverOutcome, FailureKind } from "./circuit.js";
+export type { CircuitHistory, DriverOutcome, FailureKind, FailureSource } from "./circuit.js";
 export type { DependencyNeed } from "./deadlock.js";
 
 // ---------------------------------------------------------------------------
@@ -107,6 +116,18 @@ export interface Observations {
   circuits?: Record<string, CircuitHistory>;
   /** Open dependency.requested needs (not yet satisfied). */
   needs?: DependencyNeed[];
+  /** Last agent.spawned time per agent: a spawn at or after a half-open circuit's until is its trial. */
+  spawns?: Record<string, number>;
+  /**
+   * Worker deaths per task that the circuit breaker accounts for (a rate limit, auth or credit
+   * failure in the driver's error), and the attempt of the latest one. They do not count against
+   * max_attempts.
+   */
+  infraDeaths?: Record<string, { count: number; lastAttempt: number }>;
+  /** Escalations whose lead fallback call is running now (set by the runner). */
+  leadInFlight?: Record<string, boolean>;
+  /** When lead_fallback was last issued per escalation (its watchdog.action audit event). */
+  leadIssuedAt?: Record<string, number>;
 }
 
 export interface WatchdogConfig {
@@ -114,6 +135,8 @@ export interface WatchdogConfig {
   stallMs: number;
   /** An escalation routed to an orchestrator whose watcher is not alive falls back to the lead after this long. */
   leadGraceMs: number;
+  /** A lead fallback still unresolved this long after it was issued (and not in flight) is issued again. */
+  leadRetryMs: number;
   /** A huddle without an outcome after this long goes to the orchestrator. */
   huddleTimeoutMs: number;
   /** A watcher whose lastSeenAt is older than this is not alive (it writes every 10 s). */
@@ -122,6 +145,10 @@ export interface WatchdogConfig {
   failureStreak: number;
   /** Two agents alternating on a note topic this many notes in a row suggests a micro-huddle. */
   notePingPong: number;
+  /** Respawns after transient driver failures (rate limit, auth, credit) a task may use before it fails. */
+  infraRetries: number;
+  /** A half-open circuit's trial worker that has run this long without failing counts as a success. */
+  circuitTrialMs: number;
   circuitWindowMs: number;
   circuitFailures: number;
   circuitBaseMs: number;
@@ -132,10 +159,13 @@ const MIN = 60_000;
 export const WATCHDOG_DEFAULTS: Readonly<WatchdogConfig> = Object.freeze({
   stallMs: 10 * MIN,
   leadGraceMs: 2 * MIN,
+  leadRetryMs: 5 * MIN,
   huddleTimeoutMs: 20 * MIN,
   watcherStaleMs: 30_000,
   failureStreak: 3,
   notePingPong: 4,
+  infraRetries: 20,
+  circuitTrialMs: 2 * MIN,
   circuitWindowMs: 10 * MIN,
   circuitFailures: 5,
   circuitBaseMs: MIN,
@@ -144,6 +174,9 @@ export const WATCHDOG_DEFAULTS: Readonly<WatchdogConfig> = Object.freeze({
 
 // ---------------------------------------------------------------------------
 // Lease overlap (conservative static-prefix rule, design §10)
+//
+// TODO(WS06): switch to globsOverlap / leasesConflict from src/execution/leases.ts once PR #113
+// is on release/1.0.0.
 //
 // A small stand-in: the full lease engine (WS06) replaces these. A glob's static prefix is its
 // leading path segments without a wildcard; two globs overlap when one static prefix is a path
@@ -181,6 +214,8 @@ export function leasesConflict(a: { paths: readonly string[]; mode: LeaseMode },
 // ---------------------------------------------------------------------------
 
 const ACTIVE: ReadonlySet<TaskState> = new Set(["claimed", "in_progress"]);
+/** Submitted work is being checked or merged: the claim's TTL is suspended. */
+const SUSPENDED: ReadonlySet<TaskState> = new Set(["submitted", "checking", "merging"]);
 
 function isTerminal(state: BlackboardState, task: string | undefined): boolean {
   const st = own(state.tasks, task)?.state;
@@ -202,14 +237,69 @@ function watcherAlive(w: WatcherObservation | undefined, now: number, cfg: Watch
 const minutes = (ms: number): string => `${Math.round(ms / MIN)} min`;
 
 // ---------------------------------------------------------------------------
+// Respawn gate: every path that starts a worker (retry, resume) goes through it
+// ---------------------------------------------------------------------------
+
+/** One evaluate pass: circuits this pass opens, and half-open drivers whose one trial it admitted. */
+interface Pass {
+  opening: ReadonlySet<string>;
+  admitted: Set<string>;
+}
+
+export type RespawnBlock = "budget" | "circuit_open" | "trial_in_flight";
+
+/** A worker spawned on the driver at or after its half-open `until`: the trial is under way. */
+function trialInFlight(state: BlackboardState, obs: Observations, driver: string): boolean {
+  const until = Date.parse(own(state.watchdog.circuits, driver)?.until ?? "");
+  if (!Number.isFinite(until)) return false;
+  return sortedKeys(state.agents).some((a) => state.agents[a].driver === driver && (own(obs.spawns, a) ?? -Infinity) >= until);
+}
+
+function respawnGate(
+  state: BlackboardState,
+  now: number,
+  obs: Observations,
+  who: { task: string; agent?: string; driver?: string },
+  pass: Pass
+): { ok: true; trial?: string } | { ok: false; why: RespawnBlock } {
+  if (remainingUsd(state, { task: who.task, agent: who.agent }) <= 0) return { ok: false, why: "budget" };
+  const d = who.driver;
+  if (d === undefined) return { ok: true };
+  const status = circuitStatus(state, d, now);
+  if (pass.opening.has(d) || status === "open") return { ok: false, why: "circuit_open" };
+  if (status === "half_open") {
+    if (pass.admitted.has(d) || trialInFlight(state, obs, d)) return { ok: false, why: "trial_in_flight" };
+    return { ok: true, trial: d };
+  }
+  return { ok: true };
+}
+
+/**
+ * Whether a worker may be started for the task now: budget left (execution, task and agent), and
+ * the driver's circuit closed, or half-open with no trial worker started yet (exactly one trial
+ * per half-open period). The runner checks this before every spawn of its own.
+ */
+export function canRespawn(
+  state: BlackboardState,
+  now: number,
+  obs: Observations,
+  who: { task: string; agent?: string; driver?: string }
+): { ok: boolean; why?: RespawnBlock } {
+  const g = respawnGate(state, now, obs, who, { opening: new Set(), admitted: new Set() });
+  return g.ok ? { ok: true } : { ok: false, why: g.why };
+}
+
+// ---------------------------------------------------------------------------
 // Rules: leases and claims
 // ---------------------------------------------------------------------------
 
 /**
  * An external claim (ttl_s > 0) not renewed within its ttl expires, unless the run or the task is
- * paused: its leases expire, its queued lease requests are withdrawn, and the task returns to
- * ready (the WIP stays in the worktree). Leases of finished tasks (accepted, failed, cancelled)
- * expire; a retried task requests its leases again. Then queued requests are granted in queue order
+ * paused or its submitted work is being checked or merged (the TTL is suspended then): its leases
+ * expire, its queued lease requests are withdrawn, and the task returns to ready (the WIP stays in
+ * the worktree). Leases of finished tasks (accepted, failed, cancelled) expire, and queued requests
+ * of tasks without a claim (released, retried, finished) are withdrawn; a retried task requests
+ * its leases again. Then queued requests are granted in queue order
  * when nothing they wait on is still held and they conflict neither with a held lease nor with an
  * earlier request that is still waiting (no overtaking).
  */
@@ -220,7 +310,8 @@ function leaseRules(state: BlackboardState, now: number, obs: Observations): Wat
 
   for (const task of sortedKeys(state.claims)) {
     const claim = state.claims[task];
-    if (!(claim.ttl_s > 0) || isPaused(state, task)) continue;
+    const st = own(state.tasks, task)?.state;
+    if (!(claim.ttl_s > 0) || isPaused(state, task) || (st !== undefined && SUSPENDED.has(st))) continue;
     const renewedAt = own(obs.claims, task)?.renewedAt ?? seqTime(obs, claim.granted_seq);
     if (renewedAt === undefined || now - renewedAt <= claim.ttl_s * 1000) continue;
     const key = `claim_expiry:${task}:${claim.granted_seq}`;
@@ -254,9 +345,15 @@ function leaseRules(state: BlackboardState, now: number, obs: Observations): Wat
   const waiting: LeaseRequest[] = [];
   const queue = [...state.lease_queue].sort((a, b) => a.requested_seq - b.requested_seq || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   for (const req of queue) {
+    if (withdrawn.has(req.id) || own(state.leases, req.id)) continue;
     const rt = own(state.tasks, req.task);
-    if (withdrawn.has(req.id) || !rt || TERMINAL_TASK_STATES.has(rt.state) || !own(state.claims, req.task)) continue;
-    if (own(state.leases, req.id)) continue;
+    if (!rt || TERMINAL_TASK_STATES.has(rt.state) || !own(state.claims, req.task)) {
+      // Nobody is waiting for it any more: dequeue it, so it neither blocks nor is granted later.
+      withdrawn.add(req.id);
+      const key = `lease_withdraw:${req.id}`;
+      out.push(emitAction("lease_withdraw", key, req.task, [draft("lease.released", { lease_id: req.id }, key)]));
+      continue;
+    }
     const blocked =
       req.blocking.some((id) => {
         const l = own(state.leases, id);
@@ -292,11 +389,13 @@ function leaseRules(state: BlackboardState, now: number, obs: Observations): Wat
 function deadWorker(
   state: BlackboardState,
   now: number,
+  obs: Observations,
   claim: Claim,
   rt: TaskRuntime,
   rec: AgentRecord | undefined,
   lost: boolean,
-  opening: ReadonlySet<string>
+  pass: Pass,
+  cfg: WatchdogConfig
 ): WatchdogAction[] {
   const { task, agent } = claim;
   const maxAttempts = state.contract?.budget.max_attempts ?? CONTRACT_DEFAULTS.max_attempts;
@@ -305,10 +404,21 @@ function deadWorker(
   const how = lost ? "was lost (its process is gone)" : "exited before submitting";
   const key = `worker_dead:${task}:${attempt}`;
   const lostEvent = () => [draft("agent.exited", { agent, task, code: null, reason: "lost" }, key)];
+
+  // Gate first: while no worker may start (budget spent, circuit open, a half-open trial already
+  // running), wait. Nothing is counted; the budget and circuit rules escalate. A lost worker is
+  // still recorded, under its own key, so the later retry is not mistaken for it.
+  const gate = respawnGate(state, now, obs, { task, agent, driver: rec?.driver }, pass);
+  if (!gate.ok) return lost ? [emitAction("worker_dead", `${key}:lost`, task, lostEvent())] : [];
   const before = lost ? lostEvent() : [];
 
-  if (next > maxAttempts) {
-    const why = `Worker ${agent} ${how} on attempt ${attempt} of ${maxAttempts}.`;
+  // A death the circuit breaker accounts for (a rate limit, auth or credit failure) is not the
+  // task's fault: it does not count against max_attempts, only against the larger infraRetries.
+  const infra = own(obs.infraDeaths, task);
+  const infraCount = infra?.count ?? 0;
+  const transient = !lost && infra?.lastAttempt === attempt;
+  const used = attempt - infraCount;
+  const fail = (why: string): WatchdogAction[] => {
     const esc = escalationAction(state, "worker_dead", {
       key,
       task,
@@ -320,22 +430,38 @@ function deadWorker(
       before: [...before, draft("task.failed", { task, why }, key)],
     });
     return esc ? [esc] : [];
+  };
+  if (transient && infraCount > cfg.infraRetries) {
+    return fail(`Workers on task ${task} died of transient driver failures ${infraCount} times (the limit is ${cfg.infraRetries}).`);
   }
-  // No respawn into an exhausted budget, an open circuit, or one this pass opens (the worker may
-  // have died of the very failure that trips it); the budget and circuit rules escalate. A lost
-  // worker is still recorded, under its own key, so the later retry is not mistaken for it.
-  const circuitOk = rec === undefined || (circuitStatus(state, rec.driver, now) !== "open" && !opening.has(rec.driver));
-  if (!(remainingUsd(state, { task, agent }) > 0 && circuitOk)) {
-    return lost ? [emitAction("worker_dead", `${key}:lost`, task, lostEvent())] : [];
+  if (!transient && used >= maxAttempts) {
+    const counted = infraCount
+      ? `attempt ${attempt} (${used} of ${maxAttempts} counted; ${infraCount} transient driver failure${infraCount === 1 ? "" : "s"} not counted)`
+      : `attempt ${attempt} of ${maxAttempts}`;
+    return fail(`Worker ${agent} ${how} on ${counted}.`);
   }
-  const why = `Worker ${agent} ${how}; resuming its session as attempt ${next} of ${maxAttempts}.`;
+  if (gate.trial) pass.admitted.add(gate.trial);
+  const why = transient
+    ? `Worker ${agent} hit a transient driver failure; resuming its session as attempt ${next} (not counted against max_attempts).`
+    : infraCount
+      ? `Worker ${agent} ${how}; resuming its session as attempt ${next} (${used + 1} of ${maxAttempts} counted).`
+      : `Worker ${agent} ${how}; resuming its session as attempt ${next} of ${maxAttempts}.`;
   return [
     emitAction("worker_dead", `${key}:retry`, task, [...before, draft("task.retried", { task, attempt: next, why }, key)]),
     { type: "spawn_retry", rule: "worker_dead", key: `${key}:spawn`, target: task, task, attempt: next },
   ];
 }
 
-function stalledWorker(state: BlackboardState, now: number, claim: Claim, o: AgentObservation, cfg: WatchdogConfig): WatchdogAction[] {
+function stalledWorker(
+  state: BlackboardState,
+  now: number,
+  obs: Observations,
+  claim: Claim,
+  rec: AgentRecord,
+  o: AgentObservation,
+  pass: Pass,
+  cfg: WatchdogConfig
+): WatchdogAction[] {
   const { task, agent } = claim;
   const last = Math.max(o.startedAt ?? -Infinity, o.lastOutputAt ?? -Infinity, o.lastHeartbeatAt ?? -Infinity, o.lastStallAt ?? -Infinity);
   if (!Number.isFinite(last) || now - last < cfg.stallMs) return [];
@@ -358,6 +484,11 @@ function stalledWorker(state: BlackboardState, now: number, claim: Claim, o: Age
     });
     return esc ? [esc, kill] : [];
   }
+  // The resume is a respawn: the same gate as a retry. Without it, the worker is only stopped,
+  // and the dead-worker rule retries it once the gate opens.
+  const gate = respawnGate(state, now, obs, { task, agent, driver: rec.driver }, pass);
+  if (!gate.ok) return [emitAction("worker_stall", key, task, [detected]), kill];
+  if (gate.trial) pass.admitted.add(gate.trial);
   return [
     emitAction("worker_stall", key, task, [detected]),
     kill,
@@ -368,32 +499,37 @@ function stalledWorker(state: BlackboardState, now: number, claim: Claim, o: Age
 /**
  * For each runner claim on a claimed or in-progress task that is not paused:
  *  - the agent exited or left, or its pid is gone ("lost"): retry with attempt+1 (spawn_retry
- *    resumes the session), or fail the task and escalate once attempts are used up; no retry
- *    while the budget is spent or the driver's circuit is open (or opening in this pass);
- *  - the pid lives but there has been no output or heartbeat for stallMs: kill and resume; on
- *    the task's second stall, kill, block and escalate instead.
- * Agents with busy set, and claims whose agent the observations do not cover, are left alone.
+ *    resumes the session), or fail the task and escalate once attempts are used up. Transient
+ *    driver failures do not use attempts. No retry, and no attempt accounting, while the respawn
+ *    gate is shut (budget spent, circuit open or opening, a half-open trial already running);
+ *  - the pid lives but there has been no output or heartbeat for stallMs: kill, and resume when
+ *    the gate allows; on the task's second stall, kill, block and escalate instead.
+ * A task the watchdog blocked keeps no live worker: its kill is re-issued (standing) until the
+ * worker is gone. Agents with busy set, and claims whose agent the observations do not cover,
+ * are left alone.
  */
-function workerRules(
-  state: BlackboardState,
-  now: number,
-  obs: Observations,
-  cfg: WatchdogConfig,
-  opening: ReadonlySet<string>
-): WatchdogAction[] {
+function workerRules(state: BlackboardState, now: number, obs: Observations, cfg: WatchdogConfig, pass: Pass): WatchdogAction[] {
   const out: WatchdogAction[] = [];
   for (const task of sortedKeys(state.claims)) {
     const claim = state.claims[task];
-    if (claim.ttl_s > 0) continue;
     const rt = own(state.tasks, task);
-    if (!rt || !ACTIVE.has(rt.state) || isPaused(state, task)) continue;
     const rec = own(state.agents, claim.agent);
     const o = own(obs.agents, claim.agent);
-    if (o?.busy) continue;
+    if (!rt || o?.busy) continue;
+    if (rt.state === "blocked") {
+      const escId = rt.blocked_by?.escalation;
+      const esc = own(state.escalations, escId);
+      if (claim.ttl_s <= 0 && esc?.agent === "watchdog" && esc.status !== "resolved" && esc.status !== "withdrawn" && rec?.status === "running") {
+        const agent = claim.agent;
+        out.push({ type: "kill_worker", rule: "blocked_worker", key: `${escId}:kill`, target: agent, agent, reason: "Its task is blocked", standing: true });
+      }
+      continue;
+    }
+    if (claim.ttl_s > 0 || !ACTIVE.has(rt.state) || isPaused(state, task)) continue;
     const exited = rec?.status === "exited" || rec?.status === "left";
     const lost = rec?.status === "running" && o !== undefined && !o.alive;
-    if (exited || lost) out.push(...deadWorker(state, now, claim, rt, rec, lost, opening));
-    else if (rec?.status === "running" && o?.alive) out.push(...stalledWorker(state, now, claim, o, cfg));
+    if (exited || lost) out.push(...deadWorker(state, now, obs, claim, rt, rec, lost, pass, cfg));
+    else if (rec?.status === "running" && o?.alive) out.push(...stalledWorker(state, now, obs, claim, rec, o, pass, cfg));
   }
   return out;
 }
@@ -439,7 +575,8 @@ function dependencyRules(state: BlackboardState): WatchdogAction[] {
     });
     if (dead.length) {
       const esc = escalationAction(state, "dependency_wait", {
-        key: `dependency_wait:${task}:${dead.join(",")}`,
+        // Keyed by each dep's attempt and finish, so a dep that is retried and fails again escalates again.
+        key: `dependency_wait:${task}:${dead.map((d) => `${d}@${state.tasks[d].attempt}:${state.tasks[d].state}:${state.tasks[d].finished_at ?? ""}`).join(",")}`,
         task,
         kind: "blocker",
         with: "orchestrator",
@@ -517,7 +654,7 @@ function diffPingPongRules(state: BlackboardState, obs: Observations): WatchdogA
   return out;
 }
 
-/** The last notPingPong notes on a topic alternate between two agents: suggest a micro-huddle between them. */
+/** The last notePingPong notes on a topic alternate between two agents: suggest a micro-huddle between them. */
 function notePingPongRules(state: BlackboardState, cfg: WatchdogConfig): WatchdogAction[] {
   const byTopic = new Map<string, BlackboardState["notes"]>();
   for (const n of state.notes) (byTopic.get(n.topic) ?? byTopic.set(n.topic, []).get(n.topic)!).push(n);
@@ -576,7 +713,9 @@ function huddleTimeoutRules(state: BlackboardState, now: number, obs: Observatio
 /**
  * An escalation routed to an orchestrator (the contract's, or any with a watcher entry), still
  * unresolved leadGraceMs after routing, whose watcher is not alive: route it to the contract's
- * lead (which marks it handled) and run the lead fallback.
+ * lead (which marks it handled) and run the lead fallback. An escalation still routed to the lead
+ * leadRetryMs after the fallback was last issued, with no lead call in flight, gets it again: a
+ * crash between the commit and the call, or a failed call, loses nothing.
  */
 function leadFallbackRules(state: BlackboardState, now: number, obs: Observations, cfg: WatchdogConfig): WatchdogAction[] {
   const c = state.contract;
@@ -586,7 +725,14 @@ function leadFallbackRules(state: BlackboardState, now: number, obs: Observation
   for (const id of sortedKeys(state.escalations)) {
     const esc = state.escalations[id];
     const to = esc.routed_to;
-    if (esc.status !== "routed" || to === undefined || to === lead) continue;
+    if (esc.status !== "routed" || to === undefined) continue;
+    if (to === lead) {
+      if (own(obs.leadInFlight, id)) continue;
+      const last = Math.max(own(obs.escalations, id)?.routedAt ?? -Infinity, own(obs.leadIssuedAt, id) ?? -Infinity);
+      if (!Number.isFinite(last) || now - last < cfg.leadRetryMs) continue;
+      out.push({ type: "lead_fallback", rule: "lead_fallback", key: `lead_fallback:${id}:again:${last}`, target: id, escalation: id });
+      continue;
+    }
     if (to !== c.scope.orchestrator && own(obs.watchers, to) === undefined) continue;
     const routedAt = own(obs.escalations, id)?.routedAt;
     if (routedAt === undefined || now - routedAt < cfg.leadGraceMs) continue;
@@ -604,40 +750,62 @@ function leadFallbackRules(state: BlackboardState, now: number, obs: Observation
 // Entry points
 // ---------------------------------------------------------------------------
 
-const UNSETTLED: ReadonlySet<string> = new Set(["claim_expiry", "lease_orphan", "lease_grant", "worker_dead"]);
+const UNSETTLED: ReadonlySet<string> = new Set(["claim_expiry", "lease_orphan", "lease_withdraw", "lease_grant", "worker_dead"]);
+
+/** A half-open circuit's trial worker that has run circuitTrialMs without failing is a success. */
+function trialSuccesses(state: BlackboardState, now: number, obs: Observations, cfg: WatchdogConfig): DriverOutcome[] {
+  const out: DriverOutcome[] = [];
+  for (const d of sortedKeys(state.watchdog.circuits)) {
+    if (circuitStatus(state, d, now) !== "half_open") continue;
+    const until = Date.parse(state.watchdog.circuits[d].until!);
+    for (const a of sortedKeys(state.agents)) {
+      const at = own(obs.spawns, a);
+      const rec = state.agents[a];
+      if (rec.driver !== d || rec.status !== "running" || at === undefined || at < until) continue;
+      if (own(obs.agents, a)?.alive === false || now - at < cfg.circuitTrialMs) continue;
+      out.push({ driver: d, at: at + cfg.circuitTrialMs, kind: "success", message: `trial worker ${a} ran ${minutes(cfg.circuitTrialMs)}` });
+    }
+  }
+  return out;
+}
 
 /**
  * Every rule, in a fixed order: leases and claims, workers, dependencies, repeated failure, diff
  * and note ping-pong, huddle timeouts, lead fallback, budget, circuits, then deadlocks (skipped in
  * a pass that frees leases or claims, so a cycle about to break is not reported). Actions with the
- * same type and key are emitted once. A finished run (completed, failed, aborted) yields nothing.
+ * same type and key are emitted once, and at most one kill_worker per agent. A finished run
+ * (completed, failed, aborted) yields nothing. Process operations are idempotent for the runner:
+ * standing ones repeat on every pass while their condition holds.
  */
 export function evaluate(state: BlackboardState, now: number, obs: Observations = {}, cfg: Partial<WatchdogConfig> = {}): WatchdogAction[] {
   if (state.status === "completed" || state.status === "failed" || state.status === "aborted") return [];
   const c: WatchdogConfig = { ...WATCHDOG_DEFAULTS, ...cfg };
   const circuit: CircuitConfig = { windowMs: c.circuitWindowMs, failures: c.circuitFailures, baseMs: c.circuitBaseMs, maxMs: c.circuitMaxMs };
-  const circuits = circuitRules(state, now, { outcomes: obs.outcomes, history: obs.circuits }, circuit);
+  const outcomes = [...(obs.outcomes ?? []), ...trialSuccesses(state, now, obs, c)];
+  const circuits = circuitRules(state, now, { outcomes, history: obs.circuits }, circuit);
   const opening = new Set(
     circuits.flatMap((a) =>
       a.type === "emit" ? a.events.flatMap((e) => (e.type === "watchdog.circuit_opened" ? [e.payload.driver] : [])) : []
     )
   );
+  const pass: Pass = { opening, admitted: new Set() };
+  const busy = new Set(sortedKeys(obs.agents).filter((a) => obs.agents![a].busy));
   const actions = [
     ...leaseRules(state, now, obs),
-    ...workerRules(state, now, obs, c, opening),
+    ...workerRules(state, now, obs, c, pass),
     ...dependencyRules(state),
     ...repeatedFailureRules(state, c),
     ...diffPingPongRules(state, obs),
     ...notePingPongRules(state, c),
     ...huddleTimeoutRules(state, now, obs, c),
     ...leadFallbackRules(state, now, obs, c),
-    ...budgetRules(state),
+    ...budgetRules(state, { busy }),
     ...circuits,
   ];
   if (!actions.some((a) => UNSETTLED.has(a.rule))) actions.push(...deadlockRules(state, obs.needs));
   const seen = new Set<string>();
   return actions.filter((a) => {
-    const k = `${a.type}\0${a.key}`;
+    const k = a.type === "kill_worker" ? `kill\0${a.agent}` : `${a.type}\0${a.key}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
@@ -647,10 +815,25 @@ export function evaluate(state: BlackboardState, now: number, obs: Observations 
 /**
  * The observations derivable from the log, merged under `base` (the runner's process
  * observations, which win): seq times of claims, claim renewals (the claim, any event the
- * claiming agent emits, and a resume of the run or the task), huddle start and escalation routing times, diff history, open
+ * claiming agent emits, the task's submission, checks, rejection and merge, and a resume of the
+ * run or the task), spawn times, transient driver deaths per task, lead fallback issue times,
+ * huddle start and escalation routing times, diff history, open
  * dependency needs, stall counts for base's agents on their current task, driver outcomes and
  * circuit history. Pass the log since the run started; a shorter window undercounts.
  */
+/** Events about a claimed task that show it is being worked on: they renew an external claim. */
+const RENEWS: ReadonlySet<string> = new Set([
+  "task.submitted",
+  "task.rejected",
+  "task.checks_passed",
+  "check.started",
+  "check.passed",
+  "check.failed",
+  "check.timed_out",
+  "merge.succeeded",
+  "merge.conflicted",
+]);
+
 export function observeEvents(events: readonly AnyEvent[], base: Observations = {}): Observations {
   const seqTimes: Record<number, number> = {};
   const claims: Record<string, { renewedAt: number }> = {};
@@ -661,6 +844,10 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
   const diffs: Record<string, string[]> = {};
   const needs = new Map<string, DependencyNeed>();
   const stalls = new Map<string, { count: number; lastAt: number }>();
+  const spawns: Record<string, number> = {};
+  const attemptOf = new Map<string, number>();
+  const infraDeaths: Record<string, { count: number; lastAttempt: number }> = {};
+  const leadIssuedAt: Record<string, number> = {};
   const needKey = (n: DependencyNeed) => `${n.task}\0${n.need.kind}\0${n.need.ref}`;
 
   for (const e of events) {
@@ -669,15 +856,30 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
       const t = claimOf.get(e.source.id);
       if (t !== undefined) putOwn(claims, t, { renewedAt: at });
     }
+    const named = (e.payload as { task?: unknown }).task;
+    if (typeof named === "string" && RENEWS.has(e.type) && [...claimOf.values()].includes(named)) putOwn(claims, named, { renewedAt: at });
     switch (e.type) {
       case "task.claimed":
         seqTimes[e.seq] = at;
+        attemptOf.set(e.payload.task, e.payload.attempt);
         putOwn(claims, e.payload.task, { renewedAt: at });
         claimOf.set(e.payload.agent, e.payload.task);
         currentTask.set(e.payload.agent, e.payload.task);
         break;
       case "agent.spawned":
         currentTask.set(e.payload.agent, e.payload.task);
+        attemptOf.set(e.payload.task, e.payload.attempt);
+        putOwn(spawns, e.payload.agent, at);
+        break;
+      case "agent.exited": {
+        const t = e.payload.task ?? currentTask.get(e.payload.agent);
+        if (t === undefined || e.payload.reason !== "error") break;
+        if (classifyFailure(e.payload.result_subtype ?? "", { source: "driver" }) === "error") break;
+        putOwn(infraDeaths, t, { count: (own(infraDeaths, t)?.count ?? 0) + 1, lastAttempt: attemptOf.get(t) ?? 0 });
+        break;
+      }
+      case "watchdog.action":
+        if (e.payload.rule === "lead_fallback" && e.payload.action === "lead_fallback") putOwn(leadIssuedAt, e.payload.target, at);
         break;
       case "execution.resumed": {
         // Claim TTLs restart on resume (design §3).
@@ -746,5 +948,8 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
     outcomes: [...derived.outcomes, ...(base.outcomes ?? [])],
     circuits: { ...derived.history, ...base.circuits },
     needs: base.needs ?? [...needs.values()],
+    spawns: { ...spawns, ...base.spawns },
+    infraDeaths: { ...infraDeaths, ...base.infraDeaths },
+    leadIssuedAt: { ...leadIssuedAt, ...base.leadIssuedAt },
   };
 }

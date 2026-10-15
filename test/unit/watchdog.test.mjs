@@ -2,13 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   MIN,
+  SEC,
   T0,
+  World,
   agent,
   applyDrafts,
   claim,
   emitted,
   escalations,
   eventTypes,
+  fresh,
   lease,
   makeState,
   ofType,
@@ -18,6 +21,7 @@ import {
 } from "../fixtures/execution-state.mjs";
 
 const { applyInPlace } = await import("../../dist/execution/blackboard.js");
+const { circuitStatus } = await import("../../dist/execution/circuit.js");
 const { validateDraft } = await import("../../dist/execution/events.js");
 const {
   evaluate,
@@ -28,6 +32,7 @@ const {
   leasesConflict,
   escalationId,
   processActions,
+  canRespawn,
   WATCHDOG_DEFAULTS,
 } = await import("../../dist/execution/watchdog.js");
 
@@ -325,7 +330,13 @@ test("stall: the full sequence, applied by hand, escalates on the second stall o
   s = settle(s, second);
   assert.equal(s.tasks.t.state, "blocked");
   assert.deepEqual(s.tasks.t.blocked_by, { escalation: esc.id });
-  assert.deepEqual(evaluate(s, T0 + 12 * MIN, obs), []);
+  // Nothing new; the kill stands until the worker is gone (a lost kill is re-issued).
+  const later = evaluate(s, T0 + 12 * MIN, obs);
+  assert.deepEqual(fresh(later), []);
+  assert.deepEqual(later.map((a) => [a.type, a.agent, a.standing]), [["kill_worker", "w-t", true]]);
+  assert.deepEqual(actionsToDrafts(later), [], "standing: no audit events");
+  s.agents["w-t"].status = "exited";
+  assert.deepEqual(evaluate(s, T0 + 13 * MIN, obs), []);
 });
 
 // ---------------------------------------------------------------------------
@@ -552,7 +563,14 @@ test("lead fallback waits out the grace period and skips other routes", () => {
   const dead = { watchers: { main: { alive: false } } };
   assert.deepEqual(evaluate(routedState(), T0, { ...dead, escalations: { "esc-2": { routedAt: T0 - MIN } } }), []);
   const old = { ...dead, escalations: { "esc-2": { routedAt: T0 - 10 * MIN } } };
-  assert.deepEqual(evaluate(routedState("lead"), T0, old), [], "already with the lead");
+  assert.deepEqual(evaluate(routedState("lead"), T0, { ...dead, escalations: { "esc-2": { routedAt: T0 - 3 * MIN } } }), [], "with the lead, within its retry window");
+  assert.deepEqual(
+    evaluate(routedState("lead"), T0, old).map((a) => [a.type, a.escalation]),
+    [["lead_fallback", "esc-2"]],
+    "still with the lead past the retry window: issued again"
+  );
+  assert.deepEqual(evaluate(routedState("lead"), T0, { ...old, leadInFlight: { "esc-2": true } }), [], "a lead call is running");
+  assert.deepEqual(evaluate(routedState("lead"), T0, { ...old, leadIssuedAt: { "esc-2": T0 - MIN } }), [], "issued again a minute ago");
   assert.deepEqual(evaluate(routedState("w-u"), T0, old), [], "routed to a peer, not an orchestrator");
   assert.deepEqual(evaluate(routedState("main", "awaiting_human"), T0, old), [], "awaiting the human");
   assert.deepEqual(evaluate(routedState(), T0, { watchers: dead.watchers }), [], "routing time unknown");
@@ -581,9 +599,10 @@ function busyState() {
   return s;
 }
 
-const busyObs = (over = {}) => ({
+const busyObs = (over = {}, settled = false) => ({
   agents: { "w-stuck": { alive: true, startedAt: T0 - 60 * MIN, lastOutputAt: T0 - 20 * MIN, ...over } },
-  escalations: { "esc-2": { routedAt: T0 - 5 * MIN } },
+  escalations: { "esc-2": { routedAt: settled ? T0 : T0 - 5 * MIN } },
+  ...(settled ? { leadIssuedAt: { "esc-2": T0 } } : {}),
   watchers: { main: { alive: false } },
   diffs: { chatty: ["A", "B", "A"] },
   outcomes: [{ driver: "codex", at: T0 - MIN, kind: "rate_limit", message: "429 Too Many Requests" }],
@@ -601,7 +620,7 @@ test("idempotence: once a pass's events are applied (and its process operations 
 
   const after = settle(s, first);
   // The runner performed the stall kill+resume and counted the stall.
-  const obs = busyObs({ stalls: 1, lastStallAt: T0, startedAt: T0 + 500 });
+  const obs = busyObs({ stalls: 1, lastStallAt: T0, startedAt: T0 + 500 }, true);
   assert.deepEqual(evaluate(after, T0 + 1000, obs), []);
 });
 
@@ -629,7 +648,7 @@ test("idempotence: repeated passes reach a fixed point without repeating any key
       seen.add(k);
     }
     s = settle(s, actions);
-    obs = busyObs({ stalls: 1, lastStallAt: T0, startedAt: T0 + 500 });
+    obs = busyObs({ stalls: 1, lastStallAt: T0, startedAt: T0 + 500 }, true);
     assert.ok(++passes < 5, "converges");
   }
   assert.equal(passes, 2, "the deadlock waits for the pass after the retry");
@@ -719,7 +738,9 @@ test("observeEvents derives times, history and needs from the log; process obser
   ];
   const obs = observeEvents(events, { agents: { "w-t": { alive: true, lastOutputAt: T0 } }, huddles: { "hud-1": { startedAt: 5 } } });
   assert.equal(obs.seqTimes[2], T0 - 50 * MIN);
-  assert.deepEqual(obs.claims, { t: { renewedAt: T0 - 50 * MIN }, e: { renewedAt: T0 - 20 * MIN } });
+  assert.deepEqual(obs.claims, { t: { renewedAt: T0 - 35 * MIN }, e: { renewedAt: T0 - 20 * MIN } }, "a submission renews the claim");
+  assert.deepEqual(obs.spawns, { "w-t": T0 - 50 * MIN });
+  assert.deepEqual(obs.infraDeaths, { t: { count: 1, lastAttempt: 1 } }, "the rate-limit exit is a transient driver failure");
   assert.deepEqual(obs.agents["w-t"], { stalls: 1, lastStallAt: T0 - 30 * MIN, alive: true, lastOutputAt: T0 });
   assert.deepEqual(obs.huddles, { "hud-1": { startedAt: 5 } }, "base wins");
   assert.deepEqual(obs.escalations, { "esc-1": { routedAt: T0 - 24 * MIN } });
@@ -807,7 +828,7 @@ const touched = (s) => ({
 
 const conformance = [
   { name: "claim expiry and queue grants", state: leaseScenario, obs: () => ({ seqTimes: { 10: T0 - 16 * MIN } }) },
-  { name: "most rules at once", state: busyState, obs: () => busyObs(), next: () => busyObs({ stalls: 1, lastStallAt: T0, startedAt: T0 + 500 }) },
+  { name: "most rules at once", state: busyState, obs: () => busyObs(), next: () => busyObs({ stalls: 1, lastStallAt: T0, startedAt: T0 + 500 }, true) },
   { name: "a lost worker", state: workerState, obs: () => ({ agents: { "w-t": { alive: false } } }) },
   { name: "the last attempt", state: () => workerState({ attempt: 3, status: "exited" }), obs: () => ({}) },
   { name: "a second stall", state: workerState, obs: () => ({ agents: live({ stalls: 1, lastStallAt: T0 - 40 * MIN }) }) },
@@ -850,7 +871,7 @@ for (const c of conformance) {
     const drafts = actionsToDrafts(actions, { pid: 1234 });
     const real = applyStrict(s, drafts);
     assert.deepEqual(touched(real), touched(applyDrafts(s, drafts)), "the test reducer agrees with the real one");
-    assert.deepEqual(evaluate(real, T0 + 1000, (c.next ?? c.obs)()), [], "idempotent on the real blackboard");
+    assert.deepEqual(fresh(evaluate(real, T0 + 1000, (c.next ?? c.obs)())), [], "idempotent on the real blackboard");
   });
 }
 
@@ -919,4 +940,229 @@ test("a task blocked on a dep that failed or was cancelled escalates; a split de
   assert.deepEqual(evaluate(split, T0, {}), [], "waiting for a2");
   split.tasks.a2.state = "accepted";
   assert.deepEqual(eventTypes(evaluate(split, T0, {})), ["task.unblocked"]);
+});
+
+// ---------------------------------------------------------------------------
+// Second review round
+// ---------------------------------------------------------------------------
+
+const iso = (ms) => new Date(ms).toISOString();
+const RATE_LIMITED = 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}';
+
+test("a 4-minute rate-limit outage with 4 workers: nothing fails, one trial per half-open period, all resume after", () => {
+  const ids = ["a", "b", "c", "d"];
+  const w = new World(makeState({ tasks: ids.map((t) => task(t)) }));
+  for (const t of ids) {
+    w.emit("agent.registered", { agent: `w-${t}`, persona: "dev", driver: "claude-code", token_sha256: "0".repeat(64), external: false });
+    w.emit("task.claimed", { task: t, agent: `w-${t}`, attempt: 1, ttl_s: 0 });
+    w.emit("agent.spawned", { agent: `w-${t}`, task: t, attempt: 1, pid: 1000 });
+  }
+  const outageEnd = T0 + 4 * MIN;
+  let dying = ids.map((t) => [T0 + 5 * SEC, t]);
+  const trials = new Map(); // half-open period (its until) -> spawns in it
+  for (let i = 0; i < 120; i++) {
+    for (const [, t] of dying.filter(([at]) => at <= w.now)) {
+      w.emit("agent.exited", { agent: `w-${t}`, task: t, code: 1, reason: "error", result_subtype: RATE_LIMITED });
+    }
+    dying = dying.filter(([at]) => at > w.now);
+    const status = circuitStatus(w.state, "claude-code", w.now);
+    const until = w.state.watchdog.circuits["claude-code"]?.until;
+    const actions = w.step({ agents: Object.fromEntries(ids.map((t) => [`w-${t}`, { alive: w.state.agents[`w-${t}`].status === "running" }])) });
+    const spawned = actions.filter((a) => a.type === "spawn_retry");
+    if (status === "open") assert.equal(spawned.length, 0, `no spawn while open (pass ${i})`);
+    if (status === "half_open") trials.set(until, (trials.get(until) ?? 0) + spawned.length);
+    for (const a of spawned) {
+      w.emit("task.claimed", { task: a.task, agent: `w-${a.task}`, attempt: a.attempt, ttl_s: 0 });
+      w.emit("agent.spawned", { agent: `w-${a.task}`, task: a.task, attempt: a.attempt, pid: 2000 + i });
+      if (w.now < outageEnd) dying.push([w.now + 15 * SEC, a.task]);
+    }
+    w.now += 10 * SEC;
+  }
+  assert.ok(trials.size >= 2, "the circuit went half-open more than once");
+  for (const [until, n] of trials) assert.ok(n <= 1, `one trial in the half-open period ending ${until}`);
+  assert.equal(w.log.filter((e) => e.type === "task.failed").length, 0, "no task failed");
+  assert.equal(circuitStatus(w.state, "claude-code", w.now), "closed");
+  for (const t of ids) {
+    assert.equal(w.state.tasks[t].state, "claimed", t);
+    assert.equal(w.state.agents[`w-${t}`].status, "running", t);
+  }
+});
+
+test("a half-open circuit admits exactly one trial: one retry or resume per period", () => {
+  const s = makeState({ tasks: ["a", "b", "c", "d"].map((id) => task(id)) });
+  for (const t of ["a", "b", "c"]) claim(s, t, `w-${t}`, { agentOver: { status: "exited" } });
+  claim(s, "d", "w-d");
+  s.watchdog.circuits["claude-code"] = { open: true, until: iso(T0 - SEC), reason: "429", opens: 1 };
+  const obs = { agents: { "w-d": { alive: true, startedAt: T0 - 30 * MIN, lastOutputAt: T0 - 11 * MIN } } };
+  const actions = evaluate(s, T0, obs);
+  assert.deepEqual(opsOf(actions).map((a) => [a.type, a.task ?? a.agent]), [
+    ["spawn_retry", "a"],
+    ["kill_worker", "w-d"],
+  ]);
+  // Once the trial worker is spawned, nobody else starts until the circuit closes.
+  const after = settle(s, actions);
+  claim(after, "a", "w-a", { attempt: 2 });
+  const trial = { ...obs, spawns: { "w-a": T0 + SEC } };
+  assert.deepEqual(opsOf(evaluate(after, T0 + 10 * SEC, trial)).filter((a) => a.type !== "kill_worker"), []);
+  assert.deepEqual(canRespawn(after, T0 + 10 * SEC, trial, { task: "b", agent: "w-b", driver: "claude-code" }), { ok: false, why: "trial_in_flight" });
+  assert.deepEqual(canRespawn(after, T0 + 10 * SEC, {}, { task: "b", agent: "w-b", driver: "codex" }), { ok: true });
+  // The trial survives circuitTrialMs: the circuit closes.
+  const closing = evaluate(after, T0 + SEC + 2 * MIN, { ...trial, agents: { ...trial.agents, "w-a": { alive: true } } });
+  assert.ok(emitted(closing).some((e) => e.type === "watchdog.circuit_closed"));
+});
+
+test("transient driver deaths do not use attempts; they have their own cap", () => {
+  const dead = (infraDeaths) => evaluate(workerState({ attempt: 3, status: "exited" }), T0, { infraDeaths }).filter((a) => a.rule === "worker_dead");
+  assert.deepEqual(opsOf(dead({ t: { count: 2, lastAttempt: 3 } })).map((a) => a.attempt), [4], "the third attempt died of a rate limit");
+  assert.deepEqual(opsOf(dead({ t: { count: 2, lastAttempt: 2 } })).map((a) => a.attempt), [4], "only one counted attempt was used");
+  assert.match(ofType(dead({ t: { count: 2, lastAttempt: 3 } }), "task.retried")[0].payload.why, /transient driver failure.*not counted/);
+  const capped = dead({ t: { count: 21, lastAttempt: 3 } });
+  assert.deepEqual(eventTypes(capped), ["task.failed", "escalation.raised"]);
+  assert.match(escalations(capped)[0].summary, /transient driver failures 21 times \(the limit is 20\)/);
+  const counted = evaluate(workerState({ attempt: 4, status: "exited" }), T0, { infraDeaths: { t: { count: 1, lastAttempt: 1 } } });
+  assert.match(escalations(counted)[0].summary, /attempt 4 \(3 of 3 counted; 1 transient driver failure not counted\)/);
+});
+
+test("while the respawn gate is shut a dead worker waits; no attempt is counted or failed", () => {
+  for (const [label, mut] of [
+    ["circuit open", (s) => (s.watchdog.circuits["claude-code"] = { open: true, until: iso(T0 + 10 * MIN), reason: "429" })],
+    ["budget spent", (s) => (s.budget.spent_usd = 100)],
+  ]) {
+    const s = workerState({ attempt: 3, status: "exited" });
+    mut(s);
+    assert.deepEqual(evaluate(s, T0, {}).filter((a) => a.rule === "worker_dead"), [], label);
+  }
+});
+
+test("a stalled worker is resumed only through the respawn gate, and killed once", () => {
+  const stalled = { "w-t": { alive: true, startedAt: T0 - 30 * MIN, lastOutputAt: T0 - 11 * MIN } };
+  const cases = [
+    ["the task cap is reached", (s) => Object.assign(s.budget, { spent_usd: 20, by_task: { t: 20 } }), ["kill_worker"]],
+    ["the budget is spent", (s) => Object.assign(s.budget, { spent_usd: 100, thresholds_crossed: [50, 80, 100], thresholds_budget_usd: 100 }), ["kill_worker", "stop_spawning"]],
+    ["the circuit is open", (s) => (s.watchdog.circuits["claude-code"] = { open: true, until: iso(T0 + 10 * MIN), reason: "429" }), ["kill_worker"]],
+    ["the circuit is half-open", (s) => (s.watchdog.circuits["claude-code"] = { open: true, until: iso(T0 - MIN), reason: "429" }), ["kill_worker", "resume_worker"]],
+    [
+      "a half-open trial is already running",
+      (s) => {
+        s.watchdog.circuits["claude-code"] = { open: true, until: iso(T0 - MIN), reason: "429" };
+        s.agents["w-x"] = agent("w-x");
+      },
+      ["kill_worker"],
+      { "w-x": T0 - 30 * SEC },
+    ],
+  ];
+  for (const [label, mut, ops, spawns] of cases) {
+    const s = workerState();
+    mut(s);
+    const actions = evaluate(s, T0, { agents: stalled, ...(spawns ? { spawns } : {}) });
+    assert.deepEqual(opsOf(actions).map((a) => a.type), ops, label);
+  }
+});
+
+test("claims and leases of submitted work being checked or merged do not expire", () => {
+  for (const phase of ["checking", "merging"]) {
+    const w = new World(makeState({ tasks: [task("e")] }));
+    const ext = { kind: "agent", id: "ext-1", pid: 7 };
+    w.emit("agent.registered", { agent: "ext-1", persona: "dev", driver: "external", token_sha256: "0".repeat(64), external: true });
+    w.emit("task.claimed", { task: "e", agent: "ext-1", attempt: 1, ttl_s: 900 });
+    w.emit("lease.granted", { lease: lease("L1", "e", "ext-1", ["src/e/**"]) });
+    w.now += 5 * MIN;
+    w.emit("task.submitted", { task: "e", commit: "c1", diff_blob: "sha256:d1", stat: "1 file", files: ["src/e/x.ts"], rewrites: [] }, ext);
+    w.emit("check.started", { command_id: "test", scope: "task", task: "e" });
+    if (phase === "merging") w.emit("task.checks_passed", { task: "e", commands: ["test"] });
+    w.now += 16 * MIN;
+    assert.deepEqual(w.step().filter((a) => a.rule === "claim_expiry"), [], phase);
+    assert.equal(w.state.tasks.e.state, phase);
+    assert.deepEqual(Object.keys(w.state.leases), ["L1"]);
+    if (phase !== "checking") continue;
+    // Rejected back to the worker: the TTL restarts from the rejection.
+    w.emit("task.rejected", { task: "e", reasons: ["test failed"] });
+    w.now += 10 * MIN;
+    assert.deepEqual(w.step().filter((a) => a.rule === "claim_expiry"), []);
+    w.now += 6 * MIN;
+    assert.equal(w.step().filter((a) => a.rule === "claim_expiry").length, 1, "15 min after the rejection");
+  }
+});
+
+test("a dependency that fails, is retried, and fails again escalates again", () => {
+  const s = makeState({ tasks: [task("a", { state: "in_progress" }), task("b", { state: "blocked", blocked_by: { deps: ["a"] }, spec: { depends_on: ["a"] } })] });
+  const w = new World(s);
+  const orch = { kind: "orchestrator", id: "main", pid: 1 };
+  w.emit("task.failed", { task: "a", why: "boom" });
+  const first = escalations(w.step());
+  assert.equal(first.length, 1);
+  w.emit("escalation.resolved", { id: first[0].id, action: "retry", decision: "retry a", by: "main" }, orch);
+  w.emit("task.retried", { task: "a", attempt: 2, why: "orchestrator retry" }, orch);
+  assert.deepEqual(escalations(w.step()), []);
+  w.now += MIN;
+  w.emit("task.failed", { task: "a", why: "boom again" });
+  const second = escalations(w.step());
+  assert.equal(second.length, 1);
+  assert.notEqual(second[0].id, first[0].id);
+});
+
+test("resubmitting the same diff is no patch: the repeated failure escalates", () => {
+  const s = makeState({ tasks: [task("t")] });
+  claim(s, "t", "w-t");
+  const w = new World(s);
+  const wt = { kind: "agent", id: "w-t", pid: 7 };
+  const raised = [];
+  for (let i = 0; i < 6; i++) {
+    w.emit("task.submitted", { task: "t", commit: `c${i}`, diff_blob: "sha256:same", stat: "1 file", files: ["src/t/x.ts"], rewrites: [] }, wt);
+    w.emit("check.started", { command_id: "test", scope: "task", task: "t" });
+    w.emit("check.failed", { command_id: "test", scope: "task", task: "t", exit: 1, signature: "sig-1" });
+    w.emit("task.rejected", { task: "t", reasons: ["test failed"] });
+    raised.push(...escalations(w.step({ agents: { "w-t": { alive: true, startedAt: w.now } } })));
+    w.now += MIN;
+  }
+  assert.equal(w.state.checks.task["t/test"].streak, 6);
+  assert.deepEqual(raised.map((e) => e.summary.match(/failed (\d+) times/)?.[1]), ["3"], "once, on the third identical cycle");
+});
+
+test("crash recovery: a lost lead fallback is issued again from the log alone", () => {
+  const s = makeState();
+  s.escalations["esc-2"] = { id: "esc-2", agent: "w-x", kind: "blocker", with: "orchestrator", summary: "help", blocking: false, status: "open", raised_seq: 5 };
+  const w = new World(s);
+  w.emit("escalation.routed", { id: "esc-2", to: "main", wake: true });
+  w.now += 3 * MIN;
+  const lead = (actions) => actions.filter((a) => a.type === "lead_fallback").map((a) => a.escalation);
+  assert.deepEqual(lead(w.step({ watchers: { main: { alive: false } } })), ["esc-2"], "issued; the runner dies before the call");
+  assert.equal(w.state.escalations["esc-2"].routed_to, "lead");
+  w.now += 2 * MIN;
+  assert.deepEqual(lead(w.step()), [], "within the retry window");
+  w.now += 4 * MIN;
+  assert.deepEqual(lead(w.step()), ["esc-2"], "a restarted runner, observations rebuilt from the log");
+  w.now += MIN;
+  assert.deepEqual(lead(w.step()), [], "spaced by its own audit event");
+  w.now += 6 * MIN;
+  assert.deepEqual(lead(w.step({ leadInFlight: { "esc-2": true } })), [], "not while a call runs");
+  assert.deepEqual(lead(w.step()), ["esc-2"]);
+});
+
+test("crash recovery: stop_spawning stands while the budget is spent, without new events", () => {
+  const s = makeState();
+  s.budget.spent_usd = 100;
+  const w = new World(s);
+  const first = w.step();
+  assert.deepEqual(opsOf(first).map((a) => [a.type, a.standing]), [["wake_orchestrator", undefined], ["stop_spawning", undefined]]);
+  const logged = w.log.length;
+  const again = w.step(); // the op was lost; a restarted runner evaluates again
+  assert.deepEqual(again.map((a) => [a.type, a.standing]), [["stop_spawning", true]]);
+  assert.equal(w.log.length, logged, "no duplicate events");
+});
+
+test("queued lease requests of tasks without a claim are withdrawn", () => {
+  const s = makeState({ tasks: [task("y"), task("z", { state: "accepted" })] });
+  s.lease_queue = [request("R1", "y", "w-y", ["src/a/**"], "exclusive", [], 10), request("R2", "z", "w-z", ["src/b/**"], "shared", [], 11)];
+  const actions = evaluate(s, T0, {});
+  assert.deepEqual(
+    actions.map((a) => [a.rule, a.events[0].type, a.events[0].payload.lease_id]),
+    [
+      ["lease_withdraw", "lease.released", "R1"],
+      ["lease_withdraw", "lease.released", "R2"],
+    ]
+  );
+  const after = applyStrict(s, actionsToDrafts(actions));
+  assert.deepEqual(after.lease_queue, []);
+  assert.deepEqual(evaluate(after, T0, {}), []);
 });

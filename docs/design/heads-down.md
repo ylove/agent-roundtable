@@ -79,7 +79,12 @@ Branches are named `rt/<exe6>/<task>` and `rt/<exe6>/integration`, where `exe6` 
 
 Writes are therefore serializable across processes.
 
-**Reads** take no lock. They tail from a byte offset and ignore a trailing partial line.
+Details of `transact` (`src/execution/store.ts`):
+- All of `fn`'s drafts are validated before anything is written, and they are appended with one write, so a transaction lands whole or not at all.
+- `fn` must finish well within the 10 s stale limit. Slow work, such as an LLM call, happens outside `transact`. Just before writing, the store checks that `owner.json` still carries its token and that the log has not grown. If either check fails, it throws and writes nothing.
+- Under the lock no append can be in flight. Bytes after the last newline therefore belong to a writer that died mid-append, and the next transaction truncates them.
+
+**Reads** take no lock. They tail from a byte offset and ignore a trailing partial line. A complete line that does not parse, or that breaks the seq or `prev` chain, throws.
 
 **Resume** reconciles in this order:
 1. Verify the chain.
@@ -112,10 +117,10 @@ export interface EventEnvelope<T extends EventType = EventType> {
 }
 ```
 
-- Payload text is passed through `redactSecrets` before hashing.
-- Payloads over 8 KB become `{blob, bytes, sha256}`.
-- Each type has a small validator in `src/execution/events.ts`, and unknown types are rejected.
-- `canonicalJSON` sorts keys recursively and has no whitespace.
+- Free-text payload fields pass through `scrub` (`src/security/secrets.ts`) before hashing. Identifiers, refs and paths are stored as given.
+- Payloads whose canonical JSON exceeds 8 KB are refused. The caller stores the large content with `putBlob` and puts the `sha256:<hex>` ref in the payload.
+- Each type has a small validator in `src/execution/events.ts`. Unknown types, unknown fields and wrongly typed fields are rejected.
+- `canonicalJSON` sorts keys recursively and has no whitespace. It rejects values that do not survive a JSON round trip, such as non-finite numbers.
 
 ## 5. Event catalog
 
@@ -132,8 +137,8 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `contract.consent_requested` | participants |
 | `contract.consent_recorded` | agent, verdict, reason |
 | `contract.objection_resolved` | agent, how: amended / withdrawn / excused, reason |
-| `contract.frozen` | by, hash |
-| `contract.amended` | version, patch_blob, reason, affected_tasks |
+| `contract.frozen` | by, hash, blob (the full contract at this version) |
+| `contract.amended` | version, patch_blob, reason, affected_tasks, blob (the full contract at the new version) |
 | `contract.superseded` | by_contract |
 | `runner.started` | pid, version |
 | `runner.takeover` | previous_pid |
@@ -223,6 +228,16 @@ The blackboard is a pure reducer, `apply(state, event) → state`, in `src/execu
 | `watchdog` | Circuits and failure signatures |
 
 The human's chat is never stored on the blackboard.
+
+**How the contract reaches the reducer.** `contract.frozen` and `contract.amended` carry `blob`: the full contract JSON at that version, stored with `putBlob(scrubbedJSON(contract), {redact: false})`. Before calling `apply(state, event, resolved)`, the store reads that blob, checks its hash, and passes the parsed contract in as `resolved.contract`. The reducer never touches the disk, and because blobs are content-addressed, every process resolves the same bytes. A frozen or amended event without a resolvable, matching blob is refused at write time. `contract.proposed` leaves the blackboard unchanged, since `contract` holds only frozen versions. The `contracts/<ctr>/v<N>.json` files are for people and tools; the reducer does not read them.
+
+**Reducer semantics** (`src/execution/blackboard.ts`; each handler is documented there):
+- Unknown types throw. An event that names a task, agent, lease or escalation the state does not know changes nothing for that part.
+- Freezing or amending sets `contract` and `goal` and merges teams, interfaces and decisions. Tasks are created `pending`, and become `ready` once all their dependencies are `accepted`. An amendment keeps existing tasks' runtime state, and the amending tool cancels removed tasks explicitly.
+- `task.merged` (and `task.accepted`) accepts the task, drops its claim and promotes dependents. Pausing never changes task states; it only fills `paused_tasks`.
+- `checks.task` is keyed `<task>/<command_id>` and `checks.integration` by command id. `task.submitted` resets that task's streaks, and `task.merged` resets the integration streaks.
+- `raised_seq`, `granted_seq` and `requested_seq` are set from the event's seq, whatever the payload says.
+- Snapshots record `REDUCER_VERSION`. Bump it whenever `apply` would produce a different state from an existing log; snapshots with another version are then ignored and the log is replayed.
 
 ## 7. Contract
 
@@ -613,3 +628,15 @@ These modules exist so the workstreams can run in parallel without depending on 
 | `src/security/child-env.ts` | `childEnv(profile, extra?, source?)`, `SECRET_NAME_RE`. Profiles: claude-worker, codex-worker, local-meeting, git, gh, docker, browser, open, sandbox-local, cloud-cli, runner |
 | `src/security/secrets.ts` | `scrubSecrets(text)` (exact env secret values first, then credential patterns), `scrub`, `scrubAndCap` |
 | `src/publishers/redact.ts` | `redactSecrets` and `redactPII`. `redact` composes the two, so public output is unchanged |
+
+WS03 adds the store that the other workstreams write through:
+
+| Module | API |
+|---|---|
+| `src/execution/store.ts` | `createExecutionStore({repoRoot, baseSha, agentsDir, id?})`, `openExecutionStore(id)`, `listExecutions()`, `executionDir(id)`, `REDUCER_VERSION`. Stores implement `ExecutionStore` plus `writeSnapshot()` |
+| `src/execution/lock.ts` | `acquireLock(dir, {staleMs, timeoutMs, waitMs?})` returns `release()` with `.held()`; `withLock(dir, opts, fn)` |
+| `src/execution/events.ts` | `validateDraft(draft)`, `PAYLOAD_SPECS`, `PAYLOAD_LIMIT_BYTES` |
+| `src/execution/blackboard.ts` | `initialState(id)`, `apply(state, event, resolved?)`, `checkKey(scope, command, task?)` |
+| `src/execution/blobs.ts` | `putBlob`, `getBlob`, `scrubbedJSON(value)` for structured blobs |
+| `src/execution/verify.ts` | `verifyExecution(idOrDir)` returns `{ok, seq, badSeq?, reason?}` |
+| `src/security/audit.ts` | `appendAudit({actor, action, target?, details?})`, `verifyAudit()`, `pruneAudit(retentionDays = 365)` |

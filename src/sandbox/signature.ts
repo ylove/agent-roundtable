@@ -3,17 +3,30 @@
 //
 // The watchdog escalates when the same check fails with the same signature three times with no
 // patch in between. Run-to-run noise (colors, timestamps, durations, temp paths, addresses, pids,
-// ports) is normalized away first, so only the substance of a failure is hashed.
+// ephemeral ports) is normalized away first, so only the substance of a failure is hashed.
+//
+// Which lines count: passing-test lines and pass summaries never do (test names often contain
+// "error" or "fail"). When strong failure markers are present (not ok, ✖, AssertionError, Error:,
+// FAIL, panic, Traceback, npm ERR!, compiler errors) the signature covers each marker and the few
+// lines after it, where the expected/actual detail sits; otherwise weaker error-like lines; else
+// the tail. Long selections keep their first 30 and last 30 lines, so a late failure still counts.
 // ============================================================================
 
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 
-/** Lines kept for the signature. */
+/** Lines kept for the signature: the first and last half of the selection. */
 export const SIGNATURE_LINES = 60;
+/** Lines after a strong marker that belong to it (assertion detail, the first stack frames). */
+const MARKER_CONTEXT = 8;
 
 const ERROR_LIKE_RE = /error|fail|assert|expected|exception|panic|✖|not ok/i;
+const STRONG_RE =
+  /\bnot ok\b|✖|●|AssertionError|Error:|\bFAIL(?:ED|URE)?\b|\bpanic|Traceback|npm ERR!|^npm error\b|\berror(?:\[\w+\])?:|\berror TS\d+/;
+/** Passing tests and pass summaries (TAP, node --test spec, jest, mocha). */
+const PASS_RE =
+  /^\s*(?:ok\s|✔|✓|PASS\b)|^\s*(?:#|ℹ)\s*(?:Subtest:|pass\s+\d+|fail\s+0\b|tests\s+\d+|suites\s+\d+|cancelled\s+\d+|skipped\s+\d+|todo\s+\d+|duration_ms\b)/;
 
 // CSI sequences, OSC sequences (terminated by BEL or ST), then any other two-byte escape.
 const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
@@ -52,10 +65,13 @@ const RULES: Array<[RegExp, string]> = [
   [/\b0x[0-9a-f]{4,}\b/gi, "<addr>"],
   // UUIDs (session and request ids).
   [/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "<uuid>"],
-  // Loopback host:port pairs.
-  [/\b(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):\d{2,5}\b/gi, "$1:<port>"],
-  // Explicit pid / port mentions: "pid 1234", "PID: 1234", "port=8080".
-  [/\b(pid|port)\b(\s*[:=#]?\s*)\d+/gi, "$1$2<n>"],
+  // Epoch-millisecond timestamps (2001-2033).
+  [/\b1\d{12}\b/g, "<epoch>"],
+  // Ephemeral (5-digit) ports after a host; chosen ports such as 80, 443 or 8080 stay.
+  [/\b(localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:]*\]):\d{5}\b/gi, "$1:<port>"],
+  [/\b(port)\b(\s*[:=#]?\s*)\d{5}\b/gi, "$1$2<n>"],
+  // Pids: "pid 1234", "PID: 1234".
+  [/\b(pid)\b(\s*[:=#]?\s*)\d+/gi, "$1$2<n>"],
   // TAP duration fields (node --test).
   [/\b(duration_ms)(\s*:\s*)[\d.]+/g, "$1$2<dur>"],
   // Durations: 12ms, 1.2s, 3 min, 450µs.
@@ -64,8 +80,9 @@ const RULES: Array<[RegExp, string]> = [
 
 /**
  * Normalize command output for hashing: strip ANSI codes, unify line endings (a bare CR, as in
- * progress bars, starts a new line), replace temp paths, timestamps, clock times, hex addresses,
- * UUIDs, loopback ports, pids and durations with placeholders, and trim trailing whitespace.
+ * progress bars, starts a new line), replace temp paths, timestamps (ISO, clock, epoch ms), hex
+ * addresses, UUIDs, ephemeral ports, pids and durations with placeholders, and trim trailing
+ * whitespace.
  */
 export function normalizeOutput(output: string): string {
   let text = String(output ?? "")
@@ -82,13 +99,29 @@ export function normalizeOutput(output: string): string {
     .join("\n");
 }
 
-/** The lines a signature is computed over: the first 60 error-like lines, else the last 60 lines. */
+function headAndTail(lines: string[]): string[] {
+  const half = SIGNATURE_LINES / 2;
+  return lines.length <= SIGNATURE_LINES ? lines : [...lines.slice(0, half), ...lines.slice(-half)];
+}
+
+/**
+ * The lines a signature is computed over: strong failure markers with their context, else
+ * error-like lines, else the last 60 lines. Pass lines never count. At most 60 (first 30 + last 30).
+ */
 export function signatureLines(output: string): string[] {
   const lines = normalizeOutput(output)
     .split("\n")
     .filter((l) => l.trim() !== "");
-  const errors = lines.filter((l) => ERROR_LIKE_RE.test(l));
-  return errors.length ? errors.slice(0, SIGNATURE_LINES) : lines.slice(-SIGNATURE_LINES);
+  const keep = lines.map((l) => !PASS_RE.test(l));
+  const picked = new Set<number>();
+  lines.forEach((l, i) => {
+    if (!keep[i] || !STRONG_RE.test(l)) return;
+    for (let j = i; j < Math.min(lines.length, i + 1 + MARKER_CONTEXT); j++) if (keep[j]) picked.add(j);
+  });
+  if (picked.size) return headAndTail([...picked].sort((a, b) => a - b).map((i) => lines[i]));
+  const weak = lines.filter((l, i) => keep[i] && ERROR_LIKE_RE.test(l));
+  if (weak.length) return headAndTail(weak);
+  return lines.slice(-SIGNATURE_LINES);
 }
 
 /** sha256 hex of `commandId + "\n" + normalized lines`. Equal for reruns of the same failure. */

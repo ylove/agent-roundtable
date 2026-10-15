@@ -6,6 +6,7 @@ import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { assertValid, publicSchema } from "./validate.js";
 import { deliberationTools, handleDeliberationTool } from "./tools/deliberation.js";
 import { contractTools, handleContractTool } from "./tools/contract.js";
+import { executionTools, handleExecutionTool } from "./tools/execution.js";
 import { handleWorkerTool, workerTools } from "./tools/worker.js";
 import { schemaFor, type ToolArgs, type ToolCallContext, type ToolDefinition, type ToolGroup, type ToolMode } from "./tools/shared.js";
 import { scrub } from "./security/secrets.js";
@@ -13,10 +14,10 @@ import { scrub } from "./security/secrets.js";
 export { formatUltraplanResult, formatAgentWorkshopResult } from "./tools/shared.js";
 export type { ToolCallContext, ToolMode } from "./tools/shared.js";
 
-// Later workstreams add their groups here (execution).
 const groups: ToolGroup[] = [
   { definitions: deliberationTools, handle: handleDeliberationTool },
   { definitions: contractTools, handle: handleContractTool },
+  { definitions: executionTools, handle: handleExecutionTool },
   { definitions: workerTools, handle: handleWorkerTool },
 ];
 

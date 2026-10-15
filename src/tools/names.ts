@@ -60,6 +60,10 @@ export const AMEND_CONTRACT = "amend_contract";
 export const FREEZE_CONTRACT = "freeze_contract";
 
 // Run (orchestrator server only)
+export const EXECUTE = "execute";
+export const EXECUTION_STATUS = "execution_status";
+export const CONTROL_EXECUTION = "control_execution";
+export const RESOLVE_ESCALATION = "resolve_escalation";
 export const JOIN_EXECUTION = "join_execution";
 
 // Worker tools: bound to the token on the worker server; on the orchestrator server they take agent_token

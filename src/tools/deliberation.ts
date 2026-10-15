@@ -552,7 +552,7 @@ export const deliberationTools: ToolDefinition[] = [
     precheck: checkProviderArgs,
     annotations: { title: "Start ultraplan", ...SESSION_TURN },
     description:
-      "Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: \"plan\" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. Public runs post the task and phase outputs, never context.",
+      "Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: \"plan\" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. The final result ends with a JSON trailer {ultraplan_id, archived, tally}; signed off means no OBJECT and no UNCLEAR sign-off. With execution_ready: true, plans end with a roundtable-tasks block and sign-offs check it, so propose_contract { from_session: ultraplan_id } can build a contract from it. Public runs post the task and phase outputs, never context.",
     inputSchema: {
       type: "object",
       properties: {
@@ -562,6 +562,7 @@ export const deliberationTools: ToolDefinition[] = [
         draft_plan: { type: "string", description: "Optional full draft: becomes v1 by orchestrator and skips the input phase. Whitespace-only counts as absent." },
         planner: { type: "string", description: "Optional persona that owns drafting and revision server-side; runs the whole loop in one call." },
         revision_rounds: { type: "number", description: "Planner only: review/revise cycles before sign-off, default 1, clamped to 1..3." },
+        execution_ready: { type: "boolean", description: "Default false. True when the plan will be executed heads-down: planner drafts and revisions (and your next steps) must end with a fenced roundtable-tasks JSON block of tasks, commands and interfaces, and sign-offs check it." },
         public: PUBLIC_PROP,
         ...PROVIDER_PROPS,
       },
@@ -949,13 +950,14 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Ultraplan Tools ===
     case START_ULTRAPLAN: {
-      const { agents, task, context, draft_plan, planner, revision_rounds, public: isPublic, provider, model, base_url } = (args ?? {}) as {
+      const { agents, task, context, draft_plan, planner, revision_rounds, execution_ready, public: isPublic, provider, model, base_url } = (args ?? {}) as {
         agents: string[];
         task: string;
         context?: string;
         draft_plan?: string;
         planner?: string;
         revision_rounds?: number;
+        execution_ready?: boolean;
         public?: boolean;
         provider?: LLMProvider;
         model?: string;
@@ -966,6 +968,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         draftPlan: draft_plan,
         planner,
         revisionRounds: revision_rounds,
+        executionReady: execution_ready === true,
         public: isPublic === true,
         provider,
         model,

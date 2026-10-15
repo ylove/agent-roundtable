@@ -1,5 +1,6 @@
 // Offline smoke test: no provider is called, zero API spend. Run: npm test
 import { startServer, assert } from "./mcp-client.mjs";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
-const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent"];
+const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract"];
 const NEW_START_TOOLS = ["start_ultraplan", "create_agent", "improve_agent"];
 const root = mkdtempSync(join(tmpdir(), "roundtable-smoke-"));
 const agentsDir = join(root, "agents");
@@ -162,7 +163,9 @@ async function checkDispatch() {
     check("dispatch archives the finalized ultraplan under ROUNDTABLE_HOME/sessions", () => {
       const file = join(smokeEnv.ROUNDTABLE_HOME, "sessions", `${start.ultraplanId}.json`);
       const record = JSON.parse(readFileSync(file, "utf8"));
-      assert(record.kind === "ultraplan" && record.document.signedOff === true && record.document.markdown === final, JSON.stringify(record).slice(0, 300));
+      assert(record.kind === "ultraplan" && record.document.signedOff === true && final.startsWith(record.document.markdown + "\n\n```json\n"), JSON.stringify(record).slice(0, 300));
+      const trailer = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(final)?.[1] ?? "null");
+      assert(trailer?.ultraplan_id === start.ultraplanId && trailer.archived === true && trailer.tally.APPROVE === 1, `trailer: ${JSON.stringify(trailer)}`);
       assert(record.document.versions.length === 2 && record.document.tally.APPROVE === 1, JSON.stringify(record.document.tally));
     });
 
@@ -267,10 +270,40 @@ async function checkDispatch() {
       assert(readFileSync(improved.backupPath, "utf8") === original && improvedText.includes(`Backup: ${improved.backupPath}`), improvedText);
     });
     check("result formatters preserve final markdown/public blocks and workshop warnings", () => {
-      assert(formatUltraplanResult({ status: "finalized", finalPlan: "Exact markdown\n", publicBlock: "Public block" }) === "Exact markdown\n\n\nPublic block", "final document changed");
+      const trailer = '\n\n```json\n{\n  "ultraplan_id": "ultraplan-x",\n  "archived": true,\n  "tally": {}\n}\n```';
+      assert(formatUltraplanResult({ status: "finalized", ultraplanId: "ultraplan-x", archived: true, tally: {}, finalPlan: "Exact markdown\n", publicBlock: "Public block" }) === "Exact markdown\n\n\nPublic block" + trailer, "final document changed");
       const text = formatAgentWorkshopResult({ ...improved, warnings: ["Review this warning"], publicBlock: "Public block" });
       assert(text.includes("\n- Review this warning\n") && text.endsWith("\n\nPublic block"), text);
     });
+
+    // Contracts: an explicit contract proposed offline in a throwaway git repository (no provider call).
+    script();
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    const git = (...args) => execFileSync("git", ["-c", "user.name=smoke", "-c", "user.email=smoke@example.com", "-c", "commit.gpgsign=false", ...args], { cwd: repo, encoding: "utf8" }).trim();
+    git("init", "-q");
+    writeFileSync(join(repo, "README.md"), "onboarding\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "init");
+    const proposed = await call("propose_contract", {
+      goal: "Ship the onboarding launch", orchestrator: "main", original_prompt: "ship the onboarding launch", repo_dir: repo,
+      contract: {
+        tasks: [{ id: "copy", title: "Write the launch copy", persona: "product-lead", paths: { write: ["docs/**"] }, acceptance: ["copy approved"], checks: ["lint"] }],
+        validation: { commands: [{ id: "lint", argv: ["npm", "run", "lint"], timeout_s: 120 }] },
+        budget: { usd: 5, per_task_usd: 5, wall_clock_min: 30 },
+      },
+    });
+    check("dispatch propose_contract proposes an explicit contract offline in a temp git repository", () => {
+      const summary = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(proposed)?.[1] ?? "null");
+      assert(summary && summary.status === "draft" && /^ctr-[0-9a-z]{6}-1$/.test(summary.contract_id) && summary.source === "explicit", proposed.slice(0, 400));
+      const header = JSON.parse(readFileSync(join(smokeEnv.ROUNDTABLE_HOME, "executions", summary.execution_id, "execution.json"), "utf8"));
+      assert(header.base_sha === git("rev-parse", "HEAD"), JSON.stringify(header));
+      assert(existsSync(summary.files.markdown) && proposed.includes("# Contract: Ship the onboarding launch"), summary.files.markdown);
+      assert(calls.length === 0 && git("status", "--porcelain") === "", "a provider was called or the repository changed");
+    });
+    const refused = await handleToolCall("freeze_contract", { contract_id: /"contract_id": "([^"]+)"/.exec(proposed)[1], orchestrator: "main" });
+    check("dispatch freeze_contract refuses a contract nobody consented to", () =>
+      assert(refused.isError && /Cannot freeze .*\n- product-lead has not consented/.test(refused.content[0].text), refused.content[0].text));
   } finally {
     globalThis.fetch = realFetch;
     ultraplans.clear();
@@ -286,13 +319,16 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 30 distinct tools", () => assert(tools.length === 30 && new Set(tools.map((t) => t.name)).size === 30, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 33 distinct tools", () => assert(tools.length === 33 && new Set(tools.map((t) => t.name)).size === 33, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
   check("the orchestrator's worker tools take execution_id and agent_token", () => {
     for (const name of WORKER_TOOLS) {
       const req = byName[name]?.inputSchema?.required ?? [];
       assert(req[0] === "execution_id" && req[1] === "agent_token", `${name}: ${JSON.stringify(req)}`);
     }
     assert(byName.join_execution, "join_execution is listed");
+  });
+  check("contract tools are strict (additionalProperties: false)", () => {
+    for (const name of ["propose_contract", "amend_contract", "freeze_contract"]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });
   check("every tool carries MCP annotations (a title and four hints) and no internal fields", () => {
     for (const t of tools) {
@@ -363,6 +399,9 @@ try {
     ["end_ultraplan", ["ultraplan_id"]],
     ["create_agent", []],
     ["improve_agent", ["agent"]],
+    ["propose_contract", ["goal", "orchestrator"]],
+    ["amend_contract", ["contract_id", "patch", "reason", "orchestrator"]],
+    ["freeze_contract", ["contract_id", "orchestrator"]],
   ]) {
     check(`${name} required arguments = ${required.join(", ") || "none (runtime validated)"}`, () =>
       assert(JSON.stringify(byName[name]?.inputSchema?.required || []) === JSON.stringify(required), JSON.stringify(byName[name]?.inputSchema)));

@@ -132,10 +132,15 @@ export function validateProviderOptions(provider: LLMProvider = "anthropic", bas
   }
 }
 
+/**
+ * A step as JSON; a finished ultraplan as its document (and public block), then a fenced JSON trailer
+ * {ultraplan_id, archived, tally} so the caller can hand the session to propose_contract.
+ */
 export function formatUltraplanResult(result: UltraplanStepResult | UltraplanFinalResult): string {
-  return result.status === "finalized"
-    ? result.finalPlan + (result.publicBlock ? `\n\n${result.publicBlock}` : "")
-    : JSON.stringify(result, null, 2);
+  if (result.status !== "finalized") return JSON.stringify(result, null, 2);
+  const trailer = { ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally };
+  return result.finalPlan + (result.publicBlock ? `\n\n${result.publicBlock}` : "") +
+    "\n\n```json\n" + JSON.stringify(trailer, null, 2) + "\n```";
 }
 
 export function formatAgentWorkshopResult(result: AgentWorkshopResult): string {

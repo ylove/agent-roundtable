@@ -141,9 +141,9 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `execution.mode_changed` | from, to, reason, session? |
 | `execution.completed` | integration_sha, pr_url? |
 | `execution.failed` / `execution.aborted` | reason |
-| `contract.proposed` | contract, version, source, blob |
-| `contract.consent_requested` | participants |
-| `contract.consent_recorded` | agent, verdict, reason |
+| `contract.proposed` | contract, version, source, blob, reason?, patch_blob? (both set when a draft is amended: see §8) |
+| `contract.consent_requested` | participants, round?, hash?, host? (round id, consentHash of the version asked, owner host: see §8) |
+| `contract.consent_recorded` | agent, verdict, reason, round? (an answer naming any other round is ignored) |
 | `contract.objection_resolved` | agent, how: amended / withdrawn / excused, reason |
 | `contract.frozen` | by, hash, blob (the full contract at this version) |
 | `contract.amended` | version, patch_blob, reason, affected_tasks, blob (the full contract at the new version) |
@@ -290,6 +290,13 @@ export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout
 - No `env` key may match `/KEY|TOKEN|SECRET|PASS/i`.
 - Budgets are greater than 0.
 - A child contract must fit inside its parent task's paths and budget.
+- The task id `integration` is reserved, because `rt/<exe6>/integration` is the integration branch.
+- Every task persona is a participant: a persona missing from an explicit `participants` list is added, with a warning.
+- A structure without a budget gets a placeholder budget ($20 total, $5 per task, 120 min), with a warning; `execute` asks the human for the real cap.
+- A task's `budget_usd` may not exceed `budget.per_task_usd`. A child contract may have at most `min(parent task budget_usd ?? parent per_task_usd, parent remaining budget)`, and that cap is shared with the task's other child contracts.
+- Env names are checked against `CONTRACT_SECRET_ENV_RE` (`KEY|TOKEN|SECRET|PASS|AUTH|CRED|COOKIE|SESSION|(^|_)PAT$|DATABASE_URL|DSN`, broader than `SECRET_NAME_RE`), and a value that scrubbing would change is refused, so the stored command is always the validated one.
+- `sudo`, `doas`, `su`, `pkexec` and `run0` anywhere along a command's wrapper chain are refused on every backend. Shell detection (`isShellCommand`) follows wrapper chains and matches lowercased basenames; it is a hygiene signal, not the boundary (the sandbox is, and `node -e` exists).
+- A wildcard egress host needs two labels after `*.` (no `*.com`). Glob lists (`paths.write`, `paths.read`, `scope.paths`) hold at most 64 entries.
 
 **Defaults:**
 - `budget.max_parallel`: 3
@@ -302,8 +309,8 @@ export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout
 
 **Proposing.** `propose_contract` takes its structure from the first source available:
 1. An explicit `contract` object. This is the most reliable route and the one the main chat should use.
-2. A fenced ```` ```roundtable-tasks ```` JSON block in the plan or archived session.
-3. A structuring LLM call, run as `extractJsonObject` → validate → one retry with the errors included. This mirrors the agent-creation architect.
+2. A fenced ```` ```roundtable-tasks ```` JSON block in the plan or archived session. For an ultraplan only its plan versions are searched, latest first, never the document or entries (a participant's input or sign-off may quote a block). Other sessions: the summary and orchestrator turns first, then agents' turns, with a warning.
+3. A structuring LLM call, run as `extractJsonObject` → validate → one retry with the errors included. This mirrors the agent-creation architect. Falling back to it for an ultraplan whose plans have no block is warned about, as is proposing from an ultraplan that was not signed off.
 
 **Ultraplan support.** `start_ultraplan` gains `execution_ready`.
 - When it is set, planner draft and revise prompts require the fenced block, and sign-off prompts ask participants to check it.
@@ -313,20 +320,27 @@ export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout
 
 **Consent.** `runVerdictRound(agents, prompt, label, options)` is extracted into `workshop.ts` and shared with ultraplan sign-off.
 - Each participant answers `Consent: AGREE | OBJECT`.
-- An UNCLEAR answer is re-asked once with a stricter prompt; if it is still unclear, it counts as an objection.
+- An UNCLEAR answer is re-asked once with a stricter prompt; if it is still unclear, it is recorded as UNCLEAR and counts as an objection.
+- **A verdict counts only for the version it was given on.** Each verdict carries that version and the `consentHash` of what was asked (`contractHash` without `status`, so a draft and its freeze match). An answer on an older version is *stale*: it needs re-consent or an excusal.
+- Rounds carry an id. `contract.consent_requested` gains optional `round`, `hash` and `host` (the owner's pid is the event source's), and `contract.consent_recorded` gains optional `round`. The request is recorded in its own transaction (refused while another round is in flight), the calls run outside any transaction, and the answers are recorded together, but only while their round is still current and the version unchanged; otherwise they are dropped with a warning. The first answer per participant in a round wins, on replay too.
+- A round run by another process counts as in flight for at most `CONSENT_ROUND_STALE_CAP_MS` (10 minutes), and not at all once its owner pid is dead on this host. Its missing answers then count as UNCLEAR. `freeze_contract {abandon_round: true}` lets the orchestrator record them as UNCLEAR at once (they still need excusing); this is audited as `contract.consent_round_abandoned`.
+- An objection is resolved by amendment when the objector is re-asked on the amended version and agrees (`contract.objection_resolved{how: "amended"}`), and withdrawn when they agree on the same version.
 
-**Freezing.** `freeze_contract` takes an `orchestrator` name, and only an orchestrator can freeze. It refuses when:
-- an objection is unresolved. An objection is resolved by an amendment, by being withdrawn, or by being excused with a reason; excusals are audited.
+**Freezing.** `freeze_contract` takes an `orchestrator` name, and only the contract's orchestrator can freeze. It refuses, listing every reason, when:
+- a participant has no AGREE on the current version: no answer, a stale answer, an objection or an UNCLEAR. Each can be excused with a reason; excusals are audited;
 - the source session is busy, or a consent round is in flight;
 - for a child contract: the parent is not frozen, or the caller is not the parent task's persona or the parent's orchestrator.
 
-The frozen hash goes to the audit log.
+The hash is taken over the scrubbed contract (what the blob stores) and goes to the audit log.
 
 **Amending.** An amendment is an RFC 7396 merge patch that produces v(N+1).
-- `affected_tasks` is computed by diffing task specs and interface consumers.
-- Only affected participants re-consent.
-- Affected agents receive a `directive.issued` telling them to re-read the contract, and the affected checks re-run.
-- The lead can amend only within `authority.may`.
+- `affected_tasks` is computed by diffing task specs, interface owners and consumers, and the commands tasks check with.
+- Who may amend: without an authority list, the contract's orchestrator (or a child's parent orchestrator); with one (the lead fallback), only `authority.lead`, and only with actions inside `authority.may`.
+- **Drafts.** The reducer marks every `contract.amended` frozen, so amending a contract that is not frozen yet records `contract.proposed` for v(N+1) instead, with `source: "amendment"`, the `reason` and the `patch_blob`. Every participant agreed to the old draft, not this one: `consent: true` asks them all again, and the freeze needs their AGREE on v(N+1).
+- **Frozen contracts** get `contract.amended`, whose blob carries its own freeze record and hash (also audited), `task.cancelled` for removed tasks, and a `directive.issued` telling the agents of affected tasks to re-read the contract. A change to a run-wide field (`budget`, `scope`, `sandbox`, `authority`, `validation`, `workers`, `goal`) by the orchestrator needs everyone's consent first: with `consent: true` every participant is asked about the candidate version, which is applied only if all agree; `override_consent: true` applies it without, audited as `contract.consent_overridden`; without either it is refused. A task-level change applies at once, and `consent: true` then asks the personas of the affected tasks. A lead's change within its authority was consented to as part of the authority and needs no round.
+- **The lead's authority** is default-deny over every field: `add_task` for new tasks, `reassign` for persona or team changes (either may bring the new persona in as a participant, if it resolves through `loadAgent`), `amend_interfaces`, and `extend_budget` for budget and time increases up to `budget_extension_pct` above the budget first frozen. Removing tasks, decreases and new caps, and anything else are reserved to the orchestrator.
+- **Affected checks** are not marked stale on the blackboard: `contract.amended` lists `affected_tasks`, the directive tells their agents, and the runner (WS08) re-runs those tasks' checks on their next submission.
+- An empty patch with `consent: true` makes no new version and only asks the participants without an AGREE on the current version.
 
 ## 9. Workers
 
@@ -621,28 +635,32 @@ It warns when the main worktree is dirty. Otherwise it returns `{execution_id, r
 ## 14. Visibility
 
 **Dashboard** (`src/dashboard/`, served by the runner) builds on `src/http/secure-server.ts`, which is extracted from the prototype board. The shared server:
-- binds to 127.0.0.1;
-- requires a capability token, compared in constant time;
+- binds to 127.0.0.1 on a random port;
+- requires a capability token (`randomBytes(18)`, base64url) as the first path segment of every route. It is compared with `timingSafeEqual` on sha256 digests, so neither its length nor a near miss shows: any request without it is the same plain 404. The token is never logged;
 - checks the Host header and answers 421 when it does not match;
-- serves only GET and HEAD;
-- sends strict headers.
+- serves only GET and HEAD (405 otherwise), and refuses CONNECT, upgrades and proxy requests (unless it is a deny-all proxy, as the board is for the screenshot browser);
+- sends `nosniff`, `no-store`, `no-referrer`, same-origin CORP and COOP, `X-Frame-Options: DENY`, a Permissions-Policy denying camera, microphone, geolocation and similar features, and a CSP on every response (`default-src 'none'` unless the route sets its own).
 
-Pages: overview, tasks, task detail (with the diff escaped and redacted), escalations, events, contract, and a server-rendered SVG of the task DAG. Updates arrive over SSE, with `state.json` polling as a fallback.
+`startDashboard(executionId, {store?})` returns `{url, close()}` and writes `dashboard.json {url, pid, host, started_at}` while it runs. Pages: overview (goal, status, completion with the §13 weights, budget, runner heartbeat from `runner.json`, open escalations, the DAG, recent notes), tasks, task detail (acceptance, checks with signatures and redacted failing output, the latest diff from its blob, recent events), escalations, events (newest first, paged, filtered by type, group or task through plain links), contract (markdown generated from the frozen contract, plus `contracts/<ctr>/CONTRACT.md` when present, through a converter that escapes everything, passes no raw HTML and builds no links), and a server-rendered SVG of the task DAG (layered layout, colored by state; also at `dag.svg`). Every string from the run is redacted (secrets and personal data) and escaped. A banner on every page names the escalations awaiting a human.
 
-The dashboard's CSP is `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`. It also sends COOP and a Permissions-Policy.
+Updates arrive over SSE (`<token>/stream?since=<seq>` sends `rev {seq}` when the log grows), with polling of `state.json`, a redacted subset of the blackboard without diffs, outputs or blobs, as a fallback. The dashboard is read-only: it has no mutating route, so CSRF does not apply; steering stays in the orchestrator's tools.
 
-The prototype board's own scripts move to static routes, so `'unsafe-inline'` is no longer needed for the board and viewer. Mermaid is pinned with SRI.
+The dashboard's CSP is `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`. Its stylesheet and script are TypeScript string constants served under `<token>/static/`, and no page has an inline script, style or event handler.
 
-**GitHub sync** (`src/github/`) is a runner loop with its own cursor, and it never blocks the run.
-- On start it creates a parent issue, then one issue per task carrying the marker `<!-- roundtable:<exe>:<task> -->`.
-- Each task issue is linked with `addSubIssue` through `gh api graphql` and added to the project with `gh project item-add`.
-- Status changes go through `item-edit`, coalesced so only the latest state per task is written.
-- When a human is needed, the issue gets a comment and the `needs-human` label.
-- On completion the issues are closed and the PR is linked.
-- Idempotency: `github.json`, plus a search for the body marker after a crash.
-- Rate limits: 20 creates per minute and 60 other calls per minute.
-- Every call is an argv spawn with `childEnv("gh")`. Bodies are redacted, and diffs and command output are never posted.
-- Only GraphQL is used.
+The prototype board's own scripts and stylesheet move to static routes too, so `BOARD_CSP` and `VIEWER_CSP` allow no `'unsafe-inline'`. Diagrams render with Mermaid's `securityLevel: "sandbox"` and `htmlLabels: false`, inside a script-less, opaque-origin `data:` frame, so a diagram cannot restyle or overlay the viewer; a diagram carrying a configuration directive (`%%{…}%%` or front matter, which can hold `themeCSS`) is shown as source and never rendered, and `secure` locks every styling key. `DIAGRAM_VIEWER_CSP` allows that frame (`frame-src data:`) and inline styles (never scripts) for it. Residual risk: inside its frame a diagram draws what it likes, and a link in it can open a popup on a click. A live prototype's missing file answers in plain text that only the board may frame. `APP_CSP` keeps `'unsafe-inline'` as an accepted risk: prototype pages are agent-written and run in a sandboxed, opaque origin that can read nothing from the board. Mermaid is pinned to 11.17.2, the newest 11.x release without a GitHub advisory, and loaded as the single file `dist/mermaid.min.js` with a sha384 `integrity` attribute and `crossorigin="anonymous"`; the viewer CSP names that one file.
+
+**GitHub sync** (`src/github/`) is a runner loop with its own cursor, and it never blocks the run. The runner builds `new GitHubSync({executionId, repo, projectOwner?, projectNumber?, createProject?, pr?})` and calls `syncOnce()`, which never throws and returns a `SyncReport`.
+- On start it creates a parent issue (a redacted contract summary, `<!-- roundtable:<exe> -->`), then one issue per task carrying the marker `<!-- roundtable:<exe>:<task> -->`, all labelled `roundtable`.
+- Each task issue is linked with `addSubIssue` through `gh api graphql` and added to the project with `gh project item-add`. With `createProject` and no number, the project is created.
+- Status changes go through `item-edit`, coalesced so only the latest state per task is written: Todo for pending and ready, Done for accepted, failed and cancelled (the last two with a comment), In Progress otherwise. The project's `Status` field is used when it has those options; otherwise a `Roundtable Status` single-select field is created.
+- When a human is needed, the issue (the parent when the escalation names no task) gets a comment and the `needs-human` label, created if missing and removed once the escalation is resolved or withdrawn.
+- Progress notes become at most one comment per task per 10 minutes.
+- On completion the parent gets a comment linking the PR, and the issues are closed.
+- Idempotency: `github.json` (atomic) holds the cursor, the issue numbers and node ids, the project ids and an outbox of comments, labels and closes. An issue is recorded as soon as `gh issue create` prints its URL (its node id is fetched afterwards). A lost mapping is rebuilt by searching for the body markers before anything is created, a create interrupted before it was recorded is looked up before it is retried, and comments carry an event marker so neither a rebuilt sync nor a post that timed out repeats them. Markers are public, so only issues authored by the gh account itself (`author:@me`, checked again against the GraphQL viewer) and labelled `roundtable` are trusted, and only that account's comments count when looking for a posted marker.
+- Rate limits: token buckets of 20 creates per minute and 60 other calls per minute. A rate-limit answer backs off 60 s plus jitter. Three failing rounds in a row mark the report `degraded`.
+- Every call is an argv spawn with `childEnv("gh")`, a 30 s timeout and capped output; bodies go through 0600 `--body-file` temp files. Bodies are redacted and escaped (no HTML, so no forged markers; @mentions, `#123`, `owner/repo#123`, `GH-123` and github.com URLs are broken with a zero-width space, so nothing notifies anyone or backlinks another issue), and diffs and command output are never read or posted.
+- Only GraphQL is used: gh subcommands and `gh api graphql`, never a REST path.
+- `checkGhReady({repo, project})` returns `{ok, missing[]}` for the `execute` preflight: a gh login with the `repo` and `project` scopes, write access to the repository, and a readable project when one is named.
 
 ## 15. Tool surface
 
@@ -651,8 +669,8 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | Group | Tool | Arguments |
 |---|---|---|
 | Contract | `propose_contract` | goal\*, orchestrator\*, title, original_prompt, artifacts[], from_session, plan, contract{}, parent_contract, parent_task, participants[], repo_dir, base_ref, consent, provider, model, base_url |
-| | `amend_contract` | contract_id\*, patch{}\*, reason\*, orchestrator\*, from_session, consent |
-| | `freeze_contract` | contract_id\*, orchestrator\*, excuse[{agent, reason}] |
+| | `amend_contract` | contract_id\*, patch{}\*, reason\*, orchestrator\*, from_session, consent, override_consent, provider, model, base_url |
+| | `freeze_contract` | contract_id\*, orchestrator\*, excuse[{agent, reason}], abandon_round |
 | Run | `execute` | contract_id\*, confirmation\*, visibility{dashboard, chat_only, github{repo, project_owner, project_number, create_project, pr}}, budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model |
 | | `execution_status` | execution_id, focus, view, since_seq, limit |
 | | `control_execution` | execution_id\*, action\*, reason, message, task_ids[], targets[], confirm |
@@ -666,7 +684,7 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | | `submit_work` | summary\*, ready\* |
 | | `escalate` | kind\*, with\*, summary\*, target, question, options[], diagnostics{}, blocking, emergency |
 
-On the worker server, the worker tools are bound to the token. On the orchestrator server, they require `agent_token` and `execution_id`: the tool definition carries a second schema for that mode (`inputSchemaByMode`). Subcontract tasks additionally get scoped `propose_contract` and `freeze_contract`. WS07 lands `join_execution` and the seven worker tools, so the orchestrator lists 30 tools until WS04 and WS08 land theirs.
+On the worker server, the worker tools are bound to the token. On the orchestrator server, they require `agent_token` and `execution_id`: the tool definition carries a second schema for that mode (`inputSchemaByMode`). Subcontract tasks additionally get scoped `propose_contract` and `freeze_contract`. WS07 lands `join_execution` and the seven worker tools and WS04 the three contract tools, so the orchestrator lists 33 tools until the run tools land.
 
 **Worker tool semantics** (`src/tools/worker.ts`). Every response is JSON and carries `inbox`: the agent's new directives and decisions since `agents/<id>/inbox.cursor`, which then advances, plus `awaiting_ack` for directives not yet acknowledged. Errors carry it too.
 - `read_blackboard`: `section` is summary (the default), goal, contract, tasks, task, interfaces, decisions, leases, claims, files, diffs, checks, escalations, notes, inbox, budget, agents, teams, events, blob or query.
@@ -758,6 +776,18 @@ WS03 adds the store that the other workstreams write through:
 | `src/execution/verify.ts` | `verifyExecution(idOrDir)` returns `{ok, seq, badSeq?, reason?}` |
 | `src/security/audit.ts` | `appendAudit({actor, action, target?, details?})`, `verifyAudit()`, `pruneAudit(retentionDays = 365)` |
 
+WS04 adds the contract lifecycle:
+
+| Module | API |
+|---|---|
+| `src/execution/contract.ts` | `checkContract(c, {parent?})` (sync), `validateContract(c, {parent?, personas?})` (resolves personas), `contractHash`, `consentHash`, `applyMergePatch`, `createMergePatch`, `affectedTasks(old, new)` → `{changed, added, removed, dependents, all}`, `renderContractMarkdown(c, {mark?})`, `contractPath`, `childBudgetCap(parent, task)`, `RESERVED_TASK_IDS`, `CONTRACT_SECRET_ENV_RE` |
+| `src/execution/contract-state.ts` | `contractRecord(store, id?)` (versions, verdicts with their version and hash, the consent round and freeze, read from the log), `standing(record, agent)`, `summarizeConsent(record)`, `openContractStore(contractId)`, `loadParent(id, {task?, exclude?})` (depth, remaining budget, sibling budgets), `CONSENT_ROUND_STALE_CAP_MS` |
+| `src/execution/contract-parse.ts` | `findTaskBlock(text)`, `blockToContract(value)`, `sessionSource(archived)`, `structureContract(request, llm, check)`, `TASK_BLOCK_FORMAT` |
+| `src/execution/consent.ts` | `requestConsent(store, contractId, {by, participants?, llm?, candidate?})` (returns `dropped` when the round stopped being current) |
+| `src/execution/contract-lifecycle.ts` | `proposeContract(opts)`, `freezeContract(contractId, {orchestrator, excuse?, abandonRound?})`, `freezeContractIn(store, …)`, `amendContract(store, patch, {by, reason?, authority?, contractId?, fromSession?, consent?, overrideConsent?, source?})`, `authorityNeeds`, `RUN_WIDE_FIELDS`, `AuthorityError`, `ContractRefusal` |
+| `src/sandbox/common.ts` | `analyzeArgv(argv)` → `{programs, shell}`, `isShellCommand`, `isPrivilegedCommand` (WS04 widened the shell detection) |
+| `src/sessions/workshop.ts` | `runVerdictRound(agents, buildPrompt, label, {verdicts, llm, limit?, reask?, catchErrors?})` (ultraplan reviews and sign-offs, consent) |
+
 WS06 adds worktrees, leases and the merge queue:
 
 | Module | API |
@@ -781,3 +811,13 @@ WS07 adds the worker drivers, the worker MCP server and the worker tools:
 | `src/execution/task-card.ts` | `buildTaskCard(state, taskId, {immediate?, external?, worktree?})` |
 | `src/server.ts`, `src/cli.ts` | `buildServer(mode)`, `startStdio(mode, worker?)`; `runCli(argv)` with `mcp [--worker …]` and `hook pre-tool-use` |
 | `src/tools/worker.ts` | `workerTools`, `handleWorkerTool`, `bindWorkerIdentity`, `globWithin` |
+
+WS12 adds the visibility modules the runner hosts:
+
+| Module | API |
+|---|---|
+| `src/http/secure-server.ts` | `SecureServer.start({name, routes, allowProxied?})` with `url`, `base`, `close()`, `closeNow()`; `COMMON_HEADERS`, `DEFAULT_CSP`, `escapeHtml`, `tokenMatches`. Routes are exact paths or RegExps; a handler gets `send`, `text`, `html(status, body, csp)`, `json`, `stream` (SSE) |
+| `src/dashboard/server.ts` | `startDashboard(executionId, {store?, pollMs?, writeInfo?})` returns `{url, close()}`; `DASHBOARD_CSP` |
+| `src/dashboard/render.ts` | `completion(state)` and `taskWeight(rt)` (the §13 weights), `publicState(state, runner)`, `markdownToHtml(md)` |
+| `src/github/sync.ts` | `new GitHubSync({executionId, repo, projectOwner?, projectNumber?, createProject?, pr?})`, `syncOnce(): Promise<SyncReport>`, `statusFor(taskState)` |
+| `src/github/gh.ts` | `runGh(args, {input?, timeoutMs?})`, `ghJson`, `ghGraphql`, `withBodyFile`, `checkGhReady({repo, project})` returns `{ok, missing[]}` |

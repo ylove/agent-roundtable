@@ -2,6 +2,9 @@
 // Shared helpers for phase-based workshops
 // ============================================================================
 
+import { PARALLEL_TURNS } from "../config.js";
+import { callLLM, type CallLLMOptions } from "../providers/index.js";
+
 /** Settle every item before reporting the first failure in input order. */
 export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
@@ -97,4 +100,69 @@ export function parseVerdict(text: string, label: string, options: readonly stri
     }
   }
   return "UNCLEAR";
+}
+
+// ----------------------------------------------------------------------------
+// Verdict rounds: ultraplan reviews and sign-offs, contract consent
+// ----------------------------------------------------------------------------
+
+export interface VerdictRoundOptions<A> {
+  /** The canonical verdicts after `<label>:` (parseVerdict). */
+  verdicts: readonly string[];
+  llm: CallLLMOptions;
+  /** Concurrent calls; default PARALLEL_TURNS. */
+  limit?: number;
+  /**
+   * Asked once more, as a follow-up in the same conversation, when the first answer has no
+   * verdict (UNCLEAR). The second answer replaces the first.
+   */
+  reask?: string | ((agent: A, index: number) => string);
+  /**
+   * Report a failed call as an UNCLEAR answer with `error` instead of failing the round. Without
+   * it the round settles every call and then throws the first error in agent order (mapLimit).
+   */
+  catchErrors?: boolean;
+}
+
+export interface VerdictAnswer<A> {
+  agent: A;
+  index: number;
+  content: string;
+  verdict: string;
+  /** True when the answer is the re-asked one. */
+  reasked: boolean;
+  /** When the answer arrived. */
+  at: Date;
+  /** catchErrors only: why there is no answer (content is then empty and verdict UNCLEAR). */
+  error?: string;
+}
+
+/**
+ * Ask every agent one stateless question (its system prompt, then buildPrompt's text) and parse
+ * `<label>: <verdict>` from each answer. Answers come back in agent order.
+ */
+export async function runVerdictRound<A extends { systemPrompt: string }>(
+  agents: readonly A[],
+  buildPrompt: (agent: A, index: number) => string,
+  label: string,
+  options: VerdictRoundOptions<A>
+): Promise<VerdictAnswer<A>[]> {
+  return mapLimit([...agents], options.limit ?? PARALLEL_TURNS, async (agent, index) => {
+    const messages: Array<{ role: "user" | "assistant"; content: string }> = [{ role: "user", content: buildPrompt(agent, index) }];
+    try {
+      let content = await callLLM(agent.systemPrompt, messages, options.llm);
+      let verdict = parseVerdict(content, label, options.verdicts);
+      let reasked = false;
+      if (verdict === "UNCLEAR" && options.reask !== undefined) {
+        const again = typeof options.reask === "function" ? options.reask(agent, index) : options.reask;
+        content = await callLLM(agent.systemPrompt, [...messages, { role: "assistant", content }, { role: "user", content: again }], options.llm);
+        verdict = parseVerdict(content, label, options.verdicts);
+        reasked = true;
+      }
+      return { agent, index, content, verdict, reasked, at: new Date() };
+    } catch (e) {
+      if (!options.catchErrors) throw e;
+      return { agent, index, content: "", verdict: "UNCLEAR", reasked: false, at: new Date(), error: e instanceof Error ? e.message : String(e) };
+    }
+  });
 }

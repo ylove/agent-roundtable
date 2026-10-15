@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import type { Message } from "./meetings.js";
 import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
+import { newId } from "../ids.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
@@ -43,7 +44,6 @@ export interface LocalMeeting {
 }
 
 export const localMeetings = new Map<string, LocalMeeting>();
-let localMeetingCounter = 0;
 
 export type LocalMeetingRecordHook = (meeting: LocalMeeting, message: Message) => void;
 
@@ -194,7 +194,7 @@ export async function startLocalMeeting(
 }> {
   assertMeetingMode(mode);
   const agentInfo = await loadAgent(agent);
-  const meetingId = `local-${++localMeetingCounter}`;
+  const meetingId = newId("local");
   const challengerDirective = mode === "debate" ? buildChallengerDirective(debateFocus) : undefined;
   const skillsSection = renderSkillsSection(agentInfo.skills);
   const appendSystemPrompt = [

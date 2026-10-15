@@ -6,6 +6,7 @@ import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
 import { agentKey, loadAgent, loadAgentPrompt, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
+import { newId } from "../ids.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
@@ -84,7 +85,6 @@ export interface Collaboration {
 }
 
 export const collaborations = new Map<string, Collaboration>();
-let collaborationCounter = 0;
 
 // ----------------------------------------------------------------------------
 // Recording: the single choke point for everything pushed into collaboration.messages
@@ -317,7 +317,7 @@ export async function startCollaboration(
     agents.push({ name, systemPrompt, ...(role !== undefined && { role }) });
   }
 
-  const collaborationId = `collab-${++collaborationCounter}`;
+  const collaborationId = newId("collab");
   const maxRounds = options.maxRounds || 5;
   const isPublic = !!options.public;
   const roleNames = agents.map((a) => roleLabel(mode, a, isPublic));

@@ -5,6 +5,7 @@
 import { DEFAULT_MODELS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
 import { agentKey, loadAgentPromptWithPath } from "../agents.js";
 import { recordActivity } from "../activity.js";
+import { newId } from "../ids.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
@@ -73,7 +74,6 @@ export interface UltraplanFinalResult {
 
 export const ultraplans = new Map<string, Ultraplan>();
 const busy = new Set<string>();
-let ultraplanCounter = 0;
 
 export const NEXT_AFTER_INPUT = "Write plan v1 that incorporates this input. Tag each step with the agents whose input shaped it, e.g. [cfo]. Then call submit_plan; pass final: true to go straight to sign-off.";
 export const NEXT_AFTER_REVIEW = "Revise the plan to address the amendments (say which you rejected and why), then call submit_plan again, or submit_plan with final: true to collect sign-offs and close.";
@@ -363,7 +363,7 @@ export async function startUltraplan(
   const participants = [];
   for (const name of agents) participants.push(await load(name, buildUltraplanParticipantDirective()));
   const planner = opts.planner !== undefined ? await load(opts.planner, buildUltraplanPlannerDirective()) : undefined;
-  const id = `ultraplan-${++ultraplanCounter}`;
+  const id = newId("ultraplan");
   const publicChannel = opts.public ? openPublicChannel(id, {
     mode: "ultraplan", participants: [...participants.map((a) => publicLabel(a.name)),
       planner ? `planner: ${publicLabel(planner.name)}` : "planner: orchestrator"], topic: task,

@@ -186,7 +186,7 @@ test("create happy path: sequential expertise, concurrent reviews, exact calls, 
   assert.ok(h.requests.contributions[0].messages[0].content.includes("Audit step"));
   assert.ok(h.requests.architect[0].messages.at(-1).content.includes("EXPERTISE-2"));
   assert.equal(r.mode, "create");
-  assert.match(r.sessionId, /^create-\d+$/);
+  assert.match(r.sessionId, /^create-[0-9a-hjkmnp-tv-z]{8}$/);
   assert.equal(dirname(r.agent.path), agentsDir);
   assert.ok(existsSync(r.agent.path));
   const parsed = readFrontmatter(readFileSync(r.agent.path, "utf8"));
@@ -338,7 +338,7 @@ test("improve includes self candor, activity, backup and original identity and e
   const r = await improveAgent({ ...opts, agent: "cfo", with: ["marketing-coordinator"] });
   assert.equal(h.calls.length, 5);
   assert.equal(r.mode, "improve");
-  assert.match(r.sessionId, /^improve-\d+$/);
+  assert.match(r.sessionId, /^improve-[0-9a-hjkmnp-tv-z]{8}$/);
   assert.equal(r.agent.name, "cfo-identity");
   assert.equal(r.agent.model, "sonnet");
   assert.deepEqual(r.agent.tools, ["Read", "Grep"]);

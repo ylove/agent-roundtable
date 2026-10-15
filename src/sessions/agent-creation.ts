@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { AGENTS_DIR, SKILLS_DIR, DEFAULT_MODELS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
 import { agentKey, assertReadableFrontmatter, loadAgent, listAgents, listSkills, readFrontmatter, renderSkillsSection, skillSearchDirs, type LoadedAgent } from "../agents.js";
 import { recordActivity, recentActivityForKey } from "../activity.js";
+import { newId } from "../ids.js";
 import { callLLM, type ChatCompletionOptions } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import {
@@ -216,9 +217,6 @@ interface SavedDefinition {
   written: boolean;
   files?: Array<{ path: string; content: string }>;
 }
-
-let createCounter = 0;
-let improveCounter = 0;
 
 // ----------------------------------------------------------------------------
 // Prompt builders (pure)
@@ -616,7 +614,7 @@ async function prepareWorkshop(
   const model = options.model || DEFAULT_MODELS[provider];
   const rounds = Number.isNaN(options.rounds) ? 1 : Math.min(3, Math.max(1, Math.floor(options.rounds ?? 1)));
   const existingSkills = listSkills(skillSearchDirs(target?.path ?? join(AGENTS_DIR, "new-agent.md")));
-  const sessionId = mode === "create" ? `create-${++createCounter}` : `improve-${++improveCounter}`;
+  const sessionId = newId(mode);
   const targetLabel = target ? display(improve.agent, isPublic) : "";
   const agents = listAgents().sort((a, b) => a.key.localeCompare(b.key));
   const common: PromptContext = {

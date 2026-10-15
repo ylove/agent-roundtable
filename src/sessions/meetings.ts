@@ -6,6 +6,7 @@ import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
 import { agentKey, loadAgentPrompt } from "../agents.js";
 import { recordActivity } from "../activity.js";
+import { newId } from "../ids.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
@@ -48,7 +49,6 @@ export interface Meeting {
 }
 
 export const meetings = new Map<string, Meeting>();
-let meetingCounter = 0;
 
 export type MeetingRecordHook = (meeting: Meeting, message: Message) => void;
 
@@ -109,7 +109,7 @@ export async function startMeeting(
   }
   if (isPublic) systemPrompt += publicDirectiveSuffix();
   if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic });
-  const meetingId = `meeting-${++meetingCounter}`;
+  const meetingId = newId("meeting");
   // Board, then public channel, both before the first LLM call so the header is the first post. Config
   // errors fail the start (a public config error closes the board first).
   const { prototype, publicChannel } = await openSessionSurfaces(

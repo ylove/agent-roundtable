@@ -440,6 +440,11 @@ test("amending a frozen contract: contract.amended v2, removed tasks cancelled, 
   assert.equal(state.inbox["agent-ui"][0].kind, "directive");
   assert.equal(auditEntries().filter((e) => e.target === r.contractId && e.action === "contract.amended")[0].details.hash, a.hash);
   assert.equal((await store.verify()).ok, true);
+  // A secret-shaped value in a patch is scrubbed before storage, and the hash is of what is stored.
+  const secret = await amendContract(store, { title: "Orders sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }, { by: "main", reason: "rename" });
+  const blob = JSON.parse((await store.getBlob((await store.events({ types: ["contract.amended"] })).at(-1).payload.blob)).toString("utf8"));
+  assert.doesNotMatch(blob.title, /sk-ant-api03-ABCDEF/);
+  assert.equal(contractHash(blob), secret.hash);
 });
 
 test("amendContract with an authority: add_task, reassign and extend_budget within the percentage; everything else refused", async (t) => {

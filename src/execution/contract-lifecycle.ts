@@ -670,7 +670,8 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
   const patchBlob = await store.putBlob(scrubbedJSON(effective), { redact: false });
   let hash: string | undefined;
   if (rec.frozen) {
-    const body: Contract = { ...v.contract, status: "frozen", consent: [] };
+    // Hash what is stored: the blob is scrubbed, so the hash is taken over the scrubbed contract.
+    const body = JSON.parse(scrubbedJSON({ ...v.contract, status: "frozen", consent: [] })) as Contract;
     hash = contractHash(body);
     const final: Contract = { ...body, consent: effectiveConsent({ contract: body, verdicts: rec.verdicts }), frozen: { by, at: new Date().toISOString(), hash } };
     const blob = await store.putBlob(scrubbedJSON(final), { redact: false });

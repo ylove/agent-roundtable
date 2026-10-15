@@ -78,7 +78,7 @@ export const contractTools: ToolDefinition[] = [
       "Amend a contract with an RFC 7396 merge patch (objects merge, arrays replace, null deletes) to produce v(N+1). Only its orchestrator may. " +
       "A draft gets a new proposal; a frozen contract is amended in force: removed tasks are cancelled and the agents of affected tasks get a directive to re-read it. " +
       "from_session (an archived replan or ultraplan) first replaces the structure with that session's roundtable-tasks block (pass patch: {}). " +
-      "id, version, status, consent, frozen, scope.orchestrator, scope.repo_root, scope.base_ref, scope.parent and goal.original_prompt cannot change. " +
+      "id, version, status, consent, frozen, the scope's orchestrator, repository, base commit and parent, and the goal's original_prompt cannot change. " +
       "consent: true re-asks only the affected participants (personas of changed, added or removed tasks and of tasks touched through interfaces or checks, and new participants) plus anyone with an open objection; " +
       "an objector who now agrees has the objection resolved by the amendment. patch: {} with consent: true just asks everyone without an agreement. " +
       "Returns the affected tasks, the consent outcome and the contract markdown.",

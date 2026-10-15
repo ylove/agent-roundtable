@@ -31,9 +31,11 @@ import type {
 export type WatchdogRule =
   | "claim_expiry"
   | "lease_orphan"
+  | "lease_withdraw"
   | "lease_grant"
   | "worker_dead"
   | "worker_stall"
+  | "blocked_worker"
   | "dependency_wait"
   | "repeated_failure"
   | "diff_ping_pong"
@@ -53,6 +55,12 @@ interface ActionBase {
   key: string;
   /** What the action acts on: a task, agent, escalation, orchestrator, driver or "execution". */
   target: string;
+  /**
+   * A process operation re-asserted on every pass while its condition holds (stop spawning, kill a
+   * worker that must not run), so a crash between the commit and the operation loses nothing. Its
+   * first occurrence was audited; a standing repeat is not, and it carries no events.
+   */
+  standing?: true;
 }
 
 export type WatchdogAction =
@@ -198,8 +206,8 @@ function actionName(a: WatchdogAction): string {
 
 /**
  * The event drafts for a batch of actions, in order: each emit action's events, then (with audit)
- * one watchdog.action {rule, action, target} per action, process operations included. Drafts are
- * copies; the actions are not modified.
+ * one watchdog.action {rule, action, target} per action that is not standing, process operations
+ * included. Drafts are copies; the actions are not modified.
  */
 export function actionsToDrafts(actions: readonly WatchdogAction[], opts: DraftOptions = {}): AnyEventDraft[] {
   const pid = opts.pid ?? 0;
@@ -218,7 +226,7 @@ export function actionsToDrafts(actions: readonly WatchdogAction[], opts: DraftO
         out.push(d);
       }
     }
-    if (opts.audit !== false) {
+    if (opts.audit !== false && !a.standing) {
       out.push(stamp(draft("watchdog.action", { rule: a.rule, action: actionName(a), target: a.target }, a.key)));
     }
   }

@@ -13,6 +13,7 @@ import {
   draft,
   emitAction,
   escalationAction,
+  escalationId,
   own,
   sortedKeys,
   type WatchdogAction,
@@ -65,27 +66,30 @@ export function spentPct(state: BlackboardState): number {
 }
 
 /**
- * The thresholds (50, 80, 100) reached but not yet in thresholds_crossed. Each fires once per
- * run: after a budget.extended the percentage can fall back under a recorded threshold, and it
- * does not fire again (exhaustion of the extended total is still caught by budgetRules).
+ * The thresholds (50, 80, 100) reached but not yet recorded for the current total. Each fires
+ * once per budget epoch: thresholds_crossed belongs to the total in thresholds_budget_usd, so after
+ * a budget.extended the warnings re-arm against the new total.
  */
 export function thresholdCrossings(state: BlackboardState): number[] {
   const total = executionBudgetUsd(state);
   if (total <= 0) return [];
-  const crossed = state.budget.thresholds_crossed;
+  const b = state.budget;
+  const crossed = b.thresholds_budget_usd === undefined || b.thresholds_budget_usd === round6(total) ? b.thresholds_crossed : [];
   return BUDGET_THRESHOLDS.filter((t) => state.budget.spent_usd + EPS >= (total * t) / 100 && !crossed.includes(t));
 }
 
 /**
  * Budget rules:
- *  - budget.threshold_crossed for each new threshold; at 80%, also wake the orchestrator;
- *  - execution budget spent: budget.exhausted, an emergency escalation awaiting the human
- *    (class money), and stop_spawning. Keyed by the total, so an extension that is spent in
- *    turn escalates again;
- *  - a task's (or agent's) cap reached: budget.exhausted {scope, ref}, a resource escalation that
- *    blocks the task, and kill_worker when its worker is running.
+ *  - budget.threshold_crossed for each threshold new in this budget epoch; at 80%, also wake the
+ *    orchestrator;
+ *  - execution budget spent: budget.exhausted and an emergency escalation awaiting the human
+ *    (class money), once per total (so an extension that is spent in turn escalates again), and
+ *    stop_spawning on every pass while it stays spent (standing after the first);
+ *  - a task's (or agent's) cap reached: budget.exhausted {scope, ref} and a resource escalation
+ *    that blocks the task, once; kill_worker on every pass while its worker still runs (unless the
+ *    runner reports the agent busy).
  */
-export function budgetRules(state: BlackboardState): WatchdogAction[] {
+export function budgetRules(state: BlackboardState, opts: { busy?: ReadonlySet<string> } = {}): WatchdogAction[] {
   const c = state.contract;
   if (!c) return [];
   const out: WatchdogAction[] = [];
@@ -95,7 +99,7 @@ export function budgetRules(state: BlackboardState): WatchdogAction[] {
   const est = state.budget.estimated ? " (partly estimated)" : "";
 
   for (const pct of thresholdCrossings(state)) {
-    const key = `budget:threshold:${pct}`;
+    const key = `budget:threshold:${round6(total)}:${pct}`;
     out.push(
       emitAction("budget_threshold", key, "execution", [
         draft("budget.threshold_crossed", { pct, spent_usd: round6(spent), budget_usd: round6(total) }, key),
@@ -117,8 +121,9 @@ export function budgetRules(state: BlackboardState): WatchdogAction[] {
     const message =
       `The execution budget is spent: ${usd(spent)} of ${usd(total)}${est}. ` +
       "No new workers will start until the budget is extended.";
+    const escKey = `budget:execution:${round6(total)}`;
     const esc = escalationAction(state, "budget_exhausted", {
-      key: `budget:execution:${round6(total)}`,
+      key: escKey,
       kind: "emergency",
       with: "orchestrator",
       target: orchestrator,
@@ -134,15 +139,22 @@ export function budgetRules(state: BlackboardState): WatchdogAction[] {
       },
       before: [draft("budget.exhausted", { scope: "execution" })],
     });
-    if (esc) {
-      out.push(esc, { type: "stop_spawning", rule: "budget_exhausted", key: `${esc.key}:stop`, target: "execution", reason: message });
-    }
+    if (esc) out.push(esc);
+    out.push({
+      type: "stop_spawning",
+      rule: "budget_exhausted",
+      key: `${escalationId(escKey)}:stop`,
+      target: "execution",
+      reason: message,
+      ...(esc ? {} : { standing: true as const }),
+    });
   }
 
   const capReached = (scope: "task" | "agent", ref: string, task: string | undefined, agent: string | undefined, used: number, cap: number) => {
     const what = scope === "task" ? `Task ${ref}` : `Agent ${ref}`;
+    const escKey = `budget:${scope}:${ref}:${round6(cap)}`;
     const esc = escalationAction(state, "budget_cap", {
-      key: `budget:${scope}:${ref}:${round6(cap)}`,
+      key: escKey,
       task,
       kind: "resource",
       with: "orchestrator",
@@ -152,10 +164,17 @@ export function budgetRules(state: BlackboardState): WatchdogAction[] {
       block: true,
       before: [draft("budget.exhausted", { scope, ref })],
     });
-    if (!esc) return;
-    out.push(esc);
-    if (agent !== undefined && own(state.agents, agent)?.status === "running") {
-      out.push({ type: "kill_worker", rule: "budget_cap", key: `${esc.key}:kill`, target: agent, agent, reason: `${what} reached its budget cap` });
+    if (esc) out.push(esc);
+    if (agent !== undefined && own(state.agents, agent)?.status === "running" && !opts.busy?.has(agent)) {
+      out.push({
+        type: "kill_worker",
+        rule: "budget_cap",
+        key: `${escalationId(escKey)}:kill`,
+        target: agent,
+        agent,
+        reason: `${what} reached its budget cap`,
+        ...(esc ? {} : { standing: true as const }),
+      });
     }
   };
 

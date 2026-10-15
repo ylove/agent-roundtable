@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyDrafts, claim, contract, escalations, eventTypes, makeState, ofType, opsOf, task } from "../fixtures/execution-state.mjs";
+import { World, applyDrafts, claim, contract, escalations, eventTypes, fresh, makeState, ofType, opsOf, task } from "../fixtures/execution-state.mjs";
 
 const { remainingUsd, thresholdCrossings, budgetRules, executionBudgetUsd, spentPct } = await import("../../dist/execution/budget.js");
 const { actionsToDrafts } = await import("../../dist/execution/watchdog-actions.js");
@@ -96,15 +96,25 @@ test("budget: 100% exhausts the run, stops spawning and awaits the human (money)
 
   const after = settle(s, actions);
   assert.equal(after.escalations[esc.id].status, "awaiting_human");
-  assert.deepEqual(budgetRules(after), [], "once");
+  // The escalation is raised once; stop_spawning stands on every pass while the budget is spent.
+  assert.deepEqual(budgetRules(after).map((a) => [a.type, a.standing, a.key]), [["stop_spawning", true, opsOf(actions)[0].key]]);
+  assert.deepEqual(actionsToDrafts(budgetRules(after)), [], "a standing repeat writes no events");
 
-  // The human extends the budget; spending through the extension escalates again.
+  // The human extends the budget: a new epoch, so 50% of $150 warns again; spending through it escalates again.
   after.budget.extensions_usd = 50;
-  assert.deepEqual(budgetRules(after), []);
+  assert.deepEqual(ofType(budgetRules(after), "budget.threshold_crossed").map((e) => e.payload.pct), [50]);
   after.budget.spent_usd = 150;
   const again = budgetRules(after);
-  assert.deepEqual(eventTypes(again), ["budget.exhausted", "escalation.raised", "escalation.awaiting_human"]);
+  assert.deepEqual(eventTypes(again), [
+    "budget.threshold_crossed",
+    "budget.threshold_crossed",
+    "budget.threshold_crossed",
+    "budget.exhausted",
+    "escalation.raised",
+    "escalation.awaiting_human",
+  ]);
   assert.notEqual(escalations(again)[0].id, esc.id);
+  assert.deepEqual(opsOf(again).map((a) => [a.type, a.standing]), [["wake_orchestrator", undefined], ["stop_spawning", undefined]]);
 });
 
 test("budget: a task at its cap is killed, blocked and escalated as a resource", () => {
@@ -123,6 +133,11 @@ test("budget: a task at its cap is killed, blocked and escalated as a resource",
 
   const after = settle(s, actions);
   assert.equal(after.tasks.t.state, "blocked");
+  // Until the worker is gone, the kill stands (a crash between the commit and the kill loses nothing).
+  assert.deepEqual(fresh(budgetRules(after)), []);
+  assert.deepEqual(budgetRules(after).map((a) => [a.type, a.agent, a.standing]), [["kill_worker", "w-t", true]]);
+  assert.deepEqual(budgetRules(after, { busy: new Set(["w-t"]) }), [], "not while the runner is already stopping it");
+  after.agents["w-t"].status = "exited";
   assert.deepEqual(budgetRules(after), []);
 });
 
@@ -143,4 +158,52 @@ test("budget: a cap reached on an already blocked task escalates without replaci
   assert.deepEqual(eventTypes(actions), ["budget.exhausted", "escalation.raised"]);
   assert.equal(escalations(actions)[0].blocking, true);
   assert.deepEqual(settle(s, actions).tasks.t.blocked_by, { escalation: "esc-first" });
+});
+
+test("budget: the 50% and 80% warnings re-arm when an extension raises the total", () => {
+  // $100, spent $105: every threshold recorded for the $100 total.
+  const s = makeState({ budget: { spent_usd: 105, thresholds_crossed: [50, 80, 100], thresholds_budget_usd: 100 } });
+  s.escalations = {};
+  assert.deepEqual(thresholdCrossings(s), []);
+  // Extended to $200 with $175 spent: 87.5% of the new total.
+  s.budget.extensions_usd = 100;
+  s.budget.spent_usd = 175;
+  assert.deepEqual(thresholdCrossings(s), [50, 80]);
+  const actions = budgetRules(s);
+  assert.deepEqual(ofType(actions, "budget.threshold_crossed").map((e) => e.payload), [
+    { pct: 50, spent_usd: 175, budget_usd: 200 },
+    { pct: 80, spent_usd: 175, budget_usd: 200 },
+  ]);
+  assert.deepEqual(opsOf(actions).map((a) => a.type), ["wake_orchestrator"]);
+  const after = settle(s, actions);
+  assert.deepEqual([after.budget.thresholds_crossed, after.budget.thresholds_budget_usd], [[50, 80], 200]);
+  assert.deepEqual(budgetRules(after), []);
+  // A list recorded before epochs existed is adopted, not repeated.
+  const legacy = makeState({ budget: { spent_usd: 85, thresholds_crossed: [50] } });
+  assert.deepEqual(thresholdCrossings(legacy), [80]);
+  assert.deepEqual(settle(legacy, budgetRules(legacy)).budget.thresholds_crossed, [50, 80]);
+});
+
+test("budget: the whole sequence on the real store, $100 extended to $200", () => {
+  const w = new World(makeState({ tasks: [task("t", { spec: { budget_usd: 1000 } })] }));
+  const spend = (usd) =>
+    w.emit("budget.usage_recorded", { agent: "w-t", task: "t", source: "worker", model: "claude-opus-5-5", tokens: { inputTokens: 1, outputTokens: 1 }, usd, estimated: false });
+  const trace = [];
+  for (const step of [55, 30, 20, "extend", 30, 30, 10]) {
+    if (step === "extend") w.emit("budget.extended", { by: "human", usd: 100 }, { kind: "human", id: "human", pid: 1 });
+    else spend(step);
+    const fired = fresh(w.step()).flatMap((a) =>
+      a.type === "emit" ? a.events.map((e) => (e.type === "budget.threshold_crossed" ? `${e.payload.pct}` : e.type)) : [a.type]
+    );
+    trace.push(fired.join(" "));
+  }
+  assert.deepEqual(trace, [
+    "50",
+    "80 wake_orchestrator",
+    "100 budget.exhausted escalation.raised escalation.awaiting_human stop_spawning",
+    "50",
+    "",
+    "80 wake_orchestrator",
+    "",
+  ]);
 });

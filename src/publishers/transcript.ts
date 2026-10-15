@@ -1,4 +1,5 @@
 // Titles, history reassembly, local/public merge, and the saved Markdown transcript.
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import type { EntryKind, HistoryMessage } from "./types.js";
@@ -186,16 +187,45 @@ export function renderTranscript(meta: TranscriptMeta, entries: MergedEntry[]): 
 
 const safeName = (s: string) => s.replace(/[^-_A-Za-z0-9]/g, "-").slice(0, 80) || "session";
 
-/** Transcripts hold private session text: a 0700 directory, 0600 files, written atomically. */
+const looseDirsWarned = new Set<string>();
+
+/**
+ * Where transcripts go. A missing directory is created 0700. An existing one (ROUNDTABLE_TRANSCRIPTS_DIR
+ * may be a symlink the user set up) is used at its real path and never chmodded; a warning says so
+ * when other users can reach it.
+ */
+function transcriptsDirectory(dir: string): string {
+  let real: string;
+  try {
+    real = realpathSync.native(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    mkdirPrivate(dir);
+    return dir;
+  }
+  const st = statSync(real);
+  if (!st.isDirectory()) throw new Error(`${dir} is not a directory`);
+  if ((st.mode & 0o077) !== 0 && !looseDirsWarned.has(real)) {
+    looseDirsWarned.add(real);
+    console.error(
+      `[Publish] the transcripts directory ${real} is open to other users (mode ${(st.mode & 0o777).toString(8)}); ` +
+        "transcripts are written 0600 there, but consider chmod 700"
+    );
+  }
+  // A configured symlink is resolved once, here; any other directory keeps the path as configured.
+  return lstatSync(dir).isSymbolicLink() ? real : dir;
+}
+
+/** Transcripts hold private session text: 0600 files, written atomically, in a private directory. */
 export async function writeTranscript(
   dir: string,
   meta: TranscriptMeta,
   suffix: string,
   entries: MergedEntry[]
 ): Promise<string> {
-  mkdirPrivate(dir);
+  const target = transcriptsDirectory(dir);
   const date = meta.startedAt.slice(0, 10);
-  const path = join(dir, `${date}-${safeName(meta.sessionId)}-${safeName(suffix)}.md`);
+  const path = join(target, `${date}-${safeName(meta.sessionId)}-${safeName(suffix)}.md`);
   writeFileAtomic(path, renderTranscript(meta, entries));
   return path;
 }

@@ -8,7 +8,7 @@
     "agent-roundtable": "dist/index.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "license": "MIT",
   "files": [
@@ -36,7 +36,7 @@
     "test:live": "node test/live-smoke.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "dotenv": "^17.2.3",
     "yaml": "^2.9.1"
   },

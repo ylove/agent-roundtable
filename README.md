@@ -327,7 +327,7 @@ Three generic personas ship in `examples/` (`cfo.md`, `product-lead.md`, `skepti
 
 ## Setup
 
-Requires Node 20+.
+Requires Node 22+.
 
 ```sh
 git clone <repository-url> agent-roundtable
@@ -523,7 +523,7 @@ improve_agent { "agent": "cfo", "with": ["product-lead"], "include_self": false,
 
 ## Contributing
 
-`npm test` must pass before a pull request. CI runs the build and tests on Node 20 and 22 and enforces that no absolute user paths are committed.
+`npm test` must pass before a pull request. CI runs the build and tests on Node 22 and 24 and enforces that no absolute user paths are committed.
 
 ## License
 

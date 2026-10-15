@@ -5,7 +5,8 @@
 // (not through runSandboxed) is never weaker than the run core.
 // ============================================================================
 
-import { isAbsolute } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { SECRET_NAME_RE } from "../security/child-env.js";
 import { normalizeRelPath } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
@@ -192,6 +193,43 @@ export function validateWorkdir(workdir: unknown): string {
   if (typeof workdir !== "string" || !workdir || !isAbsolute(workdir)) throw new SandboxRequestError("workdir must be an absolute path");
   if (/[\0\n\r,"']/.test(workdir)) throw new SandboxRequestError("workdir contains characters the sandbox cannot mount safely (comma, quote or control)");
   return workdir;
+}
+
+export interface CanonicalWorkdir {
+  /** The real path, resolved once; every later use (mounts, profile, cwd) uses this. */
+  path: string;
+  /** What the workdir's own .git is: a gitfile (worktree), a directory (checkout), or absent. */
+  git: "file" | "dir" | "absent";
+}
+
+/**
+ * Resolve a workdir once, refusing a workdir that is itself a symlink: a sandboxed run that could
+ * replace its workdir with a link would otherwise redirect every later run (and its mount or
+ * profile) to wherever the link points. A symlinked .git is refused for the same reason.
+ */
+export function canonicalWorkdir(workdir: unknown): CanonicalWorkdir {
+  const given = validateWorkdir(workdir);
+  let path: string;
+  try {
+    const st = lstatSync(given);
+    if (st.isSymbolicLink()) throw new SandboxRequestError(`workdir ${given} is a symlink; pass the real directory`);
+    if (!st.isDirectory()) throw new SandboxRequestError(`workdir ${given} is not a directory`);
+    path = realpathSync(given);
+  } catch (e) {
+    if (e instanceof SandboxRequestError) throw e;
+    throw new SandboxRequestError(`workdir ${given} does not exist`);
+  }
+  validateWorkdir(path);
+  let git: CanonicalWorkdir["git"] = "absent";
+  try {
+    const st = lstatSync(join(path, ".git"));
+    if (st.isSymbolicLink()) throw new SandboxRequestError("the workdir's .git is a symlink; refusing to run");
+    git = st.isDirectory() ? "dir" : st.isFile() ? "file" : "absent";
+    if (git === "absent") throw new SandboxRequestError("the workdir's .git is neither a file nor a directory");
+  } catch (e) {
+    if (e instanceof SandboxRequestError) throw e;
+  }
+  return { path, git };
 }
 
 // ============================================================================

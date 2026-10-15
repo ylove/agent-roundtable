@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +50,7 @@ test("an unknown platform runs unisolated and says so in available() and every r
   const a = await b.available();
   assert.equal(a.ok, true);
   assert.match(a.degraded, /without isolation/);
+  assert.match(a.degraded, /\.git/, "the degraded reason says .git is not protected");
   const r = await b.run({ argv: js("console.log('hi')"), workdir: work, timeoutMs: 10_000 });
   assert.equal(r.exit, 0);
   assert.equal(r.backend, "local");
@@ -75,6 +76,13 @@ test("the local backend refuses shell strings, loader variables, egress and esca
   // A symlink that leads out of the workdir is not a usable cwd.
   symlinkSync(root, join(work, "escape"));
   await assert.rejects(b.run({ ...req, cwd: "escape" }), /outside the workdir/);
+  // A workdir that is itself a symlink is refused (a run could have swapped it), as is a linked .git.
+  symlinkSync(work, join(root, "wt-link"));
+  await assert.rejects(b.run({ ...req, workdir: join(root, "wt-link") }), /is a symlink/);
+  const linkedGit = join(root, "linked-git");
+  mkdirSync(linkedGit);
+  symlinkSync(join(root, "outside"), join(linkedGit, ".git"));
+  await assert.rejects(b.run({ ...req, workdir: linkedGit }), /\.git is a symlink/);
 });
 
 test("commands get an empty HOME and TMPDIR, the cwd inside the workdir, and none of our secrets", async () => {
@@ -127,6 +135,9 @@ test("buildSeatbeltProfile passes every path as a parameter and re-allows the wo
   const denyRead = profile.indexOf("(deny file-read*");
   const allowRead = profile.indexOf('(allow file-read* (subpath (param "WORKDIR"))');
   assert.ok(denyRead > 0 && allowRead > denyRead, "the workdir allow comes after the deny (last match wins)");
+  const allowWrite = profile.indexOf('(allow file-write* (subpath (param "WORKDIR"))');
+  const denyGit = profile.indexOf('(deny file-write* (literal (param "WORKDIR")) (literal (string-append (param "WORKDIR") "/.git")) (subpath (string-append (param "WORKDIR") "/.git")))');
+  assert.ok(allowWrite > 0 && denyGit > allowWrite, "the workdir root and .git are denied after the workdir write allow");
 });
 
 // ============================================================================
@@ -154,6 +165,72 @@ test("macOS: writes inside the workdir succeed and writes outside it fail", mac,
   assert.equal(existsSync(join(outside, "x.txt")), false);
   const home = await b.run({ argv: js(`require('fs').writeFileSync(${JSON.stringify(join(homedir(), "planted.txt"))}, 'no')`), workdir: work, timeoutMs: 20_000 });
   assert.notEqual(home.exit, 0);
+});
+
+const GIT_ATTACKS = `
+  const fs = require("fs");
+  const t = (name, f) => { try { f(); console.log(name + "=ALLOWED"); } catch (e) { console.log(name + "=" + e.code); } };
+  const kind = fs.existsSync(".git") ? (fs.statSync(".git").isDirectory() ? "dir" : "file") : "absent";
+  t("write", () => kind === "dir" ? fs.appendFileSync(".git/config", "[core]\\n\\tfsmonitor = touch PWNED\\n") : fs.writeFileSync(".git", "gitdir: /tmp/evil"));
+  t("hooks", () => fs.mkdirSync(".git/hooks", { recursive: true }));
+  t("unlink", () => fs.rmSync(".git", { recursive: true, force: kind !== "absent" }));
+  t("replace", () => { fs.writeFileSync("evil", "gitdir: /tmp/evil"); fs.renameSync("evil", ".git"); });
+  t("inside", () => { fs.writeFileSync("ok.txt", "ok"); fs.mkdirSync("sub/deep", { recursive: true }); fs.renameSync("ok.txt", "sub/ok.txt"); });
+`;
+
+test("macOS: a command can neither modify, replace nor create the workdir's .git", mac, async () => {
+  for (const kind of ["file", "dir", "absent"]) {
+    const { work, rtHome } = workspace();
+    if (kind === "file") writeFileSync(join(work, ".git"), "gitdir: /nonexistent/.git/worktrees/task\n");
+    if (kind === "dir") {
+      mkdirSync(join(work, ".git"));
+      writeFileSync(join(work, ".git", "config"), "[core]\n");
+    }
+    const r = await backend(rtHome).run({ argv: ["node", "-e", GIT_ATTACKS], workdir: work, timeoutMs: 20_000 });
+    assert.equal(r.exit, 0, r.output);
+    const steps = kind === "absent" ? ["write", "replace"] : ["write", "unlink", "replace"];
+    for (const step of steps) assert.match(r.output, new RegExp(`${step}=EPERM`), `${kind}: ${r.output}`);
+    assert.doesNotMatch(r.output, /hooks=ALLOWED/, `${kind}: ${r.output}`);
+    assert.match(r.output, /inside=ALLOWED/);
+    if (kind === "file") assert.equal(readFileSync(join(work, ".git"), "utf8"), "gitdir: /nonexistent/.git/worktrees/task\n");
+    if (kind === "dir") assert.equal(readFileSync(join(work, ".git", "config"), "utf8"), "[core]\n");
+    if (kind === "absent") assert.equal(existsSync(join(work, ".git")), false);
+  }
+});
+
+test("macOS: a run cannot swap its workdir for a symlink to widen the next run", mac, async () => {
+  const { work, rtHome, root } = workspace();
+  const target = join(root, "target");
+  mkdirSync(target);
+  writeFileSync(join(work, "keep.txt"), "x");
+  const b = backend(rtHome);
+  const swap = await b.run({
+    argv: js(`
+      const fs = require("fs");
+      try { fs.rmSync(process.cwd(), { recursive: true, force: true }); console.log("rm=ALLOWED"); } catch (e) { console.log("rm=" + e.code); }
+      try { fs.symlinkSync(${JSON.stringify(target)}, process.cwd()); console.log("ln=ALLOWED"); } catch (e) { console.log("ln=" + e.code); }
+      try { fs.renameSync(process.cwd(), process.cwd() + "-moved"); console.log("mv=ALLOWED"); } catch (e) { console.log("mv=" + e.code); }
+    `),
+    workdir: work,
+    timeoutMs: 20_000,
+  });
+  assert.match(swap.output, /rm=EPERM/, swap.output);
+  assert.doesNotMatch(swap.output, /ln=ALLOWED|mv=ALLOWED/, swap.output);
+  assert.equal(lstatSync(work).isSymbolicLink(), false);
+  assert.ok(lstatSync(work).isDirectory());
+  // The next run still sees the real workdir, and cannot reach the target or the runner's token.
+  const next = await b.run({
+    argv: js(`
+      const fs = require("fs");
+      try { fs.writeFileSync(${JSON.stringify(join(target, "x.txt"))}, "no"); console.log("target=ALLOWED"); } catch (e) { console.log("target=" + e.code); }
+      try { fs.readFileSync(${JSON.stringify(join(rtHome, "token"))}); console.log("rthome=ALLOWED"); } catch (e) { console.log("rthome=" + e.code); }
+    `),
+    workdir: work,
+    timeoutMs: 20_000,
+  });
+  assert.match(next.output, /target=EPERM/);
+  assert.match(next.output, /rthome=EPERM/);
+  assert.equal(existsSync(join(target, "x.txt")), false);
 });
 
 test("macOS: network connections fail fast", mac, async () => {
@@ -248,6 +325,7 @@ test("linux: unshare isolates the network when permitted, and results are always
   const a = await b.available();
   assert.equal(a.ok, true);
   assert.ok(a.degraded, "the Linux local backend is always reported as degraded");
+  assert.match(a.degraded, /\.git/, "and says the workdir's .git is not protected");
   const r = await b.run({
     argv: js(`
       const s = require('net').connect(443, '1.1.1.1');

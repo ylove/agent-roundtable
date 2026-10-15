@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +13,18 @@ const real = await new DockerBackend().available();
 const NO_DOCKER = real.ok ? false : "docker is not available";
 
 const base = { name: "rt-cmd-abc123", uid: 501, gid: 20, image: "node:22-bookworm-slim", limits: DEFAULT_DOCKER_LIMITS };
+
+/** A real directory shaped like a task worktree: its .git is a gitfile (or a directory). */
+function worktree({ gitDir = false } = {}) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "rt-wt-")));
+  if (gitDir) {
+    mkdirSync(join(dir, ".git"));
+    writeFileSync(join(dir, ".git", "config"), "[core]\n\trepositoryformatversion = 0\n");
+  } else {
+    writeFileSync(join(dir, ".git"), "gitdir: /nonexistent/.git/worktrees/task\n");
+  }
+  return dir;
+}
 
 // ============================================================================
 // buildDockerRunArgs
@@ -44,6 +56,7 @@ test("buildDockerRunArgs: the full hardened argv", () => {
     "-e", "NODE_ENV=test",
     "-e", "CI=1",
     "--mount", "type=bind,src=/srv/worktrees/task-1,dst=/work",
+    "--mount", "type=bind,src=/srv/worktrees/task-1/.git,dst=/work/.git,readonly",
     "-w", "/work/packages/api",
     "node:22-bookworm-slim",
     "npm", "test", "--", "--grep", "a b",
@@ -179,7 +192,7 @@ test("available() reports the daemon state", async () => {
 
 test("run() spawns docker with the docker env profile, records the digest and returns the output", async () => {
   const fake = fakeDocker();
-  const work = mkdtempSync(join(tmpdir(), "rt-wt-"));
+  const work = worktree();
   process.env.SANDBOX_DOCKER_TEST_TOKEN = "should-never-reach-docker";
   try {
     const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1" });
@@ -192,6 +205,7 @@ test("run() spawns docker with the docker env profile, records the digest and re
     assert.match(r.output, /leaked nothing/);
     const run = fake.calls().find((c) => c.args[0] === "run");
     assert.ok(run.args.includes(`type=bind,src=${work},dst=/work`));
+    assert.ok(run.args.includes(`type=bind,src=${work}/.git,dst=/work/.git,readonly`));
     assert.match(run.args[run.args.indexOf("--name") + 1], /^rt-cmd-[0-9a-z]{12}$/);
     assert.ok(!run.env.includes("SANDBOX_DOCKER_TEST_TOKEN"), "docker CLI env is the allowlisted profile");
     const failed = await backend.run({ argv: ["exit", "7"], workdir: work, timeoutMs: 10_000 });
@@ -203,7 +217,7 @@ test("run() spawns docker with the docker env profile, records the digest and re
 
 test("on timeout run() kills the container by name, then the client, then removes it", async () => {
   const fake = fakeDocker();
-  const work = mkdtempSync(join(tmpdir(), "rt-wt-"));
+  const work = worktree();
   const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1" });
   const started = Date.now();
   const r = await backend.run({ argv: ["hang"], workdir: work, timeoutMs: 1_500 });
@@ -225,15 +239,42 @@ test("run() refuses invalid requests before touching docker", async () => {
   const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1" });
   await assert.rejects(backend.run({ argv: ["true"], workdir: "/nonexistent-rt-workdir", timeoutMs: 1000 }), /does not exist/);
   await assert.rejects(backend.run({ argv: ["true"], workdir: tmpdir(), env: { GH_TOKEN: "x" }, timeoutMs: 1000 }), /credential/);
-  await assert.rejects(backend.run({ argv: ["true"], workdir: tmpdir(), cwd: "rt-missing-subdir", timeoutMs: 1000 }), /does not exist/);
-  await assert.rejects(backend.run({ argv: ["true"], workdir: tmpdir(), egress: ["*"], timeoutMs: 1000 }), /allowlist/);
+  await assert.rejects(backend.run({ argv: ["true"], workdir: worktree(), cwd: "rt-missing-subdir", timeoutMs: 1000 }), /does not exist/);
+  await assert.rejects(backend.run({ argv: ["true"], workdir: worktree(), egress: ["*"], timeoutMs: 1000 }), /allowlist/);
+  // No .git: the docker backend runs only in git worktrees, whose .git it can protect.
+  await assert.rejects(backend.run({ argv: ["true"], workdir: realpathSync(mkdtempSync(join(tmpdir(), "rt-nogit-"))), timeoutMs: 1000 }), /no \.git/);
   assert.equal(fake.calls().length, 0);
   assert.throws(() => new DockerBackend({ executionTag: "Not A Tag" }), /execution tag/);
 });
 
+test("run() refuses a symlinked workdir or .git and mounts the canonical path", async () => {
+  const fake = fakeDocker();
+  const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1" });
+  const real = worktree();
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rt-links-")));
+  // The workdir itself is a link: refused (Docker would follow it at mount time).
+  symlinkSync(real, join(root, "wt-link"));
+  await assert.rejects(backend.run({ argv: ["true"], workdir: join(root, "wt-link"), timeoutMs: 1000 }), /is a symlink/);
+  // A symlinked .git: refused.
+  const linkedGit = realpathSync(mkdtempSync(join(tmpdir(), "rt-wt-")));
+  symlinkSync(join(real, ".git"), join(linkedGit, ".git"));
+  await assert.rejects(backend.run({ argv: ["true"], workdir: linkedGit, timeoutMs: 1000 }), /\.git is a symlink/);
+  assert.equal(fake.calls().length, 0);
+  // A link higher up the path is fine, but only the resolved path is mounted.
+  symlinkSync(root, join(root, "..", `${root.split("/").pop()}-alias`));
+  mkdirSync(join(root, "nested"));
+  writeFileSync(join(root, "nested", ".git"), "gitdir: /nonexistent\n");
+  const viaAlias = join(`${root}-alias`, "nested");
+  const r = await backend.run({ argv: ["echo", "0"], workdir: viaAlias, timeoutMs: 10_000 });
+  assert.equal(r.exit, 0, r.output);
+  const run = fake.calls().find((c) => c.args[0] === "run");
+  assert.ok(run.args.includes(`type=bind,src=${join(root, "nested")},dst=/work`), run.args.join(" "));
+  assert.ok(!run.args.some((a) => a.includes("-alias")));
+});
+
 test("egress run() joins a fresh internal network with the proxy variables, then tears it down", async () => {
   const fake = fakeDocker();
-  const work = mkdtempSync(join(tmpdir(), "rt-wt-"));
+  const work = worktree();
   const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1", executionTag: "abc123" });
   const r = await backend.run({ argv: ["npm", "ci"], workdir: work, egress: ["registry.npmjs.org"], timeoutMs: 20_000 });
   assert.equal(r.exit, 0, r.output);
@@ -264,7 +305,7 @@ test("egress run() joins a fresh internal network with the proxy variables, then
 // ============================================================================
 
 test("docker: non-root, HOME=/tmp, only the given env, writable /work, read-only root, no network", { skip: NO_DOCKER, timeout: 300_000 }, async () => {
-  const work = mkdtempSync(join(tmpdir(), "rt-wt-"));
+  const work = worktree();
   process.env.SANDBOX_DOCKER_TEST_TOKEN = "host-secret-value-123";
   try {
     const backend = new DockerBackend();
@@ -295,8 +336,33 @@ test("docker: non-root, HOME=/tmp, only the given env, writable /work, read-only
   }
 });
 
+test("docker: a command can neither modify nor replace .git (gitfile or directory)", { skip: NO_DOCKER, timeout: 300_000 }, async () => {
+  const backend = new DockerBackend();
+  const script = `
+    const fs = require("node:fs");
+    const t = (name, f) => { try { f(); console.log(name + "=ALLOWED"); } catch (e) { console.log(name + "=" + e.code); } };
+    const isDir = fs.statSync(".git").isDirectory();
+    t("write", () => isDir ? fs.appendFileSync(".git/config", "[core]\\n\\tfsmonitor = touch PWNED\\n") : fs.writeFileSync(".git", "gitdir: /tmp/evil"));
+    t("hooks", () => fs.mkdirSync(".git/hooks", { recursive: true }));
+    t("unlink", () => fs.rmSync(".git", { recursive: true, force: true }));
+    t("replace", () => { fs.writeFileSync("evil", "gitdir: /tmp/evil"); fs.renameSync("evil", ".git"); });
+    t("inside", () => fs.writeFileSync("ok.txt", "ok"));
+  `;
+  for (const gitDir of [false, true]) {
+    const work = worktree({ gitDir });
+    const before = gitDir ? readFileSync(join(work, ".git", "config"), "utf8") : readFileSync(join(work, ".git"), "utf8");
+    const r = await backend.run({ argv: ["node", "-e", script], workdir: work, timeoutMs: 240_000 });
+    assert.equal(r.exit, 0, r.output);
+    for (const step of ["write", "hooks", "unlink", "replace"]) assert.doesNotMatch(r.output, new RegExp(`${step}=ALLOWED`), `${step} (${gitDir ? "dir" : "gitfile"}): ${r.output}`);
+    assert.match(r.output, /inside=ALLOWED/);
+    const after = gitDir ? readFileSync(join(work, ".git", "config"), "utf8") : readFileSync(join(work, ".git"), "utf8");
+    assert.equal(after, before, ".git is unchanged on the host");
+    assert.equal(existsSync(join(work, ".git", "hooks")), false);
+  }
+});
+
 test("docker: a timeout kills and removes the container", { skip: NO_DOCKER, timeout: 300_000 }, async () => {
-  const work = mkdtempSync(join(tmpdir(), "rt-wt-"));
+  const work = worktree();
   const backend = new DockerBackend();
   await backend.prepare();
   const r = await backend.run({ argv: ["node", "-e", "console.log('started'); setInterval(() => {}, 1000)"], workdir: work, timeoutMs: 8_000 });
@@ -307,7 +373,7 @@ test("docker: a timeout kills and removes the container", { skip: NO_DOCKER, tim
 });
 
 test("docker: egress reaches allowlisted hosts through the proxy and nothing else", { skip: NO_DOCKER, timeout: 300_000 }, async () => {
-  const work = mkdtempSync(join(tmpdir(), "rt-wt-"));
+  const work = worktree();
   const tag = "t" + Math.random().toString(36).slice(2, 8);
   const backend = new DockerBackend({ executionTag: tag });
   const script = `

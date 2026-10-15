@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 
 const common = await import("../../dist/sandbox/common.js");
 const { spawnCaptured, sandboxedInFlight } = await import("../../dist/sandbox/process.js");
-const { capText, tailText, OutputCapture, validateArgv, isShellCommand, validateEnv, resolveCwd, validateWorkdir, clampTimeout, clampOutputBytes, SandboxRequestError } = common;
+const { capText, tailText, OutputCapture, validateArgv, isShellCommand, validateEnv, resolveCwd, validateWorkdir, canonicalWorkdir, clampTimeout, clampOutputBytes, SandboxRequestError } = common;
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const posix = process.platform !== "win32";
 const node = process.execPath;
@@ -159,6 +162,30 @@ test("resolveCwd keeps commands inside the workdir", () => {
 test("validateWorkdir wants an absolute path that is safe inside --mount", () => {
   assert.equal(validateWorkdir("/srv/work tree"), "/srv/work tree");
   for (const bad of ["relative/path", "", "/a,readonly=false", '/a"b', "/a\nb", 42]) assert.throws(() => validateWorkdir(bad), SandboxRequestError);
+});
+
+test("canonicalWorkdir resolves once and refuses a symlinked workdir or .git", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rt-canon-")));
+  const wt = join(root, "wt");
+  mkdirSync(wt);
+  assert.deepEqual(canonicalWorkdir(wt), { path: wt, git: "absent" });
+  writeFileSync(join(wt, ".git"), "gitdir: /x\n");
+  assert.equal(canonicalWorkdir(wt).git, "file");
+  const repo = join(root, "repo");
+  mkdirSync(join(repo, ".git"), { recursive: true });
+  assert.equal(canonicalWorkdir(repo).git, "dir");
+  symlinkSync(wt, join(root, "link"));
+  assert.throws(() => canonicalWorkdir(join(root, "link")), /is a symlink/);
+  const linked = join(root, "linked");
+  mkdirSync(linked);
+  symlinkSync(join(wt, ".git"), join(linked, ".git"));
+  assert.throws(() => canonicalWorkdir(linked), /\.git is a symlink/);
+  assert.throws(() => canonicalWorkdir(join(root, "missing")), /does not exist/);
+  writeFileSync(join(root, "file"), "");
+  assert.throws(() => canonicalWorkdir(join(root, "file")), /not a directory/);
+  // A link in an ancestor is resolved away: only the final component must be real.
+  symlinkSync(root, `${root}-alias`);
+  assert.equal(canonicalWorkdir(join(`${root}-alias`, "wt")).path, wt);
 });
 
 test("timeouts and output caps are clamped", () => {

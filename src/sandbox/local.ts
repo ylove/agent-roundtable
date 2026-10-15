@@ -3,11 +3,15 @@
 //
 // For machines without Docker. It is weaker than Docker and says so:
 //   - macOS: sandbox-exec with a generated profile. No network (not even loopback), writes only to
-//     the workdir, a per-run temp dir and /dev, no reads of credential stores under the home
-//     directory, the roundtable's state, or .env files outside the workdir, no signals to processes
-//     outside the sandbox, and no keychain, LaunchServices, AppleEvents or pasteboard services.
+//     the workdir, a per-run temp dir and /dev, but never to the workdir root itself (so it cannot
+//     be swapped for a symlink) or to its .git (host-side git runs there later, so a swapped
+//     gitfile or a config with core.fsmonitor would run code on the host). No reads of credential
+//     stores under the home directory, the roundtable's state, or .env files outside the workdir,
+//     no signals to processes outside the sandbox, and no keychain, LaunchServices, AppleEvents or
+//     pasteboard services.
 //   - Linux: `unshare -rn` (new user and network namespaces) when the kernel allows it. Only the
-//     network is isolated, so every result carries `degraded`.
+//     network is isolated (.git and the workdir root stay writable), so every result carries
+//     `degraded`.
 //   - Anything else: no isolation at all, reported as `degraded`.
 // No backend here limits CPU, memory or process count, and reads outside the listed paths are
 // allowed. Every run gets an empty HOME and TMPDIR and the sandbox-local env profile.
@@ -23,6 +27,7 @@ import { isContained, mkdirPrivate } from "../security/fs-safe.js";
 import {
   SANDBOX_ENV,
   SandboxRequestError,
+  canonicalWorkdir,
   clampOutputBytes,
   clampTimeout,
   isShellCommand,
@@ -30,7 +35,6 @@ import {
   resolveCwd,
   validateArgv,
   validateEnv,
-  validateWorkdir,
 } from "./common.js";
 import { runQuiet, sandboxShuttingDown, spawnCaptured } from "./process.js";
 
@@ -142,6 +146,9 @@ export function buildSeatbeltProfile(p: SeatbeltPaths): { profile: string; param
     "(deny network*)",
     "(deny file-write*)",
     `(allow file-write* (subpath ${work}) (subpath ${tmp}) (subpath "/dev"))`,
+    // Files inside the workdir may be created and changed, but the root itself may not be removed
+    // or replaced (a symlink in its place would widen every later run), and .git is untouchable.
+    `(deny file-write* (literal ${work}) (literal (string-append ${work} "/.git")) (subpath (string-append ${work} "/.git")))`,
     `(deny file-read*\n  ${hidden.join("\n  ")})`,
     `(allow file-read* (subpath ${work}) (subpath ${tmp}))`,
     `(allow file-read-metadata ${meta.join(" ")})`,
@@ -175,26 +182,34 @@ function findOnPath(name: string): string | null {
   return null;
 }
 
+const UNISOLATED = "commands run without isolation (network, files, the workdir's .git and the workdir itself are all reachable)";
+
 async function probeIsolation(platform: NodeJS.Platform): Promise<LocalIsolation> {
   const env = childEnv("sandbox-local");
   if (platform === "darwin") {
     if (existsSync(SANDBOX_EXEC)) {
       const r = await runQuiet(SANDBOX_EXEC, ["-p", "(version 1)(allow default)", "/usr/bin/true"], env, PROBE_TIMEOUT_MS);
       if (r.ok) return { kind: "sandbox-exec" };
-      return { kind: "none", degraded: `sandbox-exec failed (${r.output.slice(0, 200) || `exit ${r.exit}`}); commands run without isolation` };
+      return { kind: "none", degraded: `sandbox-exec failed (${r.output.slice(0, 200) || `exit ${r.exit}`}); ${UNISOLATED}` };
     }
-    return { kind: "none", degraded: "sandbox-exec is missing; commands run without isolation" };
+    return { kind: "none", degraded: `sandbox-exec is missing; ${UNISOLATED}` };
   }
   if (platform === "linux") {
     const unshare = findOnPath("unshare");
     if (unshare) {
       const r = await runQuiet(unshare, ["-rn", "--", "true"], env, PROBE_TIMEOUT_MS);
-      if (r.ok) return { kind: "unshare", path: unshare, degraded: "unshare -rn isolates the network only; filesystem reads and writes are not restricted" };
-      return { kind: "none", degraded: `unshare -rn is not permitted here (${r.output.slice(0, 200) || `exit ${r.exit}`}); commands run without isolation` };
+      if (r.ok) {
+        return {
+          kind: "unshare",
+          path: unshare,
+          degraded: "unshare -rn isolates the network only; filesystem reads and writes are not restricted, including the workdir's .git and the workdir itself",
+        };
+      }
+      return { kind: "none", degraded: `unshare -rn is not permitted here (${r.output.slice(0, 200) || `exit ${r.exit}`}); ${UNISOLATED}` };
     }
-    return { kind: "none", degraded: "unshare is missing; commands run without isolation" };
+    return { kind: "none", degraded: `unshare is missing; ${UNISOLATED}` };
   }
-  return { kind: "none", degraded: `no isolation is available on ${platform}; commands run without isolation` };
+  return { kind: "none", degraded: `no isolation is available on ${platform}; ${UNISOLATED}` };
 }
 
 function realOrSelf(p: string): string {
@@ -273,20 +288,18 @@ export class LocalBackend implements SandboxBackend {
     if (Array.isArray(req.egress) && req.egress.length) {
       throw new SandboxRequestError("the local backend has no egress proxy; commands that need the network require the docker backend");
     }
-    validateWorkdir(req.workdir);
-    let workdir: string;
+    // Resolve the workdir once (a symlinked workdir is refused) and use only that path from here.
+    const workdir = canonicalWorkdir(req.workdir).path;
     let cwd: string;
     try {
-      workdir = realpathSync(req.workdir);
       cwd = realpathSync(join(workdir, resolveCwd(req.cwd)));
     } catch (e) {
       if (e instanceof SandboxRequestError) throw e;
-      throw new SandboxRequestError(`workdir or cwd does not exist: ${e instanceof Error ? e.message : String(e)}`);
+      throw new SandboxRequestError(`cwd does not exist: ${e instanceof Error ? e.message : String(e)}`);
     }
     // A symlinked cwd must not lead out of the workdir.
     if (!isContained(workdir, cwd)) throw new SandboxRequestError("cwd resolves outside the workdir");
     if (!statSync(cwd).isDirectory()) throw new SandboxRequestError("cwd is not a directory");
-    validateWorkdir(workdir);
 
     const iso = await this.isolation();
     const degraded = iso.kind === "sandbox-exec" ? undefined : iso.degraded;

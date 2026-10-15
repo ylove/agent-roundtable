@@ -3,8 +3,11 @@
 //
 // Each command runs in a throwaway container: no network (or only the egress proxy), read-only
 // root, a small tmpfs for /tmp and HOME, every capability dropped, no-new-privileges, pid, memory
-// and CPU limits, a non-root uid, and an environment holding only HOME, the proxy variables and
-// the caller's validated non-secret variables. The worktree is the only host path mounted.
+// (no swap) and CPU limits, a non-root uid, no container log on the Docker host, and an
+// environment holding only HOME, the proxy variables and the caller's validated non-secret
+// variables. The worktree is the only host path mounted, and its .git is mounted read-only over
+// itself: host-side git later runs in this worktree, so a writable .git (a swapped gitfile, a
+// config with core.fsmonitor or hooks) would let a command run code on the host.
 // ============================================================================
 
 import { realpathSync, statSync } from "node:fs";
@@ -17,6 +20,7 @@ import {
   DEFAULT_SANDBOX_IMAGE,
   SANDBOX_ENV,
   SandboxRequestError,
+  canonicalWorkdir,
   clampOutputBytes,
   clampTimeout,
   resolveCwd,
@@ -116,6 +120,8 @@ export interface DockerRunOptions {
 /**
  * The `docker run` argv for one request. Pure; throws SandboxRequestError for an invalid argv,
  * env (secret-shaped or reserved names), cwd (absolute or escaping), workdir, image, name or limit.
+ * `req.workdir` must already be canonical (run() resolves it with canonicalWorkdir) and must hold
+ * a .git, which is mounted read-only over itself.
  */
 export function buildDockerRunArgs(req: SandboxRunRequest, opts: DockerRunOptions): string[] {
   const argv = validateArgv(req.argv);
@@ -153,7 +159,13 @@ export function buildDockerRunArgs(req: SandboxRunRequest, opts: DockerRunOption
   ];
   if (egress) for (const k of PROXY_VARS) args.push("-e", `${k}=${egress.proxyUrl}`);
   for (const [k, v] of Object.entries(env)) args.push("-e", `${k}=${v}`);
-  args.push("--mount", `type=bind,src=${workdir},dst=/work`, "-w", cwd ? `/work/${cwd}` : "/work", image, ...argv);
+  args.push(
+    "--mount", `type=bind,src=${workdir},dst=/work`,
+    "--mount", `type=bind,src=${join(workdir, ".git")},dst=/work/.git,readonly`,
+    "-w", cwd ? `/work/${cwd}` : "/work",
+    image,
+    ...argv
+  );
   return args;
 }
 
@@ -245,20 +257,27 @@ export class DockerBackend implements SandboxBackend {
     const base = { name, ...user, image, limits: this.limits };
     const wantsEgress = Array.isArray(req.egress) && req.egress.length > 0;
     // Validate everything before touching Docker (a placeholder stands in for the egress network).
-    buildDockerRunArgs(req, wantsEgress ? { ...base, egress: { network: "rt-egress-check", proxyUrl: "http://rt-proxy-check:3128" } } : base);
+    const placeholder = { network: "rt-egress-check", proxyUrl: "http://rt-proxy-check:3128" };
+    buildDockerRunArgs(req, wantsEgress ? { ...base, egress: placeholder } : base);
     if (wantsEgress) normalizeAllowlist(req.egress!);
+    // Resolve the workdir once (a symlinked workdir is refused) and use only that path from here.
+    const wd = canonicalWorkdir(req.workdir);
+    if (wd.git === "absent") {
+      throw new SandboxRequestError("the workdir has no .git; the docker backend runs only in git worktrees, whose .git it mounts read-only");
+    }
+    const canonical: SandboxRunRequest = { ...req, workdir: wd.path };
+    buildDockerRunArgs(canonical, wantsEgress ? { ...base, egress: placeholder } : base);
     // The cwd must already exist inside the worktree: Docker would otherwise create it, root-owned,
-    // in the bind mount.
+    // in the bind mount (and a symlinked cwd may not lead outside).
     let target: string;
     try {
-      const root = realpathSync(req.workdir);
-      target = realpathSync(join(root, resolveCwd(req.cwd)));
-      if (!isContained(root, target)) throw new SandboxRequestError("cwd resolves outside the workdir");
+      target = realpathSync(join(wd.path, resolveCwd(req.cwd)));
     } catch (e) {
       if (e instanceof SandboxRequestError) throw e;
-      throw new SandboxRequestError(`workdir or cwd does not exist: ${e instanceof Error ? e.message : String(e)}`);
+      throw new SandboxRequestError(`cwd does not exist: ${e instanceof Error ? e.message : String(e)}`);
     }
-    if (!statSync(target).isDirectory()) throw new SandboxRequestError("workdir or cwd is not a directory");
+    if (!isContained(wd.path, target)) throw new SandboxRequestError("cwd resolves outside the workdir");
+    if (!statSync(target).isDirectory()) throw new SandboxRequestError("cwd is not a directory");
 
     const deadline = AbortSignal.timeout(timeoutMs);
     const setupSignal = req.signal ? AbortSignal.any([req.signal, deadline]) : deadline;
@@ -296,7 +315,7 @@ export class DockerBackend implements SandboxBackend {
 
     try {
       if (setupSignal.aborted) return { ...failure("interrupted"), imageDigest: prepared.digest };
-      const args = buildDockerRunArgs(req, egress ? { ...base, egress } : base);
+      const args = buildDockerRunArgs(canonical, egress ? { ...base, egress } : base);
       const docker = this.docker;
       const r = await spawnCaptured(docker, args, {
         env: childEnv("docker"),

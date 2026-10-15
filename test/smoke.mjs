@@ -67,7 +67,7 @@ const check = (name, fn) => {
 async function checkDispatch() {
   Object.assign(process.env, smokeEnv, {
     ROUNDTABLE_PUBLISHER: "webhook",
-    ROUNDTABLE_WEBHOOK_URL: "http://publisher.test/post",
+    ROUNDTABLE_WEBHOOK_URL: "http://publisher.localhost/post",
     ROUNDTABLE_WEBHOOK_VIEW_URL: "http://publisher.test/{channel}",
     ROUNDTABLE_WEBHOOK_AUTH_HEADER: "",
   });
@@ -76,13 +76,13 @@ async function checkDispatch() {
   const { meetings } = await import("../dist/sessions/meetings.js");
   const { collaborations } = await import("../dist/sessions/collaborations.js");
   const realFetch = globalThis.fetch;
-  const providerArgs = { provider: "openai_compatible", model: "smoke-model", base_url: "http://llm.test/v1" };
+  const providerArgs = { provider: "openai_compatible", model: "smoke-model", base_url: "http://llm.localhost/v1" };
   let calls = [];
   let replies = [];
   const script = (...outputs) => { calls = []; replies = outputs; };
   globalThis.fetch = async (url, init = {}) => {
-    if (String(url) === "http://publisher.test/post") return json(200, {});
-    assert(String(url) === "http://llm.test/v1/chat/completions", `Unexpected fetch: ${url}`);
+    if (String(url) === "http://publisher.localhost/post") return json(200, {});
+    assert(String(url) === "http://llm.localhost/v1/chat/completions", `Unexpected fetch: ${url}`);
     const body = JSON.parse(init.body);
     assert(body.model === "smoke-model", JSON.stringify(body));
     calls.push(body);

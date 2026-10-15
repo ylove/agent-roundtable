@@ -27,7 +27,7 @@ const { startCollaboration, nudgeCollaboration, endCollaboration, collaborations
 const { ACTIVITY_LOG_MAX_ENTRIES } = await import("../../dist/config.js");
 
 const entry = (session, extra = {}) => ({ session, kind: "meeting", agents: ["alpha"], topic: "topic", public: false, ...extra });
-const baseUrl = "http://llm.test/v1";
+const baseUrl = "http://llm.localhost/v1";
 function replies(t) {
   return stubFetch(t, (url, init, index) => {
     if (url.startsWith(baseUrl)) return json(200, { choices: [{ message: { content: `reply ${index}` } }] });

@@ -1,0 +1,234 @@
+// The outbound URL guard (SSRF), the per-call base_url key binding, manual redirects and the webhook guard.
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import { json, stubDns, stubFetch } from "./helpers.mjs";
+
+delete process.env.OPENAI_COMPATIBLE_BASE_URL;
+delete process.env.OPENAI_COMPATIBLE_API_KEY;
+delete process.env.ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS;
+delete process.env.ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS;
+
+const { classifyAddress, checkUrl, guardUrl, describeUrl, UrlGuardError } = await import("../../dist/security/url-guard.js");
+const { callOpenAICompatible } = await import("../../dist/providers/openai-compatible.js");
+const { WebhookPublisher } = await import("../../dist/publishers/webhook.js");
+
+/** Set env vars for one test. */
+function env(t, vars) {
+  const saved = {};
+  for (const [k, v] of Object.entries(vars)) {
+    saved[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  t.after(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+}
+
+const ok = (content = "hi") => json(200, { choices: [{ message: { content }, finish_reason: "stop" }] });
+const messages = [{ role: "user", content: "hi" }];
+const opts = (extra = {}) => ({ model: "m", maxTokens: 8, signal: new AbortController().signal, ...extra });
+
+describe("classifyAddress", () => {
+  test("IPv4 ranges", () => {
+    for (const ip of ["169.254.169.254", "169.254.0.1", "100.100.100.200"]) assert.equal(classifyAddress(ip), "metadata", ip);
+    for (const ip of ["127.0.0.1", "127.255.255.254"]) assert.equal(classifyAddress(ip), "loopback", ip);
+    for (const ip of ["10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.1", "100.64.0.1", "100.127.255.255", "0.0.0.0", "224.0.0.1", "255.255.255.255"]) {
+      assert.equal(classifyAddress(ip), "private", ip);
+    }
+    for (const ip of ["8.8.8.8", "172.32.0.1", "100.128.0.1", "203.0.113.10", "1.1.1.1"]) assert.equal(classifyAddress(ip), "public", ip);
+  });
+
+  test("IPv6 ranges, including IPv4 embedded in mapped, NAT64 and 6to4 addresses", () => {
+    assert.equal(classifyAddress("::1"), "loopback");
+    assert.equal(classifyAddress("fd00:ec2::254"), "metadata");
+    assert.equal(classifyAddress("fd00:0ec2:0:0:0:0:0:254"), "metadata");
+    assert.equal(classifyAddress("::ffff:169.254.169.254"), "metadata");
+    assert.equal(classifyAddress("::ffff:a9fe:a9fe"), "metadata");
+    assert.equal(classifyAddress("64:ff9b::a9fe:a9fe"), "metadata");
+    assert.equal(classifyAddress("2002:a9fe:a9fe::1"), "metadata");
+    assert.equal(classifyAddress("::ffff:127.0.0.1"), "loopback");
+    assert.equal(classifyAddress("::ffff:10.0.0.1"), "private");
+    for (const ip of ["::", "fd12:3456::1", "fc00::1", "fe80::1", "fe80::1%en0", "ff02::1", "2002:0a00:0001::1"]) {
+      assert.equal(classifyAddress(ip), "private", ip);
+    }
+    for (const ip of ["2606:4700:4700::1111", "2001:db8::1", "::ffff:8.8.8.8"]) assert.equal(classifyAddress(ip), "public", ip);
+  });
+});
+
+describe("checkUrl / guardUrl", () => {
+  test("https anywhere public; http only to loopback; no other schemes", async (t) => {
+    stubDns(t);
+    assert.equal((await guardUrl("https://api.example.test/v1")).host, "api.example.test");
+    for (const u of ["http://localhost:1234/v1", "http://127.0.0.1:8000/v1", "http://[::1]:8000/v1", "http://llm.localhost/v1", "https://localhost/v1"]) {
+      assert.ok(checkUrl(u) instanceof URL, u);
+    }
+    for (const u of ["http://api.example.test/v1", "http://10.0.0.5:8000/v1", "ftp://example.test/", "file:///etc/passwd"]) {
+      assert.throws(() => checkUrl(u, { label: "base_url" }), /base_url must use https/, u);
+    }
+    assert.throws(() => checkUrl("not a url", { label: "base_url" }), /base_url is not a valid URL/);
+  });
+
+  test("userinfo is refused and never echoed", () => {
+    assert.throws(
+      () => checkUrl("https://user:hunter2@api.example.test/v1", { label: "base_url" }),
+      (e) => e instanceof UrlGuardError && /must not contain credentials/.test(e.message) && !e.message.includes("hunter2")
+    );
+  });
+
+  test("metadata is always blocked, even with private networks allowed", async (t) => {
+    env(t, { ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS: "1" });
+    for (const u of ["https://169.254.169.254/latest", "https://[fd00:ec2::254]/", "https://100.100.100.200/", "https://metadata.google.internal/", "https://metadata/", "https://METADATA.google.internal./x", "https://[::ffff:169.254.169.254]/"]) {
+      assert.throws(() => checkUrl(u), /cloud metadata address/, u);
+    }
+    stubDns(t, { "imds.example.test": ["169.254.169.254"] });
+    await assert.rejects(guardUrl("https://imds.example.test/"), /imds\.example\.test \(169\.254\.169\.254\) is a cloud metadata address/);
+  });
+
+  test("private, CGNAT, link-local and ULA need ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1", async (t) => {
+    stubDns(t, { "lan.example.test": ["203.0.113.9", "192.168.1.20"], "ula.example.test": ["fd12::5"] });
+    for (const u of ["https://10.0.0.5/", "https://100.64.1.1/", "https://[fe80::1]/", "https://[fd12::5]/"]) {
+      assert.throws(() => checkUrl(u, { label: "base_url" }), /private, link-local or reserved.*ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1/, u);
+    }
+    // Every resolved address is checked, not just the first.
+    await assert.rejects(guardUrl("https://lan.example.test/"), /lan\.example\.test \(192\.168\.1\.20\)/);
+    await assert.rejects(guardUrl("https://ula.example.test/"), /private/);
+    assert.ok(await guardUrl("https://lan.example.test/", { allowPrivate: true }));
+    env(t, { ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS: "1" });
+    assert.ok(checkUrl("https://10.0.0.5/"));
+    assert.ok(await guardUrl("https://ula.example.test/"));
+  });
+
+  test("loopback is always allowed; localhost and literals never reach DNS", async (t) => {
+    const asked = stubDns(t, { "loop.example.test": ["127.0.0.1", "::1"] });
+    assert.ok(await guardUrl("http://localhost:1234/v1"));
+    assert.ok(await guardUrl("http://127.0.0.1:1234/v1"));
+    assert.ok(await guardUrl("https://8.8.8.8/v1"));
+    assert.deepEqual(asked, []);
+    assert.ok(await guardUrl("https://loop.example.test/v1"));
+    assert.deepEqual(asked, ["loop.example.test"]);
+  });
+
+  test("resolution failures and timeouts are retryable refusals", async (t) => {
+    const nx = Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" });
+    stubDns(t, { "nx.example.test": nx });
+    await assert.rejects(guardUrl("https://nx.example.test/", { label: "base_url" }), (e) => e instanceof UrlGuardError && e.retryable && /could not resolve nx\.example\.test \(ENOTFOUND\)/.test(e.message));
+    t.mock.restoreAll();
+    const dns = (await import("node:dns")).default;
+    t.mock.method(dns.promises, "lookup", () => new Promise(() => {}));
+    const t0 = Date.now();
+    await assert.rejects(guardUrl("https://slow.example.test/", { lookupTimeoutMs: 50 }), (e) => e.retryable && /within 50 ms/.test(e.message));
+    assert.ok(Date.now() - t0 < 2000);
+  });
+
+  test("describeUrl keeps only scheme, host and port", () => {
+    assert.equal(describeUrl("https://user:pw@hooks.example.test:8443/T0K3N/path?key=secret#x"), "https://hooks.example.test:8443");
+    assert.equal(describeUrl("http://localhost:1234/v1"), "http://localhost:1234");
+    assert.equal(describeUrl("https://api.example.test:443/v1"), "https://api.example.test");
+    assert.equal(describeUrl("nope"), "(invalid URL)");
+    assert.equal(describeUrl(""), "(not set)");
+  });
+});
+
+describe("openai_compatible per-call base_url", () => {
+  test("is guarded: metadata, private and plain-http hosts are refused before any request", async (t) => {
+    stubDns(t, { "internal.example.test": ["10.1.2.3"] });
+    const calls = stubFetch(t, () => ok());
+    for (const baseUrl of ["https://169.254.169.254/v1", "http://api.example.test/v1", "https://internal.example.test/v1", "https://u:p@api.example.test/v1"]) {
+      await assert.rejects(callOpenAICompatible(messages, opts({ baseUrl })), /base_url/, baseUrl);
+    }
+    assert.equal(calls.length, 0);
+  });
+
+  test("the key goes only to the configured origin", async (t) => {
+    env(t, { OPENAI_COMPATIBLE_API_KEY: "sk-compat-bound-key", OPENAI_COMPATIBLE_BASE_URL: "https://llm.example.test/v1" });
+    stubDns(t);
+    const calls = stubFetch(t, () => ok());
+    await callOpenAICompatible(messages, opts()); // env base URL
+    await callOpenAICompatible(messages, opts({ baseUrl: "https://llm.example.test/other/v1" })); // same origin
+    await callOpenAICompatible(messages, opts({ baseUrl: "https://elsewhere.example.test/v1" })); // other origin
+    await callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:1234/v1" })); // loopback, other origin
+    assert.equal(calls[0].init.headers.Authorization, "Bearer sk-compat-bound-key");
+    assert.equal(calls[1].init.headers.Authorization, "Bearer sk-compat-bound-key");
+    assert.ok(!("Authorization" in calls[2].init.headers), "no key to another origin");
+    assert.ok(!("Authorization" in calls[3].init.headers), "no key to an unlisted local server");
+    assert.equal(calls[2].url, "https://elsewhere.example.test/v1/chat/completions");
+  });
+
+  test("ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS lists more origins for the key", async (t) => {
+    env(t, {
+      OPENAI_COMPATIBLE_API_KEY: "sk-compat-bound-key",
+      ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS: "http://localhost:1234, https://router.example.test:8443/ignored-path, not-an-origin",
+    });
+    const calls = stubFetch(t, () => ok());
+    await callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:1234/v1" }));
+    await callOpenAICompatible(messages, opts({ baseUrl: "https://router.example.test:8443/v1" }));
+    await callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:9999/v1" }));
+    assert.equal(calls[0].init.headers.Authorization, "Bearer sk-compat-bound-key");
+    assert.equal(calls[1].init.headers.Authorization, "Bearer sk-compat-bound-key");
+    assert.ok(!("Authorization" in calls[2].init.headers), "the port is part of the origin");
+  });
+
+  test("redirects are never followed", async (t) => {
+    env(t, { OPENAI_COMPATIBLE_API_KEY: "sk-compat-bound-key", OPENAI_COMPATIBLE_BASE_URL: "http://localhost:1234/v1" });
+    const calls = stubFetch(t, () => new Response("", { status: 307, headers: { location: "http://169.254.169.254/latest/meta-data?x=1" } }));
+    await assert.rejects(
+      callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:1234/v1" })),
+      /OpenAI-compatible API error \(307\): refusing to follow a redirect to http:\/\/169\.254\.169\.254$/
+    );
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].init.redirect, "manual");
+  });
+
+  test("echoed error bodies are redacted and capped", async (t) => {
+    env(t, { OPENAI_COMPATIBLE_API_KEY: "sk-compat-echoed-key-123456" });
+    stubFetch(t, () => json(400, { error: { message: `bad key sk-compat-echoed-key-123456 ${"y".repeat(1000)}` } }));
+    const err = await callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:1234/v1" })).then(() => null, (e) => e);
+    assert.match(err.message, /^OpenAI-compatible API error \(400\): bad key \[redacted:env:OPENAI_COMPATIBLE_API_KEY\]/);
+    assert.ok(err.message.length <= "OpenAI-compatible API error (400): ".length + 300);
+  });
+
+  test("a non-JSON error body is reported by its status", async (t) => {
+    stubFetch(t, () => new Response("<html>bad gateway</html>", { status: 502, statusText: "Bad Gateway" }));
+    await assert.rejects(callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:1234/v1" })), /API error \(502\): Bad Gateway/);
+  });
+});
+
+describe("webhook publisher URL", () => {
+  test("constructor refuses metadata, plain http off loopback and userinfo; allows private and loopback", () => {
+    const make = (url) => new WebhookPublisher({ url, topicPrefix: "rt" });
+    assert.throws(() => make("https://169.254.169.254/hook"), /ROUNDTABLE_WEBHOOK_URL refused: .*cloud metadata/);
+    assert.throws(() => make("https://metadata.google.internal/hook"), /cloud metadata/);
+    assert.throws(() => make("http://hooks.example.test/hook"), /ROUNDTABLE_WEBHOOK_URL must use https/);
+    assert.throws(() => make("https://u:p@hooks.example.test/hook"), /must not contain credentials/);
+    assert.ok(make("https://10.0.0.8/hook"));
+    assert.ok(make("http://127.0.0.1:8080/hook"));
+  });
+
+  test("send resolves the host: metadata is refused (not retried), private is allowed", async (t) => {
+    stubDns(t, { "imds.example.test": ["169.254.169.254"], "lan.example.test": ["10.0.0.8"] });
+    const calls = stubFetch(t, () => new Response("", { status: 200 }));
+    const channel = { id: "rt-x", sessionId: "s", suffix: "x" };
+    const msg = { turn: 1, part: 1, parts: 1, speaker: "a", kind: "turn", content: "c", timestamp: "t" };
+    const bad = await new WebhookPublisher({ url: "https://imds.example.test/hook", topicPrefix: "rt" }).send(channel, msg);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.retryable, false);
+    assert.match(bad.error, /cloud metadata/);
+    assert.equal(calls.length, 0);
+    const good = await new WebhookPublisher({ url: "https://lan.example.test/hook", topicPrefix: "rt" }).send(channel, msg);
+    assert.deepEqual(good, { ok: true });
+    assert.equal(calls[0].init.redirect, "manual");
+  });
+
+  test("a redirect fails the send without following it", async (t) => {
+    stubDns(t);
+    stubFetch(t, () => new Response("", { status: 302, headers: { location: "https://elsewhere.example.test/" } }));
+    const r = await new WebhookPublisher({ url: "https://hooks.example.test/hook", topicPrefix: "rt", authHeader: "Authorization: Bearer x" })
+      .send({ id: "rt-x", sessionId: "s", suffix: "x" }, { turn: 1, part: 1, parts: 1, speaker: "a", kind: "turn", content: "c", timestamp: "t" });
+    assert.equal(r.ok, false);
+    assert.equal(r.retryable, false);
+  });
+});

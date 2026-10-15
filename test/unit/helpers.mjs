@@ -1,4 +1,5 @@
 // Shared helpers for the offline unit tests (node:test). No network: fetch is always stubbed.
+import dns from "node:dns";
 
 export const json = (status, body) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -19,4 +20,20 @@ export function stubFetch(t, script) {
     return script(String(url), init, calls.length - 1);
   });
   return calls;
+}
+
+/**
+ * Stub DNS for the URL guard (dns.promises.lookup) for the duration of a test. `answers` maps a host
+ * name to its addresses, or to an Error to throw; any other host resolves to 203.0.113.10 (TEST-NET-3,
+ * a public address). Returns the host names looked up.
+ */
+export function stubDns(t, answers = {}) {
+  const asked = [];
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    asked.push(host);
+    const found = answers[host] ?? ["203.0.113.10"];
+    if (found instanceof Error) throw found;
+    return found.map((address) => ({ address, family: address.includes(":") ? 6 : 4 }));
+  });
+  return asked;
 }

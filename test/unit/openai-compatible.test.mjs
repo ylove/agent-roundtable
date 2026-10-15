@@ -68,9 +68,13 @@ describe("callOpenAICompatible", () => {
     assert.equal(r.provider, "openai_compatible");
   });
 
-  test("sends Authorization when OPENAI_COMPATIBLE_API_KEY is set", async (t) => {
+  test("sends Authorization when OPENAI_COMPATIBLE_API_KEY is set and base_url is on the configured origin", async (t) => {
     process.env.OPENAI_COMPATIBLE_API_KEY = "sk-test-local";
-    t.after(() => delete process.env.OPENAI_COMPATIBLE_API_KEY);
+    process.env.OPENAI_COMPATIBLE_BASE_URL = "http://localhost:1234/v1";
+    t.after(() => {
+      delete process.env.OPENAI_COMPATIBLE_API_KEY;
+      delete process.env.OPENAI_COMPATIBLE_BASE_URL;
+    });
     const calls = stubFetch(t, () => ok());
     const signal = new AbortController().signal;
     await callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:1234/v1", signal }));

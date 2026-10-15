@@ -44,7 +44,7 @@ const fx = (n) => resolve(here, "../fixtures/agents", n);
 const A = fx("sample.md"); // "You are Sample.\n"
 const B = fx("plain.md"); // "You are Plain. No frontmatter here.\n"
 const C = fx("third.md"); // "You are Third.\n"
-const LLM = "http://llm.test/v1";
+const LLM = "http://llm.localhost/v1";
 const NTFY = "http://ntfy.test";
 const opts = { provider: "openai_compatible", model: "m", baseUrl: LLM };
 const MARK = "COUPON-MARK-4117";

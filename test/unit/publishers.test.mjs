@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stubFetch, json } from "./helpers.mjs";
+import { stubDns, stubFetch, json } from "./helpers.mjs";
 import {
   createPublicChannel,
   createPublisher,
@@ -510,6 +510,7 @@ test("duplicate (turn, speaker) labels are disambiguated", async (t) => {
 
 // ---- webhook ----
 test("webhook: body, auth header, view url, no history fetch", async (t) => {
+  const asked = stubDns(t);
   const calls = stubFetch(t, ok);
   const dir = await tmp();
   const ch = createPublicChannel("s1", { participants: ["a"] }, {
@@ -529,6 +530,8 @@ test("webhook: body, auth header, view url, no history fetch", async (t) => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "https://hook.example.test/in");
   assert.equal(calls[0].init.headers["X-Api-Key"], "abc:123");
+  assert.equal(calls[0].init.redirect, "manual", "the auth header never follows a redirect");
+  assert.deepEqual(asked, ["hook.example.test"], "the URL guard resolved the host");
   assert.deepEqual(Object.keys(calls[0].body).sort(), ["channel", "content", "kind", "part", "parts", "session", "speaker", "timestamp", "turn"]);
   assert.equal(calls[0].body.session, "s1");
   assert.equal(calls[0].body.channel, ch.topic);

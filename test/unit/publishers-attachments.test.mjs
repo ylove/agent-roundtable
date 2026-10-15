@@ -4,7 +4,7 @@ import { rmSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stubFetch } from "./helpers.mjs";
+import { stubDns, stubFetch } from "./helpers.mjs";
 import { createPublicChannel } from "../../dist/publishers/index.js";
 import { headerValue, safeFilename } from "../../dist/publishers/ntfy.js";
 import { formatTitle } from "../../dist/publishers/transcript.js";
@@ -177,6 +177,7 @@ test("safeFilename: one sanitizer for the channel and the ntfy header", () => {
 });
 
 test("webhook attachment: JSON metadata only, never the bytes", async (t) => {
+  stubDns(t);
   const calls = stubFetch(t, ok);
   const ch = createPublicChannel("s1", { participants: ["a"] }, { config: webhookCfg, transcriptsDir: await tmp(), postHeader: false });
   ch.recordAttachment(shot({ turn: 1, speaker: "a" }));

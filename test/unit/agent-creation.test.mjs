@@ -2,7 +2,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { delimiter, join, dirname } from "node:path";
 import { json, stubFetch } from "./helpers.mjs";
 
 const root = realpathSync.native(mkdtempSync(join(tmpdir(), "roundtable-agent-creation-")));
@@ -311,7 +311,7 @@ test("validation happens before any fetch, with accepted session kinds in errors
     /Agent prompt not found/,
   );
   const txt = fixture(join(root, "not-markdown.txt"), "You check.");
-  await assert.rejects(improveAgent({ ...opts, agent: txt }), /can only edit a .md agent file/);
+  await assert.rejects(improveAgent({ ...opts, agent: txt }), /is a path but not a \.md file/);
   assert.equal(h.calls.length, 0);
 });
 
@@ -802,6 +802,10 @@ test("workshops list and reuse personal skills by name without recreating them",
 });
 
 test("improve writes new skills alongside a target in another project", async (t) => {
+  // Another project's agents directory must be allowed explicitly.
+  const savedPaths = process.env.ROUNDTABLE_AGENT_PATHS;
+  process.env.ROUNDTABLE_AGENT_PATHS = [savedPaths, join(root, "other-project", ".claude", "agents")].filter(Boolean).join(delimiter);
+  t.after(() => { process.env.ROUNDTABLE_AGENT_PATHS = savedPaths; });
   const target = fixture(join(root, "other-project", ".claude", "agents", "external.md"), "---\nname: external\n---\nExternal persona");
   const existing = fixture(join(root, "other-project", ".claude", "skills", "external-existing", "SKILL.md"), "---\ndescription: External procedure\n---\nExisting procedure");
   const h = harness(t, { spec: { skills: [{ name: "external-existing" }, { name: "external-new", instructions: "Check external details." }] } });

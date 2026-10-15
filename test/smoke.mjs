@@ -3,7 +3,7 @@ import { startServer, assert } from "./mcp-client.mjs";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
@@ -28,6 +28,8 @@ const smokeEnv = {
   OPENAI_COMPATIBLE_API_KEY: "",
   REPLICATE_API_TOKEN: "r8_test",
   ROUNDTABLE_AGENTS_DIR: agentsDir,
+  // Path-like agent refs are contained; fixture paths live under test/fixtures.
+  ROUNDTABLE_AGENT_PATHS: fileURLToPath(new URL("./fixtures", import.meta.url)),
   ROUNDTABLE_SKILLS_DIR: join(root, "skills"),
   ROUNDTABLE_WORKSPACE_DIR: root,
   ROUNDTABLE_ACTIVITY_LOG: join(root, "activity.jsonl"),

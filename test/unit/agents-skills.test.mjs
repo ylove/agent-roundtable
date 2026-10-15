@@ -2,7 +2,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { json, stubFetch } from "./helpers.mjs";
 
@@ -15,6 +15,8 @@ process.env.HOME = fakeHome;
 process.env.ROUNDTABLE_AGENTS_DIR = agentsDir;
 process.env.ROUNDTABLE_SKILLS_DIR = skillsDir;
 process.env.ROUNDTABLE_WORKSPACE_DIR = root;
+// One test loads a persona from another project's .claude/agents, which must be allowed explicitly.
+process.env.ROUNDTABLE_AGENT_PATHS = [process.env.ROUNDTABLE_AGENT_PATHS, join(root, "other", ".claude", "agents")].filter(Boolean).join(delimiter);
 process.env.ROUNDTABLE_ACTIVITY_LOG = join(root, "activity.jsonl");
 process.env.ROUNDTABLE_TRANSCRIPTS_DIR = join(root, "transcripts");
 delete process.env.OPENAI_COMPATIBLE_API_KEY;

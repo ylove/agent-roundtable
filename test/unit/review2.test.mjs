@@ -8,6 +8,8 @@ import { stubFetch, json } from "./helpers.mjs";
 // The required preload supplies disposable home and configured directories before imports.
 const root = fs.realpathSync.native(process.env.ROUNDTABLE_WORKSPACE_DIR);
 process.env.ROUNDTABLE_AGENTS_DIR = path.join(root, "project", ".claude", "agents");
+// Improve targets live in per-case projects under the temp root.
+process.env.ROUNDTABLE_AGENT_PATHS = [process.env.ROUNDTABLE_AGENT_PATHS, root].filter(Boolean).join(path.delimiter);
 delete process.env.ROUNDTABLE_PUBLISHER;
 delete process.env.OPENAI_COMPATIBLE_BASE_URL;
 delete process.env.OPENAI_COMPATIBLE_API_KEY;

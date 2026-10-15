@@ -3,11 +3,12 @@
 // ============================================================================
 
 import { readFile } from "node:fs/promises";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { parse } from "yaml";
-import { AGENTS_DIR, SKILLS_DIR } from "./config.js";
+import { AGENTS_DIR, SKILLS_DIR, WORKSPACE_DIR, agentPaths } from "./config.js";
+import { isContained } from "./security/fs-safe.js";
 
 /** Canonical, path-free agent name, including directory-style AGENT.md personas. */
 export function agentKey(ref: string): string {
@@ -221,13 +222,66 @@ export interface LoadedAgent {
   skills: LoadedSkill[];
 }
 
+/** A ref with a path separator, or ending in .md, names a file; anything else is an agent name. */
+export function isPathLikeRef(ref: string): boolean {
+  return /[\\/]/.test(ref) || /\.md$/i.test(ref);
+}
+
+/**
+ * Where a path-like ref may point: the agents directory, the workspace's and the user's
+ * .claude/agents, and every directory in ROUNDTABLE_AGENT_PATHS.
+ */
+export function allowedAgentRoots(): string[] {
+  return [...new Set([
+    AGENTS_DIR,
+    join(WORKSPACE_DIR, ".claude", "agents"),
+    join(homedir(), ".claude", "agents"),
+    ...agentPaths(),
+  ].map((dir) => resolve(dir)))];
+}
+
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a path-like ref, or throw. It must end in .md, sit (lexically) inside an allowed root
+ * before anything is read, and its realpath must be inside a root's realpath (no symlink escapes).
+ * Returns null when it is allowed but does not exist.
+ */
+function containedAgentPath(ref: string): string | null {
+  const roots = allowedAgentRoots();
+  const realRoots = roots.map(realpathOrNull).filter((r): r is string => r !== null);
+  const refuse = (why: string) => new Error(
+    `Agent ref "${ref}" ${why}. A path-like agent ref must be a .md file inside one of: ${roots.join(", ")}. ` +
+      `Add directories to ROUNDTABLE_AGENT_PATHS (separated by "${delimiter}") to allow more, or pass an agent name.`,
+  );
+  if (!/\.md$/i.test(ref)) throw refuse("is a path but not a .md file");
+  const resolved = resolve(ref);
+  if (![...roots, ...realRoots].some((root) => isContained(root, resolved))) throw refuse("is outside the allowed agent directories");
+  if (!isFile(resolved)) return null;
+  const real = realpathOrNull(resolved);
+  if (!real || !realRoots.some((root) => isContained(root, real))) throw refuse("resolves (through a symlink) outside the allowed agent directories");
+  return resolved;
+}
+
 export async function loadAgent(ref: string): Promise<LoadedAgent> {
-  const candidates = [
-    ref,
-    join(AGENTS_DIR, `${ref}.md`),
-    join(AGENTS_DIR, `subagent-${ref}.md`),
-    join(AGENTS_DIR, ref, "AGENT.md"),
-  ];
+  let candidates: string[];
+  if (isPathLikeRef(ref)) {
+    const contained = containedAgentPath(ref);
+    candidates = contained ? [contained] : [resolve(ref)];
+  } else {
+    // Agent names are looked up only inside the agents directory.
+    candidates = ref === "." || ref === ".." ? [] : [
+      join(AGENTS_DIR, `${ref}.md`),
+      join(AGENTS_DIR, `subagent-${ref}.md`),
+      join(AGENTS_DIR, ref, "AGENT.md"),
+    ];
+  }
 
   for (const candidate of candidates) {
     const resolved = resolve(candidate);

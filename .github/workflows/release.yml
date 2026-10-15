@@ -27,6 +27,9 @@ jobs:
       - run: npm run build
       - run: npm test
 
+      - name: Hygiene
+        run: "! grep -riE 'v[o]uch|/U[s]ers/' --exclude-dir=node_modules --exclude-dir=.git --exclude=.git --exclude-dir=dist ."
+
       - name: Publish with provenance
         run: npm publish --provenance --access public
         env:

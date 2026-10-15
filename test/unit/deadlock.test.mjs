@@ -112,3 +112,18 @@ test("a larger strongly connected group reports its shortest cycle through the s
   assert.deepEqual(d.members, ["a", "b", "c", "d"]);
   assert.match(escalations(deadlockRules(s, needs))[0].summary, /also includes d/);
 });
+
+test("a cycle that outlives or re-forms after its resolution is reported again, once", () => {
+  const { s, needs } = leaseCycle();
+  const first = deadlockRules(s, needs);
+  const after = settle(s, first);
+  const [esc] = escalations(first);
+  assert.deepEqual(deadlockRules(after, needs), [], "while the first report is open");
+  after.escalations[esc.id].status = "resolved";
+  const second = deadlockRules(after, needs);
+  assert.equal(escalations(second).length, 1);
+  assert.notEqual(escalations(second)[0].id, esc.id);
+  const again = settle(after, second);
+  assert.deepEqual(again.watchdog.deadlocks, [["a", "b"], ["a", "b"]]);
+  assert.deepEqual(deadlockRules(again, needs), []);
+});

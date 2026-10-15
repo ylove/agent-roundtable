@@ -11,7 +11,7 @@
 // ============================================================================
 
 import type { BlackboardState, EventPayloads } from "./types.js";
-import { TERMINAL_TASK_STATES, draft, escalationAction, own, sortedKeys, type WatchdogAction } from "./watchdog-actions.js";
+import { TERMINAL_TASK_STATES, draft, escalationAction, escalationId, own, sortedKeys, type WatchdogAction } from "./watchdog-actions.js";
 
 export type DependencyNeed = Pick<EventPayloads["dependency.requested"], "task" | "need">;
 
@@ -171,16 +171,22 @@ function describeEdge(e: WaitEdge): string {
 
 /**
  * watchdog.deadlock_detected {cycle} plus a blocker escalation to the contract's orchestrator,
- * once per distinct cycle (by its set of tasks: a cycle already in watchdog.deadlocks, or already
- * escalated, is not reported again).
+ * once per occurrence of a cycle (by its set of tasks). A cycle already in watchdog.deadlocks is
+ * reported again only after the escalation for its last report is resolved or withdrawn, that
+ * is, when it has formed again (or outlived its resolution).
  */
 export function deadlockRules(state: BlackboardState, needs: readonly DependencyNeed[] = []): WatchdogAction[] {
-  const seen = new Set(state.watchdog.deadlocks.map(cycleKey));
+  const reports = new Map<string, number>();
+  for (const c of state.watchdog.deadlocks) reports.set(cycleKey(c), (reports.get(cycleKey(c)) ?? 0) + 1);
   const out: WatchdogAction[] = [];
   for (const d of findDeadlocks(state, needs)) {
     const key = cycleKey(d.cycle);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const n = reports.get(key) ?? 0;
+    if (n > 0) {
+      const last = own(state.escalations, escalationId(`deadlock:${key}:${n - 1}`));
+      if (!last || (last.status !== "resolved" && last.status !== "withdrawn")) continue;
+    }
+    reports.set(key, n + 1);
     const chain = d.cycle.map((from, i) => {
       const to = d.cycle[(i + 1) % d.cycle.length];
       const e = d.edges.find((x) => x.from === from && x.to === to);
@@ -188,7 +194,7 @@ export function deadlockRules(state: BlackboardState, needs: readonly Dependency
     });
     const extra = d.members.length > d.cycle.length ? ` The stuck group also includes ${d.members.filter((m) => !d.cycle.includes(m)).join(", ")}.` : "";
     const esc = escalationAction(state, "deadlock", {
-      key: `deadlock:${key}`,
+      key: `deadlock:${key}:${n}`,
       task: d.cycle[0],
       kind: "blocker",
       with: "orchestrator",

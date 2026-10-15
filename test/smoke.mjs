@@ -248,6 +248,15 @@ try {
 
   console.log("tools/list");
   check("exposes 22 distinct tools", () => assert(tools.length === 22 && new Set(tools.map((t) => t.name)).size === 22, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("every tool carries MCP annotations (a title and four hints) and no internal fields", () => {
+    for (const t of tools) {
+      const a = t.annotations ?? {};
+      const hints = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"];
+      assert(typeof a.title === "string" && hints.every((h) => typeof a[h] === "boolean"), `${t.name}: ${JSON.stringify(a)}`);
+      assert(!("modes" in t), `${t.name} leaks modes`);
+    }
+    assert(byName.debug_env.annotations.readOnlyHint === true && byName.improve_agent.annotations.readOnlyHint === false, "annotation values");
+  });
   for (const name of PROVIDER_TOOLS) {
     check(`${name}.provider enum = ${EXPECTED_PROVIDERS.join("|")}`, () => {
       const e = byName[name]?.inputSchema?.properties?.provider?.enum;

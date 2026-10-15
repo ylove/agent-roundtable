@@ -171,3 +171,102 @@ export function buildTaskCard(state: Readonly<BlackboardState>, taskId: string, 
   if (body.length > room) body = `${body.slice(0, room - 32).trimEnd()}\n\n… [task card truncated]`;
   return body + tail;
 }
+
+// ============================================================================
+// Immediate contexts: why a worker starts now (WS08). The runner builds every card with one.
+// ============================================================================
+
+export type Immediate = Exclude<NonNullable<TaskCardOptions["immediate"]>, string>;
+
+/** A worker resumed after its process (or the runner) was lost or stopped. `fresh`: its session is gone and this is a new one. */
+export function interruptedContext(o: { why: string; fresh?: boolean; wipStat?: string; wipCommit?: string }): Immediate {
+  const lines = [o.why.trim()];
+  if (o.wipCommit) lines.push(`Your uncommitted work was saved as ${o.wipCommit.slice(0, 12)} ("rt: wip snapshot") on your branch.`);
+  if (o.fresh) {
+    lines.push("Your previous session could not be resumed, so this is a new one: you do not remember the earlier work.");
+    lines.push(o.wipStat ? `Your branch already holds this work (against the integration branch): ${o.wipStat}` : "Your branch holds no work yet.");
+    lines.push("Read the files your branch changed and the blackboard (`read_blackboard`) before you continue.");
+  } else {
+    if (o.wipStat) lines.push(`Your branch holds: ${o.wipStat}`);
+    lines.push("Check where you were (your files and `read_blackboard`), then continue from there.");
+  }
+  return { kind: "interrupted", text: lines.join("\n") };
+}
+
+/** Conflict markers that prepareConflictResolution left in the worktree for the worker. */
+export function conflictContext(o: { files: readonly string[]; integrationBranch: string }): Immediate {
+  const files = o.files.slice(0, CARD_LIMITS.listItems);
+  const more = o.files.length > files.length ? `\n… (+${o.files.length - files.length} more)` : "";
+  return {
+    kind: "conflict",
+    title: "Resolve the merge conflicts",
+    text:
+      `Merging your branch into ${o.integrationBranch} conflicted with work merged since you started. ` +
+      `${o.integrationBranch} has been merged into your worktree and the conflict markers (<<<<<<< ======= >>>>>>>) are in place. ` +
+      `Resolve the markers in these files, keeping both sides' intent:\n${files.map((f) => `- ${f}`).join("\n")}${more}\n` +
+      "Then call submit_work(ready: true): it concludes the merge and runs your checks again.",
+  };
+}
+
+/**
+ * The task's failing checks recorded after `sinceSeq` (the blackboard keeps their signatures and
+ * output blobs), plus the last rejection note. `tails` (command id → the end of its output, read
+ * from the blob by the caller) is added when given. Undefined when no check failed.
+ */
+export function checkFailedContext(
+  state: Readonly<BlackboardState>,
+  taskId: string,
+  o: { sinceSeq?: number; tails?: Readonly<Record<string, string>> } = {}
+): Immediate | undefined {
+  const rt = own(state.tasks, taskId);
+  if (!rt) return undefined;
+  const prefix = `${taskId}/`;
+  const failed = Object.entries(state.checks.task)
+    .filter(([k, c]) => k.startsWith(prefix) && (c.status === "failed" || c.status === "timed_out") && c.at_seq > (o.sinceSeq ?? 0))
+    .sort(([, a], [, b]) => a.at_seq - b.at_seq);
+  if (!failed.length) return undefined;
+  const parts = failed.map(([k, c]) => {
+    const id = k.slice(prefix.length);
+    const head = `${id}: ${c.status === "timed_out" ? "timed out" : "failed"}${c.streak > 1 ? ` (${c.streak} times in a row with the same error)` : ""}`;
+    const ref = c.blob ? `\n  Full output: read_blackboard(section: "blob", ref: "${c.blob}")` : "";
+    const tail = o.tails && Object.hasOwn(o.tails, id) && o.tails[id].trim() ? `\n  End of the output:\n${o.tails[id].trim()}` : "";
+    return `- ${head}${ref}${tail}`;
+  });
+  const note = rt.last_note ? `\nThe submission was rejected: ${rt.last_note}` : "";
+  return {
+    kind: "failure",
+    title: "Your checks failed",
+    text: `${parts.join("\n")}${note}\nFix the cause (do not retry the same approach unchanged), then call submit_work(ready: true) again.`,
+  };
+}
+
+/** The decision on one of the task's escalations, once it is resolved. Undefined otherwise. */
+export function resolutionContext(state: Readonly<BlackboardState>, escalationId: string): Immediate | undefined {
+  const esc = own(state.escalations, escalationId);
+  if (!esc || esc.status !== "resolved" || !esc.resolution) return undefined;
+  const r = esc.resolution;
+  return {
+    kind: "resolution",
+    text: `You escalated (${esc.kind}): ${esc.summary}\n${esc.question ? `Question: ${esc.question}\n` : ""}Resolved by ${r.by} (${r.action}): ${r.decision}\nApply this decision and continue.`,
+  };
+}
+
+/**
+ * What a respawned worker needs to hear, from the blackboard: its checks that failed since its
+ * previous run (sinceSeq), else the newest of its escalations resolved since then, else that it was
+ * interrupted (`why`).
+ */
+export function respawnContext(
+  state: Readonly<BlackboardState>,
+  taskId: string,
+  o: { sinceSeq: number; why: string; tails?: Readonly<Record<string, string>>; wipStat?: string }
+): Immediate {
+  const failed = checkFailedContext(state, taskId, { sinceSeq: o.sinceSeq, tails: o.tails });
+  if (failed) return failed;
+  const resolved = Object.values(state.escalations)
+    .filter((e) => e.task === taskId && e.status === "resolved" && e.raised_seq > o.sinceSeq)
+    .sort((a, b) => b.raised_seq - a.raised_seq)[0];
+  const res = resolved && resolutionContext(state, resolved.id);
+  if (res) return res;
+  return interruptedContext({ why: o.why, ...(o.wipStat && { wipStat: o.wipStat }) });
+}

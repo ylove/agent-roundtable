@@ -1,3 +1,5 @@
+import { installProcessIdentity } from "../fixtures/execution/process-identity.mjs";
+installProcessIdentity();
 // The claude-code driver: argv (snapshot), --help detection, stream parsing, attestation, and a
 // fake claude on PATH for launch, resume, stop (process-group kill) and answer (fork, no tools).
 import { test } from "node:test";

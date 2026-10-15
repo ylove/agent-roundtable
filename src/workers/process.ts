@@ -9,6 +9,8 @@
 
 import { spawn } from "node:child_process";
 import { closeSync, lstatSync, openSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { processMatches, processStart } from "../execution/lock.js";
 import { dirname } from "node:path";
 import { mkdirPrivate } from "../security/fs-safe.js";
 
@@ -30,6 +32,7 @@ export interface WorkerExit {
 }
 
 const exits = new Map<number, Promise<WorkerExit>>();
+const starts = new Map<number, string | undefined>();
 
 /** A real directory (not a symlink), as its canonical path. */
 export function realDirectory(path: string): string {
@@ -43,14 +46,18 @@ export function realDirectory(path: string): string {
  * (0600), the prompt on stdin. Resolves with the pid once the process has started; rejects when
  * it could not start.
  */
-export function spawnWorker(o: SpawnWorkerOptions): Promise<{ pid: number }> {
+export function spawnWorker(o: SpawnWorkerOptions): Promise<{ pid: number; started?: string }> {
   const cwd = realDirectory(o.cwd);
   mkdirPrivate(dirname(o.outputPath));
   const fd = openSync(o.outputPath, "a", 0o600);
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(o.file, o.args, { cwd, env: o.env, detached: true, shell: false, windowsHide: true, stdio: ["pipe", fd, fd] });
+      const intent = o.env.ROUNDTABLE_LAUNCH_INTENT;
+      const token = o.env.ROUNDTABLE_LAUNCH_SHA;
+      const file = intent && token ? process.execPath : o.file;
+      const args = intent && token ? [fileURLToPath(new URL("./launch-child.js", import.meta.url)), intent, token, o.file, ...o.args] : o.args;
+      child = spawn(file, args, { cwd, env: o.env, detached: true, shell: false, windowsHide: true, stdio: ["pipe", fd, fd] });
     } catch (e) {
       closeSync(fd);
       reject(e);
@@ -65,11 +72,13 @@ export function spawnWorker(o: SpawnWorkerOptions): Promise<{ pid: number }> {
       const pid = child.pid!;
       // Kept after the exit, so a caller that asks late still learns how it ended (a reused pid replaces it).
       exits.set(pid, exited);
+      const started = processStart(pid) ?? undefined;
+      starts.set(pid, started);
       child.stdin!.on("error", () => {
         /* the worker exited before reading all of stdin; its output says why */
       });
       child.stdin!.end(o.prompt);
-      resolve({ pid });
+      resolve({ pid, started });
     });
   });
 }
@@ -104,11 +113,13 @@ export function signalGroup(pgid: number, signal: NodeJS.Signals): boolean {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** SIGTERM the group, wait up to graceMs for it to go, then SIGKILL whatever is left. */
-export async function stopGroup(pgid: number, graceMs: number): Promise<void> {
+export async function stopGroup(pgid: number, graceMs: number, started?: string): Promise<void> {
+  const identity = started ?? starts.get(pgid);
+  if (!processMatches(pgid, identity)) return;
   if (!signalGroup(pgid, "SIGTERM")) return;
   const deadline = Date.now() + graceMs;
   while (Date.now() < deadline && groupAlive(pgid)) await sleep(50);
-  if (groupAlive(pgid)) signalGroup(pgid, "SIGKILL");
+  if (groupAlive(pgid) && processMatches(pgid, identity)) signalGroup(pgid, "SIGKILL");
   const reaped = Date.now() + 2000;
   while (Date.now() < reaped && groupAlive(pgid)) await sleep(25);
 }

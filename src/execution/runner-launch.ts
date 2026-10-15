@@ -22,7 +22,7 @@ import { VERSION } from "../config.js";
 import { pidAlive } from "../prototypes/sandbox.js";
 import { childEnv } from "../security/child-env.js";
 import { writeFileAtomic } from "../security/fs-safe.js";
-import { readLockOwner } from "./lock.js";
+import { processReused, readLockOwner } from "./lock.js";
 import { executionDir } from "./store.js";
 
 export const RUNNER_HEARTBEAT_MS = 5_000;
@@ -76,7 +76,7 @@ export function runnerLiveness(exe: string, now = Date.now()): RunnerLiveness {
   const heartbeat = info && (!owner || info.pid === owner.pid) ? info.heartbeatAt : undefined;
   if (owner) {
     if (owner.host !== hostname()) return { state: "other_host", pid: owner.pid, host: owner.host };
-    if (pidAlive(owner.pid)) {
+    if (pidAlive(owner.pid) && !processReused(owner.pid, owner.started)) {
       const at = heartbeat ? Date.parse(heartbeat) : NaN;
       const stale = !Number.isFinite(at) ? Date.parse(owner.at) < now - RUNNER_STALE_MS : now - at > RUNNER_STALE_MS;
       return { state: "running", pid: owner.pid, ...(heartbeat && { heartbeatAt: heartbeat }), stale };

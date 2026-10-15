@@ -14,6 +14,7 @@
 //              for it; only the integration branch is pushed.
 // ============================================================================
 
+import { createHash } from "node:crypto";
 import { redact } from "../publishers/redact.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { failureSignature, runCommandSpec, tailForTool } from "../sandbox/index.js";
@@ -21,10 +22,10 @@ import { runGh, withBodyFile } from "../github/gh.js";
 import { assertSafeRef, integrationBranch, openRepo, runGit } from "./git.js";
 import { leaseDrafts, leasesFor, releaseLeases } from "./leases.js";
 import { classifyConflict, mergeDrafts, mergeTask, prepareConflictResolution, type MergeResult } from "./merge.js";
-import { runnerEscalation } from "./runner-hooks.js";
+import { runnerEscalation, type RunnerEscalationSpec } from "./runner-hooks.js";
 import { conflictContext } from "./task-card.js";
 import type { AnyEventDraft, BlackboardState, CommandSpec } from "./types.js";
-import { ensureIntegrationWorktree, integrationWorktreePath, snapshotWip, taskWorktreePath } from "./worktrees.js";
+import { ensureIntegrationWorktree, integrationWorktreePath, snapshotWip, taskWorktreePath, withCommitCheckout } from "./worktrees.js";
 import type { Runner } from "./runner.js";
 
 const CHECK_MAX_MS = 15 * 60_000;
@@ -55,7 +56,6 @@ export function allAccepted(state: Readonly<BlackboardState>): boolean {
 export class MergeQueue {
   private running?: Promise<void>;
   private readonly failures = new Map<string, { count: number; retryAt: number }>();
-  private readonly completionTried = new Set<string>();
   private recheckedAmendment = 0;
 
   constructor(private readonly r: Runner) {}
@@ -71,7 +71,7 @@ export class MergeQueue {
     if (!job) return;
     this.running = this.r.background(
       job()
-        .catch((e) => { this.completionTried.clear(); this.r.say(`merge queue: ${errText(e)}`); })
+        .catch((e) => { this.r.say(`merge queue: ${errText(e)}`); })
         .finally(() => {
           this.running = undefined;
         })
@@ -131,24 +131,35 @@ export class MergeQueue {
     const rt = own(state.tasks, task);
     if (rt?.state !== "merging") return;
 
+    const history = await r.store.events();
+    const checked = [...history].reverse().find((e) => e.type === "task.checks_passed" &&
+      e.payload.task === task && e.payload.submitted_seq === rt.submitted_seq &&
+      e.payload.commit === rt.last_commit && e.payload.commit !== undefined && e.payload.submitted_seq !== undefined);
+    if (!checked || checked.type !== "task.checks_passed" || !checked.payload.commit) {
+      await r.commit([{ type: "task.rejected", source: src, payload: { task, reasons: ["No passing checks bound to the current submission; submit the committed work again."] } }]);
+      return;
+    }
+    const commit = checked.payload.commit;
+    const submission = { commit, submitted_seq: rt.submitted_seq! };
+
     // Checks that passed before an amendment touched the task run again first (WS04).
-    const amended = r.lastSeq((e) => e.type === "contract.amended" && e.payload.affected_tasks.includes(task));
-    const passed = r.lastSeq((e) => e.type === "task.checks_passed" && e.payload.task === task);
+    const amended = history.filter((e) => e.type === "contract.amended" && e.payload.affected_tasks.includes(task)).at(-1)?.seq ?? 0;
+    const passed = checked.seq;
     if (amended > passed && rt.spec.checks.length) {
       r.say(`re-running the checks of ${task}: the contract was amended after they passed`);
-      const res = await this.runChecks(state, "task", rt.spec.checks, taskWorktreePath(r.execution, task), task);
+      const res = await withCommitCheckout(r.header, task, commit, (dir) => this.runChecks(state, "task", rt.spec.checks, dir, task, submission));
       if (!res.ok) {
         await r.commit([{ type: "task.rejected", source: src, payload: { task, reasons: res.failed.map((f) => `check ${f.id} ${f.status === "timed_out" ? "timed out" : "failed"} after the contract was amended`) } }]);
         return;
       }
-      await r.commit([{ type: "task.checks_passed", source: src, payload: { task, commands: [...rt.spec.checks] } }]);
+      await r.commit([{ type: "task.checks_passed", source: src, payload: { task, commands: [...rt.spec.checks], ...submission } }]);
       state = await r.store.state();
     }
 
     const leases = leasesFor(state, task);
     let m: MergeResult;
     try {
-      m = await mergeTask(r.header, task, { leases });
+      m = await mergeTask(r.header, task, { leases, commit });
       this.failures.delete(task);
     } catch (e) {
       const f = { count: (this.failures.get(task)?.count ?? 0) + 1, retryAt: Date.now() + MERGE_RETRY_MS };
@@ -165,7 +176,7 @@ export class MergeQueue {
     if (m.ok) {
       const sha = m.sha;
       await r.store.transact(({ state: s }) => {
-        if (own(s.tasks, task)?.state !== "merging") return { events: [] };
+        if (own(s.tasks, task)?.state !== "merging" || s.tasks[task].submitted_seq !== submission.submitted_seq || s.tasks[task].last_commit !== commit) return { events: [] };
         return {
           events: [
             mergeDrafts.succeeded(task, sha, src),
@@ -213,22 +224,18 @@ export class MergeQueue {
       return;
     }
     await r.commit([mergeDrafts.conflicted(task, m.conflicts, src)]);
-    const exit = await r.stopTaskWorker(task, "killed", "its merge conflicted");
-    const wt = taskWorktreePath(r.execution, task);
-    await snapshotWip(wt, "rt: wip snapshot", leases);
-    const prep = await prepareConflictResolution(r.header, task);
-    if (!prep.conflicts.length) {
-      // The integration branch merged cleanly into the task branch: the next attempt merges.
-      await r.commit(exit);
-      return;
-    }
-    r.say(`${task} conflicts in ${prep.conflicts.join(", ")}: resuming its worker to resolve them`);
-    const rejected: AnyEventDraft = { type: "task.rejected", source: src, payload: { task, reasons: [`Merge conflicts to resolve: ${prep.conflicts.slice(0, 20).join(", ")}`] } };
-    await r.startWorker(task, {
-      claim: false,
-      reopen: true,
-      preDrafts: [...exit, rejected],
-      immediate: conflictContext({ files: prep.conflicts, integrationBranch: integrationBranch(r.execution) }),
+    await r.withStoppedWorker(task, "killed", "its merge conflicted", async (exit) => {
+      const wt = taskWorktreePath(r.execution, task);
+      await snapshotWip(wt, "rt: wip snapshot", leases);
+      const prep = await prepareConflictResolution(r.header, task);
+      r.say(`${task} conflicts in ${prep.conflicts.join(", ")}: resuming its worker to resolve them`);
+      const rejected: AnyEventDraft = { type: "task.rejected", source: src, payload: { task, reasons: [prep.conflicts.length ? `Merge conflicts to resolve: ${prep.conflicts.slice(0, 20).join(", ")}` : "Integration changes were merged into your branch; resubmit to check the new commit."] } };
+      await r.startWorker(task, {
+        claim: false,
+        reopen: true,
+        preDrafts: [...exit, rejected],
+        immediate: conflictContext({ files: prep.conflicts, integrationBranch: integrationBranch(r.execution) }),
+      });
     });
   }
 
@@ -241,14 +248,14 @@ export class MergeQueue {
   }
 
   /** Run contract commands as checks of `scope` in `workdir`: check.started, then passed, failed or timed_out. */
-  async runChecks(state: Readonly<BlackboardState>, scope: "task" | "integration", ids: readonly string[], workdir: string, task?: string): Promise<ChecksResult> {
+  async runChecks(state: Readonly<BlackboardState>, scope: "task" | "integration", ids: readonly string[], workdir: string, task?: string, submission?: { commit: string; submitted_seq: number }): Promise<ChecksResult> {
     const r = this.r;
     const src = r.source;
     const backend = await r.sandbox();
     const commands = state.contract?.validation.commands ?? [];
     const image = state.contract?.sandbox.image || undefined;
     const out: ChecksResult = { ok: true, failed: [], tails: {} };
-    const at = task !== undefined ? { task } : {};
+    const at = { ...(task !== undefined ? { task } : {}), ...submission };
     for (const id of ids) {
       if (r.isStopping()) throw new Error("runner stopped during validation");
       const spec: CommandSpec | undefined = commands.find((c) => c.id === id);
@@ -306,9 +313,38 @@ export class MergeQueue {
     if (!allAccepted(state) || r.hasAnyLiveWorker()) return;
     if (Object.values(state.escalations).some((e) => !["resolved", "withdrawn"].includes(e.status))) return;
     const sha = (await ensureIntegrationWorktree(r.header)).head;
-    const key = `${sha}|${Object.keys(state.tasks).join(",")}|${state.contract?.version ?? 0}`;
-    if (this.completionTried.has(key)) return;
-    this.completionTried.add(key);
+    const key = createHash("sha256").update(`${sha}|${Object.keys(state.tasks).sort().join(",")}|${state.contract?.version ?? 0}`).digest("hex");
+    const history = await r.store.events();
+    const outcomes = history.filter((e) => e.type === "note.posted" && e.source.kind === "runner" && e.payload.topic === "completion-outcome" && e.payload.refs.includes(key));
+    const last = outcomes.at(-1);
+    let resolved = 0;
+    if (last?.type === "note.posted") {
+      const outcome = JSON.parse(last.payload.text) as { retry_at?: number; escalations?: string[]; epoch?: number };
+      const related = outcome.escalations ?? [];
+      const closed = related.length > 0 && related.every((id) => {
+        const esc = own(state.escalations, id);
+        return esc && ["resolved", "withdrawn"].includes(esc.status);
+      });
+      if (closed) resolved = last.seq;
+      else {
+        resolved = outcome.epoch ?? 0;
+        if (!outcome.retry_at || outcome.retry_at > Date.now()) return;
+      }
+    }
+    const recordOutcome = async (outcome: string, retryAt?: number, escalation?: RunnerEscalationSpec, unlessOpen = false) => {
+      const since = await r.store.events();
+      const related = since.filter((e) => e.seq > state.seq && e.type === "escalation.raised")
+        .map((e) => e.type === "escalation.raised" ? e.payload.escalation.id : "");
+      await r.store.transact(({ state: s }) => {
+        const open = Object.values(s.escalations).some((e) => !["resolved", "withdrawn"].includes(e.status));
+        const before = escalation && (!unlessOpen || !open) ? runnerEscalation(s, escalation, r.source) : [];
+        const escalations = [...related, ...before.flatMap((e) => e.type === "escalation.raised" ? [e.payload.escalation.id] : [])];
+        return { events: [...before, { type: "note.posted", source: r.source, payload: {
+          topic: "completion-outcome", refs: [key],
+          text: JSON.stringify({ outcome, escalations, epoch: resolved, ...(retryAt !== undefined && { retry_at: retryAt }) }),
+        } }] };
+      });
+    };
 
     // 1. Final validation on the integration branch.
     const final = state.contract?.validation.final ?? [];
@@ -316,27 +352,36 @@ export class MergeQueue {
       const res = await this.runChecks(state, "integration", final, integrationWorktreePath(r.execution));
       if (!res.ok) {
         const failed = res.failed.map((f) => f.id).join(", ");
-        await r.store.transact(({ state: s }) => ({
-          events: runnerEscalation(
-            s,
-            {
-              key: `final_validation:${sha}`,
-              kind: "blocker",
-              summary: `Every task is accepted, but the final validation failed on the integration branch (${sha.slice(0, 12)}): ${failed}.`,
-              question: "Add a task to fix it, amend the validation, or accept the result as it is?",
-              options: ["Add a fix-up task with amend_contract", "Amend the final validation", "Abort the run"],
-            },
-            r.source
-          ),
-        }));
+        await recordOutcome("validation_failed", undefined, {
+          key: `final_validation:${sha}:${state.seq}`,
+          kind: "blocker",
+          summary: `Every task is accepted, but the final validation failed on the integration branch (${sha.slice(0, 12)}): ${failed}.`,
+          question: "Add a task to fix it, amend the validation, or accept the result as it is?",
+          options: ["Add a fix-up task with amend_contract", "Amend the final validation", "Abort the run"],
+        });
         r.say(`final validation failed (${failed}): escalated`);
         return;
       }
     }
 
     // 2. The goal review (WS10's lead; the default says COMPLETE).
-    const review = await r.hooks.goalReview(r.ctx, { integrationSha: sha, state });
+    let review;
+    try {
+      review = await r.hooks.goalReview(r.ctx, { integrationSha: sha, state });
+    } catch (e) {
+      const errors = outcomes.filter((event) => event.seq > resolved && event.type === "note.posted" && JSON.parse(event.payload.text).outcome === "review_error").length + 1;
+      await recordOutcome("review_error", errors < 3 ? Date.now() + 5 * 60_000 : undefined, errors >= 3 ? {
+        key: `goal_review_error:${key}:${state.seq}`, kind: "blocker",
+        summary: `The goal review failed ${errors} times: ${scrubAndCap(errText(e), 1500)}`,
+      } : undefined);
+      r.say(`goal review failed (${errors}/3): ${errText(e)}`);
+      return;
+    }
     if (review.verdict !== "COMPLETE") {
+      await recordOutcome("incomplete", undefined, {
+        key: `goal_incomplete:${key}:${state.seq}`, kind: "blocker",
+        summary: `Goal review is INCOMPLETE: ${review.reason ?? "the integrated result needs review"}`,
+      }, true);
       r.say(`goal review: ${review.verdict}${review.reason ? ` (${review.reason})` : ""}; the run stays open`);
       return;
     }

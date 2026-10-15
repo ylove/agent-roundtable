@@ -4,7 +4,7 @@
 //   executions  completed, failed or aborted runs that ended more than
 //               ROUNDTABLE_EXECUTION_RETENTION_DAYS ago (default 30): their worktrees, rt/<tag>/*
 //               branches and execution directory, through run-admin's purge (audited). A run whose
-//               repository is gone loses its directories only (nothing else could hold its branches).
+//               repository is gone uses the same locked purge and worker checks, skipping only git cleanup.
 //   sessions    archived at-the-table sessions (pruneArchivedSessions, ROUNDTABLE_SESSION_RETENTION_DAYS, 30)
 //   audit       month files of the audit log (pruneAudit, ROUNDTABLE_AUDIT_RETENTION_DAYS, 365)
 //
@@ -12,15 +12,14 @@
 // collected into the report instead of thrown.
 // ============================================================================
 
-import { existsSync, rmSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import { auditRetentionDays, executionRetentionDays, sessionRetentionDays } from "../config.js";
-import { appendAudit, pruneAudit } from "../security/audit.js";
+import { pruneAudit } from "../security/audit.js";
 import { pruneArchivedSessions } from "../sessions/archive.js";
 import { purgeExecution } from "./run-admin.js";
 import { executionDir, listExecutions, openExecutionStore } from "./store.js";
 import type { EventType } from "./types.js";
-import { executionWorktreesDir } from "./worktrees.js";
 
 const DAY_MS = 86_400_000;
 const TERMINAL_EVENTS: EventType[] = ["execution.completed", "execution.failed", "execution.aborted"];
@@ -63,13 +62,7 @@ export async function pruneExecutions(retentionDays: number, now = Date.now()): 
       if (statSync(join(executionDir(h.id), "events.jsonl")).mtimeMs >= cutoff) continue;
       const ended = await endedAt(h.id);
       if (ended === undefined || !(ended < cutoff)) continue;
-      if (existsSync(h.repo_root)) {
-        await purgeExecution(h.id, { confirm: true, actor: "retention" });
-      } else {
-        rmSync(executionWorktreesDir(h.id), { recursive: true, force: true });
-        rmSync(executionDir(h.id), { recursive: true, force: true });
-        await appendAudit({ actor: "retention", action: "execution.purged", target: h.id, details: { repo_root: h.repo_root, repo_missing: true } });
-      }
+      await purgeExecution(h.id, { confirm: true, actor: "retention" });
       removed.push(h.id);
     } catch (e) {
       errors.push(`${h.id}: ${errText(e)}`);

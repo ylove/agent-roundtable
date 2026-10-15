@@ -103,7 +103,7 @@ export function readLockOwner(lockDir: string): LockOwner | null {
 // ---------------------------------------------------------------------------
 
 /** A process's start time from `ps` (UTC, second resolution), or null when it is unknown. */
-function processStart(pid: number): string | null {
+export function processStart(pid: number): string | null {
   try {
     const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
@@ -116,6 +116,18 @@ function processStart(pid: number): string | null {
   } catch {
     return null;
   }
+}
+
+/** True only for a live process whose recorded start identity can still be verified. */
+export function processMatches(pid: number, started: string | undefined): boolean {
+  return started !== undefined && pidAlive(pid) && processStart(pid) === started;
+}
+
+/** Proven pid reuse. Unknown identities preserve a lock owner's protection. */
+export function processReused(pid: number, started: string | undefined): boolean {
+  if (!started) return false;
+  const current = processStart(pid);
+  return current !== null && current !== started;
 }
 
 let selfStart: string | null | undefined;
@@ -132,6 +144,9 @@ const ownStart = (): string | null => (selfStart === undefined ? (selfStart = pr
  * hard links the lock fails closed. The parent directory must exist: a lock never recreates it.
  */
 function tryCreate(lockDir: string, token: string): boolean {
+  // Before mkdir: the ps spawn takes tens of ms, and a holder killed between mkdir and owner.json
+  // leaves an ownerless lock that only ages out after staleMs.
+  const started = ownStart();
   try {
     mkdirSync(lockDir, { mode: 0o700 });
   } catch (e) {
@@ -139,7 +154,6 @@ function tryCreate(lockDir: string, token: string): boolean {
     if (errCode(e) === "ENOENT") throw new Error(`Cannot take lock ${lockDir}: ${dirname(lockDir)} does not exist`);
     throw e;
   }
-  const started = ownStart();
   const owner: LockOwner = { pid: process.pid, host: hostname(), token, at: new Date().toISOString(), ...(started ? { started } : {}) };
   const tmp = join(lockDir, `.owner.${token}.tmp`);
   try {
@@ -185,8 +199,7 @@ function ownerGone(seen: Seen, staleMs: number, now: number): boolean {
   // only once the lock is older than staleMs.
   const at = Date.parse(o.at);
   if (o.started === undefined || !(now - (Number.isFinite(at) ? at : seen.mtimeMs) > staleMs)) return false;
-  const current = processStart(o.pid);
-  return current !== null && current !== o.started;
+  return processReused(o.pid, o.started);
 }
 
 /**

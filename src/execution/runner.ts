@@ -36,15 +36,16 @@ import { ClaudeCodeDriver, WORKER_ATTESTATION } from "../workers/claude-code.js"
 import { CodexDriver } from "../workers/codex.js";
 import { agentDir, writeAgentLeases, prepareWorkerFiles } from "../workers/files.js";
 import { RunMonitor, type ExitReason, type MonitorCheckpoint } from "../workers/monitor.js";
+import { reconcileLaunch } from "../workers/launch-intent.js";
 import { stopGroup, workerExit, type WorkerExit } from "../workers/process.js";
 import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
 import { classifyFailure } from "./circuit.js";
 import { createRunnerHooks } from "./escalation.js";
 import { integrationBranch, SubmodulesUnsupportedError } from "./git.js";
-import { takeHandoffs } from "./handoff.js";
+import { acknowledgeHandoff, takeHandoffs } from "./handoff.js";
 import { decideLeaseRequest, leaseDrafts, leasesFor } from "./leases.js";
-import { acquireLock, LockTimeoutError, readLockOwner, type LockRelease } from "./lock.js";
+import { acquireLock, LockTimeoutError, processMatches, processStart, readLockOwner, type LockRelease } from "./lock.js";
 import { MergeQueue } from "./runner-merge.js";
 import {
   newRunnerInfo,
@@ -174,6 +175,7 @@ export interface RunFile {
   driver: WorkerDriverId;
   pid: number;
   pgid: number;
+  started?: string;
   /** The session the run was started with (claude-code), or the thread id the stream reported (codex). */
   session_id: string;
   output: string;
@@ -247,6 +249,7 @@ interface Tracked {
   driver: WorkerDriverId;
   pid: number;
   pgid: number;
+  started?: string;
   sessionId: string;
   outputPath: string;
   cwd: string;
@@ -609,7 +612,18 @@ export class Runner {
     let state = await this.store.state();
     if (TERMINAL_RUN.has(state.status)) return this.finish(state);
 
+    if (Object.entries(state.agents).some(([id, a]) => !a.external && !this.workers.has(id) && !this.busy.has(id) && ["registered", "running"].includes(a.status))) {
+      await this.reconcile();
+    }
+    await this.stopSuperseded();
     await this.pollWorkers();
+    state = await this.store.state();
+    for (const claim of Object.values(state.claims)) {
+      if (["submitted", "checking"].includes(state.tasks[claim.task]?.state) &&
+          !state.agents[claim.agent]?.external && !this.hasLiveWorker(claim.task) && !this.busy.has(claim.agent)) {
+        await this.recoverLost(claim.agent, claim.task, readRunFile(this.execution, claim.agent), true);
+      }
+    }
     // Before the watchdog: a resolution's resume must not be mistaken for a worker that died.
     await this.applyHandoffs();
     await this.watchdogPass();
@@ -625,6 +639,17 @@ export class Runner {
     await this.checkFailure(await this.store.state());
     this.checkIdle(state);
     await this.maybeSnapshot();
+  }
+
+  /** Retry/reassignment drops a claim durably, so a lost handoff can never orphan its worker. */
+  private async stopSuperseded(): Promise<void> {
+    const state = await this.store.state();
+    for (const t of this.workers.values()) {
+      const claim = own(state.claims, t.task);
+      if (!t.exit && (!claim || claim.agent !== t.agent || claim.attempt > t.attempt)) {
+        await this.killWorker(t.agent, "killed", "its task claim or attempt was superseded");
+      }
+    }
   }
 
   private async finish(state: BlackboardState): Promise<void> {
@@ -674,12 +699,12 @@ export class Runner {
     if (own((await this.store.state()).agents, t.agent)?.status === "registered") {
       await this.store.transact(({ state }) => ({ events: own(state.agents, t.agent)?.status === "registered" ? [{
         type: "agent.spawned", source: this.source,
-        payload: { agent: t.agent, task: t.task, attempt: t.attempt, pid: t.pid, ...(t.driver === "claude-code" && { session_id: t.sessionId }) },
+        payload: { agent: t.agent, task: t.task, attempt: t.attempt, pid: t.pid, started: t.started, ...(t.driver === "claude-code" && { session_id: t.sessionId }) },
       }] : [] }));
     }
     const offset = t.monitor.offset;
     const checkpoint = t.monitor.checkpoint();
-    if (!t.exit && t.adopted && !pidAlive(t.pid)) t.exit = { code: null, signal: null };
+    if (!t.exit && t.adopted && !processMatches(t.pid, t.started)) t.exit = { code: null, signal: null };
     const p = t.monitor.poll();
     if (p.bytes > 0) t.lastOutputAt = Date.now();
     let drafts = p.drafts;
@@ -785,6 +810,7 @@ export class Runner {
       driver: t.driver,
       pid: t.pid,
       pgid: t.pgid,
+      started: t.started,
       session_id: t.driver === "codex" ? (t.monitor.acc.sessionId ?? t.sessionId) : t.sessionId,
       output: t.outputPath,
       cwd: t.cwd,
@@ -841,20 +867,24 @@ export class Runner {
   // ==========================================================================
 
   private handleOf(t: Tracked) {
-    return { agent: t.agent, task: t.task, attempt: t.attempt, pid: t.pid, pgid: t.pgid, sessionId: t.sessionId, outputPath: t.outputPath, startedAt: new Date(t.startedAt).toISOString() };
+    return { agent: t.agent, task: t.task, attempt: t.attempt, pid: t.pid, pgid: t.pgid, started: t.started, sessionId: t.sessionId, outputPath: t.outputPath, startedAt: new Date(t.startedAt).toISOString() };
   }
 
   private async stopProcess(t: Tracked, reason: string): Promise<void> {
+    if (!processMatches(t.pid, t.started)) {
+      t.exit = { code: null, signal: null };
+      return;
+    }
     const d = this.drivers[t.driver];
     if (d) await d.stop(this.handleOf(t), reason);
-    else await stopGroup(t.pgid, 10_000);
+    else await stopGroup(t.pgid, 10_000, t.started);
   }
 
   /** The exit of a stopped worker (the pid gone, or this process saw it exit). */
   private async waitExit(t: Tracked, ms = 15_000): Promise<WorkerExit> {
     const end = Date.now() + ms;
     while (!t.exit && Date.now() < end) {
-      if (!pidAlive(t.pid)) t.exit = { code: null, signal: "SIGTERM" };
+      if (!processMatches(t.pid, t.started)) t.exit = { code: null, signal: "SIGTERM" };
       else await sleep(25);
     }
     return t.exit ?? { code: null, signal: "SIGKILL" };
@@ -866,7 +896,10 @@ export class Runner {
     if (!t) {
       // Not ours (or already gone): signal its group if the blackboard still has a live pid.
       const rec = own((await this.store.state()).agents, agent);
-      if (rec?.status === "running" && rec.pid && pidAlive(rec.pid) && !rec.external) await stopGroup(rec.pid, 10_000);
+      if (rec?.status === "running" && rec.pid && !rec.external) {
+        if (processMatches(rec.pid, rec.started)) await stopGroup(rec.pid, 10_000, rec.started);
+        else await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, code: null, reason: "lost" } }]);
+      }
       return;
     }
     if (t.exit || this.busy.has(agent)) return;
@@ -884,9 +917,14 @@ export class Runner {
    * Stop the task's live worker, if any, and return its exit drafts uncommitted, so they can be
    * committed together with a re-registration.
    */
-  async stopTaskWorker(task: string, reason: ExitReason, why: string): Promise<AnyEventDraft[]> {
+  /**
+   * Stop a task's worker and hand its uncommitted exit drafts to `then`, which commits them (as a
+   * restart's preDrafts). The agent stays busy until `then` settles, so a tick in between never
+   * mistakes the untracked worker for a lost one and records a second exit.
+   */
+  async withStoppedWorker<T>(task: string, reason: ExitReason, why: string, then: (drafts: AnyEventDraft[]) => Promise<T>): Promise<T> {
     const t = [...this.workers.values()].find((w) => w.task === task);
-    if (!t) return [];
+    if (!t) return then([]);
     this.busy.add(t.agent);
     try {
       t.killReason ??= reason;
@@ -894,7 +932,7 @@ export class Runner {
       const exit = await this.waitExit(t);
       this.workers.delete(t.agent);
       this.writeRun(t);
-      return this.unseen(t, t.monitor.finish({ code: exit.code, signal: exit.signal, reason: t.killReason }));
+      return await then(this.unseen(t, t.monitor.finish({ code: exit.code, signal: exit.signal, reason: t.killReason })));
     } finally {
       this.busy.delete(t.agent);
     }
@@ -950,8 +988,8 @@ export class Runner {
             ...(t.lastOutputAt !== undefined && { lastOutputAt: t.lastOutputAt }),
             ...(heartbeat !== undefined && { lastHeartbeatAt: heartbeat }),
           }
-        : { ...(rec.pid !== undefined && { pid: rec.pid }), alive: rec.pid !== undefined && pidAlive(rec.pid) };
-      if (this.busy.has(id)) o.busy = true;
+        : { ...(rec.pid !== undefined && { pid: rec.pid }), alive: rec.pid !== undefined && processMatches(rec.pid, rec.started) };
+      if (this.busy.has(id) || (!t && rec.status === "registered")) o.busy = true;
       Object.defineProperty(agents, id, { value: o, enumerable: true, writable: true, configurable: true });
     }
     const leadInFlight: Record<string, boolean> = {};
@@ -1005,8 +1043,9 @@ export class Runner {
             await this.killWorker(op.agent, op.rule === "worker_stall" ? "stalled" : op.rule === "budget_cap" ? "budget" : "killed", op.reason);
             break;
           case "resume_worker": {
-            const drafts = await this.stopTaskWorker(op.task, "stalled", op.why);
-            if (!(await this.startWorker(op.task, { claim: false, preDrafts: drafts, immediate: interruptedContext({ why: op.why }) }))) this.opsDone.delete(key);
+            const started = await this.withStoppedWorker(op.task, "stalled", op.why, (drafts) =>
+              this.startWorker(op.task, { claim: false, preDrafts: drafts, immediate: interruptedContext({ why: op.why }) }));
+            if (!started) this.opsDone.delete(key);
             break;
           }
           case "spawn_retry":
@@ -1218,7 +1257,7 @@ export class Runner {
         this.trialReservations.add(driver.id);
         trial = driver.id;
       }
-      const budgetUsd = remainingUsd(state, { task, agent });
+      let budgetUsd = remainingUsd(state, { task, agent });
       if (budgetUsd < 0.01) {
         await flush();
         return false;
@@ -1240,12 +1279,13 @@ export class Runner {
         if (p) return { events: pre, result: p };
         const gate = canRespawn(s, Date.now(), this.observations(s), { task, agent, driver: driver.id });
         if (!gate.ok || remainingUsd(s, { task, agent }) < 0.01 || s.contract?.version !== state.contract?.version) return { events: pre, result: "the spawn gate changed" };
+        budgetUsd = remainingUsd(s, { task, agent });
         const events: AnyEventDraft[] = [
           ...pre,
           {
             type: "agent.registered",
             source: this.source,
-            payload: { agent, persona: spec.persona, driver: driver.id, token_sha256: files.token_sha256, external: false, ...(spec.team && { team: spec.team }) },
+            payload: { agent, persona: spec.persona, driver: driver.id, token_sha256: files.token_sha256, external: false, budget_usd: budgetUsd, ...(spec.team && { team: spec.team }) },
           },
         ];
         if (o.claim) events.push({ type: "task.claimed", source: this.source, payload: { task, agent, attempt, ttl_s: 0 } });
@@ -1290,10 +1330,18 @@ export class Runner {
         budgetUsd: Math.min(budgetUsd, remainingUsd(after, { task, agent })),
         sessionId,
         outputPath,
-        env: {},
+        env: { ROUNDTABLE_LAUNCH_INTENT: join(agentDir(this.execution, agent), "launch.json"), ROUNDTABLE_LAUNCH_SHA: files.token_sha256 },
         timeoutMs: Math.round((state.contract?.budget.wall_clock_min ?? 120) * 60_000),
       };
       const record: WorkerRecord = { agent, task, attempt, pid: 0, sessionId, outputPath, startedAt: new Date().toISOString(), driver: driver.id, cwd: wt.path };
+      const intentRun: RunFile = {
+        v: 1, agent, task, attempt, driver: driver.id, pid: 0, pgid: 0,
+        session_id: sessionId, output: outputPath, cwd: wt.path, offset: startOffset,
+        start_offset: startOffset, started_at: record.startedAt, resumed: resume,
+      };
+      writeFileAtomic(launch.env.ROUNDTABLE_LAUNCH_INTENT, JSON.stringify({
+        token_sha256: files.token_sha256, at: record.startedAt, run: intentRun,
+      }) + "\n");
       const handle = resume ? await driver.resume(record, launch) : await driver.launch(launch);
       const t: Tracked = {
         agent,
@@ -1302,6 +1350,7 @@ export class Runner {
         driver: driver.id,
         pid: handle.pid,
         pgid: handle.pgid ?? handle.pid,
+        started: handle.started ?? processStart(handle.pid) ?? undefined,
         sessionId: handle.sessionId,
         outputPath,
         cwd: wt.path,
@@ -1317,7 +1366,7 @@ export class Runner {
       });
       this.writeRun(t);
       await this.commit([
-        { type: "agent.spawned", source: this.source, payload: { agent, task, attempt, pid: handle.pid, ...(driver.id === "claude-code" && { session_id: handle.sessionId }) } },
+        { type: "agent.spawned", source: this.source, payload: { agent, task, attempt, pid: handle.pid, started: t.started, ...(driver.id === "claude-code" && { session_id: handle.sessionId }) } },
       ]);
       await this.refreshLog();
       this.say(`${resume ? "resumed" : "started"} ${agent} on ${task} (attempt ${attempt}, pid ${handle.pid}, $${budgetUsd.toFixed(2)} budget)`);
@@ -1331,7 +1380,9 @@ export class Runner {
         pre = [];
       }
       await flush().catch((x) => this.say(`committing the previous run's exit: ${errText(x)}`));
-      if (registered && !this.workers.has(agent)) {
+      const pending = registered && !this.workers.has(agent)
+        ? await reconcileLaunch(join(agentDir(this.execution, agent), "launch.json")).catch(() => undefined) : null;
+      if (registered && !this.workers.has(agent) && pending === null) {
         // Registered and claimed but nothing runs: an exit lets the watchdog retry it (and count it).
         await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, task, code: null, reason: "error", result_subtype: "spawn_failed" } }]).catch(() => undefined);
       }
@@ -1386,14 +1437,21 @@ export class Runner {
     const kills = ops.filter((op) => op.type === "kill_worker");
     for (const op of [...kills, ...ops.filter((op) => op.type !== "kill_worker")]) {
       const key = `resolution\0${op.type}\0${op.key}`;
-      if (this.opsDone.has(key)) continue;
+      if (this.opsDone.has(key)) { acknowledgeHandoff(this.execution, op); continue; }
       this.opsDone.add(key);
       try {
         let done = true;
         if (op.type === "kill_worker") await this.killWorker(op.agent, "killed", op.reason);
         else if (op.type === "resume_worker") done = await this.resumeTask(op.task, { kind: "resolution", text: op.card });
         else done = await this.resumeTask(op.task, { kind: "resolution", text: `Retry attempt ${op.attempt} after escalation resolution. Re-read the contract and your task.` });
+        if (op.type === "kill_worker") {
+          const t = this.workers.get(op.agent);
+          const rec = own((await this.store.state()).agents, op.agent);
+          done = t ? !!t.exit || !processMatches(t.pid, t.started) :
+            rec?.pid === undefined || !processMatches(rec.pid, rec.started);
+        }
         if (!done) this.opsDone.delete(key);
+        else acknowledgeHandoff(this.execution, op);
       } catch (e) {
         this.opsDone.delete(key);
         this.say(`${from} ${op.type} ${op.target}: ${errText(e)}`);
@@ -1415,18 +1473,22 @@ export class Runner {
   private async reconcile(): Promise<void> {
     const state = await this.store.state();
     for (const [agent, rec] of Object.entries(state.agents)) {
-      if (rec.external || (rec.status !== "running" && rec.status !== "registered")) continue;
+      if (this.workers.has(agent) || this.busy.has(agent) || rec.external || (rec.status !== "running" && rec.status !== "registered")) continue;
       let run = readRunFile(this.execution, agent);
+      const pending = await reconcileLaunch(join(agentDir(this.execution, agent), "launch.json"));
+      if (pending === undefined) continue;
+      if (pending && (!run || run.pid !== pending.pid || run.started !== pending.started)) run = pending;
       const claim = Object.values(state.claims).find((c) => c.agent === agent);
       const task = claim?.task ?? rec.task ?? run?.task;
-      const pid = rec.status === "running" ? rec.pid : run?.pid;
-      const alive = pid !== undefined && pidAlive(pid) && (!run || run.pid === pid);
+      const pid = pending?.pid ?? (rec.status === "running" ? rec.pid : run?.pid);
+      const started = pending?.started ?? run?.started ?? rec.started;
+      const alive = pid !== undefined && processMatches(pid, started) && (!run || run.pid === pid);
       try {
         if (alive && !run && task !== undefined && pid !== undefined) {
           const spawned = [...this.log].reverse().find((e) => e.type === "agent.spawned" && e.payload.agent === agent);
           const attempt = claim?.attempt ?? state.tasks[task]?.attempt ?? 1;
           run = {
-            v: 1, agent, task, attempt, driver: rec.driver, pid, pgid: pid,
+            v: 1, agent, task, attempt, driver: rec.driver, pid, pgid: pid, started,
             session_id: rec.session_id ?? "", output: join(agentDir(this.execution, agent), "runs", `${attempt}.jsonl`),
             cwd: taskWorktreePath(this.execution, task), offset: 0, start_offset: 0,
             started_at: spawned?.ts ?? new Date().toISOString(), resumed: false,
@@ -1472,6 +1534,7 @@ export class Runner {
       driver: driver.id,
       pid: run.pid,
       pgid: run.pgid,
+      started: run.started,
       sessionId: run.session_id,
       outputPath: run.output,
       cwd: run.cwd,
@@ -1487,7 +1550,7 @@ export class Runner {
     this.workers.set(agent, t);
     if (registeredOnly) {
       // It started, but the runner died before agent.spawned was committed.
-      await this.commit([{ type: "agent.spawned", source: this.source, payload: { agent, task: run.task, attempt: run.attempt, pid: run.pid, ...(driver.id === "claude-code" && { session_id: run.session_id }) } }]);
+      await this.commit([{ type: "agent.spawned", source: this.source, payload: { agent, task: run.task, attempt: run.attempt, pid: run.pid, started: run.started, ...(driver.id === "claude-code" && { session_id: run.session_id }) } }]);
     }
     this.say(`adopted ${agent} on ${run.task} (pid ${run.pid}, attempt ${run.attempt}, from byte ${run.offset})`);
     if (t.attested === false) await this.attestationFailed(t, ["its attestation failed before the runner restarted"]);
@@ -1517,7 +1580,8 @@ export class Runner {
     let wipCommit: string | undefined;
     let wipStat: string | undefined;
     const wt = taskWorktreePath(this.execution, task);
-    if (existsSync(wt)) {
+    const phase = own(state.tasks, task)?.state;
+    if (existsSync(wt) && !["merging", "submitted", "checking"].includes(phase ?? "")) {
       try {
         const snap = await snapshotWip(wt, "rt: wip snapshot", leasesFor(state, task));
         if (snap.created) wipCommit = snap.commit;
@@ -1527,6 +1591,12 @@ export class Runner {
       }
     }
     const pre = this.lostDrafts(agent, task, run);
+    if (phase === "merging") { await this.commit(pre); return; }
+    if (phase === "submitted" || phase === "checking") {
+      pre.push({ type: "task.rejected", source: this.source, payload: {
+        task, reasons: ["Submission checks were interrupted by process loss; submit again to rerun checks of the committed work."],
+      } });
+    }
     this.say(`${agent} on ${task} is gone${wipCommit ? ` (WIP saved as ${wipCommit.slice(0, 12)})` : ""}; resuming it`);
     const why = wasRunning
       ? "The runner restarted and your worker process was gone. Your session is resumed."
@@ -1534,6 +1604,7 @@ export class Runner {
     await this.startWorker(task, {
       claim: false,
       preDrafts: pre,
+      reopen: phase === "submitted" || phase === "checking",
       immediate: interruptedContext({ why, ...(wipStat && { wipStat }), ...(wipCommit && { wipCommit }) }),
     });
   }

@@ -167,7 +167,8 @@ test("submodules: a task branch carrying a gitlink is never merged", async () =>
   commitGitlink(t.path, sub.sha);
   const integ = W.integrationWorktreePath(ex.header.id);
   const before = git(integ, "rev-parse", "HEAD");
-  await assert.rejects(mergeTask(ex.header, "linker"), (e) => e.name === "SubmodulesUnsupportedError" && /refs\/heads\/rt\/\w+\/linker/.test(e.message));
+  const commit = git(t.path, "rev-parse", "HEAD");
+  await assert.rejects(mergeTask(ex.header, "linker", { commit }), (e) => e.name === "SubmodulesUnsupportedError" && e.message.includes(commit));
   assert.equal(git(integ, "rev-parse", "HEAD"), before);
 });
 

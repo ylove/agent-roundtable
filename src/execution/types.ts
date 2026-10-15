@@ -314,8 +314,21 @@ export interface EventPayloads {
   "contract.consent_requested": { contract: string; version: number; participants: string[] };
   "contract.consent_recorded": { contract: string; agent: string; verdict: ConsentVerdict; reason?: string };
   "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused"; reason: string };
-  "contract.frozen": { contract: string; version: number; by: string; hash: string };
-  "contract.amended": { contract: string; version: number; patch_blob: string; reason: string; affected_tasks: string[] };
+  /**
+   * `blob` (added in WS03) is the full contract JSON at this version, stored with putBlob. The store
+   * requires it at runtime: the blackboard reads the contract from it (heads-down.md §6). It is
+   * optional here only to keep this frozen interface additive.
+   */
+  "contract.frozen": { contract: string; version: number; by: string; hash: string; blob?: string };
+  /** `blob`: the full contract JSON at the new version (required at runtime, as for contract.frozen). */
+  "contract.amended": {
+    contract: string;
+    version: number;
+    patch_blob: string;
+    reason: string;
+    affected_tasks: string[];
+    blob?: string;
+  };
   "contract.superseded": { contract: string; by_contract: string };
 
   "runner.started": { pid: number; version: string };

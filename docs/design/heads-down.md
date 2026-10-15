@@ -142,8 +142,8 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `execution.completed` | integration_sha, pr_url? |
 | `execution.failed` / `execution.aborted` | reason |
 | `contract.proposed` | contract, version, source, blob, reason?, patch_blob? (both set when a draft is amended: see §8) |
-| `contract.consent_requested` | participants |
-| `contract.consent_recorded` | agent, verdict, reason |
+| `contract.consent_requested` | participants, round?, hash?, host? (round id, consentHash of the version asked, owner host: see §8) |
+| `contract.consent_recorded` | agent, verdict, reason, round? (an answer naming any other round is ignored) |
 | `contract.objection_resolved` | agent, how: amended / withdrawn / excused, reason |
 | `contract.frozen` | by, hash, blob (the full contract at this version) |
 | `contract.amended` | version, patch_blob, reason, affected_tasks, blob (the full contract at the new version) |
@@ -293,6 +293,10 @@ export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout
 - The task id `integration` is reserved, because `rt/<exe6>/integration` is the integration branch.
 - Every task persona is a participant: a persona missing from an explicit `participants` list is added, with a warning.
 - A structure without a budget gets a placeholder budget ($20 total, $5 per task, 120 min), with a warning; `execute` asks the human for the real cap.
+- A task's `budget_usd` may not exceed `budget.per_task_usd`. A child contract may have at most `min(parent task budget_usd ?? parent per_task_usd, parent remaining budget)`, and that cap is shared with the task's other child contracts.
+- Env names are checked against `CONTRACT_SECRET_ENV_RE` (`KEY|TOKEN|SECRET|PASS|AUTH|CRED|COOKIE|SESSION|(^|_)PAT$|DATABASE_URL|DSN`, broader than `SECRET_NAME_RE`), and a value that scrubbing would change is refused, so the stored command is always the validated one.
+- `sudo`, `doas`, `su`, `pkexec` and `run0` anywhere along a command's wrapper chain are refused on every backend. Shell detection (`isShellCommand`) follows wrapper chains and matches lowercased basenames; it is a hygiene signal, not the boundary (the sandbox is, and `node -e` exists).
+- A wildcard egress host needs two labels after `*.` (no `*.com`). Glob lists (`paths.write`, `paths.read`, `scope.paths`) hold at most 64 entries.
 
 **Defaults:**
 - `budget.max_parallel`: 3
@@ -305,8 +309,8 @@ export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout
 
 **Proposing.** `propose_contract` takes its structure from the first source available:
 1. An explicit `contract` object. This is the most reliable route and the one the main chat should use.
-2. A fenced ```` ```roundtable-tasks ```` JSON block in the plan or archived session.
-3. A structuring LLM call, run as `extractJsonObject` → validate → one retry with the errors included. This mirrors the agent-creation architect.
+2. A fenced ```` ```roundtable-tasks ```` JSON block in the plan or archived session. For an ultraplan only its plan versions are searched, latest first, never the document or entries (a participant's input or sign-off may quote a block). Other sessions: the summary and orchestrator turns first, then agents' turns, with a warning.
+3. A structuring LLM call, run as `extractJsonObject` → validate → one retry with the errors included. This mirrors the agent-creation architect. Falling back to it for an ultraplan whose plans have no block is warned about, as is proposing from an ultraplan that was not signed off.
 
 **Ultraplan support.** `start_ultraplan` gains `execution_ready`.
 - When it is set, planner draft and revise prompts require the fenced block, and sign-off prompts ask participants to check it.
@@ -317,23 +321,26 @@ export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout
 **Consent.** `runVerdictRound(agents, prompt, label, options)` is extracted into `workshop.ts` and shared with ultraplan sign-off.
 - Each participant answers `Consent: AGREE | OBJECT`.
 - An UNCLEAR answer is re-asked once with a stricter prompt; if it is still unclear, it is recorded as UNCLEAR and counts as an objection.
-- `contract.consent_requested` is recorded in its own transaction (refused while another round is in flight), the calls run outside any transaction, and the answers are recorded together. A round whose process died stops counting as in flight after `consentRoundStaleMs`, and its missing answers count as UNCLEAR.
+- **A verdict counts only for the version it was given on.** Each verdict carries that version and the `consentHash` of what was asked (`contractHash` without `status`, so a draft and its freeze match). An answer on an older version is *stale*: it needs re-consent or an excusal.
+- Rounds carry an id. `contract.consent_requested` gains optional `round`, `hash` and `host` (the owner's pid is the event source's), and `contract.consent_recorded` gains optional `round`. The request is recorded in its own transaction (refused while another round is in flight), the calls run outside any transaction, and the answers are recorded together, but only while their round is still current and the version unchanged; otherwise they are dropped with a warning. The first answer per participant in a round wins, on replay too.
+- A round run by another process counts as in flight for at most `CONSENT_ROUND_STALE_CAP_MS` (10 minutes), and not at all once its owner pid is dead on this host. Its missing answers then count as UNCLEAR. `freeze_contract {abandon_round: true}` lets the orchestrator record them as UNCLEAR at once (they still need excusing); this is audited as `contract.consent_round_abandoned`.
 - An objection is resolved by amendment when the objector is re-asked on the amended version and agrees (`contract.objection_resolved{how: "amended"}`), and withdrawn when they agree on the same version.
 
-**Freezing.** `freeze_contract` takes an `orchestrator` name, and only an orchestrator can freeze. It refuses when:
-- an objection is unresolved. An objection is resolved by an amendment, by being withdrawn, or by being excused with a reason; excusals are audited.
+**Freezing.** `freeze_contract` takes an `orchestrator` name, and only the contract's orchestrator can freeze. It refuses, listing every reason, when:
+- a participant has no AGREE on the current version: no answer, a stale answer, an objection or an UNCLEAR. Each can be excused with a reason; excusals are audited;
 - the source session is busy, or a consent round is in flight;
 - for a child contract: the parent is not frozen, or the caller is not the parent task's persona or the parent's orchestrator.
 
-The frozen hash goes to the audit log.
+The hash is taken over the scrubbed contract (what the blob stores) and goes to the audit log.
 
 **Amending.** An amendment is an RFC 7396 merge patch that produces v(N+1).
-- `affected_tasks` is computed by diffing task specs and interface consumers.
-- Only affected participants re-consent.
-- Affected agents receive a `directive.issued` telling them to re-read the contract, and the affected checks re-run.
-- The lead can amend only within `authority.may`: `add_task` for new tasks, `reassign` for persona or team changes, `amend_interfaces`, and `extend_budget` up to `budget_extension_pct` above the budget first frozen. Removing tasks or changing anything else is reserved to the orchestrator.
-- **Drafts.** The reducer marks every `contract.amended` frozen, so amending a contract that is not frozen yet records `contract.proposed` for v(N+1) instead, with `source: "amendment"`, the `reason` and the `patch_blob`. Only amendments of a frozen contract emit `contract.amended`; that version's blob carries its own freeze record and hash, which is also audited.
-- Re-consent asks the personas of affected tasks (before and after), participants who never answered, and anyone with an open objection. An empty patch with `consent: true` makes no new version and only asks those who have not agreed.
+- `affected_tasks` is computed by diffing task specs, interface owners and consumers, and the commands tasks check with.
+- Who may amend: without an authority list, the contract's orchestrator (or a child's parent orchestrator); with one (the lead fallback), only `authority.lead`, and only with actions inside `authority.may`.
+- **Drafts.** The reducer marks every `contract.amended` frozen, so amending a contract that is not frozen yet records `contract.proposed` for v(N+1) instead, with `source: "amendment"`, the `reason` and the `patch_blob`. Every participant agreed to the old draft, not this one: `consent: true` asks them all again, and the freeze needs their AGREE on v(N+1).
+- **Frozen contracts** get `contract.amended`, whose blob carries its own freeze record and hash (also audited), `task.cancelled` for removed tasks, and a `directive.issued` telling the agents of affected tasks to re-read the contract. A change to a run-wide field (`budget`, `scope`, `sandbox`, `authority`, `validation`, `workers`, `goal`) by the orchestrator needs everyone's consent first: with `consent: true` every participant is asked about the candidate version, which is applied only if all agree; `override_consent: true` applies it without, audited as `contract.consent_overridden`; without either it is refused. A task-level change applies at once, and `consent: true` then asks the personas of the affected tasks. A lead's change within its authority was consented to as part of the authority and needs no round.
+- **The lead's authority** is default-deny over every field: `add_task` for new tasks, `reassign` for persona or team changes (either may bring the new persona in as a participant, if it resolves through `loadAgent`), `amend_interfaces`, and `extend_budget` for budget and time increases up to `budget_extension_pct` above the budget first frozen. Removing tasks, decreases and new caps, and anything else are reserved to the orchestrator.
+- **Affected checks** are not marked stale on the blackboard: `contract.amended` lists `affected_tasks`, the directive tells their agents, and the runner (WS08) re-runs those tasks' checks on their next submission.
+- An empty patch with `consent: true` makes no new version and only asks the participants without an AGREE on the current version.
 
 ## 9. Workers
 
@@ -607,8 +614,8 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | Group | Tool | Arguments |
 |---|---|---|
 | Contract | `propose_contract` | goal\*, orchestrator\*, title, original_prompt, artifacts[], from_session, plan, contract{}, parent_contract, parent_task, participants[], repo_dir, base_ref, consent, provider, model, base_url |
-| | `amend_contract` | contract_id\*, patch{}\*, reason\*, orchestrator\*, from_session, consent, provider, model, base_url |
-| | `freeze_contract` | contract_id\*, orchestrator\*, excuse[{agent, reason}] |
+| | `amend_contract` | contract_id\*, patch{}\*, reason\*, orchestrator\*, from_session, consent, override_consent, provider, model, base_url |
+| | `freeze_contract` | contract_id\*, orchestrator\*, excuse[{agent, reason}], abandon_round |
 | Run | `execute` | contract_id\*, confirmation\*, visibility{dashboard, chat_only, github{repo, project_owner, project_number, create_project, pr}}, budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model |
 | | `execution_status` | execution_id, focus, view, since_seq, limit |
 | | `control_execution` | execution_id\*, action\*, reason, message, task_ids[], targets[], confirm |
@@ -689,9 +696,10 @@ WS04 adds the contract lifecycle:
 
 | Module | API |
 |---|---|
-| `src/execution/contract.ts` | `checkContract(c, {parent?})` (sync), `validateContract(c, {parent?, personas?})` (resolves personas), `contractHash`, `applyMergePatch`, `createMergePatch`, `affectedTasks(old, new)` → `{changed, added, removed, dependents, all}`, `renderContractMarkdown(c, {mark?})`, `contractPath`, `RESERVED_TASK_IDS` |
-| `src/execution/contract-state.ts` | `contractRecord(store, id?)` (versions, verdicts, consent round and freeze, read from the log), `openContractStore(contractId)`, `loadParent(id)`, `summarizeConsent(record)` |
+| `src/execution/contract.ts` | `checkContract(c, {parent?})` (sync), `validateContract(c, {parent?, personas?})` (resolves personas), `contractHash`, `consentHash`, `applyMergePatch`, `createMergePatch`, `affectedTasks(old, new)` → `{changed, added, removed, dependents, all}`, `renderContractMarkdown(c, {mark?})`, `contractPath`, `childBudgetCap(parent, task)`, `RESERVED_TASK_IDS`, `CONTRACT_SECRET_ENV_RE` |
+| `src/execution/contract-state.ts` | `contractRecord(store, id?)` (versions, verdicts with their version and hash, the consent round and freeze, read from the log), `standing(record, agent)`, `summarizeConsent(record)`, `openContractStore(contractId)`, `loadParent(id, {task?, exclude?})` (depth, remaining budget, sibling budgets), `CONSENT_ROUND_STALE_CAP_MS` |
 | `src/execution/contract-parse.ts` | `findTaskBlock(text)`, `blockToContract(value)`, `sessionSource(archived)`, `structureContract(request, llm, check)`, `TASK_BLOCK_FORMAT` |
-| `src/execution/consent.ts` | `requestConsent(store, contractId, {by, participants?, llm?})` |
-| `src/execution/contract-lifecycle.ts` | `proposeContract(opts)`, `freezeContract(contractId, {orchestrator, excuse?})`, `freezeContractIn(store, …)`, `amendContract(store, patch, {by, reason?, authority?, contractId?, fromSession?, consent?, source?})`, `authorityNeeds`, `AuthorityError`, `ContractRefusal` |
+| `src/execution/consent.ts` | `requestConsent(store, contractId, {by, participants?, llm?, candidate?})` (returns `dropped` when the round stopped being current) |
+| `src/execution/contract-lifecycle.ts` | `proposeContract(opts)`, `freezeContract(contractId, {orchestrator, excuse?, abandonRound?})`, `freezeContractIn(store, …)`, `amendContract(store, patch, {by, reason?, authority?, contractId?, fromSession?, consent?, overrideConsent?, source?})`, `authorityNeeds`, `RUN_WIDE_FIELDS`, `AuthorityError`, `ContractRefusal` |
+| `src/sandbox/common.ts` | `analyzeArgv(argv)` → `{programs, shell}`, `isShellCommand`, `isPrivilegedCommand` (WS04 widened the shell detection) |
 | `src/sessions/workshop.ts` | `runVerdictRound(agents, buildPrompt, label, {verdicts, llm, limit?, reask?, catchErrors?})` (ultraplan reviews and sign-offs, consent) |

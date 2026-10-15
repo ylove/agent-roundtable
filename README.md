@@ -217,17 +217,17 @@ One turn runs per session at a time. While a turn is in flight, `continue_collab
 
 ### Contracts (heads-down)
 
-A contract is what a heads-down run builds: the goal and the human's request verbatim, tasks (persona, dependencies, write paths, acceptance criteria, checks), interfaces, decisions, validation commands (structured argv), budget and the lead's authority. Every participant must answer `Consent: AGREE` or `Consent: OBJECT` before the orchestrator that proposed it can freeze it. Contracts live under `ROUNDTABLE_HOME/executions/<exe>/contracts/<ctr>/` (`v<N>.json` and `CONTRACT.md`); nothing is written to the repository. These tools take no unknown arguments.
+A contract is what a heads-down run builds: the goal and the human's request verbatim, tasks (persona, dependencies, write paths, acceptance criteria, checks), interfaces, decisions, validation commands (structured argv), budget and the lead's authority. Every participant must answer `Consent: AGREE` or `Consent: OBJECT` on its current version before the orchestrator that proposed it can freeze it: an agreement to an earlier version does not count. Contracts live under `ROUNDTABLE_HOME/executions/<exe>/contracts/<ctr>/` (`v<N>.json` and `CONTRACT.md`); nothing is written to the repository. These tools take no unknown arguments.
 
 | Tool | Arguments |
 | --- | --- |
 | `propose_contract` | `{ goal, orchestrator, title?, original_prompt?, artifacts[]?, from_session?, plan?, contract?, parent_contract?, parent_task?, participants[]?, repo_dir?, base_ref?, consent?, provider?, model?, base_url? }` |
-| `amend_contract` | `{ contract_id, patch, reason, orchestrator, from_session?, consent?, provider?, model?, base_url? }` |
-| `freeze_contract` | `{ contract_id, orchestrator, excuse[]? }` (`excuse` items are `{ agent, reason }`) |
+| `amend_contract` | `{ contract_id, patch, reason, orchestrator, from_session?, consent?, override_consent?, provider?, model?, base_url? }` |
+| `freeze_contract` | `{ contract_id, orchestrator, excuse[]?, abandon_round? }` (`excuse` items are `{ agent, reason }`) |
 
 - `propose_contract` takes the structure from an explicit `contract` object with tasks, then from the last `roundtable-tasks` block in `plan` or in the archived `from_session`, then from a structuring call on the plan (one retry quoting the errors). It resolves `repo_dir` to its git top level and `base_ref` (default `HEAD`) to a commit. `consent: true` asks every participant right away; an unclear answer is re-asked once, then counts as an objection.
-- `amend_contract` applies an RFC 7396 merge patch and makes v(N+1). Amending a draft makes a new proposal. Amending a frozen contract cancels the tasks it removes and tells the agents of affected tasks to re-read the contract. `consent: true` re-asks only the affected participants and anyone with an open objection, and `patch: {}` with `consent: true` asks everyone who has not agreed yet.
-- `freeze_contract` lists every reason it refuses: an unresolved objection or unclear answer, a participant who never answered, a consent round in flight, a busy source session, or, for a child contract, a parent that is not frozen. `excuse` sets objections aside with a reason. Excusals and the frozen sha256 are written to the audit log. Freezing starts nothing.
+- `amend_contract` applies an RFC 7396 merge patch and makes v(N+1). Amending a draft makes a new proposal that everyone must consent to again (`consent: true` asks them all). Amending a frozen contract cancels the tasks it removes and tells the agents of affected tasks to re-read the contract; a change to its budget, scope, sandbox, authority, validation, workers or goal needs `consent: true` (everyone is asked first, and it applies only if all agree) or `override_consent: true` (audited). `patch: {}` with `consent: true` asks everyone who has not agreed to the current version.
+- `freeze_contract` lists every reason it refuses: an unresolved objection or unclear answer, a participant who has not answered about the current version, a consent round in flight, a busy source session, or, for a child contract, a parent that is not frozen. `excuse` sets these aside with a reason, and `abandon_round` ends a consent round whose process died. Excusals, abandoned rounds and the frozen sha256 are written to the audit log. Freezing starts nothing.
 
 ### LLM
 

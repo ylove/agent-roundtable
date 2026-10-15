@@ -263,7 +263,7 @@ test("docker: non-root, HOME=/tmp, only the given env, writable /work, read-only
     const backend = new DockerBackend();
     const script = `
       const fs = require("node:fs");
-      const out = { uid: process.getuid(), home: process.env.HOME, cwd: process.cwd(), secret: process.env.SANDBOX_DOCKER_TEST_TOKEN ?? null, mine: process.env.MY_FLAG };
+      const out = { uid: process.getuid(), home: process.env.HOME, cwd: process.cwd(), hostVar: process.env.SANDBOX_DOCKER_TEST_TOKEN ?? null, mine: process.env.MY_FLAG };
       fs.writeFileSync("/work/inside.txt", "ok");
       try { fs.writeFileSync("/etc/rt-test", "x"); out.root = "writable"; } catch (e) { out.root = e.code; }
       const s = require("node:net").connect(443, "1.1.1.1");
@@ -277,7 +277,7 @@ test("docker: non-root, HOME=/tmp, only the given env, writable /work, read-only
     assert.ok(out.uid > 0, "runs as non-root");
     assert.equal(out.home, "/tmp");
     assert.equal(out.cwd, "/work");
-    assert.equal(out.secret, null);
+    assert.equal(out.hostVar, null, "host variables never reach the container");
     assert.equal(out.mine, "yes");
     assert.equal(out.root, "EROFS");
     assert.notEqual(out.net, "connected");

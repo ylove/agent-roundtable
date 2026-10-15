@@ -141,7 +141,7 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `execution.mode_changed` | from, to, reason, session? |
 | `execution.completed` | integration_sha, pr_url? |
 | `execution.failed` / `execution.aborted` | reason |
-| `contract.proposed` | contract, version, source, blob |
+| `contract.proposed` | contract, version, source, blob, reason?, patch_blob? (both set when a draft is amended: see §8) |
 | `contract.consent_requested` | participants |
 | `contract.consent_recorded` | agent, verdict, reason |
 | `contract.objection_resolved` | agent, how: amended / withdrawn / excused, reason |
@@ -290,6 +290,9 @@ export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout
 - No `env` key may match `/KEY|TOKEN|SECRET|PASS/i`.
 - Budgets are greater than 0.
 - A child contract must fit inside its parent task's paths and budget.
+- The task id `integration` is reserved, because `rt/<exe6>/integration` is the integration branch.
+- Every task persona is a participant: a persona missing from an explicit `participants` list is added, with a warning.
+- A structure without a budget gets a placeholder budget ($20 total, $5 per task, 120 min), with a warning; `execute` asks the human for the real cap.
 
 **Defaults:**
 - `budget.max_parallel`: 3
@@ -313,7 +316,9 @@ export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout
 
 **Consent.** `runVerdictRound(agents, prompt, label, options)` is extracted into `workshop.ts` and shared with ultraplan sign-off.
 - Each participant answers `Consent: AGREE | OBJECT`.
-- An UNCLEAR answer is re-asked once with a stricter prompt; if it is still unclear, it counts as an objection.
+- An UNCLEAR answer is re-asked once with a stricter prompt; if it is still unclear, it is recorded as UNCLEAR and counts as an objection.
+- `contract.consent_requested` is recorded in its own transaction (refused while another round is in flight), the calls run outside any transaction, and the answers are recorded together. A round whose process died stops counting as in flight after `consentRoundStaleMs`, and its missing answers count as UNCLEAR.
+- An objection is resolved by amendment when the objector is re-asked on the amended version and agrees (`contract.objection_resolved{how: "amended"}`), and withdrawn when they agree on the same version.
 
 **Freezing.** `freeze_contract` takes an `orchestrator` name, and only an orchestrator can freeze. It refuses when:
 - an objection is unresolved. An objection is resolved by an amendment, by being withdrawn, or by being excused with a reason; excusals are audited.
@@ -326,7 +331,9 @@ The frozen hash goes to the audit log.
 - `affected_tasks` is computed by diffing task specs and interface consumers.
 - Only affected participants re-consent.
 - Affected agents receive a `directive.issued` telling them to re-read the contract, and the affected checks re-run.
-- The lead can amend only within `authority.may`.
+- The lead can amend only within `authority.may`: `add_task` for new tasks, `reassign` for persona or team changes, `amend_interfaces`, and `extend_budget` up to `budget_extension_pct` above the budget first frozen. Removing tasks or changing anything else is reserved to the orchestrator.
+- **Drafts.** The reducer marks every `contract.amended` frozen, so amending a contract that is not frozen yet records `contract.proposed` for v(N+1) instead, with `source: "amendment"`, the `reason` and the `patch_blob`. Only amendments of a frozen contract emit `contract.amended`; that version's blob carries its own freeze record and hash, which is also audited.
+- Re-consent asks the personas of affected tasks (before and after), participants who never answered, and anyone with an open objection. An empty patch with `consent: true` makes no new version and only asks those who have not agreed.
 
 ## 9. Workers
 
@@ -588,7 +595,7 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | Group | Tool | Arguments |
 |---|---|---|
 | Contract | `propose_contract` | goal\*, orchestrator\*, title, original_prompt, artifacts[], from_session, plan, contract{}, parent_contract, parent_task, participants[], repo_dir, base_ref, consent, provider, model, base_url |
-| | `amend_contract` | contract_id\*, patch{}\*, reason\*, orchestrator\*, from_session, consent |
+| | `amend_contract` | contract_id\*, patch{}\*, reason\*, orchestrator\*, from_session, consent, provider, model, base_url |
 | | `freeze_contract` | contract_id\*, orchestrator\*, excuse[{agent, reason}] |
 | Run | `execute` | contract_id\*, confirmation\*, visibility{dashboard, chat_only, github{repo, project_owner, project_number, create_project, pr}}, budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model |
 | | `execution_status` | execution_id, focus, view, since_seq, limit |
@@ -665,3 +672,14 @@ WS03 adds the store that the other workstreams write through:
 | `src/execution/blobs.ts` | `putBlob`, `getBlob`, `scrubbedJSON(value)` for structured blobs |
 | `src/execution/verify.ts` | `verifyExecution(idOrDir)` returns `{ok, seq, badSeq?, reason?}` |
 | `src/security/audit.ts` | `appendAudit({actor, action, target?, details?})`, `verifyAudit()`, `pruneAudit(retentionDays = 365)` |
+
+WS04 adds the contract lifecycle:
+
+| Module | API |
+|---|---|
+| `src/execution/contract.ts` | `checkContract(c, {parent?})` (sync), `validateContract(c, {parent?, personas?})` (resolves personas), `contractHash`, `applyMergePatch`, `createMergePatch`, `affectedTasks(old, new)` → `{changed, added, removed, dependents, all}`, `renderContractMarkdown(c, {mark?})`, `contractPath`, `RESERVED_TASK_IDS` |
+| `src/execution/contract-state.ts` | `contractRecord(store, id?)` (versions, verdicts, consent round and freeze, read from the log), `openContractStore(contractId)`, `loadParent(id)`, `summarizeConsent(record)` |
+| `src/execution/contract-parse.ts` | `findTaskBlock(text)`, `blockToContract(value)`, `sessionSource(archived)`, `structureContract(request, llm, check)`, `TASK_BLOCK_FORMAT` |
+| `src/execution/consent.ts` | `requestConsent(store, contractId, {by, participants?, llm?})` |
+| `src/execution/contract-lifecycle.ts` | `proposeContract(opts)`, `freezeContract(contractId, {orchestrator, excuse?})`, `freezeContractIn(store, …)`, `amendContract(store, patch, {by, reason?, authority?, contractId?, fromSession?, consent?, source?})`, `authorityNeeds`, `AuthorityError`, `ContractRefusal` |
+| `src/sessions/workshop.ts` | `runVerdictRound(agents, buildPrompt, label, {verdicts, llm, limit?, reask?, catchErrors?})` (ultraplan reviews and sign-offs, consent) |

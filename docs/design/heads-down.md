@@ -489,6 +489,14 @@ The runner never pushes to the base branch, and nothing auto-merges.
 - `pricing.ts` is a data table that can be overridden with `ROUNDTABLE_PRICING_FILE`.
 - Models missing from the table are recorded as `estimated: true`.
 
+**Implementation** (`src/execution/watchdog.ts`, with `budget.ts`, `pricing.ts`, `circuit.ts`, `deadlock.ts`, and the action types shared by all of them in `watchdog-actions.ts`):
+- The signature is `evaluate(state, now, obs, cfg?)`. `obs` holds what the blackboard does not: agent liveness and output and heartbeat times, watcher liveness, and times kept only in the log. `observeEvents(events, base)` derives the log part: claim renewals, huddle starts, routing times, diff history, open dependency needs, stall counts, driver outcomes and circuit history.
+- An action is `emit` (event drafts) or a process operation: `kill_worker`, `resume_worker`, `spawn_retry`, `stop_spawning`, `lead_fallback` or `wake_orchestrator`. Each carries a `rule` and a deterministic `key`. Watchdog escalation ids derive from the key, which is how a rule knows it has already escalated. `actionsToDrafts` adds one `watchdog.action` per action for the audit trail.
+- The runner evaluates inside `transact` against the fresh state, commits the drafts, then performs the process operations.
+- The lead fallback first re-routes the escalation to `authority.lead` (`wake: false`), which marks it handled. A huddle that times out concludes `NO_OUTCOME`, and its escalation is routed to the orchestrator.
+- Budget thresholds fire once per run. Spending through an extension escalates again. The circuit counts failures since the last success.
+- The lease grants and overlap check here are a conservative stand-in until the WS06 lease engine replaces them.
+
 ## 12. Escalations and huddles
 
 `escalate` takes:

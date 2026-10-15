@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -123,4 +123,46 @@ test("pruning deletes whole expired months, keeps the newest, re-anchors and is 
   assert.deepEqual(await pruneAudit(1, { dir, now: Date.UTC(2030, 0, 1) }), ["audit-2025-06.jsonl"]);
   assert.ok(readdirSync(dir).includes("audit-2025-07.jsonl"));
   assert.equal((await verifyAudit({ dir })).ok, true);
+});
+
+test("deleting the oldest entries without a prune is detected", async () => {
+  const dir = freshDir();
+  for (const [i, m] of [[1, 8], [2, 8], [3, 9]]) await appendAudit({ actor: "a", action: `act-${i}` }, { dir, now: at(2026, m) });
+  const file = join(dir, "audit-2026-08.jsonl");
+  rmSync(file);
+  const r = await verifyAudit({ dir });
+  assert.deepEqual([r.ok, r.badFile, r.badLine], [false, "audit-2026-09.jsonl", 1]);
+  assert.match(r.reason, /does not start the chain, and no prune anchor is recorded/);
+});
+
+test("a prune records its anchor; the chain must link to it", async () => {
+  const dir = freshDir();
+  await appendAudit({ actor: "a", action: "old" }, { dir, now: at(2024, 1) });
+  const last = await appendAudit({ actor: "a", action: "old2" }, { dir, now: at(2024, 1, 20) });
+  await appendAudit({ actor: "a", action: "new" }, { dir, now: at(2025, 6) });
+  await pruneAudit(365, { dir, now: Date.UTC(2025, 6, 1) });
+  const anchorPath = join(dir, "audit-anchor.json");
+  assert.equal(statSync(anchorPath).mode & 0o777, 0o600);
+  const anchor = JSON.parse(readFileSync(anchorPath, "utf8"));
+  assert.deepEqual([anchor.hash, anchor.previous, anchor.files], [last.hash, GENESIS_HASH, ["audit-2024-01.jsonl"]]);
+  assert.equal((await verifyAudit({ dir })).ok, true);
+
+  writeFileSync(anchorPath, JSON.stringify({ ...anchor, hash: "f".repeat(64) }));
+  assert.match((await verifyAudit({ dir })).reason, /does not link to the prune anchor/);
+  writeFileSync(anchorPath, "{");
+  assert.equal((await verifyAudit({ dir })).badFile, "audit-anchor.json");
+  writeFileSync(anchorPath, JSON.stringify(anchor));
+  for (const n of readdirSync(dir).filter((n) => n.endsWith(".jsonl"))) rmSync(join(dir, n));
+  assert.match((await verifyAudit({ dir })).reason, /no audit entries remain/);
+});
+
+test("an interrupted prune (anchor written, files not yet deleted) still verifies", async () => {
+  const dir = freshDir();
+  await appendAudit({ actor: "a", action: "one" }, { dir, now: at(2024, 1) });
+  const last = await appendAudit({ actor: "a", action: "two" }, { dir, now: at(2024, 1) });
+  await appendAudit({ actor: "a", action: "three" }, { dir, now: at(2025, 6) });
+  writeFileSync(join(dir, "audit-anchor.json"), JSON.stringify({ hash: last.hash, previous: GENESIS_HASH, files: ["audit-2024-01.jsonl"], at: "x" }));
+  assert.equal((await verifyAudit({ dir })).ok, true);
+  writeFileSync(join(dir, "audit-anchor.json"), JSON.stringify({ hash: "e".repeat(64), previous: GENESIS_HASH, files: [], at: "x" }));
+  assert.match((await verifyAudit({ dir })).reason, /never reaches the anchor/);
 });

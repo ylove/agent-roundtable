@@ -3,11 +3,13 @@
 //
 // Records confirmations, freezes, excusals, lease violations and purges. Each entry's prev is
 // the hash of the entry before it, which for the first entry of a month is the last entry of
-// the newest earlier file. Retention deletes whole month files; verification then accepts the
-// first remaining entry's prev as the chain's anchor, and the prune itself is audited.
+// the newest earlier file. The chain starts at GENESIS_HASH. Retention deletes whole month
+// files and records the hash the chain now starts from in audit-anchor.json; verification
+// requires the first remaining entry to link to that anchor (or to genesis if nothing was ever
+// pruned), and the prune itself is audited.
 // ============================================================================
 
-import { closeSync, fsyncSync, ftruncateSync, openSync, readdirSync, rmSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { AUDIT_DIR } from "../config.js";
 import { scrubDeep } from "../execution/blobs.js";
@@ -15,7 +17,7 @@ import { chainHash } from "../execution/chain.js";
 import { readLines } from "../execution/jsonl.js";
 import { acquireLock, type LockOptions } from "../execution/lock.js";
 import { GENESIS_HASH } from "../execution/types.js";
-import { mkdirPrivate } from "./fs-safe.js";
+import { fsyncDir, mkdirPrivate, writeFileAtomic } from "./fs-safe.js";
 import { scrub } from "./secrets.js";
 
 export interface AuditInput {
@@ -55,8 +57,20 @@ export interface AuditVerifyResult {
   reason?: string;
 }
 
+/** audit-anchor.json: where the chain starts after pruning. */
+interface Anchor {
+  /** The last hash of the pruned files: the first remaining entry's prev. */
+  hash: string;
+  /** The anchor before this prune (GENESIS_HASH at first), still valid if the prune was interrupted. */
+  previous: string;
+  files: string[];
+  at: string;
+}
+
+/** A live holder is never displaced (execution/lock.ts); staleMs is the grace period for an ownerless lock. */
 const AUDIT_LOCK: LockOptions = { staleMs: 10_000, timeoutMs: 30_000 };
 const FILE_RE = /^audit-(\d{4})-(\d{2})\.jsonl$/;
+const ANCHOR_FILE = "audit-anchor.json";
 const DAY_MS = 86_400_000;
 
 const monthOf = (ms: number) => new Date(ms).toISOString().slice(0, 7);
@@ -70,39 +84,62 @@ function monthFiles(dir: string): string[] {
   }
 }
 
-/**
- * The hash of the newest complete entry, searching from the newest file back. A torn last line
- * in the newest file (a writer died mid-append; we hold the lock, so none is in flight) is cut off.
- */
-function chainHead(dir: string, files: string[]): string {
-  for (let i = files.length - 1; i >= 0; i--) {
-    const path = join(dir, files[i]);
-    let last = null as string | null;
-    const r = readLines(path, 0, (line) => {
-      last = line;
-    });
-    if (i === files.length - 1 && r.torn > 0) {
-      const fd = openSync(path, "r+");
-      try {
-        ftruncateSync(fd, r.offset);
-      } finally {
-        closeSync(fd);
-      }
-      console.error(`[Audit] discarded a torn ${r.torn}-byte line at the end of ${files[i]}`);
-    }
-    if (last !== null) {
-      let hash: unknown;
-      try {
-        hash = (JSON.parse(last) as { hash?: unknown }).hash;
-      } catch {
-        hash = undefined;
-      }
-      // Refuse to extend a chain whose head is unreadable: that would hide the damage.
-      if (typeof hash !== "string") throw new Error(`Audit log ${files[i]}: the last entry is corrupt; run verifyAudit()`);
-      return hash;
-    }
+/** The hash of the last complete entry of one file, or null when it has none; throws if that entry is corrupt. */
+function lastHash(dir: string, name: string): { hash: string | null; offset: number; torn: number } {
+  let last = null as string | null;
+  const r = readLines(join(dir, name), 0, (line) => {
+    last = line;
+  });
+  if (last === null) return { hash: null, offset: r.offset, torn: r.torn };
+  let hash: unknown;
+  try {
+    hash = (JSON.parse(last) as { hash?: unknown }).hash;
+  } catch {
+    hash = undefined;
   }
-  return GENESIS_HASH;
+  // Refuse to extend or anchor a chain whose head is unreadable: that would hide the damage.
+  if (typeof hash !== "string") throw new Error(`Audit log ${name}: the last entry is corrupt; run verifyAudit()`);
+  return { hash, offset: r.offset, torn: r.torn };
+}
+
+function readAnchor(dir: string): Anchor | null {
+  let raw: string;
+  try {
+    raw = readFileSync(join(dir, ANCHOR_FILE), "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+  const a = JSON.parse(raw) as Partial<Anchor>;
+  if (!a || typeof a.hash !== "string" || typeof a.previous !== "string") throw new Error(`${ANCHOR_FILE} is malformed`);
+  return a as Anchor;
+}
+
+/**
+ * The chain head (hash of the newest entry, searching back through older files) and the size of
+ * the newest file. A torn last line in the newest file is cut off first: we hold the lock and a
+ * live holder is never displaced, so it is a dead writer's.
+ */
+function chainHead(dir: string, files: string[]): { prev: string; newestSize: number } {
+  let newestSize = 0;
+  for (let i = files.length - 1; i >= 0; i--) {
+    const r = lastHash(dir, files[i]);
+    if (i === files.length - 1) {
+      newestSize = r.offset;
+      if (r.torn > 0) {
+        const fd = openSync(join(dir, files[i]), "r+");
+        try {
+          ftruncateSync(fd, r.offset);
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+        console.error(`[Audit] discarded a torn ${r.torn}-byte line at the end of ${files[i]}`);
+      }
+    }
+    if (r.hash !== null) return { prev: r.hash, newestSize };
+  }
+  return { prev: readAnchor(dir)?.hash ?? GENESIS_HASH, newestSize };
 }
 
 /** Append one entry under the audit lock. Its details (and target) are scrubbed of secrets. */
@@ -116,11 +153,12 @@ export async function appendAudit(input: AuditInput, opts: AuditOptions = {}): P
   const lock = await acquireLock(join(dir, "audit.lock"), AUDIT_LOCK);
   try {
     const files = monthFiles(dir);
-    const prev = chainHead(dir, files);
+    const { prev, newestSize } = chainHead(dir, files);
     // Never write behind the newest file, even if the clock went back.
     const newest = files.at(-1);
-    const month = monthOf(now);
-    const file = newest && newest > `audit-${month}.jsonl` ? newest : `audit-${month}.jsonl`;
+    const month = `audit-${monthOf(now)}.jsonl`;
+    const file = newest && newest > month ? newest : month;
+    const expectedSize = file === newest ? newestSize : 0;
     const entry: Record<string, unknown> = {
       v: 1,
       ts: new Date(now).toISOString(),
@@ -133,27 +171,52 @@ export async function appendAudit(input: AuditInput, opts: AuditOptions = {}): P
     entry.prev = prev;
     entry.hash = chainHash(prev, entry); // throws, writing nothing, if details are not JSON-safe
     const line = Buffer.from(JSON.stringify(entry) + "\n", "utf8");
-    const fd = openSync(join(dir, file), "a", 0o600);
+    const path = join(dir, file);
+    const created = !existsSync(path);
+    const fd = openSync(path, "a", 0o600);
     try {
       if (!lock.held()) throw new Error("appendAudit lost the audit lock; nothing was written");
-      let off = 0;
-      while (off < line.length) off += writeSync(fd, line, off, line.length - off);
-      fsyncSync(fd);
+      const size = fstatSync(fd).size;
+      if (size !== expectedSize) throw new Error(`${file} changed while locked (${size} bytes, expected ${expectedSize}); nothing was written`);
+      try {
+        let off = 0;
+        while (off < line.length) off += writeSync(fd, line, off, line.length - off);
+        fsyncSync(fd);
+      } catch (e) {
+        try {
+          ftruncateSync(fd, expectedSize);
+        } catch {
+          /* the next append cuts the torn line off */
+        }
+        throw e;
+      }
     } finally {
       closeSync(fd);
     }
+    if (created) fsyncDir(dir);
     return entry as unknown as AuditEntry;
   } finally {
     lock();
   }
 }
 
-/** Check every remaining entry, oldest file first. The first entry's prev is accepted as the anchor. */
+/**
+ * Check every remaining entry, oldest file first. The first entry must link to the prune anchor
+ * (or to GENESIS_HASH if nothing was ever pruned).
+ */
 export async function verifyAudit(opts: Pick<AuditOptions, "dir"> = {}): Promise<AuditVerifyResult> {
   const dir = opts.dir ?? AUDIT_DIR;
   const files = monthFiles(dir);
+  let anchor: Anchor | null;
+  try {
+    anchor = readAnchor(dir);
+  } catch (e) {
+    return { ok: false, entries: 0, files: files.length, badFile: ANCHOR_FILE, reason: e instanceof Error ? e.message : String(e) };
+  }
   let prev: string | null = null;
   let entries = 0;
+  // After an interrupted prune the chain may still start at the previous anchor, but must then reach the new one.
+  let mustReach = null as string | null;
   for (const name of files) {
     let lineNo = 0;
     let failure: string | undefined;
@@ -168,9 +231,15 @@ export async function verifyAudit(opts: Pick<AuditOptions, "dir"> = {}): Promise
       }
       if (!e || typeof e !== "object" || e.v !== 1 || typeof e.prev !== "string" || typeof e.hash !== "string") {
         failure = "not a version 1 audit entry";
-      } else if (prev !== null && e.prev !== prev) {
+      } else if (prev === null) {
+        if (anchor && e.prev === anchor.hash) mustReach = null;
+        else if (anchor && e.prev === anchor.previous) mustReach = anchor.hash;
+        else if (!anchor && e.prev === GENESIS_HASH) mustReach = null;
+        else failure = anchor ? "the first entry does not link to the prune anchor" : "the first entry does not start the chain, and no prune anchor is recorded";
+      } else if (e.prev !== prev) {
         failure = "prev does not link to the previous entry";
-      } else {
+      }
+      if (!failure) {
         let hash: string | null;
         try {
           hash = chainHash(e.prev, e);
@@ -180,18 +249,22 @@ export async function verifyAudit(opts: Pick<AuditOptions, "dir"> = {}): Promise
         if (hash !== e.hash) failure = "hash does not match its content";
       }
       if (failure) return false;
+      if (e.hash === mustReach) mustReach = null;
       prev = e.hash;
       entries++;
     });
     if (failure) return { ok: false, entries, files: files.length, badFile: name, badLine: lineNo, reason: failure };
   }
+  if (mustReach !== null) return { ok: false, entries, files: files.length, reason: "an interrupted prune: the chain never reaches the anchor" };
+  if (anchor && entries === 0) return { ok: false, entries, files: files.length, reason: "a prune anchor is recorded but no audit entries remain" };
   return { ok: true, entries, files: files.length };
 }
 
 /**
  * Delete month files whose month ended more than retentionDays ago. The newest file is always
- * kept so the chain continues. Returns the deleted file names; a prune that deleted anything is
- * itself recorded as an "audit.pruned" entry.
+ * kept so the chain continues. The new starting hash is written to audit-anchor.json before
+ * anything is deleted. Returns the deleted file names; a prune that deleted anything is itself
+ * recorded as an "audit.pruned" entry.
  */
 export async function pruneAudit(retentionDays = 365, opts: AuditOptions = {}): Promise<string[]> {
   const dir = opts.dir ?? AUDIT_DIR;
@@ -206,8 +279,22 @@ export async function pruneAudit(retentionDays = 365, opts: AuditOptions = {}): 
       const [, y, m] = FILE_RE.exec(name)!;
       const monthEnd = Date.UTC(Number(y), Number(m), 1); // Date.UTC months are 0-based: this is the next month's 1st
       if (monthEnd > cutoff) break;
-      rmSync(join(dir, name), { force: true });
       removed.push(name);
+    }
+    if (removed.length) {
+      const previous = readAnchor(dir)?.hash ?? GENESIS_HASH;
+      let hash = previous;
+      for (let i = removed.length - 1; i >= 0; i--) {
+        const h = lastHash(dir, removed[i]).hash;
+        if (h !== null) {
+          hash = h;
+          break;
+        }
+      }
+      const anchor: Anchor = { hash, previous, files: removed, at: new Date(now).toISOString() };
+      writeFileAtomic(join(dir, ANCHOR_FILE), JSON.stringify(anchor, null, 2) + "\n");
+      for (const name of removed) rmSync(join(dir, name), { force: true });
+      fsyncDir(dir);
     }
   } finally {
     lock();

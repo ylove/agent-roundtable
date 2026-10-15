@@ -6,7 +6,7 @@
 // or archived. Best effort: a failed write is logged to stderr and never fails the session.
 // Readers: from_session (agent workshops) and, later, contract proposals built from an ultraplan.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { SESSIONS_DIR } from "../config.js";
 import { agentKey } from "../agents.js";
@@ -313,4 +313,29 @@ export function listArchivedSessions(): ArchivedSessionSummary[] {
     });
   }
   return out.sort((a, b) => b.ended.localeCompare(a.ended) || a.id.localeCompare(b.id));
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Delete archived sessions that ended more than `retentionDays` ago and return their ids. Unreadable,
+ * malformed or undated files are left alone. Nothing calls it yet; the retention sweep will.
+ */
+export function pruneArchivedSessions(retentionDays = 30, now = Date.now()): string[] {
+  if (!Number.isFinite(retentionDays) || retentionDays < 0) {
+    throw new Error(`retentionDays must be a non-negative number of days (got ${retentionDays})`);
+  }
+  const cutoff = now - retentionDays * DAY_MS;
+  const removed: string[] = [];
+  for (const session of listArchivedSessions()) {
+    const ended = Date.parse(session.ended);
+    if (!Number.isFinite(ended) || ended >= cutoff) continue;
+    try {
+      rmSync(archivePath(session.id), { force: true });
+      removed.push(session.id);
+    } catch (e) {
+      console.error(`[Archive] Could not prune session ${session.id}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return removed;
 }

@@ -377,6 +377,33 @@ describe("session archive", () => {
       /from_session not found: collab-nowhere1\..*or of any archived session/);
   });
 
+  test("pruneArchivedSessions removes sessions that ended before the retention window and keeps the rest", (t) => {
+    // A fixed past "now": archives written by other tests ended later, so no window can reach them.
+    const now = Date.parse("2020-01-15T12:00:00.000Z");
+    const day = 86_400_000;
+    const record = (id, endedMsAgo) => archive.archiveSession({
+      id, kind: "meeting", agents: ["cfo"], topic: "prune", started: new Date(now - endedMsAgo - 1000).toISOString(),
+      ended: new Date(now - endedMsAgo).toISOString(), turns: [], public: null,
+    });
+    record("meeting-prune0old", 31 * day);
+    record("meeting-prune0new", 29 * day);
+    record("meeting-prune0edge", 30 * day);
+    const stray = join(SESSIONS_DIR, "meeting-prune0bad.json");
+    writeFileSync(stray, "not json", { mode: 0o600 });
+    t.after(() => rmSync(stray, { force: true }));
+    t.mock.method(console, "error", () => {});
+
+    assert.deepEqual(archive.pruneArchivedSessions(30, now), ["meeting-prune0old"]);
+    assert.equal(existsSync(archivedFile("meeting-prune0old")), false);
+    assert.ok(existsSync(archivedFile("meeting-prune0new")) && existsSync(archivedFile("meeting-prune0edge")));
+    assert.ok(existsSync(stray), "malformed files are left alone");
+    assert.deepEqual(archive.pruneArchivedSessions(30, now), []);
+    // The default window is 30 days; 0 removes everything that has ended.
+    assert.deepEqual(archive.pruneArchivedSessions(undefined, now + day).sort(), ["meeting-prune0edge"]);
+    assert.ok(archive.pruneArchivedSessions(0, now).includes("meeting-prune0new"));
+    for (const bad of [-1, NaN, Infinity]) assert.throws(() => archive.pruneArchivedSessions(bad, now), /retentionDays must be a non-negative number/);
+  });
+
   test("a private prototype collaboration whose auto-run fails is archived before it is removed", async (t) => {
     let n = 0;
     stubFetch(t, () => (n++ === 0 ? reply("Opening turn") : json(500, { error: { message: "auto-run failed" } })));

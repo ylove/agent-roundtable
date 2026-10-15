@@ -1168,3 +1168,39 @@ test("queued lease requests of tasks without a claim are withdrawn", () => {
   assert.deepEqual(after.lease_queue, []);
   assert.deepEqual(evaluate(after, T0, {}), []);
 });
+
+test("a worker stopped by an emergency pause resumes on the same attempt; it never burns max_attempts", () => {
+  const w = new World(workerState({ attempt: 3 }));
+  const runnerSrc = { kind: "runner", id: "runner", pid: 1 };
+  const dead = (base) => w.step(base).filter((a) => a.rule === "worker_dead");
+  w.emit("agent.spawned", { agent: "w-t", task: "t", attempt: 3, pid: 4242 });
+  w.commit([{ type: "execution.paused", source: runnerSrc, correlation: "esc-emergency", payload: { scope: ["t"], reason: "escalation esc-emergency awaits the human (credentials)" } }]);
+  w.emit("agent.exited", { agent: "w-t", task: "t", code: 0, reason: "completed" });
+  assert.deepEqual(dead(), [], "nothing while paused");
+  w.commit([{ type: "execution.resumed", source: runnerSrc, correlation: "esc-emergency", payload: { scope: ["t"], reason: "escalation esc-emergency was resolved" } }]);
+  const resumed = dead();
+  assert.deepEqual(eventTypes(resumed), [], "no task.retried, no task.failed");
+  assert.deepEqual(opsOf(resumed).map((a) => [a.type, a.task]), [["resume_worker", "t"]]);
+  assert.match(opsOf(resumed)[0].why, /esc-emergency.*attempt 3 \(not counted/);
+  assert.deepEqual(opsOf(dead()).map((a) => a.key), opsOf(resumed).map((a) => a.key), "repeats until a worker starts");
+  assert.equal(w.state.tasks.t.attempt, 3);
+  // Once it runs again, a real death on the last attempt counts.
+  w.emit("agent.spawned", { agent: "w-t", task: "t", attempt: 3, pid: 4243 });
+  w.emit("agent.exited", { agent: "w-t", task: "t", code: 1, reason: "error" });
+  assert.deepEqual(eventTypes(dead()), ["task.failed", "escalation.raised"]);
+});
+
+test("a worker lost during a run pause is recorded as paused and resumed on the same attempt", () => {
+  const w = new World(workerState({ attempt: 3 }));
+  w.emit("agent.spawned", { agent: "w-t", task: "t", attempt: 3, pid: 4242 });
+  w.emit("execution.paused", { scope: "all", reason: "Manual inspection" });
+  w.emit("execution.resumed", { scope: "all", reason: "Inspected" });
+  const actions = w.step({ agents: { "w-t": { alive: false, pid: 4242 } } }).filter((a) => a.rule === "worker_dead");
+  assert.deepEqual(ofType(actions, "agent.exited").map((e) => e.payload), [{ agent: "w-t", task: "t", code: null, reason: "lost", paused: "Manual inspection" }]);
+  assert.deepEqual(eventTypes(actions), ["agent.exited"]);
+  assert.deepEqual(opsOf(actions).map((a) => [a.type, a.task]), [["resume_worker", "t"]]);
+  // Recorded, it stays uncounted on the next pass, under the same key.
+  assert.deepEqual(opsOf(w.step().filter((a) => a.rule === "worker_dead")).map((a) => a.key), opsOf(actions).map((a) => a.key));
+  assert.equal(observeEvents([w.log.find((e) => e.type === "agent.exited")]).pauseStops.t.context, "Manual inspection", "the marker alone is enough");
+  assert.equal(observeEvents(w.log).pauseStops.t.attempt, 3);
+});

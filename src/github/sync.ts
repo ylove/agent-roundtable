@@ -181,7 +181,12 @@ function ghLine(s: unknown, max = 200): string {
   return out.length > max ? out.slice(0, max - 1) + "…" : out;
 }
 
-export const issueMarker = (exe: string, key: string) => (key === PARENT ? `<!-- roundtable:${exe} -->` : `<!-- roundtable:${exe}:${key} -->`);
+/** A redacted code span. Entities do not decode inside one, so angle brackets and backticks are replaced instead. */
+function ghCode(s: unknown, max = 200): string {
+  return "`" + ghLine(s, max).replace(/[<>`]/g, "?") + "`";
+}
+
+export const issueMarker =(exe: string, key: string) => (key === PARENT ? `<!-- roundtable:${exe} -->` : `<!-- roundtable:${exe}:${key} -->`);
 const commentMarker = (exe: string, key: string, seq: number) => `<!-- roundtable:${exe}:${key}:e${seq} -->`;
 
 const MARKER_RE = /<!-- roundtable:(exe-[0-9a-z]{16})(?::([a-z0-9][a-z0-9._-]{0,63}))? -->/g;
@@ -414,7 +419,7 @@ export class GitHubSync {
           ...(esc?.question ? ["", `Question: ${ghText(esc.question, 1500)}`] : []),
           ...(p.alternatives?.length ? ["", "Alternatives:", ...p.alternatives.slice(0, 10).map((a) => `- ${ghText(a, 300)}`)] : []),
           "",
-          `Escalation \`${ghLine(p.id, 80).replace(/`/g, "'")}\`. Answer it in the orchestrator's chat (resolve_escalation).`,
+          `Escalation ${ghCode(p.id, 80)}. Answer it in the orchestrator's chat (resolve_escalation).`,
         ];
         this.comment(target, ev.seq, lines.join("\n"));
         f.outbox.push({ kind: "label", target, label: NEEDS_HUMAN_LABEL, attempts: 0 });
@@ -545,7 +550,7 @@ export class GitHubSync {
     const lines: string[] = [];
     if (key === PARENT) {
       lines.push(
-        `Heads-down run \`${this.executionId}\`${c ? `, contract \`${ghLine(c.id, 80)}\` v${c.version}` : ""}.`,
+        `Heads-down run \`${this.executionId}\`${c ? `, contract ${ghCode(c.id, 80)} v${c.version}` : ""}.`,
         "",
         "## Goal",
         "",
@@ -569,7 +574,7 @@ export class GitHubSync {
         "",
         `- Kind: ${ghText(spec.kind)}; persona: ${ghText(spec.persona, 100)}${spec.team ? `; team: ${ghText(spec.team, 100)}` : ""}`,
         `- Depends on: ${spec.depends_on.length ? spec.depends_on.map((d) => `\`${d}\``).join(", ") : "nothing"}`,
-        `- Writes: ${spec.paths.write.slice(0, 20).map((p) => `\`${ghLine(p, 200).replace(/`/g, "'")}\``).join(", ")}`,
+        `- Writes: ${spec.paths.write.slice(0, 20).map((p) => ghCode(p, 200)).join(", ")}`,
         "",
         "## Acceptance",
         "",

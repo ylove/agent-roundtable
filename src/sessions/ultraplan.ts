@@ -11,7 +11,7 @@ import { archiveUltraplan } from "./archive.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
-import { mapLimit, notFoundError, parseVerdict, truncate } from "./workshop.js";
+import { mapLimit, notFoundError, runVerdictRound, truncate } from "./workshop.js";
 import { TASK_BLOCK_NEXT, TASK_BLOCK_SIGNOFF_CHECK, buildTaskBlockInstructions } from "../execution/contract-parse.js";
 
 export type UltraplanStatus = "awaiting_plan" | "awaiting_revision" | "finalized";
@@ -213,19 +213,26 @@ function signoffCounts(tally: Record<string, number>): string {
     (tally.UNCLEAR > 0 ? `, ${tally.UNCLEAR} unclear` : "");
 }
 
-export function renderUltraplanDocument(u: Ultraplan, signoffs: Verdict[], signedOff: boolean): string {
+/** Signed off: sign-offs were collected and none is OBJECT or UNCLEAR. */
+export function isSignedOff(signoffs: Array<{ verdict: string }>): boolean {
+  return signoffs.length > 0 && signoffs.every((s) => s.verdict !== "OBJECT" && (SIGNOFF_VERDICTS as readonly string[]).includes(s.verdict));
+}
+
+/** `collected`: sign-offs were asked for (submit_plan final, planner runs); end_ultraplan collects none. */
+export function renderUltraplanDocument(u: Ultraplan, signoffs: Verdict[], collected: boolean): string {
   const firstLine = u.task.trim().split(/\r?\n/)[0];
   const title = firstLine.length > 120 ? firstLine.slice(0, 119) + "…" : firstLine;
   const latest = u.versions.at(-1);
   const tally = tallyVerdicts(signoffs.map((s) => s.verdict), SIGNOFF_VERDICTS);
+  const signedOff = collected && isSignedOff(signoffs);
   const blocks = [
     `# Ultraplan: ${title}`,
     `Planner: ${u.planner ? label(u, u.planner.name) : "orchestrator"} · Participants: ${u.agents.map((a) => label(u, a.name)).join(", ")} · Plan versions: ${u.versions.length} · ` +
-      (signedOff ? `Sign-off: ${signoffCounts(tally)}` : "Not signed off"),
+      (collected ? `Sign-off: ${signoffCounts(tally)}${signedOff ? "" : " — not signed off"}` : "Not signed off"),
     latest ? `## ${signedOff ? "Final" : "Latest"} plan (v${latest.version})${signedOff ? "" : " — not signed off"}\n\n${latest.plan}`
       : "## Plan\n\nNo plan was submitted.",
     "## Sign-offs",
-    ...(signedOff ? signoffs.map((s) => `### ${label(u, s.agent)} — ${s.verdict}\n${s.content}`)
+    ...(collected ? signoffs.map((s) => `### ${label(u, s.agent)} — ${s.verdict}\n${s.content}`)
       : ["(none: the session was closed without sign-off)"]),
     "## Agent input",
   ];
@@ -236,6 +243,10 @@ export function renderUltraplanDocument(u: Ultraplan, signoffs: Verdict[], signe
   blocks.push(u.versions.length ? u.versions.map((v) => {
     const prefix = `- v${v.version} by ${label(u, v.author)} — `;
     if (signedOff && v === latest) return prefix + "final, signed off";
+    if (collected && v === latest) {
+      const against = signoffs.filter((s) => s.verdict === "OBJECT" || !(SIGNOFF_VERDICTS as readonly string[]).includes(s.verdict));
+      return prefix + `final, not signed off: ${against.map((s) => `${label(u, s.agent)} ${s.verdict}`).join(", ")}`;
+    }
     const reviews = latestReviews(u, v.version);
     return prefix + (reviews.length ? `reviews: ${reviews.map((e) => `${label(u, e.speaker)} ${e.verdict}`).join(", ")}` : "not reviewed");
   }).join("\n") : "(no plan versions)");
@@ -259,18 +270,25 @@ function ownEntry(u: Ultraplan, phase: "input" | "review", index: number): strin
 }
 
 async function computePhase(u: Ultraplan, phase: "input" | "review" | "signoff", v?: PlanVersion): Promise<UltraplanEntry[]> {
-  return mapLimit(u.agents, PARALLEL_TURNS, async (agent, agentIndex) => {
+  if (phase === "input") {
+    return mapLimit(u.agents, PARALLEL_TURNS, async (agent, agentIndex) => {
+      const content = await ask(u, agent.systemPrompt, buildInputPrompt(u.task, u.agents.map((a) => label(u, a.name)), u.context));
+      return { phase, agentIndex, speaker: agent.name, content, timestamp: new Date() };
+    });
+  }
+  const review = phase === "review";
+  const answers = await runVerdictRound(u.agents, (agent, agentIndex) => {
     const ownInput = ownEntry(u, "input", agentIndex);
-    const prompt = phase === "input" ? buildInputPrompt(u.task, u.agents.map((a) => label(u, a.name)), u.context)
-      : phase === "review" ? buildReviewPrompt(u.task, u.context, v!.plan, v!.version, label(u, v!.author), ownInput, ownEntry(u, "review", agentIndex))
-        : buildSignoffPrompt(u.task, v!.plan, v!.version, ownInput, u.context);
-    const content = await ask(u, agent.systemPrompt, prompt);
-    return {
-      phase, agentIndex, speaker: agent.name, content, timestamp: new Date(),
-      ...(v && { version: v.version }),
-      ...(phase !== "input" && { verdict: parseVerdict(content, phase === "review" ? "Verdict" : "Sign-off", phase === "review" ? REVIEW_VERDICTS : SIGNOFF_VERDICTS) }),
-    };
+    return review ? buildReviewPrompt(u.task, u.context, v!.plan, v!.version, label(u, v!.author), ownInput, ownEntry(u, "review", agentIndex))
+      : buildSignoffPrompt(u.task, v!.plan, v!.version, ownInput, u.context, u.executionReady === true);
+  }, review ? "Verdict" : "Sign-off", {
+    verdicts: review ? REVIEW_VERDICTS : SIGNOFF_VERDICTS,
+    llm: { provider: u.provider, model: u.model, baseUrl: u.baseUrl },
+    limit: PARALLEL_TURNS,
   });
+  return answers.map((a) => ({
+    phase, agentIndex: a.index, speaker: a.agent.name, content: a.content, timestamp: a.at, version: v!.version, verdict: a.verdict,
+  }));
 }
 
 function commitPhase(u: Ultraplan, entries: UltraplanEntry[]): void {
@@ -307,6 +325,11 @@ function latestReviews(u: Ultraplan, version: number): UltraplanEntry[] {
   return [...latest.entries()].sort(([a], [b]) => a - b).map(([, entry]) => entry);
 }
 
+/** The next step, with the roundtable-tasks reminder when the ultraplan is execution_ready. */
+function nextText(u: Ultraplan, text: string): string {
+  return u.executionReady ? `${text} ${TASK_BLOCK_NEXT}` : text;
+}
+
 function stepResult(u: Ultraplan): UltraplanStepResult {
   const v = u.versions.at(-1);
   const reviews = v ? verdictsFor(u, latestReviews(u, v.version)) : [];
@@ -318,11 +341,11 @@ function stepResult(u: Ultraplan): UltraplanStepResult {
     ...(v ? {
       status: "awaiting_revision", version: v.version, reviews,
       ...(reviews.length
-        ? { phase: "review", tally: tallyVerdicts(reviews.map((r) => r.verdict), REVIEW_VERDICTS), next: NEXT_AFTER_REVIEW } as const
-        : { phase: "plan", next: buildUnreviewedNext(v.version),
+        ? { phase: "review", tally: tallyVerdicts(reviews.map((r) => r.verdict), REVIEW_VERDICTS), next: nextText(u, NEXT_AFTER_REVIEW) } as const
+        : { phase: "plan", next: nextText(u, buildUnreviewedNext(v.version)),
           ...(previous && { previousReviews: { version: previous.version, reviews: verdictsFor(u, latestReviews(u, previous.version)) } }),
         } as const),
-    } as const : { status: "awaiting_plan", phase: "input", input: inputsFor(u), next: NEXT_AFTER_INPUT } as const),
+    } as const : { status: "awaiting_plan", phase: "input", input: inputsFor(u), next: nextText(u, NEXT_AFTER_INPUT) } as const),
     ...(u.publicChannel && { public: { url: u.publicChannel.url, topic: u.publicChannel.topic } }),
   };
 }
@@ -335,13 +358,16 @@ async function authorPlan(u: Ultraplan, prompt: string): Promise<void> {
   commitPlan(u, nextVersion(u, content, u.planner!.name));
 }
 
-async function finalize(u: Ultraplan, signoffs: Verdict[], signedOff: boolean): Promise<UltraplanFinalResult> {
+/** `collected`: sign-offs were asked for; signedOff then means none is OBJECT or UNCLEAR. */
+async function finalize(u: Ultraplan, signoffs: Verdict[], collected: boolean): Promise<UltraplanFinalResult> {
   const version = u.versions.at(-1)?.version ?? null;
   const tally = tallyVerdicts(signoffs.map((s) => s.verdict), SIGNOFF_VERDICTS);
-  const document = renderUltraplanDocument(u, signoffs, signedOff);
+  const signedOff = collected && isSignedOff(signoffs);
+  const document = renderUltraplanDocument(u, signoffs, collected);
   u.status = "finalized";
   const outcome = signedOff ? `signed off v${version}: ${signoffCounts(tally)}`
-    : version !== null ? `ended without sign-off at v${version}` : "ended without a plan";
+    : collected ? `not signed off at v${version}: ${signoffCounts(tally)}`
+      : version !== null ? `ended without sign-off at v${version}` : "ended without a plan";
   recordActivity({
     session: u.id, kind: "ultraplan", mode: u.planner ? "planner" : "orchestrator",
     agents: [...new Set([...u.agents.map((a) => a.key), ...(u.planner ? [u.planner.key] : [])])],
@@ -370,7 +396,7 @@ function available(id: string): Ultraplan {
 export async function startUltraplan(
   agents: string[], task: string,
   opts: { context?: string; draftPlan?: string; planner?: string; revisionRounds?: number; public?: boolean;
-    provider?: LLMProvider; model?: string; baseUrl?: string } = {}
+    provider?: LLMProvider; model?: string; baseUrl?: string; executionReady?: boolean } = {}
 ): Promise<UltraplanStepResult | UltraplanFinalResult> {
   if (!Array.isArray(agents) || agents.length < 1) throw new Error("Ultraplan requires at least 1 agent");
   if (typeof task !== "string" || !task.trim()) throw new Error("task is required: describe what the plan is for");
@@ -392,6 +418,7 @@ export async function startUltraplan(
     id, task, context: opts.context, agents: participants, planner, provider, model: opts.model || DEFAULT_MODELS[provider],
     ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }), status: "awaiting_plan",
     versions: [], entries: [], startedAt: new Date(), ...(publicChannel && { publicChannel }),
+    ...(opts.executionReady === true && { executionReady: true }),
   };
   ultraplans.set(id, u);
   const release = lockSession(id, ultraplanBusy(id));
@@ -411,7 +438,7 @@ export async function startUltraplan(
     }
     if (!draft) {
       step = "draft";
-      await authorPlan(u, buildPlannerDraftPrompt(task, u.context, participants.map((a) => label(u, a.name)), inputsFor(u)));
+      await authorPlan(u, buildPlannerDraftPrompt(task, u.context, participants.map((a) => label(u, a.name)), inputsFor(u), u.executionReady === true));
     }
     const rounds = Math.min(3, Math.max(1, Math.floor(Number(opts.revisionRounds)) || 1));
     for (let round = 0; round < rounds; round++) {
@@ -421,7 +448,7 @@ export async function startUltraplan(
       if (round === 0 && draft) commitPlan(u, v);
       commitPhase(u, entries);
       step = `revision to v${v.version + 1}`;
-      await authorPlan(u, buildPlannerRevisePrompt(task, v.plan, v.version, verdictsFor(u, entries), u.context));
+      await authorPlan(u, buildPlannerRevisePrompt(task, v.plan, v.version, verdictsFor(u, entries), u.context, u.executionReady === true));
     }
     step = "sign-off";
     const entries = await computePhase(u, "signoff", u.versions.at(-1)!);

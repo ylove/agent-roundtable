@@ -6,7 +6,7 @@ const { checkArgs, handleToolCall, formatAgentWorkshopResult, tools } = await im
 const fields = {
   start_ultraplan: {
     string: ["task", "context", "draft_plan", "planner", "provider", "model", "base_url"],
-    array: ["agents"], number: ["revision_rounds"], boolean: ["public"],
+    array: ["agents"], number: ["revision_rounds"], boolean: ["public", "execution_ready"],
   },
   submit_plan: { string: ["ultraplan_id", "plan"], boolean: ["final"] },
   end_ultraplan: { string: ["ultraplan_id"] },

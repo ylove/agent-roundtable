@@ -133,7 +133,9 @@ async function checkDispatch() {
     check("dispatch archives the finalized ultraplan under ROUNDTABLE_HOME/sessions", () => {
       const file = join(smokeEnv.ROUNDTABLE_HOME, "sessions", `${start.ultraplanId}.json`);
       const record = JSON.parse(readFileSync(file, "utf8"));
-      assert(record.kind === "ultraplan" && record.document.signedOff === true && record.document.markdown === final, JSON.stringify(record).slice(0, 300));
+      assert(record.kind === "ultraplan" && record.document.signedOff === true && final.startsWith(record.document.markdown + "\n\n```json\n"), JSON.stringify(record).slice(0, 300));
+      const trailer = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(final)?.[1] ?? "null");
+      assert(trailer?.ultraplan_id === start.ultraplanId && trailer.archived === true && trailer.tally.APPROVE === 1, `trailer: ${JSON.stringify(trailer)}`);
       assert(record.document.versions.length === 2 && record.document.tally.APPROVE === 1, JSON.stringify(record.document.tally));
     });
 
@@ -238,7 +240,8 @@ async function checkDispatch() {
       assert(readFileSync(improved.backupPath, "utf8") === original && improvedText.includes(`Backup: ${improved.backupPath}`), improvedText);
     });
     check("result formatters preserve final markdown/public blocks and workshop warnings", () => {
-      assert(formatUltraplanResult({ status: "finalized", finalPlan: "Exact markdown\n", publicBlock: "Public block" }) === "Exact markdown\n\n\nPublic block", "final document changed");
+      const trailer = '\n\n```json\n{\n  "ultraplan_id": "ultraplan-x",\n  "archived": true,\n  "tally": {}\n}\n```';
+      assert(formatUltraplanResult({ status: "finalized", ultraplanId: "ultraplan-x", archived: true, tally: {}, finalPlan: "Exact markdown\n", publicBlock: "Public block" }) === "Exact markdown\n\n\nPublic block" + trailer, "final document changed");
       const text = formatAgentWorkshopResult({ ...improved, warnings: ["Review this warning"], publicBlock: "Public block" });
       assert(text.includes("\n- Review this warning\n") && text.endsWith("\n\nPublic block"), text);
     });

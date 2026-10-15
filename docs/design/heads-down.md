@@ -440,7 +440,7 @@ interface Lease { id: string; agent: string; task: string; paths: string[]; mode
 
 **Leases.**
 - Globs support `**`, `*` and `?`, with no braces. `*` and `?` never cross `/`, a trailing `/**` needs at least one segment, and `[` and `]` are literal.
-- Overlap is judged conservatively: two leases overlap if the static prefix of one is a whole-segment path prefix of the other. This never misses an overlap, but it can report one that cannot happen (`src/*.ts` and `src/*.css`), so requests may queue unnecessarily.
+- Overlap is judged conservatively: two leases overlap if the static prefix of one is a whole-segment path prefix of the other. The comparison ignores case and Unicode normalization, because `SRC/**` and `src/**` name the same files on macOS. This never misses an overlap, but it can report one that cannot happen (`src/*.ts` and `src/*.css`), so requests may queue unnecessarily. Coverage stays exact: a path in another case is simply not covered, which fails closed.
 - An exclusive lease conflicts with anything; a shared lease conflicts only with an exclusive one. An agent never conflicts with itself on the same task.
 - A conflicting request is queued. The response names the leaseholder, its task and its progress, and suggests `escalate(with: "path_owner")`.
 - The queue is FIFO: a request also waits behind an earlier queued request it conflicts with, so a stream of compatible requests cannot starve a waiting one.
@@ -458,7 +458,10 @@ Every host-side git call goes through `src/execution/git.ts`:
 - argv only, `childEnv("git")`, a timeout and capped output;
 - no fsmonitor, hooks, pager, external diff, textconv, signing, auto gc or maintenance, transports, rerere or submodule recursion;
 - an explicit `--git-dir`/`--work-tree` taken from the main repository's worktree records. A worktree whose `.git` file was rewritten, or is a symlink, is refused;
-- the commit identity, read from the main repository.
+- the commit identity, read from the main repository;
+- no nested repository is ever entered. Status and every diff that reads the working tree pass `--ignore-submodules=all`, because a child git in a submodule's directory would read that directory's agent-writable `.git/config` and `.gitattributes` and run their filters on the host. `diff.ignoreSubmodules=all` is set only as a fallback, since a worktree's `.gitmodules` can override it.
+
+**Submodules are not supported in heads-down runs in 1.0.** A `base_sha` whose tree holds a gitlink is refused before any worktree is created. So is any worktree whose index or HEAD holds one, and any branch that would bring one into a merge. Commits never stage a gitlink.
 
 **`submit_work`.** Commits, checks leases, then runs the task's checks in the sandbox. It is capped at 15 minutes and sends progress notifications. With `ready: false` it only makes a checkpoint commit.
 

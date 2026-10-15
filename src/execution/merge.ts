@@ -14,7 +14,20 @@
 // ============================================================================
 
 import { ID_RE, preview } from "./events.js";
-import { branchExists, gitIdentity, integrationBranch, openLinkedWorktree, openRepo, resolveCommit, runGit, taskBranch, type GitIdentity, type GitTarget } from "./git.js";
+import {
+  assertNoGitlinksInIndex,
+  assertNoGitlinksInTree,
+  branchExists,
+  gitIdentity,
+  integrationBranch,
+  openLinkedWorktree,
+  openRepo,
+  resolveCommit,
+  runGit,
+  taskBranch,
+  type GitIdentity,
+  type GitTarget,
+} from "./git.js";
 import { capPathList, pathCovered, type LeaseLike } from "./leases.js";
 import type { EventDraft, EventSource, ExecutionHeader } from "./types.js";
 import {
@@ -76,8 +89,12 @@ export async function mergeTask(header: ExecutionHeader, taskId: string, opts: M
       const integ = await ensureIntegrationWorktree(header);
       const repo = await openRepo(header.repo_root);
       const t = openLinkedWorktree(repo, integ.path);
-      await resetIntegration(t);
+      // Before anything touches the integration worktree: no submodule on either side (git.ts).
+      await assertNoGitlinksInIndex(t);
+      await assertNoGitlinksInTree(t, "HEAD");
       if (!(await branchExists(t, branch))) throw new Error(`Task ${taskId} has no branch ${branch}`);
+      await assertNoGitlinksInTree(t, `refs/heads/${branch}`);
+      await resetIntegration(t);
       if (opts.leases) {
         const cov = await checkRangeCoverage(t, "HEAD", `refs/heads/${branch}`, opts.leases);
         if (!cov.ok) return { ok: false, reason: "violation", conflicts: [], violations: cov.violations };
@@ -130,12 +147,13 @@ export async function prepareConflictResolution(
   const status = await worktreeStatus(path);
   if (status.branch !== w.branch) throw new Error(`${path} is on ${status.branch ?? "a detached HEAD"}, not ${w.branch}`);
   if (status.merging) return { conflicts: status.conflicts, merged: false, head: status.head };
-  const tracked = (await runGit(t, ["diff", "--name-only", "-z", "HEAD"])).stdout.split("\0").filter(Boolean);
+  const tracked = (await runGit(t, ["diff", "--name-only", "-z", "--ignore-submodules=all", "HEAD"])).stdout.split("\0").filter(Boolean);
   if (tracked.length) {
     throw new Error(`${path} has uncommitted changes (${tracked.slice(0, 10).join(", ")}); commit or snapshot them first`);
   }
   const integration = integrationBranch(header.id);
   if (!(await branchExists(t, integration))) throw new Error(`Execution ${header.id} has no integration branch yet`);
+  await assertNoGitlinksInTree(t, `refs/heads/${integration}`);
   const identity = opts.identity ?? (await gitIdentity(w.repo));
   const r = await runGit(
     t,

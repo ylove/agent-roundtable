@@ -25,6 +25,8 @@ import { mkdirPrivate } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
 import { ID_RE, preview } from "./events.js";
 import {
+  assertNoGitlinksInIndex,
+  assertNoGitlinksInTree,
   branchExists,
   findWorktreeAdmin,
   gitIdentity,
@@ -125,12 +127,22 @@ export interface OpenWorktree {
   branch: string;
 }
 
-/** Open a roundtable worktree by path, confirmed by its execution's main repository's records. */
+/** Refuse a worktree whose index or HEAD holds a gitlink, before anything inspects its files. */
+async function assertNoSubmodules(t: GitTarget): Promise<void> {
+  await assertNoGitlinksInIndex(t);
+  await assertNoGitlinksInTree(t, "HEAD");
+}
+
+/**
+ * Open a roundtable worktree by path, confirmed by its execution's main repository's records.
+ * A worktree with a submodule is refused (SubmodulesUnsupportedError).
+ */
 export async function openWorktree(path: string): Promise<OpenWorktree> {
   const loc = locate(path);
   const header = readHeader(loc.exe);
   const repo = await openRepo(header.repo_root);
   const target = openLinkedWorktree(repo, loc.path);
+  await assertNoSubmodules(target);
   return { header, repo, target, name: loc.name, branch: branchFor(loc.exe, loc.name) };
 }
 
@@ -189,6 +201,7 @@ async function ensureWorktree(header: ExecutionHeader, name: string, startPoint:
     if (existsSync(path)) {
       if (admin) {
         const target = openLinkedWorktree(repo, path);
+        await assertNoSubmodules(target);
         const on = await currentBranch(target);
         if (on !== branch) throw new Error(`${path} is checked out on ${on ?? "a detached HEAD"}, not ${branch}`);
         return { path: target.workTree, branch, head: await resolveCommit(target, "HEAD"), created: false };
@@ -197,14 +210,21 @@ async function ensureWorktree(header: ExecutionHeader, name: string, startPoint:
       if (lstatSync(path).isSymbolicLink() || readdirSync(path).length) {
         throw new Error(`${path} exists and is not a worktree of ${header.repo_root}`);
       }
-    } else {
-      if (admin) rmSync(admin, { recursive: true, force: true }); // a stale record: its directory is gone
-      mkdirSync(path, { mode: 0o700 });
+    } else if (admin) {
+      rmSync(admin, { recursive: true, force: true }); // a stale record: its directory is gone
     }
+    // Refused before anything is created or checked out: submodules are not supported (git.ts).
+    let args: string[];
+    if (await branchExists(repo, branch)) {
+      await assertNoGitlinksInTree(repo, `refs/heads/${branch}`);
+      args = ["worktree", "add", "-q", path, branch];
+    } else {
+      const start = await startPoint();
+      await assertNoGitlinksInTree(repo, start);
+      args = ["worktree", "add", "-q", "-b", branch, path, start];
+    }
+    if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
     mkdirPrivate(path);
-    const args = (await branchExists(repo, branch))
-      ? ["worktree", "add", "-q", path, branch]
-      : ["worktree", "add", "-q", "-b", branch, path, await startPoint()];
     try {
       await runGit(repo, args, { timeoutMs: ADD_TIMEOUT_MS });
     } catch (e) {
@@ -371,9 +391,20 @@ interface StatusEntry {
 
 const UNMERGED = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
 
+/**
+ * Anything that reads the working tree (status, a diff against the index or HEAD) passes this:
+ * git must never start a child in a submodule's directory, whose .git agents can write (git.ts).
+ */
+const WORKTREE_SUBMODULES = "--ignore-submodules=all";
+/**
+ * Diffs between two commits, or between the index and a commit, never read a working directory,
+ * so they keep gitlink changes visible (enforcement refuses them) with this.
+ */
+const TREE_SUBMODULES = "--ignore-submodules=none";
+
 /** Porcelain v1 status, every untracked file listed, renames off, submodules never entered. */
 async function statusEntries(t: GitTarget): Promise<StatusEntry[]> {
-  const r = await runGit(t, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=all"]);
+  const r = await runGit(t, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", WORKTREE_SUBMODULES]);
   return splitZ(r.stdout)
     .filter((rec) => rec.length > 3)
     .map((rec) => ({ xy: rec.slice(0, 2), path: rec.slice(3) }));
@@ -387,7 +418,7 @@ export async function hasMergeHead(t: GitTarget): Promise<boolean> {
 
 /** Paths with unmerged index entries (a merge stopped on conflicts). */
 export async function unmergedPaths(t: GitTarget): Promise<string[]> {
-  const r = await runGit(t, ["diff", "--name-only", "-z", "--diff-filter=U"]);
+  const r = await runGit(t, ["diff", "--name-only", "-z", "--diff-filter=U", WORKTREE_SUBMODULES]);
   return [...new Set(splitZ(r.stdout))];
 }
 
@@ -436,8 +467,8 @@ export interface ChangedPath {
 async function rawChanges(t: GitTarget, from: string, to: string | null): Promise<ChangedPath[]> {
   const args =
     to === null
-      ? ["diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--ignore-submodules=none", from]
-      : ["diff", "--raw", "-z", "--no-abbrev", "-M", "--ignore-submodules=none", from, to];
+      ? ["diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", TREE_SUBMODULES, from]
+      : ["diff", "--raw", "-z", "--no-abbrev", "-M", TREE_SUBMODULES, from, to];
   const parts = splitZ((await runGit(t, args)).stdout);
   const out: ChangedPath[] = [];
   for (let i = 0; i < parts.length; i++) {
@@ -635,9 +666,10 @@ export function buildCommitMessage(message: string, trailers: CommitTrailers): s
 
 async function summarize(t: GitTarget, from: string, to: string): Promise<DiffSummary> {
   if (from === to) return { stat: "", files: [], rewrites: [] };
-  const files = splitZ((await runGit(t, ["diff", "--name-only", "-z", "--no-renames", "--ignore-submodules=none", from, to])).stdout);
-  const stat = (await runGit(t, ["diff", "--shortstat", "--ignore-submodules=none", from, to])).stdout.trim();
-  const summary = (await runGit(t, ["diff", "-B", "-M", "--summary", "--ignore-submodules=none", from, to])).stdout;
+  // Commit to commit: no working directory is read (TREE_SUBMODULES).
+  const files = splitZ((await runGit(t, ["diff", "--name-only", "-z", "--no-renames", TREE_SUBMODULES, from, to])).stdout);
+  const stat = (await runGit(t, ["diff", "--shortstat", TREE_SUBMODULES, from, to])).stdout.trim();
+  const summary = (await runGit(t, ["diff", "-B", "-M", "--summary", TREE_SUBMODULES, from, to])).stdout;
   const rewrites = summary
     .split("\n")
     .map((l) => /^ rewrite (.+) \(\d+%\)$/.exec(l)?.[1])
@@ -700,7 +732,9 @@ async function commitCore(
   }
   let staged = await rawChanges(t, "HEAD", null);
   if (merging) {
-    const fromIntegration = new Set(splitZ((await runGit(t, ["diff", "--cached", "--name-only", "-z", "--no-renames", "MERGE_HEAD"])).stdout));
+    const fromIntegration = new Set(
+      splitZ((await runGit(t, ["diff", "--cached", "--name-only", "-z", "--no-renames", TREE_SUBMODULES, "MERGE_HEAD"])).stdout)
+    );
     staged = staged.filter((c) => fromIntegration.has(c.path));
   }
   const bad = staged
@@ -789,7 +823,8 @@ export async function diffForTask(worktree: string, base: string, maxBytes = DIF
   const w = await openWorktree(worktree);
   const head = await resolveCommit(w.target, "HEAD");
   const mb = await mergeBaseOf(w.target, head, base);
-  const r = await runGit(w.target, ["diff", "-M", "--no-color", "--ignore-submodules=none", mb, head], { maxOutputBytes: maxBytes, truncate: true });
+  // Commit to commit: no working directory is read (TREE_SUBMODULES).
+  const r = await runGit(w.target, ["diff", "-M", "--no-color", TREE_SUBMODULES, mb, head], { maxOutputBytes: maxBytes, truncate: true });
   if (!r.truncated) return r.stdout;
   const cut = r.stdout.lastIndexOf("\n");
   return `${cut > 0 ? r.stdout.slice(0, cut + 1) : r.stdout}[diff truncated at ${maxBytes} bytes]\n`;

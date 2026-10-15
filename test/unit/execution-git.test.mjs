@@ -6,9 +6,9 @@ import { join } from "node:path";
 
 const G = await import("../../dist/execution/git.js");
 const W = await import("../../dist/execution/worktrees.js");
-const { mergeTask } = await import("../../dist/execution/merge.js");
+const { mergeTask, prepareConflictResolution } = await import("../../dist/execution/merge.js");
 const { WORKTREES_DIR } = await import("../../dist/config.js");
-const { executable, git, gitTry, makeExecution, write } = await import("../fixtures/execution/git-fixture.mjs");
+const { executable, git, gitTry, makeExecution, makeRepo, write } = await import("../fixtures/execution/git-fixture.mjs");
 
 const all = [{ paths: ["**"] }];
 
@@ -69,6 +69,106 @@ test("hardening canary: status, diff, commit and merge never run fsmonitor, hook
   await G.runGit(repo, ["log", "-1", "-p"]);
 
   assert.deepEqual(ex.ran(), [], "no repository-chosen command ran");
+});
+
+// ============================================================================
+// Submodules: a nested repository's own config must never run on the host
+// ============================================================================
+
+const isSubmoduleRefusal = (e) => e.name === "SubmodulesUnsupportedError" && /not supported in heads-down runs in 1\.0/.test(e.message) && /vendor\/lib/.test(e.message);
+
+/** Commit a gitlink at vendor/lib (plain git: the roundtable never does this itself). */
+function commitGitlink(dir, sha) {
+  git(dir, "update-index", "--add", "--cacheinfo", `160000,${sha},vendor/lib`);
+  git(dir, "commit", "-q", "-m", "add vendor/lib");
+}
+
+/**
+ * What a sandboxed command could leave in a worktree: vendor/lib made into a repository (at the
+ * gitlink's commit) whose own config and .gitattributes run a filter on every file, a same-size
+ * edit there so only hashing through the filter can tell, and a .gitmodules asking for
+ * submodules to be inspected (ignore = none) despite diff.ignoreSubmodules.
+ */
+function armNested(dir, sub, evil) {
+  const nested = join(dir, "vendor", "lib");
+  git(dir, "clone", "-q", sub.root, nested);
+  git(nested, "config", "filter.x.clean", evil);
+  git(nested, "config", "filter.x.smudge", evil);
+  write(nested, ".gitattributes", "* filter=x\n");
+  write(nested, "f.txt", "g\n");
+  write(dir, ".gitmodules", '[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = ./nowhere\n\tignore = none\n');
+}
+
+function evilFilter() {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "rt-subcanary-")));
+  const canary = join(dir, "filter.ran");
+  const evil = join(dir, "evil.sh");
+  executable(evil, `#!/bin/sh\necho ran >> "${canary}"\ncat\n`);
+  return { evil, canary, ran: () => existsSync(canary), reset: () => rmSync(canary, { force: true }) };
+}
+
+test("submodules: a base_sha with a gitlink is refused before any worktree exists", async () => {
+  const sub = makeRepo({ "f.txt": "f\n" });
+  const ex = await makeExecution({ "a.txt": "a\n" });
+  commitGitlink(ex.root, sub.sha);
+  const { createExecutionStore } = await import("../../dist/execution/store.js");
+  const store = await createExecutionStore({ repoRoot: ex.root, baseSha: git(ex.root, "rev-parse", "HEAD"), agentsDir: ex.root });
+  const header = store.header();
+  await assert.rejects(W.ensureIntegrationWorktree(header), isSubmoduleRefusal);
+  await assert.rejects(W.ensureTaskWorktree(header, "t"), isSubmoduleRefusal);
+  assert.equal(existsSync(W.integrationWorktreePath(header.id)), false, "nothing was created");
+  assert.equal(existsSync(W.taskWorktreePath(header.id, "t")), false);
+});
+
+test("submodules: a nested repository's filter never runs through any operation", async () => {
+  const sub = makeRepo({ "f.txt": "f\n" });
+  const filter = evilFilter();
+  const ex = await makeExecution({ "a.txt": "a\n" });
+  const t = await W.ensureTaskWorktree(ex.header, "sneaky");
+  const integ = realpathSync(W.integrationWorktreePath(ex.header.id));
+  for (const dir of [t.path, integ]) {
+    commitGitlink(dir, sub.sha);
+    armNested(dir, sub, filter.evil);
+    write(dir, "a.txt", "b\n");
+  }
+  // Control: plain git status in the worktree does run the nested filter.
+  gitTry(t.path, "status");
+  assert.equal(filter.ran(), true, "control: the canary works");
+  filter.reset();
+
+  const base = G.integrationBranch(ex.header.id);
+  await assert.rejects(W.worktreeStatus(t.path), isSubmoduleRefusal);
+  await assert.rejects(W.commitLeasedPaths(t.path, all, { message: "x", trailers: { execution: ex.header.id, task: "sneaky", agent: "w" } }), isSubmoduleRefusal);
+  await assert.rejects(W.snapshotWip(t.path), isSubmoduleRefusal);
+  await assert.rejects(W.diffForTask(t.path, base), isSubmoduleRefusal);
+  await assert.rejects(W.checkLeaseCoverage(t.path, base, all), isSubmoduleRefusal);
+  await assert.rejects(W.changedPaths(t.path, base), isSubmoduleRefusal);
+  await assert.rejects(W.ensureTaskWorktree(ex.header, "sneaky"), isSubmoduleRefusal);
+  await assert.rejects(mergeTask(ex.header, "sneaky"), isSubmoduleRefusal);
+  await assert.rejects(prepareConflictResolution(ex.header, "sneaky"), isSubmoduleRefusal);
+
+  // Defense in depth, with the refusal bypassed: worktree status and diffs never enter the
+  // submodule, even though .gitmodules says ignore = none.
+  const repo = await G.openRepo(ex.root);
+  for (const dir of [t.path, integ]) {
+    const raw = G.openLinkedWorktree(repo, dir);
+    await G.runGit(raw, ["status", "--porcelain=v1"]);
+    await G.runGit(raw, ["diff", "--name-only", "HEAD"]);
+    await G.runGit(raw, ["diff", "--name-only"]);
+    await W.unmergedPaths(raw);
+  }
+  assert.equal(filter.ran(), false, "the nested filter never ran");
+});
+
+test("submodules: a task branch carrying a gitlink is never merged", async () => {
+  const sub = makeRepo({ "f.txt": "f\n" });
+  const ex = await makeExecution({ "a.txt": "a\n" });
+  const t = await W.ensureTaskWorktree(ex.header, "linker");
+  commitGitlink(t.path, sub.sha);
+  const integ = W.integrationWorktreePath(ex.header.id);
+  const before = git(integ, "rev-parse", "HEAD");
+  await assert.rejects(mergeTask(ex.header, "linker"), (e) => e.name === "SubmodulesUnsupportedError" && /refs\/heads\/rt\/\w+\/linker/.test(e.message));
+  assert.equal(git(integ, "rev-parse", "HEAD"), before);
 });
 
 test("a worktree whose .git file was rewritten, or replaced by a symlink, is refused before git runs", async () => {

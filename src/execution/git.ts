@@ -13,7 +13,16 @@
 //    .git file cannot point git at an agent-written config. A work tree that is a symlink, whose
 //    .git is a symlink (canonicalWorkdir), or whose .git file no longer points where the main
 //    repository says, is refused before git starts;
-//  - commits name their identity explicitly, read from the main repository (gitIdentity).
+//  - commits name their identity explicitly, read from the main repository (gitIdentity);
+//  - git never enters a nested repository. For a gitlink (submodule) entry, status and worktree
+//    diffs would start a child git in that directory, and the child would read the directory's
+//    own .git/config and .gitattributes, which agents can write (only the worktree's top-level
+//    .git is read-only in the sandbox), and run their filter drivers on the host. So status and
+//    every diff that reads the working tree pass --ignore-submodules=all (runGit adds it to any
+//    status or diff call that names no mode; diff.ignoreSubmodules=all in GIT_HARDENING is only
+//    a fallback, since a worktree's .gitmodules can override it), and a tree or index holding a
+//    gitlink is refused outright (assertNoGitlinks*): submodules are not supported in heads-down
+//    runs in 1.0. Untracked nested repositories are listed, never entered, and never staged.
 // No protocol is allowed, not even file: worktree, merge and commit operations never use a
 // transport. Filter and merge drivers that the user's own config defines (git-lfs, typically)
 // still run when .gitattributes names them; changing .gitattributes needs an explicit lease.
@@ -49,11 +58,16 @@ export const GIT_HARDENING: readonly string[] = [
   "protocol.allow=never",
   "rerere.enabled=false",
   "submodule.recurse=false",
+  // A fallback for commands without --ignore-submodules; a worktree's .gitmodules can override it.
+  "diff.ignoreSubmodules=all",
+  "status.submoduleSummary=false",
   "core.quotePath=false",
 ];
 
 /** Subcommands that can produce patches: they always get --no-ext-diff --no-textconv. */
 const DIFF_COMMANDS = new Set(["diff", "log", "show"]);
+/** Subcommands that can inspect submodule working directories: --ignore-submodules=all unless the call names a mode. */
+const SUBMODULE_AWARE = new Set(["status", "diff"]);
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT = 16 * 1024 * 1024;
@@ -335,6 +349,7 @@ function spawnGit(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] 
     ...identityArgs(o.identity),
     sub,
     ...(DIFF_COMMANDS.has(sub) ? ["--no-ext-diff", "--no-textconv"] : []),
+    ...(SUBMODULE_AWARE.has(sub) && !args.some((a) => a.startsWith("--ignore-submodules")) ? ["--ignore-submodules=all"] : []),
     ...args.slice(1),
   ];
   const env = childEnv("git", { GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: ":", GIT_PAGER: "cat", ...o.env });
@@ -452,6 +467,60 @@ export async function resolveCommit(target: GitTarget, ref: string): Promise<str
   const sha = r.stdout.trim();
   if (r.exit !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) throw new Error(`${preview(ref)} does not name a commit`);
   return sha;
+}
+
+// ============================================================================
+// Submodules are refused
+// ============================================================================
+
+/** A tree or index holds a gitlink: submodules are not supported in heads-down runs in 1.0. */
+export class SubmodulesUnsupportedError extends GitSafetyError {
+  constructor(where: string, path: string) {
+    super(
+      `Submodules are not supported in heads-down runs in 1.0: ${where} has a submodule (gitlink) at ${path}. ` +
+        "Host-side git would enter its working directory, whose .git agents can write."
+    );
+    this.name = "SubmodulesUnsupportedError";
+  }
+}
+
+const LISTING_MAX = 512 * 1024 * 1024;
+const gitlinkFreeTrees = new Set<string>();
+const gitlinkFreeIndexes = new Set<string>();
+
+function firstGitlink(listing: string): string | null {
+  for (const rec of splitZ(listing)) if (rec.startsWith("160000 ")) return rec.slice(rec.indexOf("\t") + 1);
+  return null;
+}
+
+/** Throw SubmodulesUnsupportedError when the tree of `rev` holds a gitlink (cached per tree). */
+export async function assertNoGitlinksInTree(t: GitTarget, rev: string): Promise<void> {
+  assertSafeRef(rev);
+  const r = await runGit(t, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${rev}^{tree}`], { allowExit: [1] });
+  const tree = r.stdout.trim();
+  if (r.exit !== 0 || !/^[0-9a-f]{40,64}$/.test(tree)) throw new Error(`${preview(rev)} does not name a tree`);
+  const key = `${t.commonDir}\0${tree}`;
+  if (gitlinkFreeTrees.has(key)) return;
+  // ls-tree reads objects only; it never looks at a working directory.
+  const path = firstGitlink((await runGit(t, ["ls-tree", "-r", "-z", "--full-tree", tree], { maxOutputBytes: LISTING_MAX })).stdout);
+  if (path !== null) throw new SubmodulesUnsupportedError(rev, path);
+  gitlinkFreeTrees.add(key);
+}
+
+/** Throw SubmodulesUnsupportedError when the target's index holds a gitlink (cached per index file version). */
+export async function assertNoGitlinksInIndex(t: GitTarget): Promise<void> {
+  let st;
+  try {
+    st = lstatSync(join(t.gitDir, "index"));
+  } catch {
+    return; // no index yet
+  }
+  const key = `${t.gitDir}\0${st.ino}\0${st.size}\0${st.mtimeMs}`;
+  if (gitlinkFreeIndexes.has(key)) return;
+  // ls-files --stage reads the index only.
+  const path = firstGitlink((await runGit(t, ["ls-files", "--stage", "-z"], { maxOutputBytes: LISTING_MAX })).stdout);
+  if (path !== null) throw new SubmodulesUnsupportedError(`the index of ${t.workTree}`, path);
+  gitlinkFreeIndexes.add(key);
 }
 
 /** True when refs/heads/<branch> exists. */

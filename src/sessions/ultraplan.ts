@@ -7,6 +7,7 @@ import { agentKey, loadAgentPromptWithPath } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
 import { SessionBusyError, isSessionBusy, lockSession, sessionBusyMessage } from "./lock.js";
+import { archiveUltraplan } from "./archive.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
@@ -328,13 +329,16 @@ async function finalize(u: Ultraplan, signoffs: Verdict[], signedOff: boolean): 
   const tally = tallyVerdicts(signoffs.map((s) => s.verdict), SIGNOFF_VERDICTS);
   const document = renderUltraplanDocument(u, signoffs, signedOff);
   u.status = "finalized";
+  const outcome = signedOff ? `signed off v${version}: ${signoffCounts(tally)}`
+    : version !== null ? `ended without sign-off at v${version}` : "ended without a plan";
   recordActivity({
     session: u.id, kind: "ultraplan", mode: u.planner ? "planner" : "orchestrator",
     agents: [...new Set([...u.agents.map((a) => a.key), ...(u.planner ? [u.planner.key] : [])])],
     topic: u.task, public: !!u.publicChannel,
-    outcome: signedOff ? `signed off v${version}: ${signoffCounts(tally)}`
-      : version !== null ? `ended without sign-off at v${version}` : "ended without a plan",
+    outcome,
   });
+  // Archived before it leaves the live map, so the session is always either live or archived.
+  archiveUltraplan(u, { markdown: document, signedOff, version, signoffs, tally, outcome });
   ultraplans.delete(u.id);
   const publicBlock = u.publicChannel ? formatPublicBlock(u.publicChannel, await u.publicChannel.finalize({ summary: document })) : undefined;
   return { ultraplanId: u.id, status: "finalized", signedOff, version, finalPlan: document, signoffs, tally,

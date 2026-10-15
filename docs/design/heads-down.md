@@ -613,3 +613,14 @@ These modules exist so the workstreams can run in parallel without depending on 
 | `src/security/child-env.ts` | `childEnv(profile, extra?, source?)`, `SECRET_NAME_RE`. Profiles: claude-worker, codex-worker, local-meeting, git, gh, docker, browser, open, sandbox-local, cloud-cli, runner |
 | `src/security/secrets.ts` | `scrubSecrets(text)` (exact env secret values first, then credential patterns), `scrub`, `scrubAndCap` |
 | `src/publishers/redact.ts` | `redactSecrets` and `redactPII`. `redact` composes the two, so public output is unchanged |
+
+WS02 added the tool layer and session durability that later workstreams build on:
+
+| Module | API |
+|---|---|
+| `src/validate.ts` | `findProblem(schema, args, phases?)`, `assertValid(label, schema, args, phases?)`, `publicSchema(schema)`. Phases are `values` then `required`. Extensions: `x-hint`, `x-advisory-enum` (both stripped before listing) |
+| `src/tools.ts` | `tools`, `toolsFor(mode)`, `handleToolCall(name, args, mode?)`, `checkArgs`. A new group is a `ToolGroup` (`definitions` + `handle`) added to its `groups` list |
+| `src/tools/shared.ts` | `ToolDefinition` (`modes`, `annotations`, optional `precheck`), `ToolGroup`, annotation presets, `PROVIDER_PROPS`, `validateProviderOptions` |
+| `src/tools/names.ts` | Tool-name constants, `AT_THE_TABLE`, `HEADS_DOWN`, `MODE_LABELS` |
+| `src/sessions/lock.ts` | `lockSession(id, message)`, `withSessionLock(id, message, fn)`, `isSessionBusy(id)`, `sessionBusyMessage`, `SessionBusyError`. Refuses at once, never queues |
+| `src/sessions/archive.ts` | `archiveSession(record)`, `readArchivedSession(id)`, `listArchivedSessions()`. Records are `roundtable.session/1`; ultraplans carry `document` (markdown, versions, entries, sign-offs, tally) |

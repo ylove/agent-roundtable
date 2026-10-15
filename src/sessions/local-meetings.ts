@@ -8,6 +8,7 @@ import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
 import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
+import { archiveMeeting } from "./archive.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
@@ -341,6 +342,7 @@ async function closeLocalMeeting(meetingId: string, requestSummary: boolean): Pr
     outcome: summary || lastAgentReply(meeting),
     public: meeting.publicChannel !== undefined,
   });
+  archiveMeeting("local-meeting", meeting, summary);
   localMeetings.delete(meetingId);
 
   let text = summary || `Local meeting ${meetingId} with ${meeting.agent} ended.`;

@@ -137,7 +137,7 @@ See the [Prototype tool calls](#prototype-tool-calls) below.
 
 > Have skeptic help cfo improve its own instructions, focusing on assumptions and escalation rules. Back up the old definition first.
 
-`create_agent` combines specialists' sequential contributions into an architect's draft, collects independent reviews, and revises when needed. Pass `agents` plus `task`, or `from_session` with a live collaboration or meeting id (`collab-…`, `meeting-…`) to inherit participants, topic and discussion. Explicit participants are combined with inherited ones. Contribution `rounds` default to 1 and are clamped to 1–3; concurrent reviews are bounded by `ROUNDTABLE_PARALLEL_TURNS`.
+`create_agent` combines specialists' sequential contributions into an architect's draft, collects independent reviews, and revises when needed. Pass `agents` plus `task`, or `from_session` with a live collaboration or meeting id (`collab-…`, `meeting-…`), or the id of any ended session in the archive, to inherit participants, topic and discussion. Explicit participants are combined with inherited ones. Contribution `rounds` default to 1 and are clamped to 1–3; concurrent reviews are bounded by `ROUNDTABLE_PARALLEL_TURNS`.
 
 New agents go to `ROUNDTABLE_AGENTS_DIR`; new skills from `create_agent` go to `ROUNDTABLE_SKILLS_DIR`. Skill lookup follows Claude Code's precedence: personal `~/.claude/skills`, then the `.claude/skills` beside an agent in `.claude/agents`, then `ROUNDTABLE_SKILLS_DIR`. A skill found anywhere in that order is reused, never overwritten or shadowed. Results report file realpaths. After creation in `.claude/agents`, delegate with Claude Code's Agent tool using the returned `agent.name` as `subagent_type`, or call `start_meeting` with the new agent. `perform_task: true` with writes starts a private roundtable meeting on the task; follow its `next` instructions with `say` and `end_meeting`. If the agents directory had to be created, restart Claude Code so it watches that directory.
 
@@ -225,7 +225,7 @@ One turn runs per session at a time. While a turn is in flight, `continue_collab
 
 | Tool | Returns |
 | --- | --- |
-| `debug_env` | version, whether each key is configured (presence only, never any part of the value), Ollama reachability, default models, agents/skills/workspace dirs, activity log path or `off`, parallel turn limit, active sessions including ultraplans, public-session publisher settings, a `prototypes` block: `dir`, `chrome` (the detected binary or `null`), `screenshots`, `open_browser`, `ttl_ms`, `active_boards` |
+| `debug_env` | version, whether each key is configured (presence only, never any part of the value), Ollama reachability, default models, agents/skills/workspace dirs, activity log path or `off`, `sessions_dir` (the session archive), parallel turn limit, active sessions including ultraplans, public-session publisher settings, a `prototypes` block: `dir`, `chrome` (the detected binary or `null`), `screenshots`, `open_browser`, `ttl_ms`, `active_boards` |
 
 ## Modes
 
@@ -521,6 +521,7 @@ improve_agent { "agent": "cfo", "with": ["product-lead"], "include_self": false,
 ## Notes
 
 - State is in memory. A rebuild + reconnect drops every meeting, collaboration and open ultraplan. Activity records and written agent/skill files remain local on disk.
+- Every session is archived when it ends (meetings, local meetings, collaborations, ultraplans when finalized or ended, and agent workshops) to `~/.agent-roundtable/sessions/<id>.json` under `ROUNDTABLE_HOME`: the participants, topic, the transcript as agents saw it, the summary, the ultraplan document with its versions and sign-offs, or the workshop result. Directories are 0700, files 0600, writes are atomic, and secrets are redacted first. Archiving never fails a session; a failed write is logged to stderr.
 - Session ids are a prefix plus 8 random characters (`meeting-`, `local-`, `collab-`, `ultraplan-`, `create-`, `improve-`), so an id from before a restart never points at a different session.
 - Local meetings require the `claude` CLI on `PATH`.
 - The smoke test pins temporary directories and test configuration after loading `.env`, and stubs every fetch. Local credentials or endpoint settings cannot enable network calls or home-directory writes in it.

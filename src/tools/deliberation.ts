@@ -26,6 +26,7 @@ import {
   SKILLS_DIR,
   WORKSPACE_DIR,
   ACTIVITY_LOG_PATH,
+  SESSIONS_DIR,
   PARALLEL_TURNS,
 } from "../config.js";
 import type { LLMMessage } from "../providers/index.js";
@@ -1065,6 +1066,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         skills_dir: SKILLS_DIR,
         workspace_dir: WORKSPACE_DIR,
         activity_log: ACTIVITY_LOG_PATH ?? "off",
+        sessions_dir: SESSIONS_DIR,
         parallel_turns: PARALLEL_TURNS,
         public_sessions: {
           publisher: PUBLISHER_KIND,

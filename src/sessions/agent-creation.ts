@@ -28,6 +28,7 @@ import { mapLimit, extractJsonObject, truncate, parseVerdict } from "./workshop.
 import { collaborationHistoryView, collaborations, ORCHESTRATOR } from "./collaborations.js";
 import { meetingHistoryView, meetings, startMeeting } from "./meetings.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
+import { archiveSession, readArchivedSession, type ArchivedTurn } from "./archive.js";
 
 /** Inputs for designing a new agent with specialists and an architect. */
 export interface CreateAgentOptions {
@@ -201,6 +202,7 @@ interface PreparedWorkshop {
   architectOptions: ArchitectPromptOptions;
   ownContributions: Map<string, Contribution[]>;
   run: Run;
+  startedAt: Date;
 }
 
 interface ParsedSpec {
@@ -490,11 +492,21 @@ function sourceSession(id: string | undefined, isPublic: boolean): SourceSession
       return `**${speaker}:** ${message.content}`;
     }).join("\n\n");
   } else {
-    const activeIds = [...collaborations.keys(), ...meetings.keys()].join(", ") || "none";
-    throw new Error(
-      `from_session not found: ${id}. Pass the id of a live collaboration (collab-N) or meeting (meeting-N). ` +
-        `Active sessions: ${activeIds}`,
-    );
+    const archived = readArchivedSession(id);
+    if (!archived) {
+      const activeIds = [...collaborations.keys(), ...meetings.keys()].join(", ") || "none";
+      throw new Error(
+        `from_session not found: ${id}. Pass the id of a live collaboration (collab-N) or meeting (meeting-N), ` +
+          `or of any archived session. Active sessions: ${activeIds}`,
+      );
+    }
+    // Ended sessions: the archived turns are already the stubbed views agents saw.
+    refs = archived.agents;
+    topic = archived.topic.trim();
+    text = archived.turns.map(turn => {
+      const who = turn.role === "agent" && turn.agent ? display(turn.agent, isPublic) : turn.role;
+      return `**${turn.phase ? `${who} · ${turn.phase}` : who}:** ${turn.content}`;
+    }).join("\n\n");
   }
   const discussion = text.length > 20_000
     ? "…[earlier discussion truncated]\n" + text.slice(-20_000)
@@ -661,6 +673,7 @@ async function prepareWorkshop(
     // Associate review input with canonical keys, even if sanitized labels coincide.
     ownContributions: new Map(),
     run: { transcript: [] },
+    startedAt: new Date(),
   };
 }
 
@@ -898,7 +911,7 @@ export function renderPublicSpecSummary(
   return blocks.join("\n\n");
 }
 
-function recordWorkshopActivity(workshop: PreparedWorkshop, spec: AgentSpec, saved: SavedDefinition): void {
+function recordWorkshopActivity(workshop: PreparedWorkshop, spec: AgentSpec, saved: SavedDefinition): string {
   const { written, plan } = saved;
   let outcome: string;
   if (plan.proposedPath) {
@@ -913,13 +926,34 @@ function recordWorkshopActivity(workshop: PreparedWorkshop, spec: AgentSpec, sav
       : "(no skills)";
     outcome = `${verb} ${plan.agentName} ${skills}`;
   }
+  const summary = (written ? "" : "preview: ") + outcome;
   recordActivity({
     session: workshop.sessionId,
     kind: workshop.target ? "agent-refinement" : "agent-creation",
     agents: workshop.participants.map(participant => participant.key),
     topic: workshop.task,
-    outcome: (written ? "" : "preview: ") + outcome,
+    outcome: summary,
     public: workshop.isPublic,
+  });
+  return summary;
+}
+
+/** Archive a finished workshop: contributions and reviews as turns, the tool result as the record's result. */
+function archiveWorkshop(workshop: PreparedWorkshop, result: AgentWorkshopResult, outcome: string): void {
+  const { publicBlock: _publicBlock, ...stored } = result;
+  const channel = workshop.run.channel;
+  archiveSession({
+    id: workshop.sessionId,
+    kind: workshop.target ? "agent-refinement" : "agent-creation",
+    agents: workshop.participants.map(participant => participant.key),
+    topic: workshop.task,
+    started: workshop.startedAt.toISOString(),
+    turns: workshop.run.transcript.map((entry): ArchivedTurn => ({
+      role: "agent", agent: entry.agent, phase: entry.phase, speaker: `${entry.agent} · ${entry.phase}`, content: entry.content,
+    })),
+    summary: outcome,
+    result: stored,
+    public: channel ? { url: channel.url, topic: channel.topic } : null,
   });
 }
 
@@ -955,7 +989,7 @@ async function finishWorkshop(
   const saved = saveDefinition(workshop, spec);
   const { plan, written } = saved;
   const warnings = [...parsed.warnings, ...plan.warnings];
-  recordWorkshopActivity(workshop, spec, saved);
+  const outcome = recordWorkshopActivity(workshop, spec, saved);
   const meeting = await performTask(workshop, saved, warnings);
   const next = buildWorkshopNext({
     written, agentName: plan.agentName, targetPath: workshop.target?.path,
@@ -977,7 +1011,7 @@ async function finishWorkshop(
   const originalModel = workshop.target?.frontmatter.model;
   const model = spec.model ?? (typeof originalModel === "string" ? originalModel : undefined);
   const tools = effectiveTools(spec, workshop.target);
-  return {
+  const result: AgentWorkshopResult = {
     mode: workshop.mode,
     sessionId: workshop.sessionId,
     agent: {
@@ -1002,6 +1036,8 @@ async function finishWorkshop(
     next,
     ...(publicBlock && { publicBlock }),
   };
+  archiveWorkshop(workshop, result, outcome);
+  return result;
 }
 
 // ----------------------------------------------------------------------------

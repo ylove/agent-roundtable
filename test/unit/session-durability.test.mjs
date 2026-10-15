@@ -1,19 +1,27 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { json, stubFetch } from "./helpers.mjs";
 
 delete process.env.ROUNDTABLE_PUBLISHER;
 delete process.env.OPENAI_COMPATIBLE_BASE_URL;
 delete process.env.OPENAI_COMPATIBLE_API_KEY;
+// A secret-named variable: its exact value must never reach an archive file.
+const ENV_SECRET = "archive-test-value-8f3k2q";
+process.env.ROUNDTABLE_ARCHIVE_TEST_TOKEN = ENV_SECRET;
 
 const { startMeeting, continueMeeting, endMeeting, meetings } = await import("../../dist/sessions/meetings.js");
-const { continueLocalMeeting, endLocalMeeting } = await import("../../dist/sessions/local-meetings.js");
-const { startCollaboration, continueCollaboration, endCollaboration, collaborations, MAX_COLLABORATION_ROUNDS } =
+const { continueLocalMeeting, endLocalMeeting, localMeetings } = await import("../../dist/sessions/local-meetings.js");
+const { startCollaboration, continueCollaboration, nudgeCollaboration, endCollaboration, collaborations, MAX_COLLABORATION_ROUNDS } =
   await import("../../dist/sessions/collaborations.js");
-const { startUltraplan, endUltraplan, listUltraplans } = await import("../../dist/sessions/ultraplan.js");
+const { startUltraplan, submitPlan, endUltraplan, listUltraplans, ultraplans } = await import("../../dist/sessions/ultraplan.js");
+const { createAgent } = await import("../../dist/sessions/agent-creation.js");
 const { SessionBusyError, isSessionBusy, lockSession, sessionBusyMessage, withSessionLock } = await import("../../dist/sessions/lock.js");
+const archive = await import("../../dist/sessions/archive.js");
+const { SESSIONS_DIR } = await import("../../dist/config.js");
 const { handleToolCall } = await import("../../dist/tools.js");
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -193,5 +201,190 @@ describe("collaboration rounds cap", () => {
     await assert.rejects(continueCollaboration(c.collaborationId, 25), { message: "rounds must be at most 20 (got 25)" });
     assert.equal(isSessionBusy(c.collaborationId), false);
     await endCollaboration(c.collaborationId);
+  });
+});
+
+const archivedFile = (id) => join(SESSIONS_DIR, `${id}.json`);
+const scripted = (t, ...outputs) => {
+  const calls = stubFetch(t, () => {
+    assert.ok(outputs.length, "Unexpected provider call");
+    return reply(outputs.shift());
+  });
+  return calls;
+};
+
+describe("session archive", () => {
+  test("archiveSession writes a private, scrubbed record that reads and lists back", (t) => {
+    const id = "collab-arch0001";
+    const path = archive.archiveSession({
+      id, kind: "collaboration", mode: "collaborate", agents: ["cfo", "skeptic"], topic: "Budget",
+      started: "2026-10-01T10:00:00.000Z", ended: "2026-10-01T11:00:00.000Z",
+      turns: [
+        { role: "agent", agent: "cfo", speaker: "cfo", content: `Key is ${ENV_SECRET} and sk-ant-abcdefghijklmnop` },
+        { role: "orchestrator", speaker: "orchestrator", content: "focus" },
+      ],
+      summary: "Agreed", public: null,
+    });
+    assert.equal(path, archivedFile(id));
+    assert.equal(statSync(SESSIONS_DIR).mode & 0o777, 0o700);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const raw = readFileSync(path, "utf8");
+    assert.ok(!raw.includes(ENV_SECRET) && !raw.includes("sk-ant-abcdefghijklmnop"), raw);
+    assert.match(raw, /\[redacted:env:ROUNDTABLE_ARCHIVE_TEST_TOKEN\]/);
+    const record = archive.readArchivedSession(id);
+    assert.equal(record.schema, "roundtable.session/1");
+    assert.ok(record.transcript.startsWith("**cfo:** Key is [redacted:env:ROUNDTABLE_ARCHIVE_TEST_TOKEN] and "), record.transcript);
+    assert.ok(record.transcript.endsWith("\n\n---\n\n**orchestrator:** focus"), record.transcript);
+    assert.equal(record.turns[0].content.startsWith("Key is [redacted:env:"), true);
+    assert.deepEqual(record.agents, ["cfo", "skeptic"]);
+    const listed = archive.listArchivedSessions().find((s) => s.id === id);
+    assert.deepEqual(listed, { id, kind: "collaboration", mode: "collaborate", agents: ["cfo", "skeptic"], topic: "Budget",
+      started: "2026-10-01T10:00:00.000Z", ended: "2026-10-01T11:00:00.000Z", public: false });
+    assert.ok(!readdirSync(SESSIONS_DIR).some((n) => n.endsWith(".tmp")), "no temp files left behind");
+  });
+
+  test("ids that are not plain session ids are never used as file names", (t) => {
+    const errors = t.mock.method(console, "error", () => {});
+    for (const id of ["../escape", "a/b", "UPPER-1", "", ".hidden"]) {
+      assert.equal(archive.archiveSession({ id, kind: "meeting", agents: [], topic: "", started: "x", turns: [], public: null }), null, id);
+      assert.equal(archive.readArchivedSession(id), null, id);
+    }
+    assert.equal(errors.mock.callCount(), 5);
+    assert.ok(!existsSync(join(SESSIONS_DIR, "..", "escape.json")));
+    assert.equal(archive.readArchivedSession("meeting-neverwritten"), null);
+  });
+
+  test("end_meeting archives the history, summary and mode before the meeting leaves the map", async (t) => {
+    scripted(t, "Opening reply", "Second reply", "The summary");
+    const m = await startMeeting(sample, "Pricing agenda", "private context", "openai_compatible", "m", LLM, "debate");
+    await continueMeeting(m.meetingId, "Push back");
+    const ended = await handleToolCall("end_meeting", { meeting_id: m.meetingId, request_summary: true });
+    assert.equal(ended.isError, undefined);
+    const r = archive.readArchivedSession(m.meetingId);
+    assert.equal(r.kind, "meeting");
+    assert.equal(r.mode, "debate");
+    assert.equal(r.topic, "Pricing agenda");
+    assert.deepEqual(r.agents, [sample]);
+    assert.equal(r.summary, "The summary");
+    assert.deepEqual(r.turns.map((x) => x.role), ["caller", "agent", "caller", "agent"]);
+    assert.equal(r.turns[1].agent, sample);
+    assert.equal(r.turns[1].speaker, "sample");
+    assert.equal(r.public, null);
+    assert.ok(Date.parse(r.started) <= Date.parse(r.ended));
+  });
+
+  test("end_local_meeting archives with kind local-meeting", async () => {
+    const id = "local-arch0001";
+    localMeetings.set(id, {
+      id, agent: "cfo", agenda: "Local agenda", agentPromptPath: sample, systemPrompt: "s", startedAt: new Date(),
+      mode: "standard", messages: [{ role: "user", content: "Local agenda" }, { role: "assistant", content: "Local reply" }],
+    });
+    await endLocalMeeting(id);
+    const r = archive.readArchivedSession(id);
+    assert.equal(r.kind, "local-meeting");
+    assert.equal(r.transcript, "**caller:** Local agenda\n\n---\n\n**cfo:** Local reply");
+  });
+
+  test("end_collaboration archives agent turns and nudges", async (t) => {
+    scripted(t, "First", "Second", "Third");
+    const c = await startCollaboration([sample, plain], "Launch plan", { ...opts, maxRounds: 2 });
+    await nudgeCollaboration(c.collaborationId, "Consider the budget");
+    await continueCollaboration(c.collaborationId, 1);
+    await endCollaboration(c.collaborationId);
+    const r = archive.readArchivedSession(c.collaborationId);
+    assert.equal(r.kind, "collaboration");
+    assert.equal(r.mode, "collaborate");
+    assert.deepEqual(r.agents, [sample, plain]);
+    assert.deepEqual(r.turns.map((x) => `${x.role}:${x.content}`),
+      ["agent:First", "orchestrator:Consider the budget", "agent:Second", "agent:Third"]);
+    assert.deepEqual(r.turns.map((x) => x.speaker), ["sample", "orchestrator", "plain", "sample"]);
+    assert.equal(collaborations.has(c.collaborationId), false);
+  });
+
+  test("ultraplan finalize archives the document (versions, entries, sign-offs, tally) before ultraplans.delete", async (t) => {
+    scripted(t, "Input A", "Verdict: APPROVE\nLooks right", "Sign-off: APPROVE\nShip it");
+    const u = await startUltraplan([sample], "Launch the beta", opts);
+    await submitPlan(u.ultraplanId, "1. Build [sample]");
+    const realDelete = ultraplans.delete.bind(ultraplans);
+    let archivedFirst = false;
+    t.mock.method(ultraplans, "delete", (id) => {
+      archivedFirst = existsSync(archivedFile(id));
+      return realDelete(id);
+    });
+    const final = await submitPlan(u.ultraplanId, undefined, true);
+    assert.equal(archivedFirst, true, "archived while still live");
+    const r = archive.readArchivedSession(u.ultraplanId);
+    assert.equal(r.kind, "ultraplan");
+    assert.equal(r.mode, "orchestrator");
+    assert.equal(r.summary, "signed off v1: 1 approve, 0 approve with reservations, 0 object");
+    assert.equal(r.document.markdown, final.finalPlan);
+    assert.equal(r.document.signedOff, true);
+    assert.equal(r.document.version, 1);
+    assert.equal(r.document.planner, "orchestrator");
+    assert.deepEqual(r.document.versions.map((v) => [v.version, v.plan, v.author]), [[1, "1. Build [sample]", "orchestrator"]]);
+    assert.deepEqual(r.document.entries.map((e) => e.phase), ["input", "plan", "review", "signoff"]);
+    assert.equal(r.document.tally.APPROVE, 1);
+    assert.equal(r.document.signoffs[0].verdict, "APPROVE");
+    assert.deepEqual(r.turns.map((x) => x.speaker), ["sample · input", "orchestrator · plan v1", "sample · review of v1", "sample · sign-off"]);
+  });
+
+  test("end_ultraplan archives an unsigned document too", async (t) => {
+    scripted(t, "Input A");
+    const u = await startUltraplan([sample], "Unsigned", opts);
+    await endUltraplan(u.ultraplanId);
+    const r = archive.readArchivedSession(u.ultraplanId);
+    assert.equal(r.document.signedOff, false);
+    assert.equal(r.document.version, null);
+    assert.equal(r.summary, "ended without a plan");
+  });
+
+  test("create_agent archives its result, and from_session falls back to an archived session", async (t) => {
+    scripted(t, "Opening on launches", "Reply on launches");
+    const c = await startCollaboration([sample, plain], "Launch checks", { ...opts, maxRounds: 1 });
+    await continueCollaboration(c.collaborationId, 1);
+    await endCollaboration(c.collaborationId);
+    assert.equal(collaborations.has(c.collaborationId), false);
+
+    const spec = JSON.stringify({
+      name: "launch-owner", description: "Own launch checks", system_prompt: "You own launch readiness.",
+      skills: [], contributions: [{ agent: "sample", summary: "Checks" }],
+    });
+    const calls = scripted(t, "Sample contribution", "Plain contribution", spec, "Verdict: READY", "Verdict: READY");
+    const result = await createAgent({ ...opts, fromSession: c.collaborationId, write: false });
+    const prompt = calls[0].body.messages.at(-1).content;
+    assert.match(prompt, /## Discussion that led here/);
+    assert.match(prompt, /\*\*sample:\*\* Opening on launches/);
+    assert.match(prompt, /Launch checks/, "topic inherited from the archive");
+    const r = archive.readArchivedSession(result.sessionId);
+    assert.equal(r.kind, "agent-creation");
+    assert.equal(r.topic, "Launch checks");
+    assert.equal(r.result.agent.name, "launch-owner");
+    assert.equal(r.result.publicBlock, undefined);
+    assert.match(r.summary, /^preview: drafted launch-owner/);
+    assert.deepEqual(r.turns.map((x) => x.phase), ["contribution", "contribution", "review", "review"]);
+    await assert.rejects(createAgent({ ...opts, fromSession: "collab-nowhere1", write: false }),
+      /from_session not found: collab-nowhere1\..*or of any archived session/);
+  });
+
+  test("archiving is best effort: a broken sessions directory is logged and never fails the session", async (t) => {
+    const errors = t.mock.method(console, "error", () => {});
+    const aside = `${SESSIONS_DIR}.aside`;
+    const elsewhere = mkdtempSync(join(tmpdir(), "rt-archive-elsewhere-"));
+    mkdirSync(SESSIONS_DIR, { recursive: true });
+    renameSync(SESSIONS_DIR, aside);
+    symlinkSync(elsewhere, SESSIONS_DIR);
+    try {
+      scripted(t, "Reply");
+      const m = await startMeeting(sample, "agenda", undefined, "openai_compatible", "m", LLM);
+      const ended = await endMeeting(m.meetingId);
+      assert.match(ended, /ended/);
+      assert.equal(meetings.has(m.meetingId), false);
+      assert.deepEqual(readdirSync(elsewhere), [], "nothing written through the symlink");
+      assert.ok(errors.mock.calls.some((c) => /\[Archive\] Could not archive session meeting-/.test(String(c.arguments[0]))));
+    } finally {
+      rmSync(SESSIONS_DIR);
+      renameSync(aside, SESSIONS_DIR);
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 });

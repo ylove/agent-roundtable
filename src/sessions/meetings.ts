@@ -8,6 +8,7 @@ import { agentKey, loadAgentPrompt } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
 import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
+import { archiveMeeting } from "./archive.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
@@ -285,6 +286,7 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
     outcome: summary || history.slice().reverse().find((m) => m.role === "assistant")?.content,
     public: meeting.publicChannel !== undefined,
   });
+  archiveMeeting("meeting", meeting, summary);
   meetings.delete(meetingId);
 
   let text = summary || `Meeting ${meetingId} with ${meeting.agent} ended.`;

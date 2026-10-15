@@ -8,6 +8,7 @@ import { agentKey, loadAgent, loadAgentPrompt, renderSkillsSection } from "../ag
 import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
 import { sessionBusyMessage, withSessionLock } from "./lock.js";
+import { archiveCollaboration } from "./archive.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
@@ -758,6 +759,7 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
     public: collaboration.publicChannel !== undefined,
   });
   const transcript = [...messages];
+  archiveCollaboration(collaboration, transcript, summary);
   collaborations.delete(collaborationId);
   const outcomes = tracker ? { prototypeOutcomes: tracker.outcomesMarkdown() } : undefined;
 

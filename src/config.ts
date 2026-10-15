@@ -152,3 +152,42 @@ export const CHROME_PATH_OVERRIDE = process.env.ROUNDTABLE_CHROME_PATH || "";
 export const PROTOTYPE_SCREENSHOTS = !/^(0|false|no|off)$/i.test(
   (process.env.ROUNDTABLE_PROTOTYPE_SCREENSHOTS || "").trim()
 );
+
+// Security controls (1.0). Read at call time, so a changed environment applies without a restart.
+// Two more are read elsewhere, because they act before this module is evaluated or inside a child:
+//   ROUNDTABLE_DOTENV=off      skip loading .env entirely (src/env.ts; worker MCP servers start keyless)
+//   ROUNDTABLE_WORKER_AUTH     "api_key" passes ANTHROPIC_API_KEY / OPENAI_API_KEY to claude and codex
+//                              children; otherwise they use their own login (src/security/child-env.ts)
+const PATH_LIST_DELIMITER = process.platform === "win32" ? ";" : ":";
+const truthy = (v: string | undefined) => /^(1|true|yes|on)$/i.test((v || "").trim());
+
+export const LOCAL_TIMEOUT_DEFAULT_MS = 300_000;
+
+/** One `claude -p` call of a local meeting; its process group is killed when it runs over. */
+export function localTimeoutMs(): number {
+  const n = Number((process.env.ROUNDTABLE_LOCAL_TIMEOUT_MS || "").trim());
+  return Number.isSafeInteger(n) && n > 0 ? n : LOCAL_TIMEOUT_DEFAULT_MS;
+}
+
+/** A per-call base_url may reach private, CGNAT, link-local and ULA addresses (metadata stays blocked). */
+export function allowPrivateBaseUrls(): boolean {
+  return truthy(process.env.ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS);
+}
+
+/** Origins besides OPENAI_COMPATIBLE_BASE_URL's that may receive OPENAI_COMPATIBLE_API_KEY (comma-separated). */
+export function openAICompatibleKeyOrigins(): string[] {
+  return (process.env.ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+/** Directories besides the agents directories that path-like agent refs may resolve into. */
+export function agentPaths(): string[] {
+  return (process.env.ROUNDTABLE_AGENT_PATHS || "").split(PATH_LIST_DELIMITER).map((s) => s.trim()).filter(Boolean);
+}
+
+export const PROVIDER_RETRIES_DEFAULT = 2;
+
+/** Provider retries after the first attempt (408/409/429/5xx and network errors); 0 disables, at most 5. */
+export function providerRetries(): number {
+  const raw = (process.env.ROUNDTABLE_PROVIDER_RETRIES || "").trim();
+  return Math.min(5, /^\d+$/.test(raw) ? Number(raw) : PROVIDER_RETRIES_DEFAULT);
+}

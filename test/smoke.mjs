@@ -19,6 +19,7 @@ writeFileSync(join(root, "README.md"), "Smoke project: ship the onboarding launc
 // Keys are deliberately absent/unset so no provider can be reached even by accident; a fake
 // REPLICATE_API_TOKEN is set only to prove debug_env never echoes any part of a configured key.
 const smokeEnv = {
+  ROUNDTABLE_HOME: join(root, "state"),
   ANTHROPIC_API_KEY: "",
   OPENAI_API_KEY: "",
   TOGETHER_API_KEY: "",

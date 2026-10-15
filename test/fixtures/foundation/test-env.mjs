@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const root = mkdtempSync(join(tmpdir(), "roundtable-test-env-"));
+process.env.ROUNDTABLE_HOME = join(root, "state");
 process.env.ROUNDTABLE_ACTIVITY_LOG = join(root, "activity.jsonl");
 process.env.ROUNDTABLE_AGENTS_DIR = join(root, "agents");
 process.env.ROUNDTABLE_SKILLS_DIR = join(root, "skills");

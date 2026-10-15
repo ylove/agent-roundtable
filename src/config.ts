@@ -23,9 +23,18 @@ export function defaultWorkspaceDir(): string {
 }
 
 export const WORKSPACE_DIR = process.env.ROUNDTABLE_WORKSPACE_DIR || defaultWorkspaceDir();
+
+// Local state root (built from the home directory at runtime so no literal home path appears in source).
+// Archived sessions, heads-down runs, task worktrees and the audit log live under it.
+export const ROUNDTABLE_HOME = process.env.ROUNDTABLE_HOME || join(homedir(), ".agent-roundtable");
+export const SESSIONS_DIR = join(ROUNDTABLE_HOME, "sessions");
+export const EXECUTIONS_DIR = join(ROUNDTABLE_HOME, "executions");
+export const WORKTREES_DIR = join(ROUNDTABLE_HOME, "worktrees");
+export const AUDIT_DIR = join(ROUNDTABLE_HOME, "audit");
+
 const activityLog = process.env.ROUNDTABLE_ACTIVITY_LOG;
 export const ACTIVITY_LOG_PATH: string | null = !activityLog
-  ? join(homedir(), ".agent-roundtable", "activity.jsonl")
+  ? join(ROUNDTABLE_HOME, "activity.jsonl")
   : /^(off|false|0|no)$/i.test(activityLog) ? null : activityLog;
 export const ACTIVITY_LOG_MAX_ENTRIES = 500;
 export const PARALLEL_TURNS = Math.max(1, parseInt(process.env.ROUNDTABLE_PARALLEL_TURNS || "4", 10) || 4);
@@ -96,9 +105,7 @@ export const WEBHOOK_URL = process.env.ROUNDTABLE_WEBHOOK_URL || "";
 export const WEBHOOK_VIEW_URL = process.env.ROUNDTABLE_WEBHOOK_VIEW_URL || "";
 export const WEBHOOK_AUTH_HEADER = process.env.ROUNDTABLE_WEBHOOK_AUTH_HEADER || "";
 export const PUBLIC_TOPIC_PREFIX = process.env.ROUNDTABLE_PUBLIC_TOPIC_PREFIX || "roundtable";
-// Built from the home directory at runtime so no literal home path appears in source.
-export const TRANSCRIPTS_DIR =
-  process.env.ROUNDTABLE_TRANSCRIPTS_DIR || join(homedir(), ".agent-roundtable", "transcripts");
+export const TRANSCRIPTS_DIR = process.env.ROUNDTABLE_TRANSCRIPTS_DIR || join(ROUNDTABLE_HOME, "transcripts");
 export const PUBLISH_FLUSH_TIMEOUT_MS = parseInt(
   process.env.ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS || "30000",
   10

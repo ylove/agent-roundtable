@@ -2,7 +2,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
-import { mkdtempSync, writeFileSync, readFileSync, chmodSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, statSync, chmodSync, existsSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { json, stubFetch } from "./helpers.mjs";
 
@@ -19,8 +20,16 @@ const {
   collaborations,
   setCollaborationRecordHook,
 } = await import("../../dist/sessions/collaborations.js");
-const { startLocalMeeting, continueLocalMeeting, endLocalMeeting, listLocalMeetings, buildClaudeCliArgs } =
-  await import("../../dist/sessions/local-meetings.js");
+const {
+  startLocalMeeting,
+  continueLocalMeeting,
+  endLocalMeeting,
+  listLocalMeetings,
+  buildClaudeCliArgs,
+  resetClaudeCliFeatures,
+  liveLocalMeetingPids,
+  stopLocalMeetingProcesses,
+} = await import("../../dist/sessions/local-meetings.js");
 const modes = await import("../../dist/sessions/modes.js");
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -128,13 +137,17 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
    * A fake `claude` that records its argv and stdin, then runs `body(dir)` (JavaScript source; default:
    * print "fake reply"). The prompt arrives on stdin only.
    */
-  function fakeClaude(t, body = () => 'process.stdout.write("fake reply");') {
+  function fakeClaude(t, body = () => 'process.stdout.write("fake reply");', { help = "  --permission-prompts <target>\n" } = {}) {
     const dir = mkdtempSync(join(tmpdir(), "fake-claude-"));
     const log = join(dir, "runs.jsonl");
     const script = join(dir, "claude");
+    // --help (the one-time feature check) is answered and counted separately from real runs.
     writeFileSync(
       script,
-      `#!${process.execPath}\nlet input = "";\nprocess.stdin.setEncoding("utf8");\n` +
+      `#!${process.execPath}\nif (process.argv.includes("--help")) {\n` +
+        `  require("node:fs").appendFileSync(${JSON.stringify(join(dir, "help.log"))}, "help\\n");\n` +
+        `  process.stdout.write(${JSON.stringify(help)});\n  process.exit(0);\n}\n` +
+        `let input = "";\nprocess.stdin.setEncoding("utf8");\n` +
         `process.stdin.on("data", (d) => (input += d));\nprocess.stdin.on("end", () => {\n` +
         `  require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), stdin: input }) + "\\n");\n` +
         `  ${body(dir)}\n});\n`
@@ -222,6 +235,104 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     };
     while (alive() && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
     assert.ok(!alive(), "the grandchild was killed with the group");
+  });
+
+  test("the CLI runs in the workspace, so Read/Glob/Grep cannot see past it", async (t) => {
+    const { runs } = fakeClaude(t, () => 'process.stdout.write(process.cwd());');
+    const { meetingId, response } = await startLocalMeeting(sample, "agenda");
+    await endLocalMeeting(meetingId);
+    assert.equal(response, realpathSync.native(process.env.ROUNDTABLE_WORKSPACE_DIR));
+    assert.equal(runs().length, 1);
+  });
+
+  test("a workspace of / or the home directory gives the CLI an empty private directory instead", { skip: process.platform === "win32" }, () => {
+    const state = mkdtempSync(join(tmpdir(), "rt-cwd-"));
+    try {
+      for (const ws of ["/", process.env.HOME]) {
+        mkdirSync(ws, { recursive: true });
+        const r = spawnSync(process.execPath, ["--input-type=module", "-e",
+          `const m = await import(${JSON.stringify(new URL("../../dist/sessions/local-meetings.js", import.meta.url).href)}); process.stdout.write(m.localMeetingCwd());`,
+        ], { env: { ...process.env, ROUNDTABLE_WORKSPACE_DIR: ws, ROUNDTABLE_HOME: state }, encoding: "utf8" });
+        assert.equal(r.status, 0, r.stderr);
+        assert.equal(r.stdout, join(state, "local-meeting-workspace"), ws);
+        assert.match(r.stderr, /Set ROUNDTABLE_WORKSPACE_DIR to the project/);
+        assert.equal(statSync(r.stdout).mode & 0o777, 0o700);
+        assert.deepEqual(readdirSync(r.stdout), []);
+      }
+    } finally {
+      rmSync(state, { recursive: true, force: true });
+    }
+  });
+
+  test("--permission-prompts is feature-detected once per CLI and omitted when the CLI lacks it", async (t) => {
+    resetClaudeCliFeatures();
+    const { dir, runs } = fakeClaude(t, undefined, { help: "Usage: claude [options]\n  --permission-mode <mode>\n" });
+    const { meetingId } = await startLocalMeeting(sample, "agenda");
+    await continueLocalMeeting(meetingId, "more");
+    await endLocalMeeting(meetingId);
+    for (const { argv } of runs()) {
+      assert.ok(!argv.includes("--permission-prompts"), JSON.stringify(argv));
+      assert.ok(argv.includes("dontAsk") && argv.includes("--strict-mcp-config"));
+    }
+    assert.equal(readFileSync(join(dir, "help.log"), "utf8"), "help\n", "one --help for the whole meeting");
+    assert.deepEqual(buildClaudeCliArgs("/p.md", undefined, { permissionPrompts: false }), [
+      "--system-prompt-file", "/p.md", "-p", "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--strict-mcp-config",
+    ]);
+  });
+
+  test("a failure reported on stdout reaches the error when stderr is empty", async (t) => {
+    fakeClaude(t, () => 'process.stdout.write("Not logged in · Please run /login"); process.exit(1);');
+    await assert.rejects(startLocalMeeting(sample, "agenda"), /^Error: Claude CLI exited with code 1: Not logged in · Please run \/login$/);
+  });
+
+  /** A fake CLI that records its pid and hangs; returns the pid file. */
+  function hangingClaude(t) {
+    const { dir } = fakeClaude(t, (d) => `require("node:fs").writeFileSync(${JSON.stringify(join(d, "cli.pid"))}, String(process.pid));\n  setInterval(() => {}, 1000);`);
+    return join(dir, "cli.pid");
+  }
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  async function waitFor(cond, ms = 5000) {
+    const end = Date.now() + ms;
+    while (!cond()) {
+      if (Date.now() > end) throw new Error("timed out waiting");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  test("shutdown stops every live CLI (SIGTERM, then SIGKILL) and the meeting call fails", { skip: process.platform === "win32" }, async (t) => {
+    const pidFile = hangingClaude(t);
+    const call = startLocalMeeting(sample, "agenda").then(() => null, (e) => e);
+    await waitFor(() => existsSync(pidFile));
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    assert.deepEqual(liveLocalMeetingPids(), [pid]);
+    await stopLocalMeetingProcesses(200);
+    assert.match((await call).message, /Claude CLI exited with signal SIG(TERM|KILL)/);
+    await waitFor(() => !alive(pid));
+    assert.deepEqual(liveLocalMeetingPids(), []);
+  });
+
+  test("process exit SIGKILLs any CLI still running", { skip: process.platform === "win32" }, async (t) => {
+    const pidFile = hangingClaude(t);
+    const child = spawnSync(process.execPath, [
+      "--import", new URL("../fixtures/foundation/test-env.mjs", import.meta.url).href,
+      "--input-type=module", "-e",
+      `const m = await import(${JSON.stringify(new URL("../../dist/sessions/local-meetings.js", import.meta.url).href)});\n` +
+        `const fs = await import("node:fs");\n` +
+        `m.startLocalMeeting(${JSON.stringify(sample)}, "agenda").catch(() => {});\n` +
+        `const t0 = Date.now();\n` +
+        `while (!fs.existsSync(${JSON.stringify(pidFile)}) && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 20));\n` +
+        `process.exit(0);`,
+    ], { env: process.env, encoding: "utf8", timeout: 20_000 });
+    assert.equal(child.status, 0, child.stderr);
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    await waitFor(() => !alive(pid));
   });
 });
 

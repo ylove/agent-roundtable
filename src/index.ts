@@ -14,6 +14,7 @@ import { tools, handleToolCall } from "./tools.js";
 import { findExecutable } from "./executables.js";
 import { describeUrl } from "./security/url-guard.js";
 import { finalizeOpenChannels } from "./publishers/index.js";
+import { stopLocalMeetingProcesses } from "./sessions/local-meetings.js";
 import { destroyAllPrototypes, prototypeDiagnostics, sweepStaleSessionDirs } from "./prototypes/index.js";
 
 // ============================================================================
@@ -51,12 +52,15 @@ async function main() {
 
   // Best effort: when the host disconnects or the process is told to stop, flush and close any public
   // channel still open (bounded by the publisher flush timeout) so the topic gets an end and a transcript,
-  // and destroy every live prototype (boards stopped, sandboxes removed).
+  // and destroy every live prototype (boards stopped, sandboxes removed). Local-meeting CLIs run in their
+  // own process groups, so they get no signal of ours: stop them (SIGTERM, then SIGKILL); an exit hook in
+  // local-meetings.ts SIGKILLs any still left when the process exits.
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    Promise.allSettled([finalizeOpenChannels(), destroyAllPrototypes("shutdown")]).finally(() => process.exit(0));
+    Promise.allSettled([finalizeOpenChannels(), destroyAllPrototypes("shutdown"), stopLocalMeetingProcesses()])
+      .finally(() => process.exit(0));
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);

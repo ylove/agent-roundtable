@@ -2,14 +2,18 @@
 // Local Meeting Functions (CLI-based, uses local Claude installation)
 // ============================================================================
 
-import { spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, parse as parsePath, resolve } from "node:path";
 import type { Message } from "./meetings.js";
 import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
-import { localTimeoutMs } from "../config.js";
+import { ROUNDTABLE_HOME, WORKSPACE_DIR, localTimeoutMs } from "../config.js";
 import { findExecutable } from "../executables.js";
 import { newId } from "../ids.js";
 import { childEnv } from "../security/child-env.js";
+import { mkdirPrivate } from "../security/fs-safe.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveMeeting } from "./archive.js";
@@ -88,32 +92,110 @@ export function recordLocalMeetingMessage(meeting: LocalMeeting, message: Messag
   return message;
 }
 
+// ----------------------------------------------------------------------------
+// The claude CLI: flags, working directory, live processes
+// ----------------------------------------------------------------------------
+
 /** The agent's built-in tools in a local meeting: read-only, so it can look at the project but never change it. */
 export const LOCAL_MEETING_TOOLS = "Read,Glob,Grep";
+
+export interface ClaudeCliFeatures {
+  /** --permission-prompts none (newer CLIs). Without it, dontAsk still denies whatever is not allowed. */
+  permissionPrompts: boolean;
+}
 
 /**
  * Build the argv for the `claude` CLI. Exported so the flag layout can be unit tested without spawning.
  * There is no positional argument: the prompt goes in on stdin, so prompt text is never parsed as flags,
  * never shows up in `ps` and never hits ARG_MAX. Nothing may ask for permission, and no MCP server loads.
  */
-export function buildClaudeCliArgs(systemPromptPath: string, appendSystemPrompt?: string): string[] {
+export function buildClaudeCliArgs(
+  systemPromptPath: string,
+  appendSystemPrompt?: string,
+  features: ClaudeCliFeatures = { permissionPrompts: true }
+): string[] {
   const args = ["--system-prompt-file", systemPromptPath];
   if (appendSystemPrompt) {
     args.push("--append-system-prompt", appendSystemPrompt);
   }
-  args.push(
-    "-p",
-    "--tools", LOCAL_MEETING_TOOLS,
-    "--permission-mode", "dontAsk",
-    "--permission-prompts", "none",
-    "--strict-mcp-config",
-  );
+  args.push("-p", "--tools", LOCAL_MEETING_TOOLS, "--permission-mode", "dontAsk");
+  if (features.permissionPrompts) args.push("--permission-prompts", "none");
+  args.push("--strict-mcp-config");
   return args;
 }
 
+const featureChecks = new Map<string, Promise<ClaudeCliFeatures>>();
+
+/** What this claude binary supports, from one `claude --help` per binary path (cached for the process). */
+function claudeCliFeatures(cli: string, cwd: string): Promise<ClaudeCliFeatures> {
+  let check = featureChecks.get(cli);
+  if (!check) {
+    check = new Promise((resolveFeatures) => {
+      execFile(
+        cli,
+        ["--help"],
+        { env: childEnv("local-meeting"), cwd, encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024, windowsHide: true },
+        (err, stdout) => {
+          const permissionPrompts = !err && /--permission-prompts\b/.test(String(stdout));
+          if (!permissionPrompts) {
+            console.error(
+              `[LocalMeeting] this claude CLI ${err ? "did not answer --help" : "has no --permission-prompts"}; ` +
+                "omitting that flag (--permission-mode dontAsk still denies anything not allowed)"
+            );
+          }
+          resolveFeatures({ permissionPrompts });
+        }
+      );
+    });
+    featureChecks.set(cli, check);
+  }
+  return check;
+}
+
+/** Forget cached `claude --help` results (tests swap fake CLIs). */
+export function resetClaudeCliFeatures(): void {
+  featureChecks.clear();
+}
+
+let broadWorkspaceWarned = false;
+
+/**
+ * The CLI's working directory, which bounds what Read/Glob/Grep can reach: anything outside it would
+ * need a permission prompt, and dontAsk denies every prompt. That is the workspace, unless it is the
+ * filesystem root or the home directory (an MCP host may start the server in /): then an empty
+ * private directory, so the agent sees no files rather than all of them.
+ */
+export function localMeetingCwd(): string {
+  const ws = resolve(WORKSPACE_DIR);
+  let real: string;
+  try {
+    real = realpathSync.native(ws);
+    if (!statSync(real).isDirectory()) throw new Error("not a directory");
+  } catch {
+    throw new Error(`Local meetings run the claude CLI in ROUNDTABLE_WORKSPACE_DIR, which is not a directory: ${ws}`);
+  }
+  let home: string | undefined;
+  try {
+    home = realpathSync.native(homedir());
+  } catch {
+    home = undefined;
+  }
+  if (real !== parsePath(real).root && real !== home) return real;
+  if (!broadWorkspaceWarned) {
+    broadWorkspaceWarned = true;
+    console.error(
+      `[LocalMeeting] the workspace is ${real}, which would expose every file under it to the agent; ` +
+        "running the claude CLI in an empty directory instead. Set ROUNDTABLE_WORKSPACE_DIR to the project."
+    );
+  }
+  const empty = join(ROUNDTABLE_HOME, "local-meeting-workspace");
+  mkdirPrivate(empty);
+  return empty;
+}
+
 const posix = process.platform !== "win32";
-/** Enough stderr for a useful error; the message shows at most 500 characters of it. */
-const STDERR_KEEP = 64 * 1024;
+/** Enough output for a useful error; the message shows at most 500 characters of it. */
+const OUTPUT_KEEP = 64 * 1024;
 const KILL_GRACE_MS = 2000;
 
 /** Signal the CLI and, on POSIX, its whole process group (anything it started). Never throws. */
@@ -130,10 +212,57 @@ function signalTree(pid: number | undefined, signal: NodeJS.Signals): void {
   }
 }
 
+/** CLI processes still running, by pid. Each leads its own process group on POSIX. */
+const liveCli = new Map<number, ChildProcess>();
+let exitHookInstalled = false;
+
+function trackCli(proc: ChildProcess): void {
+  const pid = proc.pid;
+  if (!pid) return;
+  liveCli.set(pid, proc);
+  proc.once("exit", () => liveCli.delete(pid));
+  if (!exitHookInstalled) {
+    // Detached CLIs do not get the server's signals: whatever is left when the process exits is killed.
+    exitHookInstalled = true;
+    process.on("exit", killLocalMeetingProcessesSync);
+  }
+}
+
+/** Pids of the local-meeting CLIs still running. */
+export function liveLocalMeetingPids(): number[] {
+  return [...liveCli.keys()];
+}
+
+/** SIGKILL every live CLI's process group. Synchronous, so it works from a process 'exit' hook. */
+export function killLocalMeetingProcessesSync(): void {
+  for (const pid of liveCli.keys()) signalTree(pid, "SIGKILL");
+  liveCli.clear();
+}
+
+/** Stop every live CLI: SIGTERM to each process group, then SIGKILL after the grace period. */
+export async function stopLocalMeetingProcesses(graceMs: number = KILL_GRACE_MS): Promise<void> {
+  const procs = [...liveCli.values()];
+  if (!procs.length) return;
+  const running = (p: ChildProcess) => p.exitCode === null && p.signalCode === null;
+  for (const p of procs) signalTree(p.pid, "SIGTERM");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.all(procs.map((p) => (running(p) ? new Promise((r) => p.once("exit", r)) : undefined))),
+    new Promise((r) => {
+      timer = setTimeout(r, graceMs);
+    }),
+  ]);
+  clearTimeout(timer);
+  // The groups too: a CLI that exited on SIGTERM may leave tool processes behind.
+  for (const p of procs) signalTree(p.pid, "SIGKILL");
+  for (const p of procs) if (p.pid) liveCli.delete(p.pid);
+}
+
 /**
  * Execute the local `claude` CLI in print mode with a system prompt file; the prompt goes in on stdin.
- * The CLI is found by a PATH scan (no shell) and gets the local-meeting allowlist environment. On
- * timeout (ROUNDTABLE_LOCAL_TIMEOUT_MS, default 5 min) its process group gets SIGTERM, then SIGKILL.
+ * The CLI is found by a PATH scan (no shell), runs in localMeetingCwd() with the local-meeting
+ * allowlist environment, and is tracked until it exits (shutdown stops it). On timeout
+ * (ROUNDTABLE_LOCAL_TIMEOUT_MS, default 5 min) its process group gets SIGTERM, then SIGKILL.
  */
 export async function executeClaudeCLI(
   systemPromptPath: string,
@@ -146,12 +275,15 @@ export async function executeClaudeCLI(
     console.error("[LocalMeeting] claude CLI not found on PATH");
     throw new Error("Failed to spawn claude CLI: not found on PATH. Is claude installed and in PATH?");
   }
-  const args = buildClaudeCliArgs(systemPromptPath, appendSystemPrompt);
+  const cwd = localMeetingCwd();
+  const features = await claudeCliFeatures(cli, cwd);
+  const args = buildClaudeCliArgs(systemPromptPath, appendSystemPrompt, features);
 
   console.error(
     `[LocalMeeting] Executing: claude --system-prompt-file ${systemPromptPath}` +
       `${appendSystemPrompt ? " --append-system-prompt <directive>" : ""} -p --tools ${LOCAL_MEETING_TOOLS} ` +
-      `--permission-mode dontAsk --permission-prompts none --strict-mcp-config (prompt on stdin)`
+      `--permission-mode dontAsk${features.permissionPrompts ? " --permission-prompts none" : ""} --strict-mcp-config ` +
+      `(prompt on stdin, cwd ${cwd})`
   );
   console.error(`[LocalMeeting] Prompt length: ${prompt.length} chars`);
 
@@ -165,10 +297,11 @@ export async function executeClaudeCLI(
       fn();
     };
 
-    let proc: ReturnType<typeof spawn>;
+    let proc: ChildProcess;
     try {
-      // Own process group on POSIX, so a timeout also stops whatever the CLI started.
+      // Own process group on POSIX, so a timeout or shutdown also stops whatever the CLI started.
       proc = spawn(cli, args, {
+        cwd,
         stdio: ["pipe", "pipe", "pipe"],
         env: childEnv("local-meeting"),
         detached: posix,
@@ -180,19 +313,22 @@ export async function executeClaudeCLI(
       reject(new Error(`Failed to spawn claude CLI: ${message}. Is claude installed and in PATH?`));
       return;
     }
+    trackCli(proc);
 
     let stdout = "";
     let stderr = "";
 
-    proc.stdout!.on("data", (data) => {
-      stdout += data.toString();
+    // Decoded as a stream, so a multi-byte character split across chunks stays intact.
+    proc.stdout!.setEncoding("utf8");
+    proc.stderr!.setEncoding("utf8");
+    proc.stdout!.on("data", (data: string) => {
+      stdout += data;
+    });
+    proc.stderr!.on("data", (data: string) => {
+      if (stderr.length < OUTPUT_KEEP) stderr += data;
     });
 
-    proc.stderr!.on("data", (data) => {
-      if (stderr.length < STDERR_KEEP) stderr += data.toString();
-    });
-
-    // EPIPE when the CLI exits before reading all of stdin: its exit code and stderr tell the story.
+    // EPIPE when the CLI exits before reading all of stdin: its exit code and output tell the story.
     proc.stdin!.on("error", () => {});
     proc.stdin!.end(prompt);
 
@@ -210,7 +346,8 @@ export async function executeClaudeCLI(
           resolve(stdout.trim());
           return;
         }
-        const detail = scrubAndCap(stderr.trim(), 500);
+        // The CLI reports some failures on stdout (e.g. "Not logged in · Please run /login").
+        const detail = scrubAndCap(stderr.trim() || stdout.slice(0, OUTPUT_KEEP).trim(), 500);
         const status = code === null ? `signal ${signal}` : `code ${code}`;
         console.error(`[LocalMeeting] CLI failed with ${status}: ${detail}`);
         reject(new Error(`Claude CLI exited with ${status}: ${detail || "No error output"}`));

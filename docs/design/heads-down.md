@@ -154,7 +154,7 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `agent.registered` | agent, persona, team, driver, token_sha256, external |
 | `agent.spawned` | task, attempt, pid, session_id |
 | `agent.attested` | tools, mcp_servers, ok |
-| `agent.exited` | code, reason, result_subtype, usage |
+| `agent.exited` | code, reason, result_subtype, usage, paused (the pause it stopped for: not counted against max_attempts) |
 | `agent.left` | reason |
 | `task.ready` | task |
 | `task.claimed` | task, agent, attempt, ttl_s |
@@ -551,7 +551,7 @@ The runner never pushes to the base branch, and nothing auto-merges.
 | Rule | Automatic action | Escalates when |
 |---|---|---|
 | Lease or claim expiry | Reclaim and grant the head of the queue | — |
-| Worker died or lost | Retry with `--resume`, attempt+1; a death from a transient driver failure (rate limit, auth, credit) is not counted against `max_attempts` | Attempts exceed `max_attempts`; transient deaths exceed `infraRetries` (20) |
+| Worker died or lost | Retry with `--resume`, attempt+1; a death from a transient driver failure (rate limit, auth, credit) is not counted against `max_attempts`; a worker that stopped while its task was paused (an emergency, a driver circuit, a manual pause) is resumed on the same attempt once the pause ends | Attempts exceed `max_attempts`; transient deaths exceed `infraRetries` (20) |
 | Stall (pid alive, no output or heartbeat for 10 min) | SIGTERM, then SIGKILL, then resume | 2 stalls on the same task |
 | Dependency wait | Block the task; unblock on `dependency.satisfied` or `task.merged` | A wait-for cycle → `deadlock_detected`, sent to the common orchestrator |
 | Repeated failure | — | The same check signature 3× with no patch in between (a diff-hash change resets the streak); or diff-hash ping-pong A→B→A |
@@ -617,9 +617,11 @@ Only the escalating task blocks.
 
 **Implementation (WS10).** `src/execution/escalation.ts` exports `routeEscalation`, `resolveEscalation` and `createRunnerHooks`. `huddle.ts`, `lead.ts`, `goal-review.ts` and `context-bundle.ts` supply the engines, fallback, review and bounded context. Persona calls and engine calls run under a usage sink outside event transactions; live-worker answers report their driver usage to the same ledger. A failed worker answer routes to the orchestrator without a third model attempt.
 
-Resolvers serialize through a separate per-escalation lock, leaving the event lock free during calls. An amendment's reason identifies its escalation so a retry after a crash can finish resolving without amending twice. A concluded format huddle can likewise recover its session and decision from its turn blobs. Emergency pause scopes retain separate ownership: resolving an escalation preserves overlapping emergencies and manual pauses.
+Resolvers serialize through a separate per-escalation lock, leaving the event lock free during calls. An amendment's reason identifies its escalation so a retry after a crash can finish resolving without amending twice. A concluded format huddle can likewise recover its session and decision from its turn blobs: `routeEscalation` and the runner pass finish a huddle that concluded while its escalation is still `in_huddle`, as whoever started it, with no further model call. Emergency pause scopes retain separate ownership: resolving an escalation preserves overlapping emergencies and manual pauses.
 
-`createRunnerHooks({llm?, alive?})` implements WS08's `escalationRouter(ctx, escalation)`, `leadFallback(ctx, id)` and `goalReview(ctx, input)` interface. The mirror in `runner-hook-types.ts` must stay identical to WS08's `runner-hooks.ts`. The adapter uses `ctx.worker` for live session records and applies returned process operations through the driver's stop control and `ctx.resumeTask`. Persona calls use the supplied provider/model, or the provider layer's default OpenAI model. The direct WS11 resolver returns the current escalation, process operations, an idempotence flag, warnings and any amendment result; `participants[0]` supplies the new persona for a `reassign` action.
+A resolution that unblocks a task owes it a resume until `agent.spawned` (or `task.retried`) for that task is observed. `owedResumeOps` re-derives the same `resume_worker` (same key) from the log on every pass, so a resume that failed or was lost in a crash is issued again. Directive lines (`Action:`, `Outcome:`, `Verdict:`, `Decision:`) are read only from the answer's own lines, never inside blockquotes or fences; conflicting `Action:` lines fail closed to `await_human`, conflicting `Outcome:` lines to `NEEDS_ORCHESTRATOR` and conflicting `Verdict:` lines to `INCOMPLETE`.
+
+`createRunnerHooks({llm?, alive?})` implements WS08's `escalationRouter(ctx, escalation)`, `leadFallback(ctx, id)` and `goalReview(ctx, input)` interface, plus the optional `escalationPass(ctx)` the runner calls every pass for owed resumes and concluded huddles. The mirror in `runner-hook-types.ts` must stay identical to WS08's `runner-hooks.ts`. The adapter uses `ctx.worker` for live session records and applies returned process operations through the driver's stop control and `ctx.resumeTask`. Persona calls use the supplied provider/model, or the provider layer's default OpenAI model. The direct WS11 resolver returns the current escalation, process operations, an idempotence flag, warnings and any amendment result; `participants[0]` supplies the new persona for a `reassign` action.
 
 ## 13. Orchestrator experience
 

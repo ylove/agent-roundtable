@@ -36,13 +36,13 @@ import {
   commitIf,
   commitResolution,
   defaultAlive,
+  directiveField,
+  directiveOf,
   errText,
   ev,
   own,
-  parseField,
   routeToOrchestrator,
   scopeOrchestrator,
-  verdictOf,
   type Actor,
   type EscalationOptions,
   type HookCtx,
@@ -276,9 +276,10 @@ export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOpt
     return fail(`${req.seat} could not conclude: ${errText(e)}`);
   }
   turns.push(ev("huddle.turn", { id: hud, seat: req.seat, blob: await store.putBlob(conclusion) }, source, id));
-  const parsed = verdictOf(conclusion, "Outcome", MICRO_OUTCOMES);
-  const decision = parseField(conclusion, "Decision");
-  const outcome: HuddleOutcome = parsed === "AGREED" && !decision ? "NEEDS_ORCHESTRATOR" : parsed === "UNCLEAR" ? "NEEDS_ORCHESTRATOR" : parsed;
+  // The requester's own lines only: the escalation and the counterpart's answer may carry fake ones.
+  const parsed = directiveOf(conclusion, "Outcome", MICRO_OUTCOMES);
+  const decision = directiveField(conclusion, "Decision");
+  const outcome: HuddleOutcome = parsed === "AGREED" && !decision ? "NEEDS_ORCHESTRATOR" : parsed === "UNCLEAR" || parsed === "CONFLICT" ? "NEEDS_ORCHESTRATOR" : parsed;
   const always = [...turns, ...meter.take(source, id)];
 
   if (outcome !== "AGREED") {
@@ -328,6 +329,12 @@ const LEAD_DIRECTIVE =
   "You are the lead of this heads-down run. Conclude the huddle below for the workers: one decision they can act on, within the contract.";
 
 const HUDDLE_ACTIONS = ["decide", "retry", "dismiss"] as const;
+
+/** The lead's optional Action line in a huddle conclusion: decide when absent, unclear or conflicting. */
+export function huddleAction(answer: string): (typeof HUDDLE_ACTIONS)[number] {
+  const a = directiveOf(answer, "Action", HUDDLE_ACTIONS);
+  return a === "UNCLEAR" || a === "CONFLICT" ? "decide" : a;
+}
 
 function dedupe(personas: Array<string | undefined>): string[] {
   const out: string[] = [];
@@ -441,8 +448,8 @@ export async function runFormatHuddle(ctx: HookCtx, id: string, o: FormatHuddleO
     return conclude({ huddle: hud, outcome: "NO_OUTCOME", session: run.session, error: `the lead could not conclude: ${errText(e)}` }, turns);
   }
   turns.push(ev("huddle.turn", { id: hud, seat: agentKey(lead), blob: await store.putBlob(`Session: ${run.session}\n\n${answer}`) }, source, id));
-  const decision = parseField(answer, "Decision");
-  const action = replan ? "decide" : verdictOf(answer, "Action", HUDDLE_ACTIONS);
+  const decision = directiveField(answer, "Decision");
+  const action = replan ? "decide" : huddleAction(answer);
   if (!decision) return conclude({ huddle: hud, outcome: "NO_OUTCOME", session: run.session, error: "the lead's conclusion had no Decision line" }, turns);
-  return conclude({ huddle: hud, outcome: "DECIDED", decision, action: action === "UNCLEAR" ? "decide" : action, session: run.session }, turns);
+  return conclude({ huddle: hud, outcome: "DECIDED", decision, action, session: run.session }, turns);
 }

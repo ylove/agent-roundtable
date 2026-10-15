@@ -127,6 +127,13 @@ export interface Observations {
    * max_attempts.
    */
   infraDeaths?: Record<string, { count: number; lastAttempt: number }>;
+  /**
+   * Per task, the attempt whose worker stopped for a pause: it exited while its task or the run
+   * was paused (or its agent.exited says paused), or it was running when the pause began. Its
+   * death does not count against max_attempts; it resumes on the same attempt. `context` is the
+   * pause (its escalation id, or its reason); `seq` the event that recorded the stop.
+   */
+  pauseStops?: Record<string, { attempt: number; context: string; seq: number }>;
   /** Escalations whose lead fallback call is running now (set by the runner). */
   leadInFlight?: Record<string, boolean>;
   /** When lead_fallback was last issued per escalation (its watchdog.action audit event). */
@@ -393,7 +400,9 @@ function deadWorker(
   const next = attempt + 1;
   const how = lost ? "was lost (its process is gone)" : "exited before submitting";
   const key = `worker_dead:${task}:${attempt}`;
-  const lostEvent = () => [draft("agent.exited", { agent, task, code: null, reason: "lost" }, key)];
+  const stop = own(obs.pauseStops, task);
+  const paused = stop !== undefined && stop.attempt === attempt ? stop : undefined;
+  const lostEvent = () => [draft("agent.exited", { agent, task, code: null, reason: "lost", ...(paused && { paused: paused.context }) }, key)];
 
   // Gate first: while no worker may start (budget spent, circuit open, a half-open trial already
   // running), wait. Nothing is counted; the budget and circuit rules escalate. A lost worker is
@@ -401,6 +410,18 @@ function deadWorker(
   const gate = respawnGate(state, now, obs, { task, agent, driver: rec?.driver }, pass);
   if (!gate.ok) return lost ? [emitAction("worker_dead", `${key}:lost`, task, lostEvent())] : [];
   const before = lost ? lostEvent() : [];
+
+  // A worker that stopped for a pause (an emergency, a driver circuit, a manual pause) did
+  // nothing wrong: resume its session on the same attempt, counting nothing. The op repeats
+  // (same key) until its agent.spawned clears the stop.
+  if (paused) {
+    if (gate.trial) pass.admitted.add(gate.trial);
+    const why = `Worker ${agent} stopped while task ${task} was paused (${paused.context}); resuming its session on attempt ${attempt} (not counted against max_attempts).`;
+    return [
+      ...(before.length ? [emitAction("worker_dead", `${key}:lost`, task, before)] : []),
+      { type: "resume_worker", rule: "worker_dead", key: `${key}:paused:${paused.seq}`, target: agent, agent, task, why },
+    ];
+  }
 
   // A death the circuit breaker accounts for (a rate limit, auth or credit failure) is not the
   // task's fault: it does not count against max_attempts, only against the larger infraRetries.
@@ -490,8 +511,9 @@ function stalledWorker(
  * For each runner claim on a claimed or in-progress task that is not paused:
  *  - the agent exited or left, or its pid is gone ("lost"): retry with attempt+1 (spawn_retry
  *    resumes the session), or fail the task and escalate once attempts are used up. Transient
- *    driver failures do not use attempts. No retry, and no attempt accounting, while the respawn
- *    gate is shut (budget spent, circuit open or opening, a half-open trial already running);
+ *    driver failures do not use attempts, and a worker that stopped for a pause resumes its
+ *    session on the same attempt (obs.pauseStops). No retry, and no attempt accounting, while the
+ *    respawn gate is shut (budget spent, circuit open or opening, a half-open trial already running);
  *  - the pid lives but there has been no output or heartbeat for stallMs: kill, and resume when
  *    the gate allows; on the task's second stall, kill, block and escalate instead.
  * A task the watchdog blocked keeps no live worker: its kill is re-issued (standing) until the
@@ -838,6 +860,15 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
   const spawns: Record<string, number> = {};
   const attemptOf = new Map<string, number>();
   const infraDeaths: Record<string, { count: number; lastAttempt: number }> = {};
+  const pauseStops: Record<string, { attempt: number; context: string; seq: number }> = {};
+  const pausedTasks = new Map<string, string>();
+  let runPause: string | undefined;
+  const live = new Map<string, string>();
+  // The first record of an attempt's stop wins, so its resume keeps one key.
+  const stopFor = (t: string, context: string, seq: number) => {
+    const attempt = attemptOf.get(t) ?? 0;
+    if (own(pauseStops, t)?.attempt !== attempt) putOwn(pauseStops, t, { attempt, context, seq });
+  };
   const leadIssuedAt: Record<string, number> = {};
   const needKey = (n: DependencyNeed) => `${n.task}\0${n.need.kind}\0${n.need.ref}`;
 
@@ -861,9 +892,14 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
         currentTask.set(e.payload.agent, e.payload.task);
         attemptOf.set(e.payload.task, e.payload.attempt);
         putOwn(spawns, e.payload.agent, at);
+        live.set(e.payload.agent, e.payload.task);
+        delete pauseStops[e.payload.task];
         break;
       case "agent.exited": {
         const t = e.payload.task ?? currentTask.get(e.payload.agent);
+        live.delete(e.payload.agent);
+        const pause = e.payload.paused ?? (t !== undefined ? runPause ?? pausedTasks.get(t) : undefined);
+        if (t !== undefined && pause !== undefined) stopFor(t, pause, e.seq);
         if (t === undefined || e.payload.reason !== "error") break;
         if (classifyFailure(e.payload.result_subtype ?? "", { source: "driver" }) === "error") break;
         putOwn(infraDeaths, t, { count: (own(infraDeaths, t)?.count ?? 0) + 1, lastAttempt: attemptOf.get(t) ?? 0 });
@@ -872,10 +908,23 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
       case "watchdog.action":
         if (e.payload.rule === "lead_fallback" && e.payload.action === "lead_fallback") putOwn(leadIssuedAt, e.payload.target, at);
         break;
+      case "execution.paused": {
+        // A worker running when its task is paused was told to stop: its death does not count.
+        const scope = e.payload.scope;
+        const context = e.correlation ?? e.payload.reason;
+        if (scope === "all") runPause = context;
+        else for (const t of scope) pausedTasks.set(t, context);
+        for (const t of live.values()) if (scope === "all" || scope.includes(t)) stopFor(t, context, e.seq);
+        break;
+      }
       case "execution.resumed": {
         // Claim TTLs restart on resume (design §3).
         const scope = e.payload.scope;
         for (const t of new Set(claimOf.values())) if (scope === "all" || scope.includes(t)) putOwn(claims, t, { renewedAt: at });
+        if (scope === "all") {
+          runPause = undefined;
+          pausedTasks.clear();
+        } else for (const t of scope) pausedTasks.delete(t);
         break;
       }
       case "task.reassigned":
@@ -889,6 +938,7 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
       case "task.accepted":
       case "task.merged":
         for (const [a, t] of claimOf) if (t === e.payload.task) claimOf.delete(a);
+        delete pauseStops[e.payload.task];
         break;
       case "huddle.started":
         putOwn(huddles, e.payload.id, { startedAt: at });
@@ -941,6 +991,7 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
     needs: base.needs ?? [...needs.values()],
     spawns: { ...spawns, ...base.spawns },
     infraDeaths: { ...infraDeaths, ...base.infraDeaths },
+    pauseStops: { ...pauseStops, ...base.pauseStops },
     leadIssuedAt: { ...leadIssuedAt, ...base.leadIssuedAt },
   };
 }

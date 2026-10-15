@@ -35,7 +35,7 @@ import { contractRecord, openContractStore, orchestratorSource } from "./contrac
 import { leasesInQuestion, readDiagnostics, targetPaths, type Diagnostics } from "./context-bundle.js";
 import { globWithin } from "./contract.js";
 import { goalReview } from "./goal-review.js";
-import { runFormatHuddle, runMicroHuddle } from "./huddle.js";
+import { huddleAction, runFormatHuddle, runMicroHuddle } from "./huddle.js";
 import { leadFallback } from "./lead.js";
 import { acquireLock } from "./lock.js";
 import { normalizeGlob } from "./leases.js";
@@ -267,20 +267,60 @@ export function verdictOf<T extends string>(text: string, label: string, options
 
 const LABEL_LINE = /^\s*(?:#+\s*|>\s*)?(?:\*\*|__)?[A-Z][A-Za-z _-]{0,30}(?:\*\*|__)?\s*:/;
 
-/** The value of the first `Label:` line and the lines continuing it (up to the next `Label:` line or a fence). */
-export function parseField(text: string, label: string, max = 2000): string | undefined {
+/**
+ * The value of the first `Label:` line (the last with `last`) and the lines continuing it (up to
+ * the next `Label:` line or a fence).
+ */
+export function parseField(text: string, label: string, max = 2000, last = false): string | undefined {
   const esc = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`^\\s*(?:#+\\s*|>\\s*|[-+]\\s+)?[*_\`]*${esc}[*_\`]*\\s*:(.*)$`, "i");
   const lines = text.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const m = re.exec(lines[i]);
-    if (!m) continue;
-    const out = [m[1].replace(/^[\s*_`]+/, "")];
-    for (let j = i + 1; j < lines.length && !/^\s*```/.test(lines[j]) && !LABEL_LINE.test(lines[j]); j++) out.push(lines[j]);
-    const v = out.join("\n").trim();
-    return v ? cap(v, max) : undefined;
+  const starts = lines.map((l, i) => (re.test(l) ? i : -1)).filter((i) => i >= 0);
+  const i = last ? starts.at(-1) : starts[0];
+  if (i === undefined) return undefined;
+  const out = [re.exec(lines[i])![1].replace(/^[\s*_`]+/, "")];
+  for (let j = i + 1; j < lines.length && !/^\s*```/.test(lines[j]) && !LABEL_LINE.test(lines[j]); j++) out.push(lines[j]);
+  const v = out.join("\n").trim();
+  return v ? cap(v, max) : undefined;
+}
+
+/**
+ * The answer's own lines: none inside a fenced block or a blockquote (`>`), where an answer
+ * quotes the escalation and other agents' words. Agent-written text is untrusted: it can carry
+ * lines that look like directives.
+ */
+export function ownLines(text: string): string[] {
+  const out: string[] = [];
+  let fence: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (m) {
+      if (fence === undefined) fence = m[1];
+      else if (m[1][0] === fence[0] && m[1].length >= fence.length) fence = undefined;
+      continue;
+    }
+    if (fence === undefined && !/^\s*>/.test(line)) out.push(line);
   }
-  return undefined;
+  return out;
+}
+
+/**
+ * The answer's own `Label: <option>` directive: verdictOf on each of its own lines (ownLines).
+ * CONFLICT when its own lines name different options, which callers treat as no directive and
+ * fail closed on; UNCLEAR when none does.
+ */
+export function directiveOf<T extends string>(text: string, label: string, options: readonly T[]): T | "UNCLEAR" | "CONFLICT" {
+  const found = new Set<T>();
+  for (const line of ownLines(text)) {
+    const v = verdictOf(line, label, options);
+    if (v !== "UNCLEAR") found.add(v);
+  }
+  return found.size > 1 ? "CONFLICT" : found.size === 1 ? [...found][0] : "UNCLEAR";
+}
+
+/** The last `Label:` field among the answer's own lines (ownLines): the answer's own, not one it quotes. */
+export function directiveField(text: string, label: string, max = 2000): string | undefined {
+  return parseField(ownLines(text).join("\n"), label, max, true);
 }
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
@@ -632,8 +672,13 @@ function dependencyWait(state: Readonly<BlackboardState>, esc: Escalation): Auto
   }
   const rt = state.tasks[esc.task];
   if (rt.state === "blocked" && rt.blocked_by?.escalation === esc.id) {
-    // The watchdog unblocks a task blocked on dependencies once they are accepted or published.
-    return { rule: "dependency_wait", events: (source, id) => [ev("task.blocked", { task: esc.task!, deps: [t] }, source, id)], revoked: [] };
+    // The watchdog unblocks a task blocked on dependencies once they are accepted or published. A
+    // block keeps its escalation through a later task.blocked, so the task is unblocked first.
+    return {
+      rule: "dependency_wait",
+      events: (source, id) => [ev("task.unblocked", { task: esc.task! }, source, id), ev("task.blocked", { task: esc.task!, deps: [t] }, source, id)],
+      revoked: [],
+    };
   }
   return { rule: "dependency_wait", events: () => [], directive: `${label} is ${dep.state}: wait for it (post_update kind "need" blocks your task until it is done).`, revoked: [] };
 }
@@ -688,16 +733,19 @@ async function commitAuto(ctx: HookCtx, id: string, auto: AutoResolution): Promi
 /**
  * Route a newly raised escalation (see the header). Idempotent: an escalation that is no longer
  * open is left alone, except an emergency whose tasks are not paused yet (the watchdog records
- * awaiting_human but pauses nothing).
+ * awaiting_human but pauses nothing), a huddle that concluded but whose outcome was not applied
+ * (finishConcludedHuddle), and a resolution whose resume has not started yet (owedResumeOps).
  */
 export async function routeEscalation(ctx: HookCtx, id: string, opts: EscalationOptions = {}): Promise<ProcessOp[]> {
   const state = await ctx.store.state();
   const esc = own(state.escalations, id);
   if (!esc || !state.contract) return [];
+  if (esc.status === "resolved") return owedResumeOps(ctx, id);
   if (isEmergency(esc)) {
     if (esc.status === "open" || esc.status === "awaiting_human") await awaitHuman(ctx, id, { actor: { kind: "runner" } });
     return [];
   }
+  if (esc.status === "in_huddle") return finishConcludedHuddle(ctx, id, opts);
   if (esc.status !== "open") return [];
   const diag = await readDiagnostics(ctx.store, esc);
   const auto = autoResolution(state, esc, diag, opts.alive ?? defaultAlive);
@@ -936,12 +984,14 @@ async function resolveByHuddle(ctx: HookCtx, id: string, opts: ResolveOptions, a
       const text = (await ctx.store.getBlob(e.payload.blob)).toString("utf8");
       session = /^Session: ([a-z0-9-]+)\n/.exec(text)?.[1];
       if (session) {
-        const parsed = verdictOf(text, "Action", ["decide", "retry", "dismiss"] as const);
-        if (parsed !== "UNCLEAR") action = parsed;
+        action = huddleAction(text);
         break;
       }
     }
     h = { huddle: esc.huddle, outcome: "DECIDED", decision: previous.decision, session, action };
+  } else if (esc.status === "in_huddle" && previous?.outcome !== undefined && esc.huddle) {
+    // It concluded without a usable decision before a crash: the fallback below still applies.
+    h = { huddle: esc.huddle, outcome: previous.outcome, error: previous.decision ?? `the ${format} huddle reached no decision` };
   } else {
     if (esc.status === "in_huddle") {
       warnings.push(`${id} is already in huddle ${esc.huddle ?? ""}`.trim());
@@ -997,6 +1047,69 @@ async function finishHuddle(ctx: HookCtx, id: string, huddle: string, plan: Reso
 }
 
 // ============================================================================
+// Recovery: what a resolution left undone (a failed or lost resume, an unapplied huddle)
+// ============================================================================
+
+/** The resume card of an automatic resolution, re-derived (its first card named the paths). */
+const AUTO_RESUME: Readonly<Record<string, string>> = {
+  dead_leaseholder: "The holder of the lease you waited on is gone and its lease was revoked. A queued request of yours is granted next; otherwise request the lease again with lease(action: \"request\").",
+  lease_orphan: "The holder of the lease you waited on has finished, so its lease expires. A queued request of yours is granted next; otherwise request the lease again with lease(action: \"request\").",
+  dependency_satisfied: "What you waited on is done: continue with it.",
+  transient_rate_limit: "The rate limit was transient: continue where you stopped.",
+};
+
+/**
+ * The resumes resolutions still owe: a task.unblocked a resolution wrote (correlated with its
+ * escalation) that no agent.spawned or task.retried for the task has followed. The same
+ * resume_worker op (same key) comes back on every call until one does, so a resume that failed
+ * (the runner could not start it, the worker died) or was lost in a crash between the commit
+ * and the op is issued again. A worker still running needs none: the directive reaches it.
+ */
+export async function owedResumeOps(ctx: HookCtx, only?: string): Promise<ProcessOp[]> {
+  const owed = new Map<string, string>();
+  for (const e of await ctx.store.events({ types: ["task.unblocked", "task.blocked", "agent.spawned", "task.retried"] })) {
+    if (e.type === "task.unblocked") {
+      if (e.correlation) owed.set(e.payload.task, e.correlation);
+    } else if (e.type === "task.blocked" || e.type === "agent.spawned" || e.type === "task.retried") owed.delete(e.payload.task);
+  }
+  const state = await ctx.store.state();
+  const ops: ProcessOp[] = [];
+  for (const [task, id] of owed) {
+    const esc = own(state.escalations, id);
+    const r = esc?.resolution;
+    if ((only !== undefined && id !== only) || !esc || !r || esc.status !== "resolved" || esc.task !== task) continue;
+    if (r.action === "retry" || r.action === "reassign") continue; // a new attempt, not a resume
+    if (own(state.agents, own(state.claims, task)?.agent)?.status === "running") continue;
+    const text = (r.by === "runner" ? own(AUTO_RESUME, r.decision) : undefined) ?? r.decision;
+    ops.push(...resumeOps(state, esc, text, r.action === "huddle" ? "huddle" : "escalation"));
+  }
+  return ops;
+}
+
+/**
+ * A huddle that concluded while its escalation is still in_huddle: the process stopped between
+ * recording huddle.concluded and applying it. Apply it now, once, as whoever started it: a
+ * decision through resolveEscalation (which re-runs no engine and no model call), any other
+ * outcome through its fallback (the orchestrator, or the human for the lead's huddle). The
+ * micro-huddle records its conclusion with its outcome in one batch; one started by the runner
+ * goes to the orchestrator.
+ */
+export async function finishConcludedHuddle(ctx: HookCtx, id: string, opts: EscalationOptions = {}): Promise<ProcessOp[]> {
+  const state = await ctx.store.state();
+  const esc = own(state.escalations, id);
+  const c = state.contract;
+  if (!esc || !c || esc.status !== "in_huddle" || own(state.huddles, esc.huddle)?.outcome === undefined) return [];
+  const started = (await ctx.store.events({ types: ["huddle.started"] })).find((e) => e.type === "huddle.started" && e.payload.id === esc.huddle);
+  const src = started?.source;
+  const lead = src?.kind === "agent" && src.id === c.authority.lead;
+  if (!src || (src.kind !== "orchestrator" && !lead)) {
+    await routeToOrchestrator(ctx, id, { expect: ["in_huddle"] });
+    return [];
+  }
+  return (await resolveEscalation(ctx, id, { action: "huddle", resolved_by: src.id, as: lead ? "lead" : "orchestrator" }, opts)).ops;
+}
+
+// ============================================================================
 // Runner hooks (WS08 plugs these in)
 // ============================================================================
 
@@ -1034,6 +1147,15 @@ export function createRunnerHooks(opts: RunnerHookOptions = {}): RunnerHooks {
     },
     async leadFallback(ctx, id) {
       await applyOps(ctx, await leadFallback(await runnerHookContext(ctx, opts), id, opts));
+    },
+    async escalationPass(ctx) {
+      // No model call here: owed resumes, and concluded huddles applied from their records.
+      const h = await runnerHookContext(ctx, opts);
+      const ops = await owedResumeOps(h);
+      for (const esc of Object.values(h.state.escalations)) {
+        if (esc.status === "in_huddle" && own(h.state.huddles, esc.huddle)?.outcome !== undefined) ops.push(...await finishConcludedHuddle(h, esc.id, opts));
+      }
+      await applyOps(ctx, ops);
     },
     async goalReview(ctx, input) {
       const r = await goalReview({ ...await runnerHookContext(ctx, opts), integrationSha: input.integrationSha });

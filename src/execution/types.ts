@@ -365,6 +365,11 @@ export interface EventPayloads {
     reason: "completed" | "error" | "killed" | "lost" | "stalled" | "budget" | "attestation";
     result_subtype?: string;
     usage?: TokenUsage;
+    /**
+     * Added in WS10: the pause the worker stopped for (the pausing escalation's id, or the pause's
+     * reason) when its task or the run was paused. Such an exit does not count against max_attempts.
+     */
+    paused?: string;
   };
   "agent.left": { agent: string; reason: string };
 

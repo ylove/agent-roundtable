@@ -12,13 +12,13 @@
 // reentrant, so a locked operation can call another one.
 //
 // A worktree is only ever opened through its location: it must sit at WORKTREES_DIR/<exe>/<name>,
-// and the execution's header names the main repository whose records vouch for it (git.ts). Every
+// and the execution's header names the main repository whose records must confirm it (git.ts). Every
 // git call here goes through runGit's hardening.
 // ============================================================================
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { dirname, isAbsolute, join, posix, relative, sep } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, posix, relative, sep } from "node:path";
 import { WORKTREES_DIR } from "../config.js";
 import { EXECUTION_ID_RE } from "../ids.js";
 import { mkdirPrivate } from "../security/fs-safe.js";
@@ -40,7 +40,7 @@ import {
   type GitIdentity,
   type GitTarget,
 } from "./git.js";
-import { hasDotGitSegment, isGitMetadataPath, pathCovered, type LeaseLike } from "./leases.js";
+import { hasDotGitSegment, isGitMetadataPath, matchGlob, pathCovered, type LeaseLike } from "./leases.js";
 import { withLock, type LockOptions } from "./lock.js";
 import { executionDir } from "./store.js";
 import type { BlackboardState, ExecutionHeader } from "./types.js";
@@ -98,7 +98,9 @@ const real = (p: string): string => {
 function locate(path: string): { exe: string; name: string; path: string } {
   if (typeof path !== "string" || !isAbsolute(path)) throw new GitSafetyError(`Not a worktree path: ${preview(path)}`);
   const root = real(WORKTREES_DIR);
-  const resolved = existsSync(path) ? real(path) : join(real(dirname(path)), path.slice(dirname(path).length + 1));
+  // The parents are resolved, the worktree itself never: a symlink in its place is refused later
+  // (canonicalWorkdir), not followed to whatever it names.
+  const resolved = join(real(dirname(path)), basename(path));
   const parts = relative(root, resolved).split(sep);
   const [exe, name] = parts;
   if (parts.length !== 2 || !EXECUTION_ID_RE.test(exe ?? "") || !(name === INTEGRATION_WORKTREE || validTaskRefName(name ?? ""))) {
@@ -123,7 +125,7 @@ export interface OpenWorktree {
   branch: string;
 }
 
-/** Open a roundtable worktree by path, vouched for by its execution's main repository. */
+/** Open a roundtable worktree by path, confirmed by its execution's main repository's records. */
 export async function openWorktree(path: string): Promise<OpenWorktree> {
   const loc = locate(path);
   const header = readHeader(loc.exe);
@@ -235,20 +237,24 @@ export function taskStartPoint(state: Readonly<BlackboardState>, taskId: string)
  * WORKTREES_DIR/<exe>/<task> on rt/<tag>/<task>. A new branch starts at `startPoint`: "base"
  * (base_sha, the default), "integration" (the integration head) or a commit id. An existing
  * worktree on the right branch is reused as it is, and an existing branch is checked out where
- * it stands, so resumes keep their work.
+ * it stands, so resumes keep their work. The integration worktree is ensured first, so the
+ * integration branch always exists to measure the task against.
  */
-export function ensureTaskWorktree(header: ExecutionHeader, taskId: string, startPoint: string = "base"): Promise<WorktreeInfo> {
+export async function ensureTaskWorktree(header: ExecutionHeader, taskId: string, startPoint: string = "base"): Promise<WorktreeInfo> {
   checkHeader(header);
   if (typeof taskId !== "string" || !ID_RE.test(taskId)) throw new Error(`Not a task id: ${preview(taskId)}`);
-  return ensureWorktree(header, taskId, async () => {
-    const repo = await openRepo(header.repo_root);
-    if (startPoint === "base") return resolveCommit(repo, header.base_sha);
-    if (startPoint === "integration") {
-      await ensureIntegrationWorktree(header);
-      return resolveCommit(repo, `refs/heads/${integrationBranch(header.id)}`);
-    }
-    if (!SHA_RE.test(startPoint)) throw new Error(`startPoint must be "base", "integration" or a full commit id, not ${preview(startPoint)}`);
-    return resolveCommit(repo, startPoint);
+  taskBranch(header.id, taskId);
+  if (startPoint !== "base" && startPoint !== "integration" && !SHA_RE.test(startPoint)) {
+    throw new Error(`startPoint must be "base", "integration" or a full commit id, not ${preview(startPoint)}`);
+  }
+  return withGitLock(header.id, async () => {
+    await ensureIntegrationWorktree(header);
+    return ensureWorktree(header, taskId, async () => {
+      const repo = await openRepo(header.repo_root);
+      if (startPoint === "base") return resolveCommit(repo, header.base_sha);
+      if (startPoint === "integration") return resolveCommit(repo, `refs/heads/${integrationBranch(header.id)}`);
+      return resolveCommit(repo, startPoint);
+    });
   });
 }
 
@@ -373,7 +379,8 @@ async function statusEntries(t: GitTarget): Promise<StatusEntry[]> {
     .map((rec) => ({ xy: rec.slice(0, 2), path: rec.slice(3) }));
 }
 
-async function hasMergeHead(t: GitTarget): Promise<boolean> {
+/** True while a merge is in progress in the target (MERGE_HEAD exists). */
+export async function hasMergeHead(t: GitTarget): Promise<boolean> {
   const r = await runGit(t, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { allowExit: [1] });
   return r.exit === 0;
 }
@@ -425,11 +432,12 @@ export interface ChangedPath {
   sha: string;
 }
 
-/** `git diff --raw -z -M` between two commits, both sides of renames kept. */
-async function rawChanges(t: GitTarget, from: string, to: string, cached = false): Promise<ChangedPath[]> {
-  const args = cached
-    ? ["diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--ignore-submodules=none", from]
-    : ["diff", "--raw", "-z", "--no-abbrev", "-M", "--ignore-submodules=none", from, to];
+/** `git diff --raw -z -M` between two commits (both sides of renames kept), or the index against `from` when `to` is null. */
+async function rawChanges(t: GitTarget, from: string, to: string | null): Promise<ChangedPath[]> {
+  const args =
+    to === null
+      ? ["diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--ignore-submodules=none", from]
+      : ["diff", "--raw", "-z", "--no-abbrev", "-M", "--ignore-submodules=none", from, to];
   const parts = splitZ((await runGit(t, args)).stdout);
   const out: ChangedPath[] = [];
   for (let i = 0; i < parts.length; i++) {
@@ -512,7 +520,9 @@ async function judge(t: GitTarget, changes: readonly ChangedPath[], leases: read
   for (const c of changes) {
     for (const p of c.from !== undefined ? [c.from, c.path] : [c.path]) {
       if (hasDotGitSegment(p)) add(p, "inside .git");
-      else if (leases && !pathCovered(p, leases)) add(p, isGitMetadataPath(p) && pathCovered(p, [{ paths: ["**"] }]) === false && leases.some((l) => l.paths.length) && !pathCoveredIgnoringMeta(p, leases) ? "not leased" : isGitMetadataPath(p) ? "git metadata needs an explicit lease" : "not leased");
+      else if (leases && !pathCovered(p, leases)) {
+        add(p, isGitMetadataPath(p) && globMatched(p, leases) ? "git metadata needs an explicit lease" : "not leased");
+      }
     }
     if (c.status === "D") continue;
     if (c.mode === "160000") add(c.path, "nested repository");
@@ -524,10 +534,9 @@ async function judge(t: GitTarget, changes: readonly ChangedPath[], leases: read
   return out;
 }
 
-/** pathCovered without the metadata rule: tells "not leased" from "needs an explicit lease". */
-function pathCoveredIgnoringMeta(path: string, leases: readonly LeaseLike[]): boolean {
-  const meta = path.split("/").map((s) => (/^\.git/i.test(s) ? `x${s}` : s)).join("/");
-  return pathCovered(meta, leases.map((l) => ({ paths: l.paths.map((g) => g.split("/").map((s) => (/^\.git/i.test(s) ? `x${s}` : s)).join("/")) })));
+/** Some lease glob matches the path, ignoring the metadata rule ("needs an explicit lease" vs "not leased"). */
+function globMatched(path: string, leases: readonly LeaseLike[]): boolean {
+  return leases.some((l) => l.paths.some((g) => matchGlob(g, path)));
 }
 
 /**
@@ -669,8 +678,11 @@ async function commitCore(
   for (const e of await statusEntries(t)) {
     if (e.path.endsWith("/")) rejected.push({ path: e.path, reason: "nested repository" });
     else if (hasDotGitSegment(e.path)) rejected.push({ path: e.path, reason: "inside .git" });
-    else if (leases && !pathCovered(e.path, leases)) uncovered.push(e.path);
-    else if (await escapingSymlink(t, e.path)) rejected.push({ path: e.path, reason: "symlink leaves the worktree" });
+    else if (leases && !pathCovered(e.path, leases)) {
+      // During a merge, a change the merge staged and nobody touched since is the integration
+      // branch's: it is committed with the merge, and is not the worker's uncovered edit.
+      if (!(merging && e.xy[1] === " " && !UNMERGED.has(e.xy))) uncovered.push(e.path);
+    } else if (escapingSymlink(t, e.path)) rejected.push({ path: e.path, reason: "symlink leaves the worktree" });
     else {
       toStage.push(e.path);
       if (UNMERGED.has(e.xy)) conflicted.push(e.path);
@@ -686,7 +698,7 @@ async function commitCore(
   if (stillUnmerged.length) {
     throw new CommitRefusedError(`Unresolved conflicts outside the leases: ${stillUnmerged.join(", ")}`, stillUnmerged);
   }
-  let staged = await rawChanges(t, "HEAD", "", true);
+  let staged = await rawChanges(t, "HEAD", null);
   if (merging) {
     const fromIntegration = new Set(splitZ((await runGit(t, ["diff", "--cached", "--name-only", "-z", "--no-renames", "MERGE_HEAD"])).stdout));
     staged = staged.filter((c) => fromIntegration.has(c.path));
@@ -710,12 +722,10 @@ async function commitCore(
   return { commit, created: true, ...(await summarize(t, from, commit)), uncovered, rejected };
 }
 
-async function escapingSymlink(t: GitTarget, rel: string): Promise<boolean> {
+function escapingSymlink(t: GitTarget, rel: string): boolean {
   try {
     const p = join(t.workTree, rel);
-    const st = lstatSync(p);
-    if (!st.isSymbolicLink()) return false;
-    const { readlinkSync } = await import("node:fs");
+    if (!lstatSync(p).isSymbolicLink()) return false;
     return symlinkEscapes(rel, readlinkSync(p, "utf8"));
   } catch {
     return false; // gone (a deletion)

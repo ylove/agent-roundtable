@@ -21,7 +21,7 @@
 
 import { spawn } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { executionTag, EXECUTION_ID_RE } from "../ids.js";
 import { canonicalWorkdir } from "../sandbox/common.js";
 import { killTree } from "../sandbox/process.js";
@@ -253,7 +253,8 @@ export function findWorktreeAdmin(repo: GitTarget, workTree: string): string | n
   } catch {
     return null;
   }
-  const want = join(real(workTree), ".git");
+  // The parents are resolved, the worktree itself is not: a symlink in its place matches nothing.
+  const want = join(real(dirname(workTree)), basename(workTree), ".git");
   for (const name of names) {
     const admin = join(base, name);
     try {
@@ -397,10 +398,19 @@ function spawnGit(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] 
     });
     if (o.input !== undefined) child.stdin!.end(o.input);
     let startError: Error | undefined;
+    let settled = false;
     child.on("error", (e) => {
       startError = e;
+      if (child.pid === undefined && !settled) {
+        // Never started (git missing from PATH): there may be no close event to wait for.
+        settled = true;
+        clearTimeout(timer);
+        reject(new GitError(`${label} could not start (${e.message})`, args, null, ""));
+      }
     });
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       const stderr = Buffer.concat(err).toString("utf8");
       const fail = (why: string) =>

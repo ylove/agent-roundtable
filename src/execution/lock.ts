@@ -1,24 +1,33 @@
 // ============================================================================
-// Cross-process mkdir locks with stale detection and atomic steal
+// Cross-process mkdir locks that are never taken from a live holder
 //
 // A lock is a directory created with mkdir (atomic on local filesystems) holding
-// owner.json {pid, host, token, at}. It is stale when its pid is dead on this host or `at` is
-// older than staleMs. A contender steals a stale lock by renaming it aside, so of several
-// contenders exactly one moves it; the rest find it gone and race for a fresh mkdir.
+// owner.json {pid, host, token, at, started?}. A holder keeps the lock for as long as its process
+// lives, however long that is: a holder stalled by a GC pause, swap, SIGSTOP or a suspended
+// laptop must never wake up next to a second writer, so waiters time out instead of stealing.
 //
-// A holder can still lose its lock: by holding it past staleMs, or in the narrow window of a
-// steal race. Code that commits shared state must call held() immediately before committing.
+// A lock is cleared only when its owner is known to be gone:
+//  - its pid is dead on this host, or the pid is alive but belongs to another process (pid reuse,
+//    detected by comparing the process start time recorded in `started`); or
+//  - owner.json is missing or unreadable after a grace period of staleMs (by directory mtime):
+//    its creator died between mkdir and publishing owner.json.
+// A lock owned by another host is never cleared: 1.0 supports one host per home directory.
+// Several contenders may race to clear a dead lock; the rename that moves it aside succeeds for
+// one of them, and all then race for a fresh mkdir.
 // ============================================================================
 
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { pidAlive } from "../prototypes/sandbox.js";
-import { mkdirPrivate } from "../security/fs-safe.js";
 
 export interface LockOptions {
-  /** A lock whose owner.json `at` is older than this is stale, even if its pid is alive. */
+  /**
+   * Grace period for a lock directory without a readable owner.json. It is also the age after
+   * which a live owner pid is checked for reuse. It never makes a live holder's lock stale.
+   */
   staleMs: number;
   /** Give up with LockTimeoutError after waiting this long. */
   timeoutMs: number;
@@ -32,6 +41,8 @@ export interface LockOwner {
   token: string;
   /** ISO time the lock was taken. */
   at: string;
+  /** The holder process's start time as `ps` reports it (UTC); guards against pid reuse. */
+  started?: string;
 }
 
 /** Releases the lock if owner.json still carries our token; true when it removed it. */
@@ -44,18 +55,24 @@ export type LockRelease = (() => boolean) & {
 export class LockTimeoutError extends Error {
   readonly code = "ELOCKTIMEOUT";
   constructor(readonly lockDir: string, readonly timeoutMs: number, readonly owner: LockOwner | null) {
-    super(
-      `Timed out after ${timeoutMs} ms waiting for lock ${lockDir}` +
-        (owner ? ` (held by pid ${owner.pid} on ${owner.host} since ${owner.at})` : "")
-    );
+    super(`Timed out after ${timeoutMs} ms waiting for lock ${lockDir}${describeOwner(lockDir, owner)}`);
     this.name = "LockTimeoutError";
   }
+}
+
+function describeOwner(lockDir: string, o: LockOwner | null): string {
+  if (!o) return "";
+  if (o.host !== hostname()) {
+    return ` (held by pid ${o.pid} on host ${o.host}, which is not this host; if that is this machine under an earlier name and the process is gone, remove ${lockDir})`;
+  }
+  return ` (held by pid ${o.pid} since ${o.at}; a lock is never taken from a live process, so if it is stuck, stop it)`;
 }
 
 const OWNER_FILE = "owner.json";
 const MAX_WAIT_MS = 5000;
 
 const errCode = (e: unknown) => (e as NodeJS.ErrnoException).code;
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const rand = () => randomBytes(4).toString("hex");
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -67,9 +84,11 @@ export function readLockOwner(lockDir: string): LockOwner | null {
       o &&
       typeof o === "object" &&
       Number.isSafeInteger(o.pid) &&
+      (o.pid as number) > 0 &&
       typeof o.host === "string" &&
       typeof o.token === "string" &&
-      typeof o.at === "string"
+      typeof o.at === "string" &&
+      (o.started === undefined || typeof o.started === "string")
     ) {
       return o as LockOwner;
     }
@@ -80,42 +99,62 @@ export function readLockOwner(lockDir: string): LockOwner | null {
 }
 
 // ---------------------------------------------------------------------------
-// Taking, judging and stealing
+// Process identity (pid reuse guard)
+// ---------------------------------------------------------------------------
+
+/** A process's start time from `ps` (UTC, second resolution), or null when it is unknown. */
+function processStart(pid: number): string | null {
+  try {
+    const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { PATH: process.env.PATH || "/usr/bin:/bin", TZ: "UTC", LC_ALL: "C" },
+    });
+    const out = r.status === 0 && typeof r.stdout === "string" ? r.stdout.trim().replace(/\s+/g, " ") : "";
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+let selfStart: string | null | undefined;
+const ownStart = (): string | null => (selfStart === undefined ? (selfStart = processStart(process.pid)) : selfStart);
+
+// ---------------------------------------------------------------------------
+// Taking, judging and clearing
 // ---------------------------------------------------------------------------
 
 /**
  * mkdir the lock, then publish owner.json with link(2), which fails if owner.json already exists.
  * That catches the one race mkdir alone cannot: our fresh, still-empty directory being replaced
- * by a lock that a steal restored (rename may replace an empty directory).
+ * by a lock that a clearing contender restored (rename may replace an empty directory). Without
+ * hard links the lock fails closed. The parent directory must exist: a lock never recreates it.
  */
 function tryCreate(lockDir: string, token: string): boolean {
   try {
     mkdirSync(lockDir, { mode: 0o700 });
   } catch (e) {
     if (errCode(e) === "EEXIST") return false;
-    if (errCode(e) !== "ENOENT") throw e;
-    mkdirPrivate(dirname(lockDir));
-    try {
-      mkdirSync(lockDir, { mode: 0o700 });
-    } catch (e2) {
-      if (errCode(e2) === "EEXIST") return false;
-      throw e2;
-    }
+    if (errCode(e) === "ENOENT") throw new Error(`Cannot take lock ${lockDir}: ${dirname(lockDir)} does not exist`);
+    throw e;
   }
-  const owner: LockOwner = { pid: process.pid, host: hostname(), token, at: new Date().toISOString() };
+  const started = ownStart();
+  const owner: LockOwner = { pid: process.pid, host: hostname(), token, at: new Date().toISOString(), ...(started ? { started } : {}) };
   const tmp = join(lockDir, `.owner.${token}.tmp`);
   try {
     writeFileSync(tmp, JSON.stringify(owner), { mode: 0o600, flag: "wx" });
-    try {
-      linkSync(tmp, join(lockDir, OWNER_FILE));
-    } catch (e) {
-      if (errCode(e) === "EEXIST") return false; // the directory is someone else's now
-      renameSync(tmp, join(lockDir, OWNER_FILE)); // filesystems without hard links
-    }
+    linkSync(tmp, join(lockDir, OWNER_FILE));
     return true;
   } catch (e) {
-    if (errCode(e) === "ENOENT") return false; // moved away under us
-    throw e;
+    if (errCode(e) === "EEXIST" || errCode(e) === "ENOENT") return false; // the directory is someone else's now
+    rmSync(tmp, { force: true });
+    try {
+      rmdirSync(lockDir);
+    } catch {
+      /* not empty: not ours */
+    }
+    throw new Error(`Cannot take lock ${lockDir}: ${errText(e)} (the lock needs a local filesystem with hard links)`);
   } finally {
     rmSync(tmp, { force: true });
   }
@@ -136,22 +175,28 @@ function inspect(lockDir: string): Seen | null {
   }
 }
 
-/** Dead pid on this host, or older than staleMs (by owner.at, else by directory mtime). */
-function isStale(seen: Seen, staleMs: number, now: number): boolean {
+/** True only when the owner is known to be gone (see the header); a live holder is never gone. */
+function ownerGone(seen: Seen, staleMs: number, now: number): boolean {
   const o = seen.owner;
-  if (o && o.host === hostname() && o.pid > 0 && !pidAlive(o.pid)) return true;
-  const at = o ? Date.parse(o.at) : NaN;
-  return now - (Number.isFinite(at) ? at : seen.mtimeMs) > staleMs;
+  if (!o) return now - seen.mtimeMs > staleMs;
+  if (o.host !== hostname()) return false;
+  if (!pidAlive(o.pid)) return true;
+  // The pid is alive. It is the holder unless the pid was reused, which is checked (one ps spawn)
+  // only once the lock is older than staleMs.
+  const at = Date.parse(o.at);
+  if (o.started === undefined || !(now - (Number.isFinite(at) ? at : seen.mtimeMs) > staleMs)) return false;
+  const current = processStart(o.pid);
+  return current !== null && current !== o.started;
 }
 
 /**
- * Remove the lock if it is stale. Returns true when the caller should retry mkdir at once (the
- * lock is gone or was removed), false when it is live and the caller should wait.
+ * Remove the lock if its owner is gone. Returns true when the caller should retry mkdir at once
+ * (the lock is gone or was removed), false when it is live and the caller should wait.
  */
-function stealIfStale(lockDir: string, staleMs: number): boolean {
+function clearIfGone(lockDir: string, staleMs: number): boolean {
   const seen = inspect(lockDir);
   if (!seen) return true;
-  if (!isStale(seen, staleMs, Date.now())) return false;
+  if (!ownerGone(seen, staleMs, Date.now())) return false;
   const aside = `${lockDir}.stale.${rand()}`;
   try {
     renameSync(lockDir, aside);
@@ -160,17 +205,19 @@ function stealIfStale(lockDir: string, staleMs: number): boolean {
     throw e;
   }
   if (readLockOwner(aside)?.token !== seen.owner?.token) {
-    // Between our look and the rename, the stale lock was replaced by a live one: put it back.
+    // Between our look and the rename, the dead lock was replaced by a live one: put it back.
     try {
       renameSync(aside, lockDir);
       return false;
     } catch {
-      /* lockDir was taken again meanwhile; the lock we moved is lost and its holder's held() is false */
+      rmSync(aside, { recursive: true, force: true });
+      console.error(`[Lock] a live lock on ${lockDir} was displaced while clearing a dead one; its holder will see it lost`);
+      return true;
     }
   }
   rmSync(aside, { recursive: true, force: true });
   const o = seen.owner;
-  console.error(`[Lock] removed stale lock ${lockDir}${o ? ` (pid ${o.pid} on ${o.host}, taken ${o.at})` : " (no owner)"}`);
+  console.error(`[Lock] cleared dead lock ${lockDir}${o ? ` (pid ${o.pid}, taken ${o.at})` : " (no owner)"}`);
   return true;
 }
 
@@ -181,7 +228,7 @@ function makeRelease(lockDir: string, token: string): LockRelease {
     if (done) return false;
     done = true;
     if (!held()) return false;
-    // Rename first, so a steal racing this release cannot make us delete the stealer's lock.
+    // Rename first, so a contender racing this release cannot make us delete its lock.
     const aside = `${lockDir}.released.${rand()}`;
     try {
       renameSync(lockDir, aside);
@@ -207,14 +254,18 @@ function makeRelease(lockDir: string, token: string): LockRelease {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Take the lock at `lockDir`, waiting with exponential backoff (5 ms doubling to 5 s, jittered). */
+/**
+ * Take the lock at `lockDir` (its parent must exist), waiting with exponential backoff (5 ms
+ * doubling to 5 s, jittered). A lock whose holder is alive is waited for, never taken; the wait
+ * ends with LockTimeoutError.
+ */
 export async function acquireLock(lockDir: string, opts: LockOptions): Promise<LockRelease> {
   const token = randomBytes(16).toString("hex");
   const deadline = Date.now() + opts.timeoutMs;
   let delay = Math.max(1, opts.waitMs ?? 5);
   for (;;) {
     if (tryCreate(lockDir, token)) return makeRelease(lockDir, token);
-    if (stealIfStale(lockDir, opts.staleMs)) continue;
+    if (clearIfGone(lockDir, opts.staleMs)) continue;
     const left = deadline - Date.now();
     if (left <= 0) throw new LockTimeoutError(lockDir, opts.timeoutMs, readLockOwner(lockDir));
     await sleep(Math.min(left, delay / 2 + (Math.random() * delay) / 2));

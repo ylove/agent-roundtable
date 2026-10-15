@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 const { acquireLock, withLock, readLockOwner, LockTimeoutError } = await import("../../dist/execution/lock.js");
 
 const LOCK_WORKER = fileURLToPath(new URL("../fixtures/execution/lock-worker.mjs", import.meta.url));
+const LOCK_HOLDER = fileURLToPath(new URL("../fixtures/execution/lock-holder.mjs", import.meta.url));
 const freshDir = () => mkdtempSync(join(tmpdir(), "rt-lock-"));
 
 function plant(lockDir, owner) {
@@ -44,11 +45,20 @@ test("acquire writes owner.json in a 0700 lock directory; release removes it", a
   assert.equal(release(), false, "a second release is a no-op");
 });
 
-test("a missing parent directory is created", async () => {
-  const lockDir = join(freshDir(), "deep", "er", "x.lock");
-  const release = await acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 1000 });
-  assert.equal(release(), true);
+test("a missing parent directory is refused, never recreated", async () => {
+  const parent = join(freshDir(), "purged-execution");
+  await assert.rejects(acquireLock(join(parent, "x.lock"), { staleMs: 10_000, timeoutMs: 1000 }), /does not exist/);
+  assert.equal(existsSync(parent), false);
 });
+
+/** This process's start time as the lock records it (read from a lock we take). */
+async function ownStarted() {
+  const lockDir = join(freshDir(), "probe.lock");
+  const release = await acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 1000 });
+  const { started } = readLockOwner(lockDir);
+  release();
+  return started;
+}
 
 test("a second acquirer waits with backoff until the holder releases", async () => {
   const lockDir = join(freshDir(), "w.lock");
@@ -77,14 +87,32 @@ test("a live pid's lock younger than staleMs is not stolen", async () => {
   assert.equal(readLockOwner(lockDir).token, "theirs");
 });
 
-test("a live pid's lock older than staleMs is stolen", async () => {
+test("a live holder's lock is never taken, however old", async () => {
+  const started = await ownStarted();
+  assert.equal(typeof started, "string", "the lock records the holder's start time");
+  const lockDir = join(freshDir(), "old.lock");
+  plant(lockDir, { pid: process.pid, host: hostname(), token: "theirs", at: ago(3_600_000), started });
+  await assert.rejects(
+    acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 200 }),
+    (e) => e instanceof LockTimeoutError && /never taken from a live process/.test(e.message)
+  );
+  assert.equal(readLockOwner(lockDir).token, "theirs");
+  // Without a recorded start time a live pid is trusted too.
+  writeFileSync(join(lockDir, "owner.json"), JSON.stringify({ pid: process.pid, host: hostname(), token: "theirs", at: ago(3_600_000) }));
+  await assert.rejects(acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 100 }), LockTimeoutError);
+});
+
+test("a live pid whose start time differs is a reused pid: its lock is cleared", async () => {
   const dir = freshDir();
-  const lockDir = join(dir, "old.lock");
-  plant(lockDir, { pid: process.pid, host: hostname(), token: "theirs", at: ago(20_000) });
+  const lockDir = join(dir, "reused.lock");
+  plant(lockDir, { pid: process.pid, host: hostname(), token: "theirs", at: ago(20_000), started: "Mon Jan 1 00:00:00 2001" });
   const release = await acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 1000 });
   assert.equal(readLockOwner(lockDir).token, release.token);
-  assert.deepEqual(readdirSync(dir), ["old.lock"], "the stolen lock is removed, not left aside");
+  assert.deepEqual(readdirSync(dir), ["reused.lock"], "the dead lock is removed, not left aside");
   release();
+  // A fresh lock is not re-checked: pid reuse within staleMs is not plausible.
+  plant(lockDir, { pid: process.pid, host: hostname(), token: "theirs", at: new Date().toISOString(), started: "Mon Jan 1 00:00:00 2001" });
+  await assert.rejects(acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 100 }), LockTimeoutError);
 });
 
 test("a lock whose pid is dead on this host is stolen at once", async () => {
@@ -98,13 +126,41 @@ test("a lock whose pid is dead on this host is stolen at once", async () => {
   release();
 });
 
-test("a dead pid on another host proves nothing: only age makes that lock stale", async () => {
+test("another host's lock is never taken, however old", async () => {
   const lockDir = join(freshDir(), "remote.lock");
   const pid = await deadPid();
-  plant(lockDir, { pid, host: `${hostname()}-elsewhere`, token: "remote", at: new Date().toISOString() });
-  await assert.rejects(acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 100 }), LockTimeoutError);
-  writeFileSync(join(lockDir, "owner.json"), JSON.stringify({ pid, host: "elsewhere", token: "remote", at: ago(60_000) }));
-  const release = await acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 1000 });
+  plant(lockDir, { pid, host: `${hostname()}-elsewhere`, token: "remote", at: ago(3_600_000) });
+  await assert.rejects(
+    acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 100 }),
+    (e) => e instanceof LockTimeoutError && /not this host/.test(e.message)
+  );
+  assert.equal(readLockOwner(lockDir).token, "remote");
+});
+
+test("a SIGSTOP'd holder keeps its lock: waiters time out instead of stealing", async () => {
+  const lockDir = join(freshDir(), "stopped.lock");
+  const child = spawn(process.execPath, [LOCK_HOLDER, lockDir], { stdio: ["ignore", "pipe", "inherit"] });
+  try {
+    const token = await new Promise((resolve, reject) => {
+      let out = "";
+      child.stdout.on("data", (d) => {
+        out += d;
+        const m = /^held (\w+)\n/.exec(out);
+        if (m) resolve(m[1]);
+      });
+      child.once("exit", (code) => reject(new Error(`holder exited ${code}`)));
+    });
+    child.kill("SIGSTOP");
+    await new Promise((r) => setTimeout(r, 120)); // well past the holder's staleMs of 50
+    await assert.rejects(acquireLock(lockDir, { staleMs: 50, timeoutMs: 400 }), LockTimeoutError);
+    assert.equal(readLockOwner(lockDir).token, token, "the stopped holder still owns the lock");
+    child.kill("SIGCONT");
+  } finally {
+    child.kill("SIGKILL");
+    await new Promise((r) => (child.exitCode !== null || child.signalCode !== null ? r() : child.once("exit", r)));
+  }
+  // Once the holder is dead, its lock is cleared at once.
+  const release = await acquireLock(lockDir, { staleMs: 50, timeoutMs: 2000 });
   release();
 });
 

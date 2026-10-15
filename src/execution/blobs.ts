@@ -1,0 +1,98 @@
+// ============================================================================
+// Content-addressed blobs: <blobsDir>/sha256/<2-char prefix>/<hex>, files 0600, written atomically
+//
+// Diffs, command output, huddle turns, prompts and contracts. Text is scrubbed of secrets before
+// it is hashed, so the ref names the redacted content and the raw secret never touches disk.
+// ============================================================================
+
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
+import { scrub } from "../security/secrets.js";
+import { canonicalJSON, sha256Hex } from "./chain.js";
+
+const REF_RE = /^sha256:([0-9a-f]{64})$/;
+
+/** The hex digest of a "sha256:<hex>" ref; throws on anything else. */
+export function blobHex(ref: string): string {
+  const m = typeof ref === "string" ? REF_RE.exec(ref) : null;
+  if (!m) throw new Error(`Not a blob ref: ${JSON.stringify(ref)} (expected "sha256:<64 hex>")`);
+  return m[1];
+}
+
+export function blobPath(blobsDir: string, ref: string): string {
+  const hex = blobHex(ref);
+  return join(blobsDir, "sha256", hex.slice(0, 2), hex);
+}
+
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/**
+ * Store content and return its "sha256:<hex>" ref. With redact (the default) the content is
+ * scrubbed first; a Buffer must then be valid UTF-8, since binary data cannot be scrubbed (store
+ * it with { redact: false }). Storing the same content twice is a no-op.
+ */
+export function putBlob(blobsDir: string, content: string | Buffer, opts: { redact?: boolean } = {}): string {
+  const redact = opts.redact !== false;
+  let buf: Buffer;
+  if (typeof content === "string") {
+    buf = Buffer.from(redact ? scrub(content) : content, "utf8");
+  } else if (!Buffer.isBuffer(content)) {
+    throw new TypeError("putBlob: content must be a string or a Buffer");
+  } else if (!redact) {
+    buf = content;
+  } else {
+    let text: string;
+    try {
+      text = utf8.decode(content);
+    } catch {
+      throw new Error("putBlob: binary content cannot be scrubbed of secrets; pass { redact: false } for non-text data");
+    }
+    buf = Buffer.from(scrub(text), "utf8");
+  }
+  const ref = `sha256:${sha256Hex(buf)}`;
+  const path = blobPath(blobsDir, ref);
+  try {
+    if (statSync(path).size === buf.length) return ref;
+  } catch {
+    /* not stored yet */
+  }
+  mkdirPrivate(join(path, ".."));
+  writeFileAtomic(path, buf);
+  return ref;
+}
+
+/** Read a blob and check its hash. Throws when it is missing or its content does not match the ref. */
+export function getBlob(blobsDir: string, ref: string): Buffer {
+  const path = blobPath(blobsDir, ref);
+  let buf: Buffer;
+  try {
+    buf = readFileSync(path);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`Blob ${ref} not found`);
+    throw e;
+  }
+  if (`sha256:${sha256Hex(buf)}` !== ref) throw new Error(`Blob ${ref} is corrupt: its content does not match its hash`);
+  return buf;
+}
+
+/** Scrub every string inside plain objects and arrays (keys and other values are left alone). */
+export function scrubDeep<T>(value: T): T {
+  if (typeof value === "string") return scrub(value) as T;
+  if (Array.isArray(value)) return value.map((v) => scrubDeep(v)) as T;
+  if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = scrubDeep(v);
+    return out as T;
+  }
+  return value;
+}
+
+/**
+ * Canonical JSON with every string scrubbed: the way to blob structured data such as a contract.
+ * Store it with { redact: false }, because scrubbing serialized JSON as text can break its syntax
+ * (a "…token…": 1234 pair would lose its number).
+ */
+export function scrubbedJSON(value: unknown): string {
+  return canonicalJSON(scrubDeep(value));
+}

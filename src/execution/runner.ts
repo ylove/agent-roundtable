@@ -41,6 +41,7 @@ import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
 import { classifyFailure } from "./circuit.js";
 import { integrationBranch, SubmodulesUnsupportedError } from "./git.js";
+import { takeHandoffs } from "./handoff.js";
 import { decideLeaseRequest, leaseDrafts, leasesFor } from "./leases.js";
 import { acquireLock, LockTimeoutError, readLockOwner, type LockRelease } from "./lock.js";
 import { MergeQueue } from "./runner-merge.js";
@@ -598,6 +599,8 @@ export class Runner {
     if (TERMINAL_RUN.has(state.status)) return this.finish(state);
 
     await this.pollWorkers();
+    // Before the watchdog: a resolution's resume must not be mistaken for a worker that died.
+    await this.applyHandoffs();
     await this.watchdogPass();
     await this.refreshLog();
     state = await this.store.state();
@@ -1316,6 +1319,25 @@ export class Runner {
       return this.startWorker(task, { claim: false, ...(im && { immediate: im }) });
     }
     return this.startWorker(task, { claim: true, ...(im && { immediate: im }) });
+  }
+
+  /**
+   * Process operations an orchestrator tool handed over (handoff.ts: resolve_escalation's resume,
+   * retry and kill), applied as WS10's runner hooks apply their own: each once per process.
+   */
+  private async applyHandoffs(): Promise<void> {
+    for (const op of takeHandoffs(this.execution)) {
+      const key = `handoff\0${op.type}\0${op.key}`;
+      if (this.opsDone.has(key)) continue;
+      this.opsDone.add(key);
+      try {
+        if (op.type === "kill_worker") await this.killWorker(op.agent, "killed", op.reason);
+        else if (op.type === "resume_worker") await this.resumeTask(op.task, { kind: "resolution", text: op.card });
+        else await this.resumeTask(op.task, { kind: "resolution", text: `Retry attempt ${op.attempt} after escalation resolution. Re-read the contract and your task.` });
+      } catch (e) {
+        this.say(`handed-over ${op.type} ${op.target}: ${errText(e)}`);
+      }
+    }
   }
 
   // ==========================================================================

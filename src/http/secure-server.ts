@@ -201,6 +201,11 @@ export class SecureServer {
     }
   }
 
+  /** The client has disconnected (or the response is over): nothing more can be sent. */
+  static gone(req: IncomingMessage, res: ServerResponse): boolean {
+    return req.destroyed || res.destroyed || res.writableEnded || !res.socket || res.socket.destroyed;
+  }
+
   /** console.error with the token removed, whatever the message holds. */
   private log(message: string): void {
     console.error(`[${this.opts.name}] ${message.split(this.token).join("<token>")}`);
@@ -322,6 +327,12 @@ export class SecureServer {
   }
 
   private openStream(req: IncomingMessage, res: ServerResponse, contentType: string, extra?: Headers): ResponseStream | null {
+    // The client may have gone while the route was awaiting something: its "close" has fired
+    // already and would never reach a listener added now.
+    if (SecureServer.gone(req, res)) {
+      res.destroy();
+      return null;
+    }
     res.writeHead(200, headerList({ ...COMMON_HEADERS, "Content-Security-Policy": DEFAULT_CSP, "Content-Type": contentType }, extra));
     if (req.method === "HEAD" || this.closing) {
       res.end();

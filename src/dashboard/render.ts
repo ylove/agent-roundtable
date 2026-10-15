@@ -27,7 +27,16 @@ import { renderDagSvg } from "./dag-svg.js";
 export const red = (s: unknown): string => redact(String(s ?? "")).text;
 /** Redacted, then HTML-escaped: the only way run content reaches a page. */
 const t = (s: unknown): string => escapeHtml(red(s));
-const cap = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+/** Cut to n characters (code points, so no surrogate pair is split). */
+const cap = (s: string, n: number) => {
+  if (s.length <= n) return s;
+  const chars = Array.from(s);
+  return chars.length > n ? chars.slice(0, n - 1).join("") + "…" : s;
+};
+/** Redacted, then capped: cutting first could leave half an email or key that no rule matches. */
+const rc = (s: unknown, n: number): string => cap(red(s), n);
+/** Redacted, capped, escaped. */
+const tc = (s: unknown, n: number): string => escapeHtml(rc(s, n));
 const money = (n: number) => `$${(Number.isFinite(n) ? n : 0).toFixed(2)}`;
 const pctOf = (n: number | undefined) => (typeof n === "number" && Number.isFinite(n) ? Math.round(Math.min(100, Math.max(0, n))) : undefined);
 
@@ -189,10 +198,10 @@ function frame(c: PageContext, page: PageKey, title: string, body: string): stri
   ).join("");
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-    `<title>${t(title)} · ${t(cap(runTitle, 80))}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head>` +
+    `<title>${t(title)} · ${tc(runTitle, 80)}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head>` +
     `<body data-base="${b}" data-seq="${c.state.seq}" data-live="${LIVE[page]}"><main>` +
     `<nav>${nav}</nav>` +
-    `<p class="meta">${t(cap(runTitle, 160))} · ${t(c.state.execution)} · ${badge(c.state.status)} · event ${c.state.seq}</p>` +
+    `<p class="meta">${tc(runTitle, 160)} · ${t(c.state.execution)} · ${badge(c.state.status)} · event ${c.state.seq}</p>` +
     `<p class="live" id="live">Read-only. This page follows the run as it happens.</p>` +
     banner(c) +
     body +
@@ -234,7 +243,7 @@ export function renderOverview(c: PageContext): string {
     `<h2>Task graph</h2><div class="dagwrap">${renderDagSvg(s, { base: c.base })}</div>` +
     `<h2>Recent notes</h2>` +
     (notes.length
-      ? `<ul>${notes.map((n) => `<li><strong>${t(n.agent)}</strong> on ${t(n.topic)}: ${t(cap(n.text, 500))}</li>`).join("")}</ul>`
+      ? `<ul>${notes.map((n) => `<li><strong>${t(n.agent)}</strong> on ${t(n.topic)}: ${tc(n.text, 500)}</li>`).join("")}</ul>`
       : `<p class="empty">No notes yet.</p>`);
   return frame(c, "overview", "Overview", body);
 }
@@ -264,7 +273,7 @@ export function renderTasks(c: PageContext): string {
       (rt) =>
         `<tr><td>${taskLink(c.base, rt.spec.id)}<br><span class="meta">${t(rt.spec.title)}</span></td><td>${badge(rt.state)}</td>` +
         `<td>${rt.agent ? t(rt.agent) : `<span class="empty">none</span>`}</td><td class="num">${progressCell(rt)}</td>` +
-        `<td class="note">${rt.last_note ? t(cap(rt.last_note, 400)) : ""}</td><td>${blockers(c, rt)}</td></tr>`
+        `<td class="note">${rt.last_note ? tc(rt.last_note, 400) : ""}</td><td>${blockers(c, rt)}</td></tr>`
     );
   const body =
     `<h1>Tasks</h1>` +
@@ -636,7 +645,7 @@ export function publicState(state: BlackboardState, runner: RunnerHealth) {
         state: rt.state,
         ...(rt.agent && { agent: red(rt.agent) }),
         ...(pctOf(rt.percent) !== undefined && { percent: pctOf(rt.percent) }),
-        ...(rt.last_note && { last_note: red(cap(rt.last_note, 400)) }),
+        ...(rt.last_note && { last_note: rc(rt.last_note, 400) }),
       })),
     escalations: {
       open: Object.values(state.escalations).filter((e) => e.status !== "resolved" && e.status !== "withdrawn").length,
@@ -644,11 +653,11 @@ export function publicState(state: BlackboardState, runner: RunnerHealth) {
         id: red(e.id),
         ...(e.task && { task: e.task }),
         class: e.emergency ?? null,
-        summary: red(cap(e.summary, 400)),
+        summary: rc(e.summary, 400),
       })),
     },
     budget: { spent_usd: budget.spent, ...(budget.limit !== undefined && { budget_usd: budget.limit }), estimated: budget.estimated },
     runner,
-    notes: state.notes.slice(-10).map((n) => ({ seq: n.seq, agent: red(n.agent), topic: red(n.topic), text: red(cap(n.text, 400)) })),
+    notes: state.notes.slice(-10).map((n) => ({ seq: n.seq, agent: red(n.agent), topic: red(n.topic), text: rc(n.text, 400) })),
   };
 }

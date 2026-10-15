@@ -34,8 +34,15 @@ export const STATE_COLORS: Readonly<Record<TaskState, readonly [string, string]>
   cancelled: ["#f0f0ee", "#9a9aa2"],
 };
 
-const text = (s: unknown) => escapeHtml(redact(String(s ?? "")).text);
-const cut = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+/** Not allowed in XML 1.0 (dag.svg is served on its own): C0 controls but tab, LF and CR, DEL, U+FFFE/FFFF, lone surrogates. */
+const XML_UNSAFE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f￾￿]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/** Text for the SVG: redacted first, then cut to `max` code points, then made XML-safe and escaped. */
+function text(s: unknown, max = Infinity): string {
+  const chars = Array.from(redact(String(s ?? "")).text);
+  const cut = chars.length > max ? chars.slice(0, max - 1).join("") + "…" : chars.join("");
+  return escapeHtml(cut.replace(XML_UNSAFE, ""));
+}
 
 /** Layer of every task: 0 without dependencies, else 1 + the deepest known dependency (cycles are cut). */
 export function layers(tasks: Record<string, TaskRuntime>): Map<string, number> {
@@ -120,8 +127,8 @@ export function renderDagSvg(state: BlackboardState, opts: DagSvgOptions = {}): 
     const inner =
       `<title>${text(`${id}: ${rt.spec.title} (${rt.state})`)}</title>` +
       `<rect x="${x}" y="${y}" width="${NODE_W}" height="${NODE_H}" rx="8" fill="${fill}" stroke="${stroke}" stroke-width="1.5"${dash}/>` +
-      `<text x="${x + 10}" y="${y + 19}" fill="#1d1d1f">${text(cut(id, LABEL_CHARS))}</text>` +
-      `<text class="sub" x="${x + 10}" y="${y + 36}" fill="#55555a">${text(cut(rt.spec.title, LABEL_CHARS - 6))} · ${text(rt.state.replace(/_/g, " "))}${pct}</text>`;
+      `<text x="${x + 10}" y="${y + 19}" fill="#1d1d1f">${text(id, LABEL_CHARS)}</text>` +
+      `<text class="sub" x="${x + 10}" y="${y + 36}" fill="#55555a">${text(rt.spec.title, LABEL_CHARS - 6)} · ${text(rt.state.replace(/_/g, " "))}${pct}</text>`;
     const node = opts.base ? `<a href="${escapeHtml(`${opts.base}tasks/${encodeURIComponent(id)}`)}">${inner}</a>` : inner;
     return `<g class="node st-${escapeHtml(rt.state)}">${node}</g>`;
   });

@@ -289,3 +289,106 @@ test("dashboard: completion weights and the safe markdown subset", () => {
   assert.deepEqual(cut, { text: "line one", truncated: true });
   assert.deepEqual(capAtLine("short", 20), { text: "short", truncated: false });
 });
+
+/** The store, with state() held until `open()` (a slow read in flight while a client goes away) and events() calls recorded. */
+function gatedStore(store) {
+  let open;
+  const gate = new Promise((r) => (open = r));
+  const reads = [];
+  return {
+    open,
+    reads,
+    store: {
+      id: store.id,
+      dir: store.dir,
+      header: () => store.header(),
+      state: async () => {
+        await gate;
+        return store.state();
+      },
+      events: (o) => {
+        reads.push(o);
+        return store.events(o);
+      },
+      getBlob: (r) => store.getBlob(r),
+    },
+  };
+}
+
+test("dashboard: text is redacted before it is cut, so no half email or key survives a cap", async (t) => {
+  const pad = "x".repeat(385);
+  const contract = makeContract({ tasks: [taskSpec("a", [], { title: `Ask ${EMAIL} now` })] });
+  const { store } = await frozenRun(contract);
+  await emit(store, "task.claimed", { task: "a", agent: "w1", attempt: 1, ttl_s: 0 });
+  await emit(store, "task.progress", { task: "a", note: `${pad} ${EMAIL} tail` }, src("w1", "agent"));
+  await emit(store, "note.posted", { topic: "t", text: `${pad} ${EMAIL}`, refs: [] }, src("w1", "agent"));
+  const dash = await startDashboard(store.id, { store });
+  t.after(() => dash.close());
+  const prefix = EMAIL.slice(0, 14); // "alice.secret@e"
+  for (const path of ["", "tasks", "state.json", "dag.svg", "dag"]) {
+    const r = await get(dash.url + path);
+    assert.ok(!r.body.includes(prefix), `${path}: a cut email`);
+  }
+  const s = JSON.parse((await get(`${dash.url}state.json`)).body);
+  assert.match(s.tasks[0].last_note, /x \[redacted:e/, "the cap falls inside the redaction mark, not the address");
+});
+
+test("dashboard: a stream whose client leaves during a slow read is never registered", async (t) => {
+  const { store } = await frozenRun();
+  const gated = gatedStore(store);
+  const dash = await startDashboard(store.id, { store: gated.store, writeInfo: false });
+  t.after(() => dash.close());
+  const u = new URL(`${dash.url}stream?since=0`);
+  // 40 clients connect and leave while state() is still pending (more than the 32-stream cap).
+  for (let i = 0; i < 40; i++) {
+    await new Promise((resolve) => {
+      const req = request({ host: "127.0.0.1", port: u.port, path: u.pathname + u.search, headers: { Host: u.host } });
+      req.on("error", () => resolve());
+      req.on("socket", (sock) => sock.on("connect", () => setTimeout(() => (req.destroy(), resolve()), 5)));
+      req.end();
+    });
+  }
+  await new Promise((r) => setTimeout(r, 50));
+  gated.open();
+  await new Promise((r) => setTimeout(r, 100));
+  const status = await new Promise((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port: u.port, path: u.pathname + u.search, headers: { Host: u.host } }, (res) => {
+      resolve(res.statusCode);
+      res.destroy();
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  assert.equal(status, 200, "no slot was leaked by the clients that left");
+});
+
+test("dashboard: dag.svg is well-formed XML even with control characters in a title", async (t) => {
+  const contract = makeContract({ tasks: [taskSpec("a", [], { title: "form\ffeed\u0000nul\u0007bell\u007fdel\ud800lone" })] });
+  const { store } = await frozenRun(contract);
+  const dash = await startDashboard(store.id, { store });
+  t.after(() => dash.close());
+  const svg = (await get(`${dash.url}dag.svg`)).body;
+  assert.doesNotMatch(svg, /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/);
+  assert.match(svg, /formfeednulbelldellone/);
+  // The page's inline copy is cleaned the same way.
+  assert.doesNotMatch((await get(`${dash.url}dag`)).body, /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/);
+});
+
+test("dashboard: an events page with before= reads only its window of the log", async (t) => {
+  const { store } = await frozenRun();
+  const base = (await store.state()).seq;
+  await store.transact(() => ({ events: Array.from({ length: 250 }, (_, i) => ({ type: "note.posted", source: src(), payload: { topic: "t", text: `n${i}`, refs: [] } })) }));
+  const gated = gatedStore(store);
+  gated.open();
+  const dash = await startDashboard(store.id, { store: gated.store, writeInfo: false });
+  t.after(() => dash.close());
+  const before = base + 200;
+  const r = await get(`${dash.url}events?before=${before}`);
+  assert.equal(r.status, 200);
+  const seqs = [...r.body.matchAll(/<tr><td class="num">(\d+)<\/td>/g)].map((m) => Number(m[1]));
+  assert.equal(seqs.length, 100);
+  assert.equal(seqs[0], before - 1);
+  assert.equal(seqs.at(-1), before - 100);
+  assert.ok(r.body.includes(`events?before=${before - 100}">Older</a>`));
+  assert.deepEqual(gated.reads.at(-1), { sinceSeq: before - 1 - 101, limit: 101 }, "one window, not the whole log");
+});

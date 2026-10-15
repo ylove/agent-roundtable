@@ -223,7 +223,7 @@ class DashboardServer {
     if (!f.type && !f.task) {
       // Unfiltered: read only the page's window of the log.
       const top = Math.min(state.seq, (f.before ?? state.seq + 1) - 1);
-      found = await this.store.events({ sinceSeq: Math.max(0, top - EVENTS_PAGE_SIZE - 1) });
+      found = await this.store.events({ sinceSeq: Math.max(0, top - EVENTS_PAGE_SIZE - 1), limit: EVENTS_PAGE_SIZE + 1 });
     } else {
       const types = f.type ? (EVENT_TYPES.filter((x) => x === f.type || x.startsWith(`${f.type}.`)) as EventType[]) : undefined;
       found = await this.store.events(types ? { types } : {});

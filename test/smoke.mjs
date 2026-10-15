@@ -1,6 +1,7 @@
 // Offline smoke test: no provider is called, zero API spend. Run: npm test
 import { startServer, assert } from "./mcp-client.mjs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
-const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract"];
+const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract", "resolve_escalation"];
 const NEW_START_TOOLS = ["start_ultraplan", "create_agent", "improve_agent"];
 const root = mkdtempSync(join(tmpdir(), "roundtable-smoke-"));
 const agentsDir = join(root, "agents");
@@ -44,6 +45,7 @@ const smokeEnv = {
   ROUNDTABLE_PROTOTYPE_OPEN: "",
 };
 const PROTOTYPE_START_TOOLS = ["start_meeting", "start_local_meeting", "start_collaboration"];
+const RUN_TOOLS = ["execute", "execution_status", "control_execution", "resolve_escalation"];
 const WORKER_TOOLS = ["read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"];
 
 // A worker server (mcp --worker) for a registered agent lists exactly the seven worker tools.
@@ -304,6 +306,24 @@ async function checkDispatch() {
     const refused = await handleToolCall("freeze_contract", { contract_id: /"contract_id": "([^"]+)"/.exec(proposed)[1], orchestrator: "main" });
     check("dispatch freeze_contract refuses a contract nobody consented to", () =>
       assert(refused.isError && /Cannot freeze .*\n- product-lead has not consented/.test(refused.content[0].text), refused.content[0].text));
+
+    // execute over stdio, offline: freeze v1 directly (consent needs a provider), then call without visibility.
+    const summary = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(proposed)[1]);
+    const { openExecutionStore } = await import("../dist/execution/store.js");
+    const store = await openExecutionStore(summary.execution_id);
+    const [v1] = await store.events({ types: ["contract.proposed"], limit: 1 });
+    const hash = createHash("sha256").update(await store.getBlob(v1.payload.blob)).digest("hex");
+    await store.transact(() => ({
+      events: [{ type: "contract.frozen", source: { kind: "orchestrator", id: "main", pid: process.pid }, payload: { contract: summary.contract_id, version: 1, by: "main", hash, blob: v1.payload.blob } }],
+    }));
+    const executed = await server.callTool("execute", { contract_id: summary.contract_id, confirmation: "Go ahead and build it." });
+    const after = await store.state();
+    check("execute without visibility returns needs_input over stdio and starts nothing", () => {
+      const r = JSON.parse(executed.text);
+      assert(!executed.isError && r.status === "needs_input" && r.questions[0]?.topic === "visibility" && /dashboard/.test(r.questions[0].question), executed.text.slice(0, 600));
+      assert(!r.questions.some((q) => q.topic === "budget"), "the contract set a budget");
+      assert(after.status === "created" && after.contract?.id === summary.contract_id, "the run started, or the freeze did not apply");
+    });
   } finally {
     globalThis.fetch = realFetch;
     ultraplans.clear();
@@ -319,9 +339,9 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 33 distinct tools", () => assert(tools.length === 33 && new Set(tools.map((t) => t.name)).size === 33, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
-  check("contract tools are strict (additionalProperties: false)", () => {
-    for (const name of ["propose_contract", "amend_contract", "freeze_contract"]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
+  check("exposes 37 distinct tools", () => assert(tools.length === 37 && new Set(tools.map((t) => t.name)).size === 37, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("contract and run tools are strict (additionalProperties: false)", () => {
+    for (const name of ["propose_contract", "amend_contract", "freeze_contract", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });
   check("the orchestrator's worker tools take execution_id and agent_token", () => {
     for (const name of WORKER_TOOLS) {
@@ -402,6 +422,10 @@ try {
     ["propose_contract", ["goal", "orchestrator"]],
     ["amend_contract", ["contract_id", "patch", "reason", "orchestrator"]],
     ["freeze_contract", ["contract_id", "orchestrator"]],
+    ["execute", ["contract_id", "confirmation"]],
+    ["execution_status", []],
+    ["control_execution", ["execution_id", "action"]],
+    ["resolve_escalation", ["execution_id", "escalation_id", "action"]],
   ]) {
     check(`${name} required arguments = ${required.join(", ") || "none (runtime validated)"}`, () =>
       assert(JSON.stringify(byName[name]?.inputSchema?.required || []) === JSON.stringify(required), JSON.stringify(byName[name]?.inputSchema)));

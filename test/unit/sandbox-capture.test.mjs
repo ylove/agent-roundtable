@@ -143,6 +143,46 @@ test("isShellCommand spots shell strings behind common wrappers", () => {
   }
 });
 
+test("isShellCommand looks through wrapper chains, variant names and shell options; sudo and doas are flagged", () => {
+  const { isPrivilegedCommand, analyzeArgv } = common;
+  for (const yes of [
+    ["env", "-iS", "sh -c x"],
+    ["env", "-vS", "sh -c x"],
+    ["env", "-i", "--", "sh", "-c", "x"],
+    ["bash", "--rcfile", "/dev/null", "-c", "x"],
+    ["bash", "--init-file", "/dev/null", "-c", "x"],
+    ["bash", "--noprofile", "--norc", "-c", "x"],
+    ["SH", "-c", "x"],
+    ["/BIN/Bash", "-c", "x"],
+    ["bash5", "-c", "x"],
+    ["sh", "-o", "errexit", "-c", "x"],
+    ["sudo", "sh", "-c", "x"],
+    ["sudo", "-u", "nobody", "bash", "-c", "x"],
+    ["time", "sh", "-c", "x"],
+    ["time", "-p", "nice", "-n", "5", "nohup", "sh", "-c", "x"],
+    ["setsid", "sh", "-c", "x"],
+    ["flock", "/tmp/l", "sh", "-c", "x"],
+    ["flock", "/tmp/l", "-c", "echo x"],
+    ["timeout", "--preserve-status", "10", "sh", "-c", "x"],
+    ["timeout", "-v", "10s", "sh", "-c", "x"],
+    ["busybox", "sh", "-c", "x"],
+    ["fish", "-c", "x"],
+    ["ksh", "-c", "x"],
+    ["csh", "-c", "x"],
+    ["su", "-c", "x"],
+    ["pwsh", "-Command", "x"],
+    ["env", "--split-string", "time bash -c x"],
+  ]) assert.equal(isShellCommand(yes), true, yes.join(" "));
+  for (const no of [["bash", "--rcfile", "/dev/null", "script.sh"], ["sh", "--", "script.sh", "-c"], ["time", "npm", "test"], ["flock", "/tmp/l", "npm", "test"], ["python3", "-c", "x"], ["npx", "-c", "x"]]) {
+    assert.equal(isShellCommand(no), false, no.join(" "));
+  }
+  for (const yes of [["sudo", "npm", "test"], ["doas", "make"], ["env", "sudo", "ls"], ["time", "nice", "doas", "ls"], ["env", "-S", "sudo ls"], ["SUDO", "ls"]]) {
+    assert.equal(isPrivilegedCommand(yes), true, yes.join(" "));
+  }
+  for (const no of [["npm", "test"], ["sudoku", "solve"], ["env", "FOO=sudo", "ls"]]) assert.equal(isPrivilegedCommand(no), false, no.join(" "));
+  assert.deepEqual(analyzeArgv(["env", "A=1", "time", "-p", "npm", "test"]).programs, ["env", "time", "npm"]);
+});
+
 test("validateEnv refuses secret-shaped, malformed and reserved names", () => {
   assert.deepEqual(validateEnv(undefined), {});
   assert.deepEqual(validateEnv({ NODE_ENV: "test", CI: "1" }), { NODE_ENV: "test", CI: "1" });

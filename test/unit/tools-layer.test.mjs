@@ -9,7 +9,7 @@ const HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHi
 const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
 test("every tool has a title and all four MCP hints", () => {
-  assert.equal(tools.length, 30);
+  assert.equal(tools.length, 33, "22 at the table, 3 contract tools, join_execution and the 7 worker tools");
   assert.equal(toolsFor("worker").length, 7);
   for (const tool of tools) {
     assert.equal(typeof tool.annotations?.title, "string", tool.name);
@@ -71,6 +71,20 @@ test("a tool not offered in a mode is unknown there", async () => {
   assert.equal((await handleToolCall("join_execution", { execution_id: "exe-0000000000abcdef", agent: "x" }, "worker")).content[0].text, "Error: Unknown tool: join_execution");
   assert.equal((await handleToolCall("no_such_tool", {})).content[0].text, "Error: Unknown tool: no_such_tool");
   assert.equal((await handleToolCall("list_meetings", {})).content[0].text, "No active meetings.");
+});
+
+test("contract tools: orchestrator only, strict schemas, and annotations that match what they do", async () => {
+  const { contractTools } = await import("../../dist/tools/contract.js");
+  assert.deepEqual(contractTools.map((d) => d.name), [names.PROPOSE_CONTRACT, names.AMEND_CONTRACT, names.FREEZE_CONTRACT]);
+  for (const def of contractTools) {
+    assert.deepEqual([...def.modes], ["orchestrator"], def.name);
+    assert.equal(def.inputSchema.additionalProperties, false, def.name);
+    assert.equal(byName[def.name].annotations.readOnlyHint, false, def.name);
+  }
+  assert.equal(byName.propose_contract.annotations.openWorldHint, true, "propose may call a provider");
+  assert.equal(byName.amend_contract.annotations.destructiveHint, true, "amend can cancel tasks");
+  assert.equal(byName.freeze_contract.annotations.openWorldHint, false, "freeze is local");
+  assert.equal(byName.freeze_contract.inputSchema.properties.excuse.items.additionalProperties, false);
 });
 
 test("names.ts: mode labels and one constant per tool", () => {

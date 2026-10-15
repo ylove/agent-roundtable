@@ -37,3 +37,22 @@ export function stubDns(t, answers = {}) {
   });
   return asked;
 }
+
+/**
+ * Inline script, style or event-handler constructs in an HTML page (none may appear under a strict
+ * CSP): <script> without src or with a body, <style>, style="…" attributes, on…= handler
+ * attributes, and javascript: URLs in any attribute. Returns the offending snippets.
+ */
+export function inlineProblems(html) {
+  const problems = [];
+  for (const m of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
+    if (!/\ssrc="/i.test(m[0].slice(0, m[0].indexOf(">") + 1)) || m[1].trim()) problems.push(m[0].slice(0, 120));
+  }
+  for (const m of html.matchAll(/<style\b/gi)) problems.push(m[0]);
+  for (const tag of html.matchAll(/<[a-z][^>]*>/gi)) {
+    if (/\sstyle\s*=/i.test(tag[0])) problems.push(tag[0]);
+    if (/\son[a-z]+\s*=/i.test(tag[0])) problems.push(tag[0]);
+    if (/=\s*["']?\s*javascript:/i.test(tag[0])) problems.push(tag[0]);
+  }
+  return problems;
+}

@@ -8,8 +8,11 @@ import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { localTimeoutMs } from "../config.js";
 import { findExecutable } from "../executables.js";
+import { newId } from "../ids.js";
 import { childEnv } from "../security/child-env.js";
 import { scrubAndCap } from "../security/secrets.js";
+import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
+import { archiveMeeting } from "./archive.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
@@ -47,7 +50,10 @@ export interface LocalMeeting {
 }
 
 export const localMeetings = new Map<string, LocalMeeting>();
-let localMeetingCounter = 0;
+
+function localMeetingBusy(id: string): string {
+  return sessionBusyMessage("Local meeting", id);
+}
 
 export type LocalMeetingRecordHook = (meeting: LocalMeeting, message: Message) => void;
 
@@ -266,7 +272,7 @@ export async function startLocalMeeting(
 }> {
   assertMeetingMode(mode);
   const agentInfo = await loadAgent(agent);
-  const meetingId = `local-${++localMeetingCounter}`;
+  const meetingId = newId("local");
   const challengerDirective = mode === "debate" ? buildChallengerDirective(debateFocus) : undefined;
   const skillsSection = renderSkillsSection(agentInfo.skills);
   const appendSystemPrompt = [
@@ -325,10 +331,16 @@ export async function startLocalMeeting(
     ...(prototype && { prototype }),
   };
   localMeetings.set(meetingId, meeting);
-  const record = recorderFor(meeting);
-  // Publish the agenda only: userMessage also carries the private context and the debate suffix.
-  await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
-  await recordMeetingAgentReply(meeting, assistantMessage, record);
+  // Listed from here on: hold the lock until the opening exchange is recorded.
+  const release = lockSession(meetingId, localMeetingBusy(meetingId));
+  try {
+    const record = recorderFor(meeting);
+    // Publish the agenda only: userMessage also carries the private context and the debate suffix.
+    await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
+    await recordMeetingAgentReply(meeting, assistantMessage, record);
+  } finally {
+    release();
+  }
 
   return {
     meetingId,
@@ -347,6 +359,10 @@ export async function continueLocalMeeting(
   meetingId: string,
   message: string
 ): Promise<string> {
+  return withSessionLock(meetingId, localMeetingBusy(meetingId), () => runLocalMeetingTurn(meetingId, message));
+}
+
+async function runLocalMeetingTurn(meetingId: string, message: string): Promise<string> {
   const meeting = localMeetings.get(meetingId);
   if (!meeting) {
     throw new Error(`Local meeting not found: ${meetingId}`);
@@ -369,6 +385,10 @@ export async function endLocalMeeting(
   meetingId: string,
   requestSummary: boolean = false
 ): Promise<string> {
+  return withSessionLock(meetingId, localMeetingBusy(meetingId), () => closeLocalMeeting(meetingId, requestSummary));
+}
+
+async function closeLocalMeeting(meetingId: string, requestSummary: boolean): Promise<string> {
   const meeting = localMeetings.get(meetingId);
   if (!meeting) {
     throw new Error(`Local meeting not found: ${meetingId}`);
@@ -394,6 +414,7 @@ export async function endLocalMeeting(
     outcome: summary || lastAgentReply(meeting),
     public: meeting.publicChannel !== undefined,
   });
+  archiveMeeting("local-meeting", meeting, summary);
   localMeetings.delete(meetingId);
 
   let text = summary || `Local meeting ${meetingId} with ${meeting.agent} ended.`;

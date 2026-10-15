@@ -6,6 +6,9 @@ import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
 import { agentKey, loadAgent, loadAgentPrompt, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
+import { newId } from "../ids.js";
+import { sessionBusyMessage, withSessionLock } from "./lock.js";
+import { archiveCollaboration } from "./archive.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
@@ -84,7 +87,13 @@ export interface Collaboration {
 }
 
 export const collaborations = new Map<string, Collaboration>();
-let collaborationCounter = 0;
+
+/** Hard cap on max_rounds and on rounds per continue (the tool schemas declare the same maximum). */
+export const MAX_COLLABORATION_ROUNDS = 20;
+
+function collaborationBusy(id: string): string {
+  return sessionBusyMessage("Collaboration", id);
+}
 
 // ----------------------------------------------------------------------------
 // Recording: the single choke point for everything pushed into collaboration.messages
@@ -264,8 +273,24 @@ export async function startCollaboration(
   /** Prototype sessions only. */
   prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
+  const collaborationId = newId("collab");
+  return withSessionLock(collaborationId, collaborationBusy(collaborationId), () =>
+    openCollaboration(collaborationId, agentNames, topic, options)
+  );
+}
+
+/** The opening turn and any auto-run, holding the session lock (the session is listed before the first call). */
+async function openCollaboration(
+  collaborationId: string,
+  agentNames: string[],
+  topic: string | undefined,
+  options: NonNullable<Parameters<typeof startCollaboration>[2]>
+): ReturnType<typeof startCollaboration> {
   if (agentNames.length < 2) {
     throw new Error("Collaboration requires at least 2 agents");
+  }
+  if (options.maxRounds !== undefined && options.maxRounds > MAX_COLLABORATION_ROUNDS) {
+    throw new Error(`max_rounds must be at most ${MAX_COLLABORATION_ROUNDS} (got ${options.maxRounds})`);
   }
 
   const provider = options.provider || "anthropic";
@@ -317,7 +342,6 @@ export async function startCollaboration(
     agents.push({ name, systemPrompt, ...(role !== undefined && { role }) });
   }
 
-  const collaborationId = `collab-${++collaborationCounter}`;
   const maxRounds = options.maxRounds || 5;
   const isPublic = !!options.public;
   const roleNames = agents.map((a) => roleLabel(mode, a, isPublic));
@@ -433,10 +457,13 @@ export async function startCollaboration(
     } catch (e) {
       if (!publicChannel) {
         // The caller never receives this id. A private prototype session is removed with its board and
-        // sandbox (it cannot prototype without them); a plain session is left as before.
+        // sandbox (it cannot prototype without them), archived first with every prototype stubbed; a plain
+        // session is left as before.
         if (prototype) {
-          collaborations.delete(collaborationId);
           await closePrototypeTracker(prototype, "ended");
+          const reason = e instanceof Error ? e.message : String(e);
+          archiveCollaboration(collaboration, collaborationHistoryView(collaboration), `Auto-run stopped: ${reason}`);
+          collaborations.delete(collaborationId);
         }
         throw e;
       }
@@ -566,6 +593,13 @@ export async function continueCollaboration(
   /** Prototype sessions only. */
   prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
+  return withSessionLock(collaborationId, collaborationBusy(collaborationId), () => runRounds(collaborationId, rounds));
+}
+
+async function runRounds(collaborationId: string, rounds: number): ReturnType<typeof continueCollaboration> {
+  if (rounds > MAX_COLLABORATION_ROUNDS) {
+    throw new Error(`rounds must be at most ${MAX_COLLABORATION_ROUNDS} (got ${rounds})`);
+  }
   const collaboration = collaborations.get(collaborationId);
   if (!collaboration) {
     throw new Error(`Collaboration not found: ${collaborationId}`);
@@ -611,14 +645,16 @@ export async function nudgeCollaboration(
   collaborationId: string,
   message: string
 ): Promise<CollaborationMessage> {
-  const collaboration = collaborations.get(collaborationId);
-  if (!collaboration) {
-    throw new Error(`Collaboration not found: ${collaborationId}`);
-  }
-  // Prototype sessions: wait for an agent turn the tracker is still processing, so the nudge neither
-  // takes that turn's message index nor slips past a prototype the turn has just proposed.
-  if (collaboration.prototype) return serializeTurn(collaboration, () => injectNudge(collaboration, message));
-  return injectNudge(collaboration, message);
+  return withSessionLock(collaborationId, collaborationBusy(collaborationId), () => {
+    const collaboration = collaborations.get(collaborationId);
+    if (!collaboration) {
+      throw new Error(`Collaboration not found: ${collaborationId}`);
+    }
+    // Prototype sessions: wait for an agent turn the tracker is still processing, so the nudge neither
+    // takes that turn's message index nor slips past a prototype the turn has just proposed.
+    if (collaboration.prototype) return serializeTurn(collaboration, () => injectNudge(collaboration, message));
+    return injectNudge(collaboration, message);
+  });
 }
 
 function injectNudge(collaboration: Collaboration, message: string): CollaborationMessage {
@@ -670,6 +706,10 @@ export async function endCollaboration(
   /** Prototype sessions only: "## Prototype outcomes" and "## Shortlist for the human" (full shortlisted source). */
   prototypeOutcomes?: string;
 }> {
+  return withSessionLock(collaborationId, collaborationBusy(collaborationId), () => closeCollaboration(collaborationId, requestSummary));
+}
+
+async function closeCollaboration(collaborationId: string, requestSummary: boolean): ReturnType<typeof endCollaboration> {
   const collaboration = collaborations.get(collaborationId);
   if (!collaboration) {
     throw new Error(`Collaboration not found: ${collaborationId}`);
@@ -722,6 +762,7 @@ export async function endCollaboration(
     public: collaboration.publicChannel !== undefined,
   });
   const transcript = [...messages];
+  archiveCollaboration(collaboration, transcript, summary);
   collaborations.delete(collaborationId);
   const outcomes = tracker ? { prototypeOutcomes: tracker.outcomesMarkdown() } : undefined;
 

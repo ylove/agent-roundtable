@@ -130,6 +130,12 @@ async function checkDispatch() {
       assert(final.startsWith("# Ultraplan: Launch") && final.includes("v2 [cfo, product-lead]") && final.includes("## Sign-offs") && final.includes("## Agent input"), final);
       assert(!ultraplans.has(start.ultraplanId) && replies.length === 0, "session did not close or calls were skipped");
     });
+    check("dispatch archives the finalized ultraplan under ROUNDTABLE_HOME/sessions", () => {
+      const file = join(smokeEnv.ROUNDTABLE_HOME, "sessions", `${start.ultraplanId}.json`);
+      const record = JSON.parse(readFileSync(file, "utf8"));
+      assert(record.kind === "ultraplan" && record.document.signedOff === true && record.document.markdown === final, JSON.stringify(record).slice(0, 300));
+      assert(record.document.versions.length === 2 && record.document.tally.APPROVE === 1, JSON.stringify(record.document.tally));
+    });
 
     script("Verdict: APPROVE", "Verdict: OBJECT", "Sign-off: APPROVE");
     const reuse = JSON.parse(await call("start_ultraplan", { ...providerArgs, agents: ["cfo"], task: "Reuse launch", draft_plan: "Keep this plan" }));
@@ -252,6 +258,15 @@ try {
 
   console.log("tools/list");
   check("exposes 22 distinct tools", () => assert(tools.length === 22 && new Set(tools.map((t) => t.name)).size === 22, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("every tool carries MCP annotations (a title and four hints) and no internal fields", () => {
+    for (const t of tools) {
+      const a = t.annotations ?? {};
+      const hints = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"];
+      assert(typeof a.title === "string" && hints.every((h) => typeof a[h] === "boolean"), `${t.name}: ${JSON.stringify(a)}`);
+      assert(!("modes" in t), `${t.name} leaks modes`);
+    }
+    assert(byName.debug_env.annotations.readOnlyHint === true && byName.improve_agent.annotations.readOnlyHint === false, "annotation values");
+  });
   for (const name of PROVIDER_TOOLS) {
     check(`${name}.provider enum = ${EXPECTED_PROVIDERS.join("|")}`, () => {
       const e = byName[name]?.inputSchema?.properties?.provider?.enum;
@@ -421,6 +436,7 @@ try {
     const d = JSON.parse(debug.text);
     assert(d.skills_dir === smokeEnv.ROUNDTABLE_SKILLS_DIR && d.workspace_dir === root, debug.text);
     assert(d.activity_log === smokeEnv.ROUNDTABLE_ACTIVITY_LOG && d.parallel_turns === 2 && d.active_ultraplans === 0, debug.text);
+    assert(d.sessions_dir === join(smokeEnv.ROUNDTABLE_HOME, "sessions"), debug.text);
   });
   check("startup banner includes skills, workspace and activity paths", () => {
     const banner = server.stderr();

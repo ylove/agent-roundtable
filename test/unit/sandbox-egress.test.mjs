@@ -161,6 +161,17 @@ test("the proxy answers 403 to CONNECT for non-allowlisted hosts, other ports an
   assert.ok(log.join("").includes("deny example.com is not on the egress allowlist"));
 });
 
+test("the proxy releases its connection slot on every refusal (the 128 cap never leaks)", async () => {
+  const { port } = await startProxy(["unresolvable-rt-test.invalid.example"]);
+  const statuses = new Set();
+  for (let i = 0; i < 150; i++) {
+    const target = i % 3 === 0 ? "evil.example.com:443" : i % 3 === 1 ? "garbage" : "unresolvable-rt-test.invalid.example:443";
+    statuses.add((await connect(port, target)).status);
+  }
+  assert.ok(!statuses.has(503), [...statuses].join(","));
+  assert.deepEqual([...statuses].sort(), [400, 403, 502]);
+});
+
 test("the proxy refuses plain-HTTP requests, even to allowlisted hosts", async () => {
   const { port } = await startProxy(["registry.npmjs.org"]);
   const status = await new Promise((resolve) => {

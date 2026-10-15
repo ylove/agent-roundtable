@@ -195,25 +195,31 @@ const server = http.createServer((req, res) => {
 server.on("connect", (req, sock, head) => {
   sock.on("error", () => {});
   if (active >= MAX_CONNECTIONS) return refuse(sock, 503, "too many connections");
+  // The slot is taken on accept and released exactly once, whatever happens during DNS or dialling.
+  active++;
+  let done = false;
+  let up = null;
+  // keepClient lets a refusal written with sock.end() flush instead of being cut off.
+  const finish = (keepClient) => {
+    if (done) return;
+    done = true;
+    active--;
+    if (up) up.destroy();
+    if (!keepClient) sock.destroy();
+  };
+  const close = () => finish(false);
+  const deny = (status, reason) => {
+    refuse(sock, status, reason);
+    finish(true);
+  };
+  sock.on("close", close);
   const d = decideConnect(req.url || "", ALLOW);
-  if (!d.allow) return refuse(sock, d.status, d.reason);
+  if (!d.allow) return deny(d.status, d.reason);
   dns.lookup(d.host, { all: true, verbatim: true }, (err, answers) => {
-    if (err) return refuse(sock, 502, d.host + " did not resolve");
+    if (done) return;
+    if (err) return deny(502, d.host + " did not resolve");
     const pick = decideAddresses(answers.map((a) => a.address));
-    if (!pick.ok) return refuse(sock, 403, d.host + " " + pick.reason);
-    active++;
-    let done = false;
-    let up = null;
-    // keepClient lets a refusal written with sock.end() flush instead of being cut off.
-    const finish = (keepClient) => {
-      if (done) return;
-      done = true;
-      active--;
-      if (up) up.destroy();
-      if (!keepClient) sock.destroy();
-    };
-    const close = () => finish(false);
-    sock.on("close", close);
+    if (!pick.ok) return deny(403, d.host + " " + pick.reason);
     // Dial the checked addresses in order; move to the next one only before a tunnel exists.
     const dial = (i) => {
       if (done) return;
@@ -238,8 +244,7 @@ server.on("connect", (req, sock, head) => {
       conn.on("error", (e) => {
         if (connected) return close();
         if (i + 1 < pick.addresses.length) return dial(i + 1);
-        refuse(sock, 502, d.host + " upstream connect failed (" + (e && e.code ? e.code : "error") + ")");
-        finish(true);
+        deny(502, d.host + " upstream connect failed (" + (e && e.code ? e.code : "error") + ")");
       });
     };
     dial(0);
@@ -409,7 +414,12 @@ export async function ensureEgressNetwork(opts: EgressOptions): Promise<EgressNe
       "--security-opt", "no-new-privileges",
       "--pids-limit", "64",
       "--memory", "256m",
+      "--memory-swap", "256m",
       "--cpus", "1",
+      // Readiness is read from the log, so keep one, but bounded.
+      "--log-driver", "json-file",
+      "--log-opt", "max-size=1m",
+      "--log-opt", "max-file=1",
       "--user", PROXY_USER,
       "--mount", `type=bind,src=${dir},dst=/proxy,readonly`,
       "-e", `RT_EGRESS_ALLOW=${allowlist.join(",")}`,

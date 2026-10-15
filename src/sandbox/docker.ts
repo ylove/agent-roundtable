@@ -137,6 +137,7 @@ export function buildDockerRunArgs(req: SandboxRunRequest, opts: DockerRunOption
 
   const args = [
     "run", "--rm", "--init",
+    "--log-driver", "none",
     "--name", opts.name,
     "--network", egress ? egress.network : "none",
     "--read-only",
@@ -145,6 +146,7 @@ export function buildDockerRunArgs(req: SandboxRunRequest, opts: DockerRunOption
     "--security-opt", "no-new-privileges",
     "--pids-limit", String(pids),
     "--memory", memory,
+    "--memory-swap", memory,
     "--cpus", cpus,
     "--user", `${opts.uid}:${opts.gid}`,
     "-e", "HOME=/tmp",
@@ -175,6 +177,8 @@ const INFO_TIMEOUT_MS = 5_000;
 const INSPECT_TIMEOUT_MS = 30_000;
 const PULL_TIMEOUT_MS = 600_000;
 const KILL_TIMEOUT_MS = 10_000;
+/** A tag can be re-pushed; re-read the digest at least this often. */
+const DIGEST_TTL_MS = 10 * 60_000;
 
 export class DockerBackend implements SandboxBackend {
   readonly id = "docker" as const;
@@ -183,8 +187,8 @@ export class DockerBackend implements SandboxBackend {
   private readonly limits: DockerLimits;
   private readonly tag: string;
   private readonly env: NodeJS.ProcessEnv;
-  /** Digest per image, once the image is known to be present. */
-  private readonly digests = new Map<string, Promise<string | undefined>>();
+  /** Digest per image reference, with when it was read. */
+  private readonly digests = new Map<string, { digest: string; at: number }>();
 
   constructor(opts: DockerBackendOptions = {}) {
     this.env = opts.env ?? process.env;
@@ -208,23 +212,23 @@ export class DockerBackend implements SandboxBackend {
    */
   async prepare(image = this.image, signal?: AbortSignal, timeoutMs = PULL_TIMEOUT_MS): Promise<{ ok: true; digest?: string } | { ok: false; error: string }> {
     if (!IMAGE_RE.test(image)) return { ok: false, error: `invalid image reference ${JSON.stringify(image)}` };
-    const cached = this.digests.get(image);
-    if (cached) return { ok: true, digest: await cached };
+    const hit = this.digests.get(image);
+    if (hit && Date.now() - hit.at < DIGEST_TTL_MS) return { ok: true, digest: hit.digest };
     const env = childEnv("docker");
-    const present = await runQuiet(this.docker, ["image", "inspect", "--format", "{{.Id}}", image], env, Math.min(INSPECT_TIMEOUT_MS, timeoutMs), signal);
+    const inspect = (format: string) =>
+      runQuiet(this.docker, ["image", "inspect", "--format", format, image], env, Math.min(INSPECT_TIMEOUT_MS, timeoutMs), signal);
+    const present = await inspect("{{.Id}}");
     if (!present.ok) {
       if (signal?.aborted) return { ok: false, error: `preparing ${image} was interrupted` };
       const pulled = await runQuiet(this.docker, ["pull", image], env, Math.min(PULL_TIMEOUT_MS, timeoutMs), signal);
       if (!pulled.ok) return { ok: false, error: `could not pull ${image}: ${pulled.output.slice(-1000)}` };
     }
-    const digest = (async () => {
-      const repo = await runQuiet(this.docker, ["image", "inspect", "--format", "{{index .RepoDigests 0}}", image], env, INSPECT_TIMEOUT_MS);
-      if (repo.ok && repo.output) return repo.output;
-      const id = await runQuiet(this.docker, ["image", "inspect", "--format", "{{.Id}}", image], env, INSPECT_TIMEOUT_MS);
-      return id.ok && id.output ? id.output : undefined;
-    })();
-    this.digests.set(image, digest);
-    return { ok: true, digest: await digest };
+    // Best effort: the registry digest, else the local image id (locally built images have none).
+    const repo = await inspect("{{index .RepoDigests 0}}");
+    const id = repo.ok && repo.output ? null : await inspect("{{.Id}}");
+    const digest = repo.ok && repo.output ? repo.output : id?.ok && id.output ? id.output : undefined;
+    if (digest) this.digests.set(image, { digest, at: Date.now() });
+    return { ok: true, digest };
   }
 
   /**
@@ -320,7 +324,11 @@ export class DockerBackend implements SandboxBackend {
         imageDigest: prepared.digest,
       };
     } finally {
-      await egress?.teardown();
+      if (egress) {
+        // The network cannot be removed while the container still has an endpoint on it.
+        await runQuiet(this.docker, ["rm", "-f", name], childEnv("docker"), KILL_TIMEOUT_MS);
+        await egress.teardown();
+      }
     }
   }
 }

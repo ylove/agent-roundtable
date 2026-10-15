@@ -28,6 +28,7 @@ test("buildDockerRunArgs: the full hardened argv", () => {
   };
   assert.deepEqual(buildDockerRunArgs(req, base), [
     "run", "--rm", "--init",
+    "--log-driver", "none",
     "--name", "rt-cmd-abc123",
     "--network", "none",
     "--read-only",
@@ -36,6 +37,7 @@ test("buildDockerRunArgs: the full hardened argv", () => {
     "--security-opt", "no-new-privileges",
     "--pids-limit", "512",
     "--memory", "2g",
+    "--memory-swap", "2g",
     "--cpus", "2",
     "--user", "501:20",
     "-e", "HOME=/tmp",
@@ -69,6 +71,7 @@ test("buildDockerRunArgs: req.image overrides the default and limits come from o
     { ...base, limits: { memory: "512m", cpus: "0.5", pids: 64 } }
   );
   assert.equal(args[args.indexOf("--memory") + 1], "512m");
+  assert.equal(args[args.indexOf("--memory-swap") + 1], "512m", "no swap beyond the memory limit");
   assert.equal(args[args.indexOf("--cpus") + 1], "0.5");
   assert.equal(args[args.indexOf("--pids-limit") + 1], "64");
   assert.equal(args.at(-3), "python:3.12-slim@sha256:" + "a".repeat(64));
@@ -247,9 +250,13 @@ test("egress run() joins a fresh internal network with the proxy variables, then
   const cmd = calls.find((a) => a[0] === "run" && a[1] === "--rm");
   assert.equal(cmd[cmd.indexOf("--network") + 1], network);
   assert.ok(cmd.includes(`HTTPS_PROXY=http://${proxy}:3128`));
+  const name = cmd[cmd.indexOf("--name") + 1];
+  const rmCmd = calls.findIndex((a) => a[0] === "rm" && a.includes(name));
   const rmProxy = calls.findIndex((a) => a[0] === "rm" && a.includes(proxy));
   const rmNet = calls.findIndex((a) => a[0] === "network" && a[1] === "rm" && a[2] === network);
-  assert.ok(rmProxy > calls.indexOf(cmd) && rmNet > rmProxy, "proxy and network removed after the command");
+  assert.ok(rmCmd > calls.indexOf(cmd), "the command container is removed (awaited) first");
+  assert.ok(rmProxy > rmCmd && rmNet > rmProxy, "then the proxy, then the network");
+  for (const flag of ["--log-driver", "json-file", "max-size=1m", "max-file=1", "--memory-swap"]) assert.ok(proxyRun.includes(flag), flag);
 });
 
 // ============================================================================

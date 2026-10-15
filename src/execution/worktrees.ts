@@ -1,0 +1,786 @@
+// ============================================================================
+// Task worktrees, lease enforcement and leased commits
+//
+//   WORKTREES_DIR/<exe>/_integration   branch rt/<tag>/integration, started at base_sha
+//   WORKTREES_DIR/<exe>/<task>         branch rt/<tag>/<task>, started at base_sha, or at the
+//                                      integration head once the task has accepted dependencies
+//
+// The task owns its branch and worktree; agents come and go, so every ensure* call is idempotent
+// and a resumed run finds the same worktree on the same branch. Operations that change the
+// repository's shared state (creating, removing and pruning worktrees and branches, merging into
+// the integration branch) hold the execution's git.lock; within one async call chain the lock is
+// reentrant, so a locked operation can call another one.
+//
+// A worktree is only ever opened through its location: it must sit at WORKTREES_DIR/<exe>/<name>,
+// and the execution's header names the main repository whose records vouch for it (git.ts). Every
+// git call here goes through runGit's hardening.
+// ============================================================================
+
+import { AsyncLocalStorage } from "node:async_hooks";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { dirname, isAbsolute, join, posix, relative, sep } from "node:path";
+import { WORKTREES_DIR } from "../config.js";
+import { EXECUTION_ID_RE } from "../ids.js";
+import { mkdirPrivate } from "../security/fs-safe.js";
+import { scrub } from "../security/secrets.js";
+import { ID_RE, preview } from "./events.js";
+import {
+  branchExists,
+  findWorktreeAdmin,
+  gitIdentity,
+  GitSafetyError,
+  integrationBranch,
+  openLinkedWorktree,
+  openRepo,
+  resolveCommit,
+  runGit,
+  splitZ,
+  taskBranch,
+  validTaskRefName,
+  type GitIdentity,
+  type GitTarget,
+} from "./git.js";
+import { hasDotGitSegment, isGitMetadataPath, pathCovered, type LeaseLike } from "./leases.js";
+import { withLock, type LockOptions } from "./lock.js";
+import { executionDir } from "./store.js";
+import type { BlackboardState, ExecutionHeader } from "./types.js";
+
+// ============================================================================
+// Names and locations
+// ============================================================================
+
+/** The integration worktree's directory name (task ids start with [a-z0-9], so it never collides). */
+export const INTEGRATION_WORKTREE = "_integration";
+
+export function executionWorktreesDir(executionId: string): string {
+  if (typeof executionId !== "string" || !EXECUTION_ID_RE.test(executionId)) throw new Error(`Not an execution id: ${preview(executionId)}`);
+  return join(WORKTREES_DIR, executionId);
+}
+
+export function taskWorktreePath(executionId: string, task: string): string {
+  taskBranch(executionId, task); // validates the id
+  return join(executionWorktreesDir(executionId), task);
+}
+
+export function integrationWorktreePath(executionId: string): string {
+  return join(executionWorktreesDir(executionId), INTEGRATION_WORKTREE);
+}
+
+const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+function checkHeader(h: ExecutionHeader): void {
+  if (!h || typeof h !== "object" || typeof h.id !== "string" || !EXECUTION_ID_RE.test(h.id)) throw new Error("Not an execution header");
+  if (typeof h.repo_root !== "string" || !isAbsolute(h.repo_root)) throw new Error(`Execution ${h.id}: repo_root must be an absolute path`);
+  if (typeof h.base_sha !== "string" || !SHA_RE.test(h.base_sha)) throw new Error(`Execution ${h.id}: base_sha must be a full commit id`);
+}
+
+function readHeader(executionId: string): ExecutionHeader {
+  let h: ExecutionHeader;
+  try {
+    h = JSON.parse(readFileSync(join(executionDir(executionId), "execution.json"), "utf8")) as ExecutionHeader;
+  } catch {
+    throw new GitSafetyError(`Execution ${executionId} not found`);
+  }
+  if (!h || h.schema !== 1 || h.id !== executionId) throw new GitSafetyError(`Execution ${executionId}: execution.json is not a schema 1 header for this id`);
+  checkHeader(h);
+  return h;
+}
+
+const real = (p: string): string => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+};
+
+/** Where a path sits under WORKTREES_DIR: [execution id, worktree name], or a GitSafetyError. */
+function locate(path: string): { exe: string; name: string; path: string } {
+  if (typeof path !== "string" || !isAbsolute(path)) throw new GitSafetyError(`Not a worktree path: ${preview(path)}`);
+  const root = real(WORKTREES_DIR);
+  const resolved = existsSync(path) ? real(path) : join(real(dirname(path)), path.slice(dirname(path).length + 1));
+  const parts = relative(root, resolved).split(sep);
+  const [exe, name] = parts;
+  if (parts.length !== 2 || !EXECUTION_ID_RE.test(exe ?? "") || !(name === INTEGRATION_WORKTREE || validTaskRefName(name ?? ""))) {
+    throw new GitSafetyError(`${path} is not a roundtable worktree (expected ${join(WORKTREES_DIR, "<execution>", "<task>")})`);
+  }
+  return { exe, name, path: resolved };
+}
+
+function branchFor(exe: string, name: string): string {
+  return name === INTEGRATION_WORKTREE ? integrationBranch(exe) : taskBranch(exe, name);
+}
+
+export interface OpenWorktree {
+  header: ExecutionHeader;
+  /** The main repository. */
+  repo: GitTarget;
+  /** The worktree itself. */
+  target: GitTarget;
+  /** The task id, or INTEGRATION_WORKTREE. */
+  name: string;
+  /** The branch this worktree must be on. */
+  branch: string;
+}
+
+/** Open a roundtable worktree by path, vouched for by its execution's main repository. */
+export async function openWorktree(path: string): Promise<OpenWorktree> {
+  const loc = locate(path);
+  const header = readHeader(loc.exe);
+  const repo = await openRepo(header.repo_root);
+  const target = openLinkedWorktree(repo, loc.path);
+  return { header, repo, target, name: loc.name, branch: branchFor(loc.exe, loc.name) };
+}
+
+async function currentBranch(t: GitTarget): Promise<string | null> {
+  const r = await runGit(t, ["symbolic-ref", "-q", "HEAD"], { allowExit: [1] });
+  const ref = r.stdout.trim();
+  return r.exit === 0 && ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : null;
+}
+
+async function expectBranch(w: OpenWorktree): Promise<void> {
+  const b = await currentBranch(w.target);
+  if (b !== w.branch) throw new Error(`${w.target.workTree} is on ${b ?? "a detached HEAD"}, not ${w.branch}`);
+}
+
+// ============================================================================
+// git.lock (reentrant within one async call chain)
+// ============================================================================
+
+const GIT_LOCK: LockOptions = { staleMs: 10_000, timeoutMs: 15 * 60_000 };
+const heldGitLocks = new AsyncLocalStorage<ReadonlySet<string>>();
+
+/** Run fn holding executions/<exe>/git.lock. Nested calls in the same async chain do not re-take it. */
+export async function withGitLock<T>(executionId: string, fn: () => Promise<T>, opts: { timeoutMs?: number } = {}): Promise<T> {
+  const held = heldGitLocks.getStore();
+  if (held?.has(executionId)) return fn();
+  const lockOpts = opts.timeoutMs ? { ...GIT_LOCK, timeoutMs: opts.timeoutMs } : GIT_LOCK;
+  return withLock(join(executionDir(executionId), "git.lock"), lockOpts, () =>
+    heldGitLocks.run(new Set([...(held ?? []), executionId]), fn)
+  );
+}
+
+// ============================================================================
+// Creating and reusing worktrees
+// ============================================================================
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string;
+  head: string;
+  /** False when an existing worktree on the right branch was reused. */
+  created: boolean;
+}
+
+const ADD_TIMEOUT_MS = 10 * 60_000;
+
+async function ensureWorktree(header: ExecutionHeader, name: string, startPoint: () => Promise<string>): Promise<WorktreeInfo> {
+  checkHeader(header);
+  const branch = branchFor(header.id, name);
+  return withGitLock(header.id, async () => {
+    const repo = await openRepo(header.repo_root);
+    mkdirPrivate(WORKTREES_DIR);
+    const exeDir = executionWorktreesDir(header.id);
+    mkdirPrivate(exeDir);
+    const path = join(realpathSync(exeDir), name);
+    const admin = findWorktreeAdmin(repo, path);
+    if (existsSync(path)) {
+      if (admin) {
+        const target = openLinkedWorktree(repo, path);
+        const on = await currentBranch(target);
+        if (on !== branch) throw new Error(`${path} is checked out on ${on ?? "a detached HEAD"}, not ${branch}`);
+        return { path: target.workTree, branch, head: await resolveCommit(target, "HEAD"), created: false };
+      }
+      // An unregistered directory is reused only when empty (an interrupted create).
+      if (lstatSync(path).isSymbolicLink() || readdirSync(path).length) {
+        throw new Error(`${path} exists and is not a worktree of ${header.repo_root}`);
+      }
+    } else {
+      if (admin) rmSync(admin, { recursive: true, force: true }); // a stale record: its directory is gone
+      mkdirSync(path, { mode: 0o700 });
+    }
+    mkdirPrivate(path);
+    const args = (await branchExists(repo, branch))
+      ? ["worktree", "add", "-q", path, branch]
+      : ["worktree", "add", "-q", "-b", branch, path, await startPoint()];
+    try {
+      await runGit(repo, args, { timeoutMs: ADD_TIMEOUT_MS });
+    } catch (e) {
+      const left = findWorktreeAdmin(repo, path);
+      if (left) rmSync(left, { recursive: true, force: true });
+      rmSync(path, { recursive: true, force: true });
+      throw e;
+    }
+    const target = openLinkedWorktree(repo, path);
+    return { path: target.workTree, branch, head: await resolveCommit(target, "HEAD"), created: true };
+  });
+}
+
+/** WORKTREES_DIR/<exe>/_integration on rt/<tag>/integration, created at base_sha the first time. */
+export function ensureIntegrationWorktree(header: ExecutionHeader): Promise<WorktreeInfo> {
+  return ensureWorktree(header, INTEGRATION_WORKTREE, async () => resolveCommit(await openRepo(header.repo_root), header.base_sha));
+}
+
+/**
+ * Where a new task branch starts: "integration" when the task depends on an accepted task (so it
+ * builds on merged work), else "base".
+ */
+export function taskStartPoint(state: Readonly<BlackboardState>, taskId: string): "base" | "integration" {
+  const rt = Object.hasOwn(state.tasks, taskId) ? state.tasks[taskId] : undefined;
+  const accepted = (rt?.spec.depends_on ?? []).some((d) => Object.hasOwn(state.tasks, d) && state.tasks[d].state === "accepted");
+  return accepted ? "integration" : "base";
+}
+
+/**
+ * WORKTREES_DIR/<exe>/<task> on rt/<tag>/<task>. A new branch starts at `startPoint`: "base"
+ * (base_sha, the default), "integration" (the integration head) or a commit id. An existing
+ * worktree on the right branch is reused as it is, and an existing branch is checked out where
+ * it stands, so resumes keep their work.
+ */
+export function ensureTaskWorktree(header: ExecutionHeader, taskId: string, startPoint: string = "base"): Promise<WorktreeInfo> {
+  checkHeader(header);
+  if (typeof taskId !== "string" || !ID_RE.test(taskId)) throw new Error(`Not a task id: ${preview(taskId)}`);
+  return ensureWorktree(header, taskId, async () => {
+    const repo = await openRepo(header.repo_root);
+    if (startPoint === "base") return resolveCommit(repo, header.base_sha);
+    if (startPoint === "integration") {
+      await ensureIntegrationWorktree(header);
+      return resolveCommit(repo, `refs/heads/${integrationBranch(header.id)}`);
+    }
+    if (!SHA_RE.test(startPoint)) throw new Error(`startPoint must be "base", "integration" or a full commit id, not ${preview(startPoint)}`);
+    return resolveCommit(repo, startPoint);
+  });
+}
+
+// ============================================================================
+// Removing and pruning
+// ============================================================================
+
+/** Remove a worktree (its files and its record). The branch stays unless deleteBranch is set. */
+export async function removeWorktree(path: string, opts: { deleteBranch?: boolean } = {}): Promise<{ removed: boolean; branch: string }> {
+  const loc = locate(path);
+  const header = readHeader(loc.exe);
+  const repo = await openRepo(header.repo_root);
+  const branch = branchFor(loc.exe, loc.name);
+  return withGitLock(loc.exe, async () => {
+    const admin = findWorktreeAdmin(repo, loc.path);
+    let removed = false;
+    if (existsSync(loc.path)) {
+      let viaGit = false;
+      if (admin) {
+        try {
+          openLinkedWorktree(repo, loc.path);
+          await runGit(repo, ["worktree", "remove", "--force", loc.path]);
+          viaGit = true;
+        } catch {
+          /* tampered or half-made: removed by hand below */
+        }
+      }
+      if (!viaGit) {
+        rmSync(loc.path, { recursive: true, force: true });
+        if (admin) rmSync(admin, { recursive: true, force: true });
+      }
+      removed = true;
+    } else if (admin) {
+      rmSync(admin, { recursive: true, force: true });
+      removed = true;
+    }
+    if (opts.deleteBranch && (await branchExists(repo, branch))) await runGit(repo, ["branch", "-q", "-D", branch]);
+    return { removed, branch };
+  });
+}
+
+export interface PruneResult {
+  /** Records dropped because their directories were gone. */
+  pruned: string[];
+  /** Worktrees removed (with remove: true). */
+  removed: string[];
+  /** Branches deleted (with branches: true). */
+  branches: string[];
+}
+
+/**
+ * Drop the execution's stale worktree records (directories that are gone; other worktrees of the
+ * repository are never touched). With remove, also remove all of its worktrees and their
+ * directory; with branches, also delete its rt/<tag>/* branches.
+ */
+export async function pruneWorktrees(
+  execution: string | ExecutionHeader,
+  opts: { remove?: boolean; branches?: boolean } = {}
+): Promise<PruneResult> {
+  const header = typeof execution === "string" ? readHeader(execution) : execution;
+  checkHeader(header);
+  const repo = await openRepo(header.repo_root);
+  const exeDir = executionWorktreesDir(header.id);
+  return withGitLock(header.id, async () => {
+    const out: PruneResult = { pruned: [], removed: [], branches: [] };
+    const realExe = real(exeDir);
+    const base = join(repo.commonDir, "worktrees");
+    for (const name of existsSync(base) ? readdirSync(base) : []) {
+      const admin = join(base, name);
+      let wt: string;
+      try {
+        wt = dirname(posix.resolve(admin, readFileSync(join(admin, "gitdir"), "utf8").trim()));
+      } catch {
+        continue;
+      }
+      if (dirname(wt) !== realExe && dirname(wt) !== exeDir) continue;
+      if (!existsSync(wt)) {
+        rmSync(admin, { recursive: true, force: true });
+        out.pruned.push(wt);
+      } else if (opts.remove) {
+        await removeWorktree(wt);
+        out.removed.push(wt);
+      }
+    }
+    if (opts.remove && existsSync(exeDir)) {
+      for (const leftover of readdirSync(exeDir)) {
+        rmSync(join(exeDir, leftover), { recursive: true, force: true });
+        out.removed.push(join(realExe, leftover));
+      }
+      rmSync(exeDir, { recursive: true, force: true });
+    }
+    if (opts.branches) {
+      const prefix = `refs/heads/${dirname(integrationBranch(header.id))}/`;
+      const r = await runGit(repo, ["for-each-ref", "--format=%(refname)", prefix]);
+      for (const ref of r.stdout.split("\n").map((s) => s.trim()).filter((s) => s.startsWith(prefix))) {
+        const b = ref.slice("refs/heads/".length);
+        await runGit(repo, ["branch", "-q", "-D", b]);
+        out.branches.push(b);
+      }
+    }
+    return out;
+  });
+}
+
+// ============================================================================
+// Status
+// ============================================================================
+
+interface StatusEntry {
+  /** Two-letter porcelain v1 code: index then work tree. */
+  xy: string;
+  path: string;
+}
+
+const UNMERGED = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+
+/** Porcelain v1 status, every untracked file listed, renames off, submodules never entered. */
+async function statusEntries(t: GitTarget): Promise<StatusEntry[]> {
+  const r = await runGit(t, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=all"]);
+  return splitZ(r.stdout)
+    .filter((rec) => rec.length > 3)
+    .map((rec) => ({ xy: rec.slice(0, 2), path: rec.slice(3) }));
+}
+
+async function hasMergeHead(t: GitTarget): Promise<boolean> {
+  const r = await runGit(t, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { allowExit: [1] });
+  return r.exit === 0;
+}
+
+/** Paths with unmerged index entries (a merge stopped on conflicts). */
+export async function unmergedPaths(t: GitTarget): Promise<string[]> {
+  const r = await runGit(t, ["diff", "--name-only", "-z", "--diff-filter=U"]);
+  return [...new Set(splitZ(r.stdout))];
+}
+
+export interface WorktreeStatus {
+  path: string;
+  branch: string | null;
+  head: string;
+  /** Every changed, deleted or untracked path (a nested repository is listed as "dir/"). */
+  dirty: string[];
+  /** A merge is in progress (prepareConflictResolution left it for the worker). */
+  merging: boolean;
+  conflicts: string[];
+}
+
+export async function worktreeStatus(path: string): Promise<WorktreeStatus> {
+  const w = await openWorktree(path);
+  const t = w.target;
+  const entries = await statusEntries(t);
+  return {
+    path: t.workTree,
+    branch: await currentBranch(t),
+    head: await resolveCommit(t, "HEAD"),
+    dirty: entries.map((e) => e.path),
+    merging: await hasMergeHead(t),
+    conflicts: entries.filter((e) => UNMERGED.has(e.xy)).map((e) => e.path),
+  };
+}
+
+// ============================================================================
+// Enforcement: what a branch changed, and whether its leases cover it
+// ============================================================================
+
+export interface ChangedPath {
+  /** A, M, D, T, R, C, U or X (similarity scores dropped). */
+  status: string;
+  path: string;
+  /** The source path of a rename or copy. */
+  from?: string;
+  /** Destination mode ("000000" when deleted; "160000" a gitlink, "120000" a symlink). */
+  mode: string;
+  /** Destination object id. */
+  sha: string;
+}
+
+/** `git diff --raw -z -M` between two commits, both sides of renames kept. */
+async function rawChanges(t: GitTarget, from: string, to: string, cached = false): Promise<ChangedPath[]> {
+  const args = cached
+    ? ["diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames", "--ignore-submodules=none", from]
+    : ["diff", "--raw", "-z", "--no-abbrev", "-M", "--ignore-submodules=none", from, to];
+  const parts = splitZ((await runGit(t, args)).stdout);
+  const out: ChangedPath[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const meta = /^:(\d{6}) (\d{6}) ([0-9a-f]+) ([0-9a-f]+) ([A-Z])\d*$/.exec(parts[i]);
+    if (!meta) throw new Error(`Unexpected git diff --raw output near ${preview(parts[i])}`);
+    const status = meta[5];
+    if (status === "R" || status === "C") {
+      out.push({ status, from: parts[i + 1], path: parts[i + 2], mode: meta[2], sha: meta[4] });
+      i += 2;
+    } else {
+      out.push({ status, path: parts[i + 1], mode: meta[2], sha: meta[4] });
+      i += 1;
+    }
+  }
+  return out;
+}
+
+async function mergeBaseOf(t: GitTarget, a: string, b: string): Promise<string> {
+  const ca = await resolveCommit(t, a);
+  const cb = await resolveCommit(t, b);
+  const r = await runGit(t, ["merge-base", ca, cb], { allowExit: [1] });
+  const sha = r.stdout.trim();
+  if (r.exit !== 0 || !SHA_RE.test(sha)) throw new Error(`${preview(a)} and ${preview(b)} have no common ancestor`);
+  return sha;
+}
+
+/** The merge base of the worktree's HEAD and `ref`. */
+export async function mergeBase(worktree: string, ref: string): Promise<string> {
+  const w = await openWorktree(worktree);
+  return mergeBaseOf(w.target, "HEAD", ref);
+}
+
+/**
+ * What HEAD changed since its merge base with `base` (like `git diff base...HEAD`). Pass the
+ * integration branch: for a fresh task that is base_sha, and after prepareConflictResolution it
+ * is the integration head, so other tasks' merged work never counts as this task's.
+ */
+export async function changedPaths(worktree: string, base: string): Promise<ChangedPath[]> {
+  const w = await openWorktree(worktree);
+  return rawChanges(w.target, await mergeBaseOf(w.target, "HEAD", base), "HEAD");
+}
+
+/** Both sides of every rename and copy: a rename out of a leased directory touches both paths. */
+export function touchedPaths(changes: readonly ChangedPath[]): string[] {
+  const out = new Set<string>();
+  for (const c of changes) {
+    if (c.from !== undefined) out.add(c.from);
+    out.add(c.path);
+  }
+  return [...out];
+}
+
+export interface Violation {
+  path: string;
+  reason: "not leased" | "git metadata needs an explicit lease" | "inside .git" | "nested repository" | "symlink leaves the worktree";
+}
+
+export interface CoverageResult {
+  ok: boolean;
+  /** The merge base the changes were measured from. */
+  base: string;
+  /** Violating paths, without duplicates. */
+  violations: string[];
+  details: Violation[];
+  changes: ChangedPath[];
+}
+
+/** True when a symlink at `linkPath` with `target` would resolve outside the repository. */
+export function symlinkEscapes(linkPath: string, target: string): boolean {
+  if (!target || target.includes("\0") || posix.isAbsolute(target) || /^[A-Za-z]:/.test(target) || target.startsWith("~")) return true;
+  const resolved = posix.normalize(posix.join(posix.dirname(linkPath), target));
+  return resolved === ".." || resolved.startsWith("../");
+}
+
+async function judge(t: GitTarget, changes: readonly ChangedPath[], leases: readonly LeaseLike[] | null): Promise<Violation[]> {
+  const out: Violation[] = [];
+  const add = (path: string, reason: Violation["reason"]) => {
+    if (!out.some((v) => v.path === path && v.reason === reason)) out.push({ path, reason });
+  };
+  for (const c of changes) {
+    for (const p of c.from !== undefined ? [c.from, c.path] : [c.path]) {
+      if (hasDotGitSegment(p)) add(p, "inside .git");
+      else if (leases && !pathCovered(p, leases)) add(p, isGitMetadataPath(p) && pathCovered(p, [{ paths: ["**"] }]) === false && leases.some((l) => l.paths.length) && !pathCoveredIgnoringMeta(p, leases) ? "not leased" : isGitMetadataPath(p) ? "git metadata needs an explicit lease" : "not leased");
+    }
+    if (c.status === "D") continue;
+    if (c.mode === "160000") add(c.path, "nested repository");
+    if (c.mode === "120000") {
+      const target = (await runGit(t, ["cat-file", "blob", c.sha], { maxOutputBytes: 4096, truncate: true })).stdout;
+      if (symlinkEscapes(c.path, target)) add(c.path, "symlink leaves the worktree");
+    }
+  }
+  return out;
+}
+
+/** pathCovered without the metadata rule: tells "not leased" from "needs an explicit lease". */
+function pathCoveredIgnoringMeta(path: string, leases: readonly LeaseLike[]): boolean {
+  const meta = path.split("/").map((s) => (/^\.git/i.test(s) ? `x${s}` : s)).join("/");
+  return pathCovered(meta, leases.map((l) => ({ paths: l.paths.map((g) => g.split("/").map((s) => (/^\.git/i.test(s) ? `x${s}` : s)).join("/")) })));
+}
+
+/**
+ * Lease enforcement for submit and merge: every path HEAD changed since its merge base with
+ * `base` (both sides of renames) must be covered by `leases`; .git* metadata needs an explicit
+ * lease; gitlinks and symlinks that leave the repository are refused outright.
+ */
+export async function checkLeaseCoverage(worktree: string, base: string, leases: readonly LeaseLike[]): Promise<CoverageResult> {
+  const w = await openWorktree(worktree);
+  return checkRangeCoverage(w.target, base, "HEAD", leases);
+}
+
+/** checkLeaseCoverage for an arbitrary tip in an open target (the merge queue checks a branch). */
+export async function checkRangeCoverage(t: GitTarget, base: string, tip: string, leases: readonly LeaseLike[]): Promise<CoverageResult> {
+  const mb = await mergeBaseOf(t, tip, base);
+  const changes = await rawChanges(t, mb, await resolveCommit(t, tip));
+  const details = await judge(t, changes, leases);
+  return { ok: details.length === 0, base: mb, violations: [...new Set(details.map((d) => d.path))], details, changes };
+}
+
+// ============================================================================
+// Commits
+// ============================================================================
+
+/** A commit was refused: staged paths outside the leases, unresolved conflicts or conflict markers. */
+export class CommitRefusedError extends Error {
+  constructor(message: string, readonly paths: string[]) {
+    super(message);
+    this.name = "CommitRefusedError";
+  }
+}
+
+export interface CommitTrailers {
+  execution: string;
+  task: string;
+  agent?: string;
+}
+
+export interface CommitOptions {
+  message: string;
+  trailers: Required<CommitTrailers>;
+  /**
+   * Measure stat, files and rewrites from the merge base with this ref (pass the integration
+   * branch to describe the whole task, as task.submitted wants). Default: this commit alone.
+   */
+  summaryBase?: string;
+  /** Default: gitIdentity of the main repository. */
+  identity?: GitIdentity;
+}
+
+export interface DiffSummary {
+  /** `git diff --shortstat`, e.g. "2 files changed, 10 insertions(+), 1 deletion(-)". */
+  stat: string;
+  /** Every path touched (renames as both paths). */
+  files: string[];
+  /** Paths git reports as complete rewrites (-B). */
+  rewrites: string[];
+}
+
+export interface CommitResult extends DiffSummary {
+  /** The new commit, or HEAD when there was nothing to commit. */
+  commit: string;
+  created: boolean;
+  /** Changed paths outside the leases, left uncommitted in the worktree. */
+  uncovered: string[];
+  /** Paths never committed whatever the leases: nested repositories, .git paths, escaping symlinks. */
+  rejected: Violation[];
+}
+
+const MESSAGE_MAX = 16 * 1024;
+const MARKER_RE = /^(?:<{7}|>{7})(?: |$)/m;
+
+function trailerValue(name: string, v: string | undefined, re?: RegExp): string {
+  if (typeof v !== "string" || !v.trim() || v.length > 128 || /[\0-\x1f\x7f]/.test(v) || (re && !re.test(v))) {
+    throw new Error(`Invalid ${name} trailer value ${preview(v)}`);
+  }
+  return v.trim();
+}
+
+/** Scrubbed message without forged Roundtable-* trailers, then our trailers. */
+export function buildCommitMessage(message: string, trailers: CommitTrailers): string {
+  let text = scrub(typeof message === "string" ? message : "").replace(/\0/g, "").replace(/\r\n?/g, "\n");
+  text = text
+    .split("\n")
+    .filter((l) => !/^\s*roundtable-[a-z-]*\s*:/i.test(l))
+    .join("\n")
+    .trim();
+  if (text.length > MESSAGE_MAX) text = text.slice(0, MESSAGE_MAX).trimEnd() + "\n\n[message truncated]";
+  const lines = [
+    `Roundtable-Execution: ${trailerValue("Roundtable-Execution", trailers.execution, EXECUTION_ID_RE)}`,
+    `Roundtable-Task: ${trailerValue("Roundtable-Task", trailers.task, ID_RE)}`,
+  ];
+  if (trailers.agent !== undefined) lines.push(`Roundtable-Agent: ${trailerValue("Roundtable-Agent", trailers.agent)}`);
+  return `${text || "rt: update"}\n\n${lines.join("\n")}\n`;
+}
+
+async function summarize(t: GitTarget, from: string, to: string): Promise<DiffSummary> {
+  if (from === to) return { stat: "", files: [], rewrites: [] };
+  const files = splitZ((await runGit(t, ["diff", "--name-only", "-z", "--no-renames", "--ignore-submodules=none", from, to])).stdout);
+  const stat = (await runGit(t, ["diff", "--shortstat", "--ignore-submodules=none", from, to])).stdout.trim();
+  const summary = (await runGit(t, ["diff", "-B", "-M", "--summary", "--ignore-submodules=none", from, to])).stdout;
+  const rewrites = summary
+    .split("\n")
+    .map((l) => /^ rewrite (.+) \(\d+%\)$/.exec(l)?.[1])
+    .filter((p): p is string => !!p);
+  return { stat, files: [...new Set(files)], rewrites };
+}
+
+/** stat, files and rewrites for what HEAD changed since its merge base with `base`. */
+export async function taskDiffSummary(worktree: string, base: string): Promise<DiffSummary & { base: string; head: string }> {
+  const w = await openWorktree(worktree);
+  const head = await resolveCommit(w.target, "HEAD");
+  const mb = await mergeBaseOf(w.target, head, base);
+  return { ...(await summarize(w.target, mb, head)), base: mb, head };
+}
+
+/**
+ * Stage what `leases` cover (all changes when null) and commit it. Nested repositories, paths
+ * inside .git and symlinks that leave the repository are never staged. When a merge is in
+ * progress (prepareConflictResolution), the commit concludes it: conflicted paths must be
+ * leased and free of conflict markers, and staged changes that only bring in the integration
+ * branch's own versions are allowed.
+ */
+async function commitCore(
+  w: OpenWorktree,
+  leases: readonly LeaseLike[] | null,
+  message: string,
+  opts: { summaryBase?: string; identity?: GitIdentity }
+): Promise<CommitResult> {
+  const t = w.target;
+  await expectBranch(w);
+  const merging = await hasMergeHead(t);
+  // Outside a merge the index is rebuilt from HEAD, so nothing staged earlier rides along.
+  if (!merging) await runGit(t, ["reset", "-q"]);
+  const toStage: string[] = [];
+  const uncovered: string[] = [];
+  const rejected: Violation[] = [];
+  const conflicted: string[] = [];
+  for (const e of await statusEntries(t)) {
+    if (e.path.endsWith("/")) rejected.push({ path: e.path, reason: "nested repository" });
+    else if (hasDotGitSegment(e.path)) rejected.push({ path: e.path, reason: "inside .git" });
+    else if (leases && !pathCovered(e.path, leases)) uncovered.push(e.path);
+    else if (await escapingSymlink(t, e.path)) rejected.push({ path: e.path, reason: "symlink leaves the worktree" });
+    else {
+      toStage.push(e.path);
+      if (UNMERGED.has(e.xy)) conflicted.push(e.path);
+    }
+  }
+  const marked = conflicted.filter((p) => hasConflictMarkers(join(t.workTree, p)));
+  if (marked.length) throw new CommitRefusedError(`Conflict markers remain in ${marked.join(", ")}`, marked);
+  if (toStage.length) {
+    await runGit(t, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], { input: toStage.join("\0") + "\0" });
+  }
+
+  const stillUnmerged = await unmergedPaths(t);
+  if (stillUnmerged.length) {
+    throw new CommitRefusedError(`Unresolved conflicts outside the leases: ${stillUnmerged.join(", ")}`, stillUnmerged);
+  }
+  let staged = await rawChanges(t, "HEAD", "", true);
+  if (merging) {
+    const fromIntegration = new Set(splitZ((await runGit(t, ["diff", "--cached", "--name-only", "-z", "--no-renames", "MERGE_HEAD"])).stdout));
+    staged = staged.filter((c) => fromIntegration.has(c.path));
+  }
+  const bad = staged
+    .filter((c) => (c.status !== "D" && c.mode === "160000") || hasDotGitSegment(c.path) || (leases !== null && !pathCovered(c.path, leases)))
+    .map((c) => c.path);
+  if (bad.length) {
+    if (!merging) await runGit(t, ["reset", "-q"]);
+    throw new CommitRefusedError(`Staged changes outside the leases: ${bad.join(", ")}`, bad);
+  }
+
+  const before = await resolveCommit(t, "HEAD");
+  if (!staged.length && !merging) {
+    return { commit: before, created: false, stat: "", files: [], rewrites: [], uncovered, rejected };
+  }
+  const identity = opts.identity ?? (await gitIdentity(w.repo));
+  await runGit(t, ["commit", "-q", "--no-verify", "--no-gpg-sign", "-F", "-"], { input: message, identity });
+  const commit = await resolveCommit(t, "HEAD");
+  const from = opts.summaryBase ? await mergeBaseOf(t, commit, opts.summaryBase) : before;
+  return { commit, created: true, ...(await summarize(t, from, commit)), uncovered, rejected };
+}
+
+async function escapingSymlink(t: GitTarget, rel: string): Promise<boolean> {
+  try {
+    const p = join(t.workTree, rel);
+    const st = lstatSync(p);
+    if (!st.isSymbolicLink()) return false;
+    const { readlinkSync } = await import("node:fs");
+    return symlinkEscapes(rel, readlinkSync(p, "utf8"));
+  } catch {
+    return false; // gone (a deletion)
+  }
+}
+
+function hasConflictMarkers(file: string): boolean {
+  try {
+    const st = lstatSync(file);
+    if (!st.isFile() || st.size > 32 * 1024 * 1024) return false;
+    return MARKER_RE.test(readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Commit the worktree's changes that `leases` cover, with Roundtable-Execution, -Task and -Agent
+ * trailers (which must name this worktree's execution and task) and a scrubbed message. Changed
+ * paths outside the leases stay uncommitted and are listed in `uncovered`. Repository hooks never
+ * run. Throws CommitRefusedError when the staged set would not be a subset of the leases.
+ */
+export async function commitLeasedPaths(worktree: string, leases: readonly LeaseLike[], opts: CommitOptions): Promise<CommitResult> {
+  if (!Array.isArray(leases)) throw new Error("commitLeasedPaths: leases must be an array");
+  const w = await openWorktree(worktree);
+  const tr = opts.trailers;
+  if (!tr || tr.execution !== w.header.id || tr.task !== w.name) {
+    throw new Error(`Commit trailers must name this worktree's execution ${w.header.id} and task ${w.name}`);
+  }
+  return commitCore(w, leases, buildCommitMessage(opts.message, tr), opts);
+}
+
+/**
+ * Runner recovery for a dead worker: commit all of the worktree's WIP ("rt: wip snapshot"), or
+ * only what `leases` cover when given, so a resumed or fresh worker starts from it. Nested
+ * repositories, .git paths and escaping symlinks are still never committed. A worktree in the
+ * middle of a conflict resolution is left alone (skipped).
+ */
+export async function snapshotWip(
+  path: string,
+  message = "rt: wip snapshot",
+  leases?: readonly LeaseLike[]
+): Promise<CommitResult & { skipped?: string }> {
+  const w = await openWorktree(path);
+  if (await hasMergeHead(w.target)) {
+    const head = await resolveCommit(w.target, "HEAD");
+    return { commit: head, created: false, stat: "", files: [], rewrites: [], uncovered: [], rejected: [], skipped: "a merge is in progress" };
+  }
+  const task = w.name === INTEGRATION_WORKTREE ? undefined : w.name;
+  if (!task) throw new Error("snapshotWip is for task worktrees");
+  return commitCore(w, leases ?? null, buildCommitMessage(message, { execution: w.header.id, task }), {});
+}
+
+const DIFF_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The unified diff of what HEAD changed since its merge base with `base`, capped at maxBytes (at a
+ * line boundary, with a note), for the blob store (putBlob scrubs it).
+ */
+export async function diffForTask(worktree: string, base: string, maxBytes = DIFF_MAX_BYTES): Promise<string> {
+  const w = await openWorktree(worktree);
+  const head = await resolveCommit(w.target, "HEAD");
+  const mb = await mergeBaseOf(w.target, head, base);
+  const r = await runGit(w.target, ["diff", "-M", "--no-color", "--ignore-submodules=none", mb, head], { maxOutputBytes: maxBytes, truncate: true });
+  if (!r.truncated) return r.stdout;
+  const cut = r.stdout.lastIndexOf("\n");
+  return `${cut > 0 ? r.stdout.slice(0, cut + 1) : r.stdout}[diff truncated at ${maxBytes} bytes]\n`;
+}

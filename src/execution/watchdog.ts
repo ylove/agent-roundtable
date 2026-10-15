@@ -40,6 +40,7 @@ import {
   type DriverOutcome,
 } from "./circuit.js";
 import { deadlockRules, type DependencyNeed } from "./deadlock.js";
+import { globsOverlap as leaseGlobsOverlap, staticPrefix as leaseStaticPrefix } from "./leases.js";
 import {
   TERMINAL_TASK_STATES,
   draft,
@@ -96,6 +97,8 @@ export interface WatcherObservation {
 
 /** What the runner knows that the blackboard does not. Times are ms since the epoch. */
 export interface Observations {
+  /** Accepted tasks whose post-merge integration checks still hold their leases. */
+  retainedTasks?: readonly string[];
   /** By agent id. */
   agents?: Record<string, AgentObservation>;
   /** By orchestrator name. */
@@ -175,30 +178,16 @@ export const WATCHDOG_DEFAULTS: Readonly<WatchdogConfig> = Object.freeze({
 // ---------------------------------------------------------------------------
 // Lease overlap (conservative static-prefix rule, design §10)
 //
-// TODO(WS06): switch to globsOverlap / leasesConflict from src/execution/leases.ts once PR #113
-// is on release/1.0.0.
-//
-// A small stand-in: the full lease engine (WS06) replaces these. A glob's static prefix is its
-// leading path segments without a wildcard; two globs overlap when one static prefix is a path
-// prefix of the other. An exclusive lease conflicts with any overlapping lease, a shared lease
-// only with an exclusive one.
+// The exported array-shaped prefix keeps the watchdog API compatible with its callers.
 // ---------------------------------------------------------------------------
 
 export function staticPrefix(glob: string): string[] {
-  const out: string[] = [];
-  for (const seg of glob.replace(/\\/g, "/").split("/")) {
-    if (seg === "" || seg === ".") continue;
-    if (/[*?[\]{}]/.test(seg)) break;
-    out.push(seg);
-  }
-  return out;
+  const prefix = leaseStaticPrefix(glob);
+  return prefix ? prefix.split("/") : [];
 }
 
 export function globsOverlap(a: string, b: string): boolean {
-  const pa = staticPrefix(a);
-  const pb = staticPrefix(b);
-  for (let i = 0; i < Math.min(pa.length, pb.length); i++) if (pa[i] !== pb[i]) return false;
-  return true;
+  return leaseGlobsOverlap(a, b);
 }
 
 export function pathsOverlap(a: readonly string[], b: readonly string[]): boolean {
@@ -333,6 +322,7 @@ function leaseRules(state: BlackboardState, now: number, obs: Observations): Wat
 
   for (const id of sortedKeys(state.leases)) {
     if (ending.has(id)) continue;
+    if (obs.retainedTasks?.includes(state.leases[id].task)) continue;
     if (!isTerminal(state, state.leases[id].task)) continue;
     ending.add(id);
     const key = `lease_orphan:${id}`;

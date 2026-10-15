@@ -12,7 +12,10 @@ import { resolve, dirname } from "path";
 // quiet: true — dotenv 17 otherwise prints an "injected env" line to STDOUT, which is the MCP JSON-RPC channel.
 //
 // ROUNDTABLE_DOTENV=off skips .env entirely: worker MCP servers start keyless, with only the
-// environment their launcher gave them.
-if ((process.env.ROUNDTABLE_DOTENV ?? "").trim().toLowerCase() !== "off") {
+// environment their launcher gave them. The processes a worker starts (`mcp --worker`, and the
+// lease hook) never load it either, whatever their environment says.
+const [command, ...rest] = process.argv.slice(2);
+const workerProcess = command === "hook" || (command === "mcp" && rest.includes("--worker"));
+if (!workerProcess && (process.env.ROUNDTABLE_DOTENV ?? "").trim().toLowerCase() !== "off") {
   config({ path: resolve(dirname(fileURLToPath(import.meta.url)), "..", ".env"), override: true, quiet: true });
 }

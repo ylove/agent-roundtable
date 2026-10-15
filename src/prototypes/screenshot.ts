@@ -6,10 +6,11 @@
 // goes to the board, which serves only its own prototype files and answers anything else with 403.
 // WebRTC may not send UDP outside the proxy. Nothing else on this machine or network is reachable.
 import { spawn } from "node:child_process";
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { rm, stat } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { CHROME_PATH_OVERRIDE } from "../config.js";
+import { findExecutable, isExecutableFile } from "../executables.js";
 import { childEnv } from "../security/child-env.js";
 
 export interface Viewport {
@@ -24,30 +25,6 @@ export const SCREENSHOT_TIMEOUT_MS = 20_000;
 
 /** Only the local board can be captured; its origin doubles as the proxy. */
 const BOARD_URL_RE = /^http:\/\/127\.0\.0\.1:(\d{1,5})\//;
-
-function isExecutableFile(p: string): boolean {
-  try {
-    if (!statSync(p).isFile()) return false;
-    if (process.platform !== "win32") accessSync(p, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function scanPath(names: string[]): string | null {
-  const dirs = (process.env.PATH || "").split(delimiter).filter(Boolean);
-  const exts = process.platform === "win32" ? ["", ".exe"] : [""];
-  for (const name of names) {
-    for (const d of dirs) {
-      for (const e of exts) {
-        const p = join(d, name + e);
-        if (isExecutableFile(p)) return p;
-      }
-    }
-  }
-  return null;
-}
 
 function detectChrome(override: string): string | null {
   if (override && isExecutableFile(override)) return override;
@@ -64,7 +41,7 @@ function detectChrome(override: string): string | null {
     }
   }
   for (const c of candidates) if (existsSync(c) && isExecutableFile(c)) return c;
-  return scanPath(["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]);
+  return findExecutable(["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]);
 }
 
 let cached: string | null | undefined;

@@ -42,10 +42,12 @@ function fakeProgram(t, names, out, stdout = "") {
   const bin = mkdtempSync(join(root, "bin-"));
   for (const name of names) {
     const p = join(bin, name);
+    // Drains stdin first (local meetings send the prompt there), then reports.
     writeFileSync(
       p,
-      `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(process.env));\n` +
-        `process.stdout.write(${JSON.stringify(stdout)});\n`
+      `#!${process.execPath}\nprocess.stdin.resume();\nprocess.stdin.on("end", () => {\n` +
+        `  require("node:fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(process.env));\n` +
+        `  process.stdout.write(${JSON.stringify(stdout)});\n});\n`
     );
     chmodSync(p, 0o755);
   }

@@ -29,6 +29,7 @@ import {
 } from "./config.js";
 import type { LLMMessage } from "./providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "./providers/index.js";
+import { findExecutable } from "./executables.js";
 import {
   meetings,
   startMeeting,
@@ -1063,15 +1064,8 @@ export async function handleToolCall(
         const keyStatus = (name: string) => (process.env[name] ? "configured" : "NOT SET");
         const agentsDir = process.env.ROUNDTABLE_AGENTS_DIR;
 
-        // Check if claude CLI is available for local meetings
-        let claudeCliAvailable = false;
-        try {
-          const { execSync } = await import("child_process");
-          execSync("which claude", { stdio: "pipe" });
-          claudeCliAvailable = true;
-        } catch {
-          claudeCliAvailable = false;
-        }
+        // Check if claude CLI is available for local meetings (PATH scan, no shell)
+        const claudeCliAvailable = findExecutable("claude") !== null;
 
         const debugInfo = {
           version: VERSION,

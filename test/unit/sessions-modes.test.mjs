@@ -115,20 +115,29 @@ describe("meeting debate mode", () => {
 });
 
 describe("local meeting debate mode (fake claude on PATH)", () => {
-  test("arg builder", () => {
-    assert.deepEqual(buildClaudeCliArgs("/p.md", "hi"), ["--system-prompt-file", "/p.md", "-p", "hi"]);
-    assert.deepEqual(buildClaudeCliArgs("/p.md", "hi", "DIR"), [
-      "--system-prompt-file", "/p.md", "--append-system-prompt", "DIR", "-p", "hi",
+  const FLAGS = ["-p", "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config"];
+
+  test("arg builder: no positional prompt, read-only tools, no permission prompts, no MCP servers", () => {
+    assert.deepEqual(buildClaudeCliArgs("/p.md"), ["--system-prompt-file", "/p.md", ...FLAGS]);
+    assert.deepEqual(buildClaudeCliArgs("/p.md", "DIR"), [
+      "--system-prompt-file", "/p.md", "--append-system-prompt", "DIR", ...FLAGS,
     ]);
   });
 
-  test("debate passes --append-system-prompt on every call; standard never does", async (t) => {
+  /**
+   * A fake `claude` that records its argv and stdin, then runs `body(dir)` (JavaScript source; default:
+   * print "fake reply"). The prompt arrives on stdin only.
+   */
+  function fakeClaude(t, body = () => 'process.stdout.write("fake reply");') {
     const dir = mkdtempSync(join(tmpdir(), "fake-claude-"));
-    const log = join(dir, "argv.jsonl");
+    const log = join(dir, "runs.jsonl");
     const script = join(dir, "claude");
     writeFileSync(
       script,
-      `#!${process.execPath}\nrequire("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nprocess.stdout.write("fake reply");\n`
+      `#!${process.execPath}\nlet input = "";\nprocess.stdin.setEncoding("utf8");\n` +
+        `process.stdin.on("data", (d) => (input += d));\nprocess.stdin.on("end", () => {\n` +
+        `  require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), stdin: input }) + "\\n");\n` +
+        `  ${body(dir)}\n});\n`
     );
     chmodSync(script, 0o755);
     const oldPath = process.env.PATH;
@@ -137,28 +146,82 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
       process.env.PATH = oldPath;
       rmSync(dir, { recursive: true, force: true });
     });
-    const argvs = () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
+    return { dir, runs: () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []) };
+  }
+
+  test("debate passes --append-system-prompt on every call; standard never does", async (t) => {
+    const { runs } = fakeClaude(t);
 
     const d = await startLocalMeeting(sample, "agenda", undefined, "debate", "latency");
     assert.equal(d.response, "fake reply");
     await continueLocalMeeting(d.meetingId, "more");
     await endLocalMeeting(d.meetingId, true);
-    const calls = argvs();
+    const calls = runs();
     assert.equal(calls.length, 3);
-    for (const a of calls) {
+    for (const { argv: a, stdin } of calls) {
       const i = a.indexOf("--append-system-prompt");
       assert.ok(i >= 0, `missing flag in ${JSON.stringify(a)}`);
       assert.ok(a[i + 1].includes("Debate role: challenger") && a[i + 1].includes("latency"));
       assert.equal(a[0], "--system-prompt-file");
-      assert.equal(a[a.length - 2], "-p");
+      assert.deepEqual(a.slice(-FLAGS.length), FLAGS, "the prompt is never an argument");
+      assert.ok(stdin.length > 0 && !a.some((arg) => arg.includes(stdin)));
     }
-    assert.ok(calls[0].at(-1).includes("You are the challenger in this meeting"));
+    assert.ok(calls[0].stdin.includes("You are the challenger in this meeting"));
+    assert.ok(calls[1].stdin.includes("**User:** more"), "history goes in on stdin");
     assert.equal(listLocalMeetings().length, 0);
 
     const s = await startLocalMeeting(sample, "agenda");
     assert.equal(listLocalMeetings().find((m) => m.id === s.meetingId).mode, "standard");
-    assert.ok(!argvs().at(-1).includes("--append-system-prompt"));
+    assert.ok(!runs().at(-1).argv.includes("--append-system-prompt"));
     await endLocalMeeting(s.meetingId);
+  });
+
+  test("a prompt that looks like flags reaches the CLI verbatim on stdin", async (t) => {
+    const { runs } = fakeClaude(t);
+    const agenda = "--dangerously-skip-permissions --tools Bash -- and a $(subshell) `tick`";
+    const { meetingId } = await startLocalMeeting(sample, agenda);
+    await endLocalMeeting(meetingId);
+    const [{ argv, stdin }] = runs();
+    assert.equal(stdin, agenda);
+    assert.ok(!argv.includes("--dangerously-skip-permissions") && !argv.includes("Bash"));
+  });
+
+  test("CLI errors are scrubbed of secrets and capped", async (t) => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-local-meeting-secret-1234567890";
+    t.after(() => delete process.env.ANTHROPIC_API_KEY);
+    fakeClaude(t, () => `process.stderr.write("auth failed for sk-ant-local-meeting-secret-1234567890 " + "x".repeat(2000)); process.exit(3);`);
+    const err = await startLocalMeeting(sample, "agenda").then(() => null, (e) => e);
+    assert.ok(err instanceof Error);
+    assert.match(err.message, /^Claude CLI exited with code 3: auth failed for \[redacted:env:ANTHROPIC_API_KEY\]/);
+    assert.ok(!err.message.includes("sk-ant-local"));
+    assert.ok(err.message.length < 560, `${err.message.length} chars`);
+  });
+
+  test("ROUNDTABLE_LOCAL_TIMEOUT_MS bounds a call and the CLI's whole process group is killed", { skip: process.platform === "win32" }, async (t) => {
+    process.env.ROUNDTABLE_LOCAL_TIMEOUT_MS = "1000";
+    t.after(() => delete process.env.ROUNDTABLE_LOCAL_TIMEOUT_MS);
+    // A grandchild that would outlive the CLI unless the whole group is killed.
+    const { dir } = fakeClaude(t, (d) =>
+      `const c = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });\n` +
+        `  require("node:fs").writeFileSync(${JSON.stringify(join(d, "grandchild.pid"))}, String(c.pid));\n  setInterval(() => {}, 1000);`
+    );
+    const t0 = Date.now();
+    await assert.rejects(startLocalMeeting(sample, "agenda"), /Claude CLI timed out after 1000ms \(ROUNDTABLE_LOCAL_TIMEOUT_MS\)/);
+    assert.ok(Date.now() - t0 < 5000);
+    const pidFile = join(dir, "grandchild.pid");
+    const end = Date.now() + 5000;
+    while (!existsSync(pidFile) && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    const alive = () => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    while (alive() && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(!alive(), "the grandchild was killed with the group");
   });
 });
 

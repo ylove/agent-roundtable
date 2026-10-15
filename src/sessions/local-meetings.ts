@@ -6,7 +6,10 @@ import { spawn } from "node:child_process";
 import type { Message } from "./meetings.js";
 import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
+import { localTimeoutMs } from "../config.js";
+import { findExecutable } from "../executables.js";
 import { childEnv } from "../security/child-env.js";
+import { scrubAndCap } from "../security/secrets.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
@@ -79,72 +82,140 @@ export function recordLocalMeetingMessage(meeting: LocalMeeting, message: Messag
   return message;
 }
 
-/** Build the argv for the `claude` CLI. Exported so the flag layout can be unit tested without spawning. */
-export function buildClaudeCliArgs(
-  systemPromptPath: string,
-  prompt: string,
-  appendSystemPrompt?: string
-): string[] {
+/** The agent's built-in tools in a local meeting: read-only, so it can look at the project but never change it. */
+export const LOCAL_MEETING_TOOLS = "Read,Glob,Grep";
+
+/**
+ * Build the argv for the `claude` CLI. Exported so the flag layout can be unit tested without spawning.
+ * There is no positional argument: the prompt goes in on stdin, so prompt text is never parsed as flags,
+ * never shows up in `ps` and never hits ARG_MAX. Nothing may ask for permission, and no MCP server loads.
+ */
+export function buildClaudeCliArgs(systemPromptPath: string, appendSystemPrompt?: string): string[] {
   const args = ["--system-prompt-file", systemPromptPath];
   if (appendSystemPrompt) {
     args.push("--append-system-prompt", appendSystemPrompt);
   }
-  args.push("-p", prompt);
+  args.push(
+    "-p",
+    "--tools", LOCAL_MEETING_TOOLS,
+    "--permission-mode", "dontAsk",
+    "--permission-prompts", "none",
+    "--strict-mcp-config",
+  );
   return args;
 }
 
+const posix = process.platform !== "win32";
+/** Enough stderr for a useful error; the message shows at most 500 characters of it. */
+const STDERR_KEEP = 64 * 1024;
+const KILL_GRACE_MS = 2000;
+
+/** Signal the CLI and, on POSIX, its whole process group (anything it started). Never throws. */
+function signalTree(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (!pid) return;
+  try {
+    process.kill(posix ? -pid : pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
 /**
- * Execute the local `claude` CLI with a system prompt file and user prompt.
- * Uses -p flag for print mode (non-interactive single prompt/response).
+ * Execute the local `claude` CLI in print mode with a system prompt file; the prompt goes in on stdin.
+ * The CLI is found by a PATH scan (no shell) and gets the local-meeting allowlist environment. On
+ * timeout (ROUNDTABLE_LOCAL_TIMEOUT_MS, default 5 min) its process group gets SIGTERM, then SIGKILL.
  */
 export async function executeClaudeCLI(
   systemPromptPath: string,
   prompt: string,
-  timeoutMs: number = 300000,  // 5 minute default timeout for long responses
-  appendSystemPrompt?: string  // Debate mode: challenger directive (the CLI is stateless, so pass it on every call)
+  timeoutMs: number = localTimeoutMs(),
+  appendSystemPrompt?: string  // Skills and session directives (the CLI is stateless, so pass them on every call)
 ): Promise<string> {
+  const cli = findExecutable("claude");
+  if (!cli) {
+    console.error("[LocalMeeting] claude CLI not found on PATH");
+    throw new Error("Failed to spawn claude CLI: not found on PATH. Is claude installed and in PATH?");
+  }
+  const args = buildClaudeCliArgs(systemPromptPath, appendSystemPrompt);
+
+  console.error(
+    `[LocalMeeting] Executing: claude --system-prompt-file ${systemPromptPath}` +
+      `${appendSystemPrompt ? " --append-system-prompt <directive>" : ""} -p --tools ${LOCAL_MEETING_TOOLS} ` +
+      `--permission-mode dontAsk --permission-prompts none --strict-mcp-config (prompt on stdin)`
+  );
+  console.error(`[LocalMeeting] Prompt length: ${prompt.length} chars`);
+
   return new Promise((resolve, reject) => {
-    const args = buildClaudeCliArgs(systemPromptPath, prompt, appendSystemPrompt);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
 
-    console.error(`[LocalMeeting] Executing: claude ${args.slice(0, 2).join(" ")}${appendSystemPrompt ? " --append-system-prompt <directive>" : ""} -p "<prompt>"`);
-    console.error(`[LocalMeeting] Prompt length: ${prompt.length} chars`);
-
-    const proc = spawn("claude", args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: childEnv("local-meeting"),
-    });
+    let proc: ReturnType<typeof spawn>;
+    try {
+      // Own process group on POSIX, so a timeout also stops whatever the CLI started.
+      proc = spawn(cli, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: childEnv("local-meeting"),
+        detached: posix,
+        windowsHide: true,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[LocalMeeting] CLI spawn error: ${message}`);
+      reject(new Error(`Failed to spawn claude CLI: ${message}. Is claude installed and in PATH?`));
+      return;
+    }
 
     let stdout = "";
     let stderr = "";
 
-    proc.stdout.on("data", (data) => {
+    proc.stdout!.on("data", (data) => {
       stdout += data.toString();
     });
 
-    proc.stderr.on("data", (data) => {
-      stderr += data.toString();
+    proc.stderr!.on("data", (data) => {
+      if (stderr.length < STDERR_KEEP) stderr += data.toString();
     });
 
-    const timeout = setTimeout(() => {
-      proc.kill("SIGTERM");
-      reject(new Error(`Claude CLI timed out after ${timeoutMs}ms`));
+    // EPIPE when the CLI exits before reading all of stdin: its exit code and stderr tell the story.
+    proc.stdin!.on("error", () => {});
+    proc.stdin!.end(prompt);
+
+    timer = setTimeout(() => {
+      console.error(`[LocalMeeting] CLI timed out after ${timeoutMs}ms; stopping its process group`);
+      signalTree(proc.pid, "SIGTERM");
+      setTimeout(() => signalTree(proc.pid, "SIGKILL"), KILL_GRACE_MS).unref();
+      settle(() => reject(new Error(`Claude CLI timed out after ${timeoutMs}ms (ROUNDTABLE_LOCAL_TIMEOUT_MS)`)));
     }, timeoutMs);
 
-    proc.on("close", (code) => {
-      clearTimeout(timeout);
-      if (code === 0) {
-        console.error(`[LocalMeeting] CLI completed successfully, output length: ${stdout.length} chars`);
-        resolve(stdout.trim());
-      } else {
-        console.error(`[LocalMeeting] CLI failed with code ${code}: ${stderr}`);
-        reject(new Error(`Claude CLI exited with code ${code}: ${stderr || "No error output"}`));
-      }
+    proc.on("close", (code, signal) => {
+      settle(() => {
+        if (code === 0) {
+          console.error(`[LocalMeeting] CLI completed successfully, output length: ${stdout.length} chars`);
+          resolve(stdout.trim());
+          return;
+        }
+        const detail = scrubAndCap(stderr.trim(), 500);
+        const status = code === null ? `signal ${signal}` : `code ${code}`;
+        console.error(`[LocalMeeting] CLI failed with ${status}: ${detail}`);
+        reject(new Error(`Claude CLI exited with ${status}: ${detail || "No error output"}`));
+      });
     });
 
     proc.on("error", (err) => {
-      clearTimeout(timeout);
-      console.error(`[LocalMeeting] CLI spawn error: ${err.message}`);
-      reject(new Error(`Failed to spawn claude CLI: ${err.message}. Is claude installed and in PATH?`));
+      settle(() => {
+        console.error(`[LocalMeeting] CLI spawn error: ${err.message}`);
+        reject(new Error(`Failed to spawn claude CLI: ${err.message}. Is claude installed and in PATH?`));
+      });
     });
   });
 }

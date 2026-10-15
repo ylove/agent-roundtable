@@ -178,7 +178,8 @@ test("listAgents and listSkills scan only the contracted depth and extract YAML 
 test("local meetings append skills on every CLI call with debate/public directives, and omit the flag without skills", async (t) => {
   const bin = join(root, "bin");
   const log = join(root, "cli-argv.jsonl");
-  const script = fixture(join(bin, "claude"), `#!${process.execPath}\nrequire("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nprocess.stdout.write("local reply");\n`);
+  // The prompt arrives on stdin; drain it before answering, as the real CLI does.
+  const script = fixture(join(bin, "claude"), `#!${process.execPath}\nprocess.stdin.resume();\nprocess.stdin.on("end", () => {\n  require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n  process.stdout.write("local reply");\n});\n`);
   chmodSync(script, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${bin}:${previousPath}`;

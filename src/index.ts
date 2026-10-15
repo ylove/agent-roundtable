@@ -11,6 +11,7 @@ import {
 import { resolve } from "path";
 import { VERSION, AGENTS_DIR, SKILLS_DIR, WORKSPACE_DIR, ACTIVITY_LOG_PATH, PROVIDER_IDS, DEFAULT_MODELS, OLLAMA_URL, PUBLISHER_KIND, NTFY_URL, WEBHOOK_URL } from "./config.js";
 import { tools, handleToolCall } from "./tools.js";
+import { findExecutable } from "./executables.js";
 import { finalizeOpenChannels } from "./publishers/index.js";
 import { destroyAllPrototypes, prototypeDiagnostics, sweepStaleSessionDirs } from "./prototypes/index.js";
 
@@ -66,15 +67,8 @@ async function main() {
     .then(() => sweepStaleSessionDirs())
     .catch((e) => console.error(`[Prototype] startup sweep skipped: ${e instanceof Error ? e.message : String(e)}`));
 
-  // Check if claude CLI is available for local meetings
-  let claudeCliAvailable = false;
-  try {
-    const { execSync } = await import("child_process");
-    execSync("which claude", { stdio: "pipe" });
-    claudeCliAvailable = true;
-  } catch {
-    claudeCliAvailable = false;
-  }
+  // Check if claude CLI is available for local meetings (PATH scan, no shell)
+  const claudeCliAvailable = findExecutable("claude") !== null;
 
   console.error(`agent-roundtable v${VERSION} running on stdio`);
   console.error(`  Agents dir: ${resolve(AGENTS_DIR)}`);

@@ -191,3 +191,46 @@ export function providerRetries(): number {
   const raw = (process.env.ROUNDTABLE_PROVIDER_RETRIES || "").trim();
   return Math.min(5, /^\d+$/.test(raw) ? Number(raw) : PROVIDER_RETRIES_DEFAULT);
 }
+
+// Heads-down runs (1.0). Read at call time, like the security controls above.
+
+/**
+ * ROUNDTABLE_DEFAULT_VISIBILITY: how execute shows a run when the call names no channel. A comma
+ * list of dashboard, chat_only and github:<owner/name>; "" when unset. Parsed by execute.
+ */
+export function defaultVisibility(): string {
+  return (process.env.ROUNDTABLE_DEFAULT_VISIBILITY || "").trim();
+}
+
+/** ROUNDTABLE_DEFAULT_BUDGET_USD: the run budget execute uses when neither the call nor the contract sets one. */
+export function defaultBudgetUsd(): number | undefined {
+  const raw = (process.env.ROUNDTABLE_DEFAULT_BUDGET_USD || "").trim();
+  const n = Number(raw);
+  return raw && Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+export const EXECUTION_RETENTION_DEFAULT_DAYS = 30;
+export const SESSION_RETENTION_DEFAULT_DAYS = 30;
+export const AUDIT_RETENTION_DEFAULT_DAYS = 365;
+
+/** Whole days from `name`: null (keep everything) for 0 or off, the default when unset or not a whole number. */
+function retentionDays(name: string, fallback: number): number | null {
+  const raw = (process.env[name] || "").trim().toLowerCase();
+  if (raw === "off" || /^0+$/.test(raw)) return null;
+  return /^\d+$/.test(raw) ? Number(raw) : fallback;
+}
+
+/** Days a completed, failed or aborted run is kept (worktrees, branches and log); null keeps them all. */
+export function executionRetentionDays(): number | null {
+  return retentionDays("ROUNDTABLE_EXECUTION_RETENTION_DAYS", EXECUTION_RETENTION_DEFAULT_DAYS);
+}
+
+/** Days an archived at-the-table session is kept after it ended; null keeps them all. */
+export function sessionRetentionDays(): number | null {
+  return retentionDays("ROUNDTABLE_SESSION_RETENTION_DAYS", SESSION_RETENTION_DEFAULT_DAYS);
+}
+
+/** Days the audit log keeps a month file after its month ended; null keeps them all. */
+export function auditRetentionDays(): number | null {
+  return retentionDays("ROUNDTABLE_AUDIT_RETENTION_DAYS", AUDIT_RETENTION_DEFAULT_DAYS);
+}

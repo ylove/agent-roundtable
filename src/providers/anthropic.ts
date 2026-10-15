@@ -1,6 +1,6 @@
 // --- Anthropic (raw Messages API) ---
 import type { ProviderCall } from "./shared.js";
-import { assertNonEmpty } from "./shared.js";
+import { assertNonEmpty, assertNotRedirect, readProviderJson } from "./shared.js";
 import { requireEnv } from "../config.js";
 
 export const callAnthropic: ProviderCall = async (messages, o) => {
@@ -8,7 +8,8 @@ export const callAnthropic: ProviderCall = async (messages, o) => {
   const systemMessage = messages.find((m) => m.role === "system");
   const nonSystemMessages = messages.filter((m) => m.role !== "system");
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const url = "https://api.anthropic.com/v1/messages";
+  const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -23,9 +24,11 @@ export const callAnthropic: ProviderCall = async (messages, o) => {
       // temperature is deliberately omitted: current Claude models reject sampling params
     }),
     signal: o.signal,
+    redirect: "manual",
   });
+  assertNotRedirect("Anthropic", response, url);
 
-  const result = (await response.json()) as {
+  const result = (await readProviderJson(response)) as {
     error?: { type?: string; message: string };
     content?: Array<{ type: string; text?: string }>;
     model?: string;

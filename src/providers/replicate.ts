@@ -6,10 +6,20 @@
 // keys the model declares, create a prediction, and poll it to a terminal state.
 import { setTimeout as sleep } from "node:timers/promises";
 import type { LLMMessage, ProviderCall } from "./shared.js";
-import { assertNonEmpty, stripThinkTags } from "./shared.js";
+import { assertNonEmpty, assertNotRedirect, stripThinkTags } from "./shared.js";
 import { requireEnv } from "../config.js";
+import { describeUrl } from "../security/url-guard.js";
 
-const API_BASE = "https://api.replicate.com/v1";
+const API_ORIGIN = "https://api.replicate.com";
+const API_BASE = `${API_ORIGIN}/v1`;
+
+function originOf(raw: string): string | null {
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return null;
+  }
+}
 
 export interface ReplicateModelRef {
   owner: string;
@@ -167,7 +177,9 @@ export function fetchReplicateInputSchema(
         method: "GET",
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: own,
+        redirect: "manual",
       });
+      assertNotRedirect("Replicate", response, url);
       body = (await readJson(response)) as ReplicateModelResponse;
     } catch (error) {
       // Report our own bound in our own words so it is not mistaken for ROUNDTABLE_LLM_TIMEOUT_MS.
@@ -306,7 +318,9 @@ export function createReplicateCall({
       },
       body: JSON.stringify(createBody),
       signal: o.signal,
+      redirect: "manual",
     });
+    assertNotRedirect("Replicate", response, createUrl);
     let prediction = (await readJson(response)) as ReplicatePrediction;
     if (o.signal.aborted) throw o.signal.reason;
     if (!response.ok) {
@@ -334,6 +348,12 @@ export function createReplicateCall({
     if (text === undefined) {
       const getUrl = prediction.urls?.get;
       if (!getUrl) throw new Error(`Replicate returned no polling URL for model ${refText}`);
+      // The URL comes from the response body: the token goes only to Replicate's own API origin.
+      if (originOf(getUrl) !== API_ORIGIN) {
+        throw new Error(
+          `Replicate returned a polling URL outside ${API_ORIGIN} for model ${refText} (${describeUrl(getUrl)}); refusing to send the token there`
+        );
+      }
       for (let polls = 1; ; polls++) {
         // The caller's signal is the single bound: sleep rejects with AbortError when it fires.
         await sleep(pollIntervalMs, undefined, { signal: o.signal });
@@ -341,7 +361,9 @@ export function createReplicateCall({
           method: "GET",
           headers: { Authorization: `Bearer ${token}` },
           signal: o.signal,
+          redirect: "manual",
         });
+        assertNotRedirect("Replicate", pollResponse, getUrl);
         if (!pollResponse.ok) {
           throw new Error(`Replicate API error (${pollResponse.status}) polling model ${refText}`);
         }

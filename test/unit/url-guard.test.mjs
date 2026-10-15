@@ -197,6 +197,16 @@ describe("openai_compatible per-call base_url", () => {
   });
 });
 
+describe("display", () => {
+  test("debug_env reports OPENAI_COMPATIBLE_BASE_URL as scheme://host[:port] only", async (t) => {
+    env(t, { OPENAI_COMPATIBLE_BASE_URL: "https://user:pw@llm.example.test:8443/proxy/T0K3N-in-path/v1?key=q" });
+    const { handleToolCall } = await import("../../dist/tools.js");
+    const text = (await handleToolCall("debug_env", {})).content[0].text;
+    assert.equal(JSON.parse(text).openai_compatible.base_url, "https://llm.example.test:8443");
+    for (const part of ["T0K3N", "key=q", "user:pw"]) assert.ok(!text.includes(part), part);
+  });
+});
+
 describe("webhook publisher URL", () => {
   test("constructor refuses metadata, plain http off loopback and userinfo; allows private and loopback", () => {
     const make = (url) => new WebhookPublisher({ url, topicPrefix: "rt" });

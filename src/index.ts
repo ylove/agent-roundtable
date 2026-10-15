@@ -12,6 +12,7 @@ import { resolve } from "path";
 import { VERSION, AGENTS_DIR, SKILLS_DIR, WORKSPACE_DIR, ACTIVITY_LOG_PATH, PROVIDER_IDS, DEFAULT_MODELS, OLLAMA_URL, PUBLISHER_KIND, NTFY_URL, WEBHOOK_URL } from "./config.js";
 import { tools, handleToolCall } from "./tools.js";
 import { findExecutable } from "./executables.js";
+import { describeUrl } from "./security/url-guard.js";
 import { finalizeOpenChannels } from "./publishers/index.js";
 import { destroyAllPrototypes, prototypeDiagnostics, sweepStaleSessionDirs } from "./prototypes/index.js";
 
@@ -81,14 +82,16 @@ async function main() {
   console.error(`  openai: OPENAI_API_KEY ${status("OPENAI_API_KEY")}`);
   console.error(`  together: TOGETHER_API_KEY ${status("TOGETHER_API_KEY")}`);
   console.error(`  replicate: REPLICATE_API_TOKEN ${status("REPLICATE_API_TOKEN")}`);
-  console.error(`  ollama: ${OLLAMA_URL} (optional; checked on use)`);
+  // URLs as scheme://host[:port] only: a path or query may carry a token, userinfo a password.
+  console.error(`  ollama: ${describeUrl(OLLAMA_URL)} (optional; checked on use)`);
+  const compatibleBase = process.env.OPENAI_COMPATIBLE_BASE_URL;
   console.error(
-    `  openai_compatible: OPENAI_COMPATIBLE_BASE_URL ${process.env.OPENAI_COMPATIBLE_BASE_URL || "NOT SET (pass base_url per call)"}, ` +
+    `  openai_compatible: OPENAI_COMPATIBLE_BASE_URL ${compatibleBase ? describeUrl(compatibleBase) : "NOT SET (pass base_url per call)"}, ` +
       `OPENAI_COMPATIBLE_API_KEY ${process.env.OPENAI_COMPATIBLE_API_KEY ? "configured" : "not set (no auth header)"}`
   );
   console.error(
     `  public sessions: publisher ${PUBLISHER_KIND}` +
-      (PUBLISHER_KIND === "webhook" ? ` (${WEBHOOK_URL ? "URL configured" : "URL NOT SET"})` : ` (${NTFY_URL})`) +
+      (PUBLISHER_KIND === "webhook" ? ` (${WEBHOOK_URL ? "URL configured" : "URL NOT SET"})` : ` (${describeUrl(NTFY_URL)})`) +
       ` (used only when a session sets public: true)`
   );
   console.error(`  Local meetings (CLI): ${claudeCliAvailable ? "available" : "NOT available (install claude CLI)"}`);

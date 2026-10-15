@@ -30,6 +30,7 @@ import {
 import type { LLMMessage } from "./providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "./providers/index.js";
 import { findExecutable } from "./executables.js";
+import { describeUrl } from "./security/url-guard.js";
 import {
   meetings,
   startMeeting,
@@ -1074,7 +1075,7 @@ export async function handleToolCall(
           together_api_key: keyStatus("TOGETHER_API_KEY"),
           replicate_api_token: keyStatus("REPLICATE_API_TOKEN"),
           openai_compatible: {
-            base_url: process.env.OPENAI_COMPATIBLE_BASE_URL || "NOT SET",
+            base_url: process.env.OPENAI_COMPATIBLE_BASE_URL ? describeUrl(process.env.OPENAI_COMPATIBLE_BASE_URL) : "NOT SET",
             api_key: keyStatus("OPENAI_COMPATIBLE_API_KEY"),
           },
           ollama: { url: OLLAMA_URL, reachable: await isOllamaAvailable() },

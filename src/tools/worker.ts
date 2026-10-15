@@ -52,6 +52,7 @@ import {
   taskDiffSummary,
   taskStartPoint,
   taskWorktreePath,
+  withCommitCheckout,
 } from "../execution/worktrees.js";
 import {
   adhocCommandId,
@@ -518,6 +519,8 @@ function worktreeOf(a: Actor, task: string): string {
 
 interface CheckOutcome {
   command_id: string;
+  /** The submitted commit a submission check ran on (run_command checks run in the worktree). */
+  commit?: string;
   status: "passed" | "failed" | "timed_out";
   exit: number | null;
   duration_ms: number;
@@ -526,15 +529,31 @@ interface CheckOutcome {
   output_tail: string;
 }
 
+/** The submission a check belongs to: its task.submitted seq and commit. */
+interface CheckBinding {
+  submitted_seq: number;
+  commit: string;
+}
+
 /**
  * Run one contract command as a check of `task`: check.started, then check.passed / failed /
- * timed_out. No sandbox is not a failed check: it throws before anything is recorded.
+ * timed_out. No sandbox is not a failed check: it throws before anything is recorded. A
+ * submission's checks run in `workdir` (the checkout of its commit) and their events carry the
+ * binding; run_command's run in the worktree.
  */
-async function runCheck(a: Actor, task: string, spec: CommandSpec | undefined, commandId: string, opts: { maxTimeoutMs: number; signal?: AbortSignal; image?: string }): Promise<CheckOutcome> {
+async function runCheck(
+  a: Actor,
+  task: string,
+  spec: CommandSpec | undefined,
+  commandId: string,
+  opts: { maxTimeoutMs: number; signal?: AbortSignal; image?: string; workdir?: string; bind?: CheckBinding }
+): Promise<CheckOutcome> {
   const backend = await sandboxFor(a);
-  const workdir = worktreeOf(a, task);
+  const workdir = opts.workdir ?? worktreeOf(a, task);
+  const bind = opts.bind ?? {};
+  const at = opts.bind ? { commit: opts.bind.commit } : {};
   const emit = (draft: (s: EventSource) => AnyEventDraft) => a.store.transact(({ state }) => ({ events: [draft(sourceOf(state, a, task))] }));
-  await emit((source) => ({ type: "check.started", source, payload: { command_id: commandId, scope: "task", task } }));
+  await emit((source) => ({ type: "check.started", source, payload: { command_id: commandId, scope: "task", task, ...bind } }));
   let output: string;
   let exit: number | null;
   let timedOut = false;
@@ -554,16 +573,16 @@ async function runCheck(a: Actor, task: string, spec: CommandSpec | undefined, c
   const blob = await a.store.putBlob(output || "(no output)");
   const tail = tailForTool(output);
   if (timedOut) {
-    await emit((source) => ({ type: "check.timed_out", source, payload: { command_id: commandId, scope: "task", task } }));
-    return { command_id: commandId, status: "timed_out", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
+    await emit((source) => ({ type: "check.timed_out", source, payload: { command_id: commandId, scope: "task", task, ...bind } }));
+    return { command_id: commandId, ...at, status: "timed_out", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
   }
   if (exit === 0) {
-    await emit((source) => ({ type: "check.passed", source, payload: { command_id: commandId, scope: "task", task, duration_ms: duration } }));
-    return { command_id: commandId, status: "passed", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
+    await emit((source) => ({ type: "check.passed", source, payload: { command_id: commandId, scope: "task", task, duration_ms: duration, ...bind } }));
+    return { command_id: commandId, ...at, status: "passed", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
   }
   const signature = failureSignature(commandId, output);
-  await emit((source) => ({ type: "check.failed", source, payload: { command_id: commandId, scope: "task", task, exit, signature, output_blob: blob } }));
-  return { command_id: commandId, status: "failed", exit, duration_ms: duration, signature, output_blob: blob, output_tail: tail };
+  await emit((source) => ({ type: "check.failed", source, payload: { command_id: commandId, scope: "task", task, exit, signature, output_blob: blob, ...bind } }));
+  return { command_id: commandId, ...at, status: "failed", exit, duration_ms: duration, signature, output_blob: blob, output_tail: tail };
 }
 
 // ============================================================================
@@ -1166,10 +1185,46 @@ async function rejectSubmission(a: Actor, task: string, reasons: string[], viola
   });
 }
 
+/** Tasks with a submit_work in flight in this process (execution and task): one at a time per task. */
+const submitting = new Set<string>();
+
+/** One recorded submission and the ownership it was made under. */
+interface Submission extends CheckBinding {
+  attempt: number;
+  token_sha256: string;
+}
+
+/**
+ * Why `sub` may no longer pass or fail its task, or null while it is the live one: the task's
+ * latest task.submitted, still submitted or checking, claimed by the same agent in the same attempt
+ * under the same token. Another process (or a reassignment) can change any of these during checks.
+ */
+function staleSubmission(s: Readonly<BlackboardState>, a: Actor, task: string, sub: Submission): string | null {
+  const rt = own(s.tasks, task);
+  if (!rt || rt.submitted_seq !== sub.submitted_seq || rt.last_commit !== sub.commit) return `a newer submission of ${task} was recorded`;
+  const claim = own(s.claims, task);
+  if (!claim || claim.agent !== a.agent || claim.attempt !== sub.attempt) return `${task} is no longer claimed by ${a.agent} in attempt ${sub.attempt}`;
+  const rec = own(s.agents, a.agent);
+  if (!rec || rec.status === "left" || !sameDigest(rec.token_sha256, sub.token_sha256)) return `${a.agent} was registered again or left`;
+  if (rt.state !== "submitted" && rt.state !== "checking") return `${task} is ${rt.state}`;
+  return null;
+}
+
 async function submitWork(a: Actor, args: Record<string, unknown>, ctx: ToolCallContext): Promise<Json> {
   const state = await a.store.state();
   const task = requireTask(state, a);
   requireActive(state, task);
+  const key = `${a.execution}\0${task}`;
+  if (submitting.has(key)) throw new Refusal(`A submission of ${task} is already in progress; wait for its result before you submit again`);
+  submitting.add(key);
+  try {
+    return await submitLocked(a, args, ctx, state, task);
+  } finally {
+    submitting.delete(key);
+  }
+}
+
+async function submitLocked(a: Actor, args: Record<string, unknown>, ctx: ToolCallContext, state: Readonly<BlackboardState>, task: string): Promise<Json> {
   const rt = state.tasks[task];
   const ready = args.ready === true;
   if (rt.state === "merging") throw new Refusal(`Task ${task} passed its checks and is being merged; end your turn`);
@@ -1177,6 +1232,7 @@ async function submitWork(a: Actor, args: Record<string, unknown>, ctx: ToolCall
   const leases = leasesFor(state, task, a.agent);
   const wt = worktreeOf(a, task);
   const integration = integrationBranch(a.execution);
+  const token = own(state.agents, a.agent)?.token_sha256;
 
   // 1. Commit what the leases cover; anything else stays in the worktree, uncommitted.
   let commit;
@@ -1206,8 +1262,10 @@ async function submitWork(a: Actor, args: Record<string, unknown>, ctx: ToolCall
     throw new Refusal(`Submission rejected: ${reasons.join("; ")}. Lease these paths (lease request) or revert them, then submit again.`);
   }
 
-  // 2. Everything the branch changed since its merge base with the integration branch must be leased.
-  const cov = await checkLeaseCoverage(wt, integration, leases);
+  // 2. Everything the commit changed since its merge base with the integration branch must be
+  // leased. From here on everything is measured at that commit, never at a HEAD that may move.
+  const head = commit.commit;
+  const cov = await checkLeaseCoverage(wt, integration, leases, head);
   if (!cov.ok) {
     const reasons = cov.details.slice(0, 20).map((d) => `${d.path}: ${d.reason}`);
     await rejectSubmission(a, task, reasons, cov.violations);
@@ -1215,57 +1273,80 @@ async function submitWork(a: Actor, args: Record<string, unknown>, ctx: ToolCall
   }
 
   // 3. The submission: diff blob, stat and files of the whole task (the sandbox is checked first,
-  // so a run without one never leaves a submission whose checks cannot start).
+  // so a run without one never leaves a submission whose checks cannot start). It is recorded only
+  // while the agent still holds the claim under the token it started with.
   if (rt.spec.checks.length) await sandboxFor(a);
-  const diff = await diffForTask(wt, integration);
+  const diff = await diffForTask(wt, integration, undefined, head);
   const diffBlob = await a.store.putBlob(diff || "(no changes)\n");
-  const sum = await taskDiffSummary(wt, integration);
-  await a.store.transact(({ state: s }) => ({
-    events: [{
-      type: "task.submitted",
-      source: sourceOf(s, a, task),
-      payload: { task, commit: sum.head, diff_blob: diffBlob, stat: sum.stat, files: capPathList(sum.files, 4500), rewrites: capPathList(sum.rewrites, 1500) },
-    }],
-  }));
+  const sum = await taskDiffSummary(wt, integration, head);
+  let attempt = 0;
+  const recorded = await a.store.transact(({ state: s }) => {
+    const claim = own(s.claims, task);
+    if (!claim || claim.agent !== a.agent) throw new Refusal(`You no longer hold the claim on ${task}; nothing was submitted`);
+    const rec = own(s.agents, a.agent);
+    if (!rec || !token || !sameDigest(rec.token_sha256, token)) throw new Refusal(`${a.agent} was registered again; nothing was submitted`);
+    attempt = claim.attempt;
+    return {
+      events: [{
+        type: "task.submitted",
+        source: sourceOf(s, a, task),
+        payload: { task, commit: head, diff_blob: diffBlob, stat: sum.stat, files: capPathList(sum.files, 4500), rewrites: capPathList(sum.rewrites, 1500) },
+      }],
+    };
+  });
+  const sub: Submission = { submitted_seq: recorded.events[0].seq, commit: head, attempt, token_sha256: token! };
+  const bind: CheckBinding = { submitted_seq: sub.submitted_seq, commit: head };
 
-  // 4. The task's checks, within 15 minutes in all.
+  // 4. The task's checks, within 15 minutes in all, in a fresh checkout of the submitted commit
+  // that no worker tool can reach (so nothing done to the worktree meanwhile changes what is checked).
   const c = state.contract;
   const ids = rt.spec.checks;
   const deadline = Date.now() + SUBMIT_CHECKS_MS;
-  const results: CheckOutcome[] = [];
-  for (const [i, id] of ids.entries()) {
-    ctx.progress?.(i, ids.length, `check ${id}`);
-    const left = deadline - Date.now();
-    if (left < 1000) {
-      await a.store.transact(({ state: s }) => ({ events: [{ type: "check.timed_out", source: sourceOf(s, a, task), payload: { command_id: id, scope: "task", task } }] }));
-      results.push({ command_id: id, status: "timed_out", exit: null, duration_ms: 0, output_blob: "", output_tail: "submit_work's 15 minutes ran out before this check started" });
-      continue;
+  const runAll = async (dir: string): Promise<CheckOutcome[]> => {
+    const results: CheckOutcome[] = [];
+    for (const [i, id] of ids.entries()) {
+      ctx.progress?.(i, ids.length, `check ${id}`);
+      const left = deadline - Date.now();
+      if (left < 1000) {
+        await a.store.transact(({ state: s }) => ({ events: [{ type: "check.timed_out", source: sourceOf(s, a, task), payload: { command_id: id, scope: "task", task, ...bind } }] }));
+        results.push({ command_id: id, commit: head, status: "timed_out", exit: null, duration_ms: 0, output_blob: "", output_tail: "submit_work's 15 minutes ran out before this check started" });
+        continue;
+      }
+      results.push(await runCheck(a, task, c?.validation.commands.find((x) => x.id === id), id, { maxTimeoutMs: left, signal: ctx.signal, image: c?.sandbox.image || undefined, workdir: dir, bind }));
     }
-    results.push(await runCheck(a, task, c?.validation.commands.find((x) => x.id === id), id, { maxTimeoutMs: left, signal: ctx.signal, image: c?.sandbox.image || undefined }));
-  }
+    return results;
+  };
+  const results = ids.length ? await withCommitCheckout(a.store.header(), task, head, runAll) : [];
   ctx.progress?.(ids.length, ids.length, "checks done");
   const failed = results.filter((r) => r.status !== "passed");
   const view = results.map(({ output_tail, ...r }) => (r.status === "passed" ? r : { ...r, output_tail }));
+
+  // 5. The outcome, recorded only for the live submission (staleSubmission), so a slow check can
+  // never pass or fail a newer submission or a task that changed hands.
+  const outcome = (draft: (s: Readonly<BlackboardState>) => AnyEventDraft) =>
+    a.store.transact(({ state: s }) => {
+      const why = staleSubmission(s, a, task, sub);
+      if (why) throw new Refusal(`This submission (${head.slice(0, 12)}) is out of date: ${why}. Nothing was recorded for it; read_blackboard shows where ${task} stands.`);
+      return { events: [draft(s)] };
+    });
   if (!failed.length) {
-    await a.store.transact(({ state: s }) => ({ events: [{ type: "task.checks_passed", source: sourceOf(s, a, task), payload: { task, commands: [...ids] } }] }));
+    await outcome((s) => ({ type: "task.checks_passed", source: sourceOf(s, a, task), payload: { task, commands: [...ids], ...bind } }));
     return {
       submitted: task,
-      commit: sum.head,
+      commit: head,
       stat: sum.stat,
       checks: view,
       next: "Your checks passed and the runner will merge your work. End your turn now with a one-line summary.",
     };
   }
-  await a.store.transact(({ state: s }) => ({
-    events: [{
-      type: "task.rejected",
-      source: sourceOf(s, a, task),
-      payload: { task, reasons: failed.map((f) => cap(`check ${f.command_id} ${f.status === "timed_out" ? "timed out" : `failed (exit ${f.exit ?? "none"})`}`, 300)) },
-    }],
+  await outcome((s) => ({
+    type: "task.rejected",
+    source: sourceOf(s, a, task),
+    payload: { task, reasons: failed.map((f) => cap(`check ${f.command_id} ${f.status === "timed_out" ? "timed out" : `failed (exit ${f.exit ?? "none"})`}`, 300)) },
   }));
   return {
     submitted: task,
-    commit: sum.head,
+    commit: head,
     checks_passed: false,
     checks: view,
     next: "Fix what failed (the output tails are above; read_blackboard(section: \"blob\", ref) has the full output) and call submit_work again.",

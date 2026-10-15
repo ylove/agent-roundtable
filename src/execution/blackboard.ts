@@ -38,7 +38,8 @@ import {
  * Bump whenever apply's output for an existing log changes; snapshots of other versions are ignored.
  * 2: split map, terminal-state guards, amended contracts marked frozen.
  * 3: an identical resubmitted diff is no patch; threshold epochs; circuit open counts.
- * 4: blocked_by.needs; task.blocked keeps the other reasons.
+ * 4: blocked_by.needs; task.blocked keeps the other reasons; checks bound to an older submission
+ *    are ignored and a bound task.checks_passed for one is refused.
  */
 export const REDUCER_VERSION = 4;
 
@@ -183,6 +184,11 @@ function liveTask(s: BlackboardState, e: AnyEvent, x: Ctx, allow: readonly TaskS
   if (!rt) return refuse(x, `${e.type}: unknown task ${preview(id)}`);
   if (TERMINAL.has(rt.state) && !allow.includes(rt.state)) return refuse(x, `${e.type}: task ${id} is already ${rt.state}`);
   return rt;
+}
+
+/** A task check bound to a submission that is no longer the task's latest. */
+function staleCheck(s: BlackboardState, p: { scope: "task" | "integration"; task?: string; submitted_seq?: number }): boolean {
+  return p.scope === "task" && p.submitted_seq !== undefined && own(s.tasks, p.task)?.submitted_seq !== p.submitted_seq;
 }
 
 function depsAccepted(s: BlackboardState, spec: TaskSpec): boolean {
@@ -466,9 +472,18 @@ const HANDLERS: Handlers = {
       }
     }
   },
+  /** merging. One bound to a submission (submitted_seq) is refused unless it is the task's latest and still checking. */
   "task.checks_passed": (s, e, x) => {
+    const p = e.payload;
     const rt = liveTask(s, e, x);
-    if (rt) rt.state = "merging";
+    if (!rt) return;
+    if (p.submitted_seq !== undefined) {
+      if (rt.submitted_seq !== p.submitted_seq || (p.commit !== undefined && rt.last_commit !== p.commit)) {
+        return refuse(x, `task.checks_passed: submission ${p.submitted_seq} of ${p.task} is not its latest`);
+      }
+      if (rt.state !== "submitted" && rt.state !== "checking") return refuse(x, `task.checks_passed: task ${p.task} is ${rt.state}, not checking`);
+    }
+    rt.state = "merging";
   },
   /** Back to in_progress while claimed (the worker is resumed with the reasons), else ready. */
   "task.rejected": (s, e, x) => {
@@ -616,10 +631,11 @@ const HANDLERS: Handlers = {
     if (rt.state !== "blocked" && !Object.keys(rt.blocked_by).length) delete rt.blocked_by;
   },
 
-  // --- checks: [scope][checkKey] -------------------------------------------
+  // --- checks: [scope][checkKey] (a task check bound to an older submission is ignored) ---
   /** status running; a submitted task moves to checking. */
   "check.started": (s, e) => {
     const p = e.payload;
+    if (staleCheck(s, p)) return;
     const key = checkKey(p.scope, p.command_id, p.task);
     const cur = own(s.checks[p.scope], key);
     put(s.checks[p.scope], key, { streak: 0, since_patch_seq: 0, ...cur, status: "running", at_seq: e.seq });
@@ -629,6 +645,7 @@ const HANDLERS: Handlers = {
   /** status passed; the failure streak resets to 0. */
   "check.passed": (s, e) => {
     const p = e.payload;
+    if (staleCheck(s, p)) return;
     const key = checkKey(p.scope, p.command_id, p.task);
     const cur = own(s.checks[p.scope], key);
     put(s.checks[p.scope], key, { status: "passed", streak: 0, since_patch_seq: cur?.since_patch_seq ?? 0, at_seq: e.seq });
@@ -636,6 +653,7 @@ const HANDLERS: Handlers = {
   /** status failed; streak + 1 when the signature is unchanged, else 1. */
   "check.failed": (s, e) => {
     const p = e.payload;
+    if (staleCheck(s, p)) return;
     const key = checkKey(p.scope, p.command_id, p.task);
     const cur = own(s.checks[p.scope], key);
     const next: CheckState = {
@@ -651,6 +669,7 @@ const HANDLERS: Handlers = {
   /** status timed_out; the streak is kept. */
   "check.timed_out": (s, e) => {
     const p = e.payload;
+    if (staleCheck(s, p)) return;
     const key = checkKey(p.scope, p.command_id, p.task);
     const cur = own(s.checks[p.scope], key);
     put(s.checks[p.scope], key, { streak: 0, since_patch_seq: 0, ...cur, status: "timed_out", at_seq: e.seq });

@@ -125,6 +125,8 @@ const ESCALATION: Shape = {
   "resolution?": { action: RESOLUTION, decision: "t", by: "s" },
   raised_seq: "int",
 };
+/** The submission a task check or task.checks_passed belongs to (WS07). */
+const SUBMISSION: Shape = { "commit?": "s", "submitted_seq?": "int" };
 const NEED: Shape = { kind: "'task'|'interface'|'artifact'", ref: "s", "owner?": "id" };
 
 // ---------------------------------------------------------------------------
@@ -181,7 +183,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "task.released": { task: "id", agent: "s", "note?": "t" },
   "task.progress": { task: "id", "percent?": "n", note: "t" },
   "task.submitted": { task: "id", commit: "s", diff_blob: "s", stat: "t", files: "s[]", rewrites: "s[]" },
-  "task.checks_passed": { task: "id", commands: "id[]" },
+  "task.checks_passed": { task: "id", commands: "id[]", ...SUBMISSION },
   "task.rejected": { task: "id", reasons: "t[]", "violations?": "t[]" },
   "task.merged": { task: "id", integration_sha: "s" },
   "task.accepted": { task: "id" },
@@ -206,8 +208,8 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "dependency.requested": { task: "id", need: NEED },
   "dependency.satisfied": { task: "id", need: NEED, by_event: "s" },
 
-  "check.started": { command_id: "id", scope: CHECK_SCOPE, "task?": "id" },
-  "check.passed": { command_id: "id", scope: CHECK_SCOPE, "task?": "id", duration_ms: "n" },
+  "check.started": { command_id: "id", scope: CHECK_SCOPE, "task?": "id", ...SUBMISSION },
+  "check.passed": { command_id: "id", scope: CHECK_SCOPE, "task?": "id", duration_ms: "n", ...SUBMISSION },
   "check.failed": {
     command_id: "id",
     scope: CHECK_SCOPE,
@@ -215,8 +217,9 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
     exit: "int|null",
     signature: "s",
     "output_blob?": "s",
+    ...SUBMISSION,
   },
-  "check.timed_out": { command_id: "id", scope: CHECK_SCOPE, "task?": "id" },
+  "check.timed_out": { command_id: "id", scope: CHECK_SCOPE, "task?": "id", ...SUBMISSION },
 
   "command.completed": {
     task: "id",

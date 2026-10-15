@@ -373,7 +373,11 @@ export interface EventPayloads {
   "task.released": { task: string; agent: string; note?: string };
   "task.progress": { task: string; percent?: number; note: string };
   "task.submitted": { task: string; commit: string; diff_blob: string; stat: string; files: string[]; rewrites: string[] };
-  "task.checks_passed": { task: string; commands: string[] };
+  /**
+   * commit and submitted_seq (added in WS07) bind the result to one submission: the task.submitted
+   * seq and the commit its checks ran on. The runner merges exactly that commit.
+   */
+  "task.checks_passed": { task: string; commands: string[]; commit?: string; submitted_seq?: number };
   "task.rejected": { task: string; reasons: string[]; violations?: string[] };
   "task.merged": { task: string; integration_sha: string };
   "task.accepted": { task: string };
@@ -398,8 +402,9 @@ export interface EventPayloads {
   "dependency.requested": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string; owner?: string } };
   "dependency.satisfied": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string; owner?: string }; by_event: string };
 
-  "check.started": { command_id: string; scope: "task" | "integration"; task?: string };
-  "check.passed": { command_id: string; scope: "task" | "integration"; task?: string; duration_ms: number };
+  /** A submission's checks carry its task.submitted seq and commit (WS07); run_command's carry neither. */
+  "check.started": { command_id: string; scope: "task" | "integration"; task?: string; commit?: string; submitted_seq?: number };
+  "check.passed": { command_id: string; scope: "task" | "integration"; task?: string; duration_ms: number; commit?: string; submitted_seq?: number };
   "check.failed": {
     command_id: string;
     scope: "task" | "integration";
@@ -407,8 +412,10 @@ export interface EventPayloads {
     exit: number | null;
     signature: string;
     output_blob?: string;
+    commit?: string;
+    submitted_seq?: number;
   };
-  "check.timed_out": { command_id: string; scope: "task" | "integration"; task?: string };
+  "check.timed_out": { command_id: string; scope: "task" | "integration"; task?: string; commit?: string; submitted_seq?: number };
 
   "command.completed": {
     task: string;

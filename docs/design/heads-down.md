@@ -161,7 +161,7 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `task.released` | task, note |
 | `task.progress` | task, percent?, note |
 | `task.submitted` | task, commit, diff_blob, stat, files, rewrites |
-| `task.checks_passed` | task, commands |
+| `task.checks_passed` | task, commands, commit?, submitted_seq? |
 | `task.rejected` | task, reasons, violations? |
 | `task.merged` | task, integration_sha |
 | `task.accepted` | task |
@@ -181,10 +181,10 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `artifact.changed` | name, version, consumers |
 | `dependency.requested` | task, need: {kind, ref} |
 | `dependency.satisfied` | task, need, by_event |
-| `check.started` | command_id, scope: task / integration, task? |
-| `check.passed` | command_id, scope, task?, duration_ms |
-| `check.failed` | command_id, scope, task?, exit, signature, output_blob |
-| `check.timed_out` | command_id, scope, task? |
+| `check.started` | command_id, scope: task / integration, task?, commit?, submitted_seq? |
+| `check.passed` | command_id, scope, task?, duration_ms, commit?, submitted_seq? |
+| `check.failed` | command_id, scope, task?, exit, signature, output_blob, commit?, submitted_seq? |
+| `check.timed_out` | command_id, scope, task?, commit?, submitted_seq? |
 | `command.completed` | task, argv, exit, duration_ms, signature, output_blob |
 | `merge.succeeded` | task, sha |
 | `merge.conflicted` | task, files |
@@ -246,6 +246,7 @@ The human's chat is never stored on the blackboard.
 - `checks.task` is keyed `<task>/<command_id>` and `checks.integration` by command id. `task.submitted` resets that task's streaks only when its `diff_blob` differs from the task's previous submission (resubmitting the same diff is no patch), and `task.merged` resets the integration streaks. `budget.threshold_crossed` for a new `budget_usd` starts a new list.
 - `raised_seq`, `granted_seq` and `requested_seq` are set from the event's seq, whatever the payload says.
 - `blocked_by.needs` lists a task's open interface and artifact needs: `dependency.requested` adds one and `dependency.satisfied` removes it (task needs are `deps`). `task.blocked` on a task that is already blocked keeps its other reasons: a new escalation replaces the old one, deps are added, and open needs are always kept. `task.unblocked` clears them all.
+- A task check that carries `submitted_seq` counts only while that is the task's latest `task.submitted`; a stale one changes nothing. A `task.checks_passed` that carries `submitted_seq` is refused unless it names the latest submission and commit and the task is still `submitted` or `checking`.
 - Task events are checked against the task's state. On the write path, which uses strict mode, an event that names an unknown task, or that would move a task out of `accepted`, `failed` or `cancelled`, is refused before append. The exceptions are a retry or cancel of a failed task, and a merge or accept of an accepted one, which does nothing. Replay ignores such events, so an old log never breaks.
 - `task.split` records `splits[task] = parts`. Whenever a contract version is adopted, dependencies on a split task are rewritten to its parts, recursively.
 - Task and command ids match `^[a-z0-9][a-z0-9._-]{0,63}$` in payloads and contracts, so the `/` in a check key is unambiguous.
@@ -521,6 +522,11 @@ Every host-side git call goes through `src/execution/git.ts`:
 **Submodules are not supported in heads-down runs in 1.0.** A `base_sha` whose tree holds a gitlink is refused before any worktree is created. So is any worktree whose index or HEAD holds one, and any branch that would bring one into a merge. Commits never stage a gitlink.
 
 **`submit_work`.** Commits, checks leases, then runs the task's checks in the sandbox. It is capped at 15 minutes and sends progress notifications. With `ready: false` it only makes a checkpoint commit.
+- One submission per task at a time: a worker server refuses a second `submit_work` for the task while one is in progress.
+- A submission is one commit. Lease coverage, the diff, `task.submitted` and every check are taken at the commit `submit_work` made, never at a `HEAD` that may move.
+- Checks run in a fresh detached checkout of that commit (`withCommitCheckout`, under `executions/<exe>/checks/`), which no worker tool reaches, and which is removed afterwards. Whatever the worker does to its worktree during the checks, they see the committed bytes and nothing uncommitted. The checkout's `.git` is a gitfile, which the docker backend mounts read-only.
+- Every check event, and `task.checks_passed`, carries the submission's `submitted_seq` and `commit`. The outcome (`task.checks_passed` or `task.rejected`) is recorded only if, in the same transaction, the submission is still the task's latest `task.submitted`, the task is still `submitted` or `checking`, and the same agent holds the claim in the same attempt under the same token. Otherwise nothing is recorded and the worker is told its submission is out of date.
+- **The runner merges exactly `task.checks_passed.commit`**, the commit the checks passed on, never the task branch's current head.
 
 **Merge queue.** The runner merges serially, under `git.lock`, with `git merge --no-ff` into `_integration`.
 - If the conflicted files are inside the task's leases, the runner merges the integration branch into the task worktree, leaving the conflict markers, and resumes the worker.
@@ -712,9 +718,9 @@ On the worker server, the worker tools are bound to the token. On the orchestrat
 - `submit_work`:
   1. `commitLeasedPaths` with the integration branch as `summaryBase`.
   2. Uncovered or refused paths emit `lease.violation` + `task.rejected`, and the submission is refused.
-  3. `checkLeaseCoverage` against the integration branch.
-  4. `task.submitted` with the diff blob.
-  5. The task's checks, within 15 minutes, with progress notifications. The result is `task.checks_passed` (state merging), or `check.failed` + `task.rejected` (back to in_progress).
+  3. `checkLeaseCoverage` of the new commit against the integration branch.
+  4. `task.submitted` with the commit and the diff blob, while the agent still holds the claim under its token.
+  5. The task's checks in a checkout of that commit, within 15 minutes, with progress notifications. The result is `task.checks_passed` with the commit (state merging), or `check.failed` + `task.rejected` (back to in_progress), recorded only while the submission is still live (§10).
 
   `ready: false` makes a checkpoint commit and emits `task.progress`. Nothing here merges.
 - `escalate`: `escalation.raised`, plus `task.blocked` when blocking, with the instruction to end the turn. Diagnostics go to a scrubbed blob.

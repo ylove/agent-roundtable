@@ -3,7 +3,7 @@
 // leases, updates, the sandbox (local backend) and submissions.
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { git } from "../fixtures/execution/git-fixture.mjs";
 import { makeRun, nodeCommand, registerWorker, runner, task } from "../fixtures/workers/run.mjs";
@@ -330,7 +330,12 @@ test("submit_work: a checkpoint; an unleased change is a violation; failing chec
   assert.match(sub.stat, /2 files changed/);
   const diff = await ok("read_blackboard", { ...ext, section: "blob", ref: sub.diff_blob });
   assert.match(diff.text, /\+export const get/);
-  assert.deepEqual(ge[3].payload, { task: "api", commands: ["needs-ok"] });
+  const bound = { commit: good.commit, submitted_seq: ge[0].seq };
+  assert.deepEqual(ge[3].payload, { task: "api", commands: ["needs-ok"], ...bound }, "the runner merges exactly this commit");
+  assert.equal(good.commit, ge[0].payload.commit);
+  assert.deepEqual(ge.slice(1, 3).map((e) => ({ commit: e.payload.commit, submitted_seq: e.payload.submitted_seq })), [bound, bound]);
+  assert.equal(good.checks[0].commit, good.commit);
+  assert.deepEqual(readdirSync(join(ROUNDTABLE_HOME, "executions", run.store.id, "checks")), [], "the check checkout is removed");
   assert.match((await call("submit_work", { ...ext, summary: "again", ready: true })).text, /being merged/);
 });
 
@@ -563,6 +568,88 @@ test("post_update refuses paused and terminal progress, notes and publications",
     await ok("claim_task", { ...at, task_id: "api" });
     await terminal.store.transact(() => ({ events: [{ type: `execution.${status}`, source: runner, payload: status === "completed" ? { integration_sha: terminal.header.base_sha } : { reason: "done" } }] }));
     for (const kind of ["progress", "note", "interface"]) assert.match((await call("post_update", { ...at, kind, name: "ApiClient", text: "late" })).text, new RegExp(status));
+  }
+});
+
+// A check that reads src/api/flag.txt a second after it starts and passes only on "good".
+const SLOW_FLAG = nodeCommand(
+  "slow-flag",
+  "setTimeout(() => { const s = require('fs').readFileSync('src/api/flag.txt', 'utf8').trim(); console.log('flag=' + s + ' cwd=' + process.cwd()); process.exit(s === 'good' ? 0 : 1); }, 1000)"
+);
+
+async function slowClaim() {
+  const run = await makeRun({ contract: { tasks: [task("api", { checks: ["slow-flag"] })], validation: { commands: [SLOW_FLAG], final: [] } } });
+  const ext = await join_(run, "ext-1", { task_id: "api" });
+  const wt = ext.j.worktree;
+  delete ext.j;
+  await ok("claim_task", { ...ext, task_id: "api" });
+  await ok("lease", { ...ext, action: "request", paths: ["src/api/**"] });
+  return { run, ext, wt };
+}
+
+/** Start a ready submission, run `meanwhile` once its check has started, and return the submission's result. */
+async function submitWhileChecking(run, ext, meanwhile) {
+  const seq = (await run.store.state()).seq;
+  const pending = call("submit_work", { ...ext, summary: "flag", ready: true });
+  while (!(await eventsSince(run.store, seq, ["check.started"])).length) await new Promise((r) => setTimeout(r, 25));
+  await meanwhile();
+  return { r: await pending, seq };
+}
+
+test("submit_work checks the submitted commit in a private checkout, whatever the worker does to its worktree meanwhile", async () => {
+  const { run, ext, wt } = await slowClaim();
+  writeFileSync(join(wt, "src/api/flag.txt"), "bad\n");
+  const { r, seq } = await submitWhileChecking(run, ext, async () => writeFileSync(join(wt, "src/api/flag.txt"), "good\n"));
+  assert.equal(r.isError, false, r.text);
+  assert.equal(r.json.checks_passed, false, "the committed bytes fail; the swapped ones are never checked");
+  const [check] = r.json.checks;
+  assert.match(check.output_tail, /flag=bad/);
+  assert.equal(check.commit, r.json.commit);
+  const checks = realpathSync(join(ROUNDTABLE_HOME, "executions", run.store.id, "checks"));
+  const cwd = /cwd=(\S+)/.exec(check.output_tail)[1];
+  assert.ok(cwd.startsWith(`${checks}/api-`), `checked in ${cwd}, not the worktree`);
+  assert.deepEqual(readdirSync(checks), [], "the checkout is removed");
+  assert.doesNotMatch(git(wt, "worktree", "list", "--porcelain"), /\/checks\//, "and so is its record");
+  const evs = await eventsSince(run.store, seq, ["task.submitted", "check.started", "check.failed", "task.rejected"]);
+  assert.deepEqual(evs.map((e) => e.type), ["task.submitted", "check.started", "check.failed", "task.rejected"]);
+  for (const e of evs.slice(1, 3)) assert.deepEqual([e.payload.commit, e.payload.submitted_seq], [r.json.commit, evs[0].seq], e.type);
+
+  const again = await ok("submit_work", { ...ext, summary: "flag good", ready: true });
+  assert.notEqual(again.commit, r.json.commit);
+  assert.equal(again.checks[0].status, "passed", "the swap passes once it is committed");
+});
+
+test("submit_work: one submission per task at a time; a newer submission, reassignment, new attempt or re-registration voids the outcome", async () => {
+  const interfere = {
+    "a newer failed submission": () => [
+      { type: "task.submitted", source: runner, payload: { task: "api", commit: "f".repeat(40), diff_blob: "x", stat: "", files: [], rewrites: [] } },
+      { type: "task.rejected", source: runner, payload: { task: "api", reasons: ["check slow-flag failed"] } },
+    ],
+    "a reassignment": () => [{ type: "task.reassigned", source: runner, payload: { task: "api", from: "ext-1", to: "ext-2" } }],
+    "a new attempt": () => [
+      { type: "task.released", source: runner, payload: { task: "api", agent: "ext-1" } },
+      { type: "task.claimed", source: runner, payload: { task: "api", agent: "ext-1", attempt: 2, ttl_s: 900 } },
+    ],
+    "a re-registration": () => [
+      { type: "agent.registered", source: runner, payload: { agent: "ext-1", persona: "ext-1", driver: "external", external: true, token_sha256: "e".repeat(64) } },
+    ],
+  };
+  for (const [what, events] of Object.entries(interfere)) {
+    const { run, ext, wt } = await slowClaim();
+    writeFileSync(join(wt, "src/api/flag.txt"), "good\n");
+    const { r, seq } = await submitWhileChecking(run, ext, async () => {
+      if (what === "a newer failed submission") {
+        const twice = await call("submit_work", { ...ext, summary: "again", ready: true });
+        assert.equal(twice.isError, true);
+        assert.match(twice.text, /A submission of api is already in progress/);
+      }
+      await run.store.transact(() => ({ events: events() }));
+    });
+    assert.equal(r.isError, true, `${what}: ${r.text}`);
+    assert.match(r.text, /is out of date: .*Nothing was recorded for it/, what);
+    const after = await eventsSince(run.store, seq, ["check.passed", "task.checks_passed", "task.rejected"]);
+    assert.equal(after.some((e) => e.type === "task.checks_passed"), false, what);
+    assert.notEqual((await run.store.state()).tasks.api.state, "merging", what);
   }
 });
 

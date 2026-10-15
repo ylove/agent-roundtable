@@ -647,9 +647,9 @@ function globMatched(path: string, leases: readonly LeaseLike[]): boolean {
  * `base` (both sides of renames) must be covered by `leases`; .git* metadata needs an explicit
  * lease; gitlinks and symlinks that leave the repository are refused outright.
  */
-export async function checkLeaseCoverage(worktree: string, base: string, leases: readonly LeaseLike[]): Promise<CoverageResult> {
+export async function checkLeaseCoverage(worktree: string, base: string, leases: readonly LeaseLike[], tip = "HEAD"): Promise<CoverageResult> {
   const w = await openWorktree(worktree);
-  return checkRangeCoverage(w.target, base, "HEAD", leases);
+  return checkRangeCoverage(w.target, base, tip, leases);
 }
 
 /** checkLeaseCoverage for an arbitrary tip in an open target (the merge queue checks a branch). */
@@ -750,9 +750,9 @@ async function summarize(t: GitTarget, from: string, to: string): Promise<DiffSu
 }
 
 /** stat, files and rewrites for what HEAD changed since its merge base with `base`. */
-export async function taskDiffSummary(worktree: string, base: string): Promise<DiffSummary & { base: string; head: string }> {
+export async function taskDiffSummary(worktree: string, base: string, tip = "HEAD"): Promise<DiffSummary & { base: string; head: string }> {
   const w = await openWorktree(worktree);
-  const head = await resolveCommit(w.target, "HEAD");
+  const head = await resolveCommit(w.target, tip);
   const mb = await mergeBaseOf(w.target, head, base);
   return { ...(await summarize(w.target, mb, head)), base: mb, head };
 }
@@ -891,9 +891,9 @@ const DIFF_MAX_BYTES = 2 * 1024 * 1024;
  * The unified diff of what HEAD changed since its merge base with `base`, capped at maxBytes (at a
  * line boundary, with a note), for the blob store (putBlob scrubs it).
  */
-export async function diffForTask(worktree: string, base: string, maxBytes = DIFF_MAX_BYTES): Promise<string> {
+export async function diffForTask(worktree: string, base: string, maxBytes = DIFF_MAX_BYTES, tip = "HEAD"): Promise<string> {
   const w = await openWorktree(worktree);
-  const head = await resolveCommit(w.target, "HEAD");
+  const head = await resolveCommit(w.target, tip);
   const mb = await mergeBaseOf(w.target, head, base);
   // Commit to commit: no working directory is read (TREE_SUBMODULES).
   const r = await runGit(w.target, ["diff", "-M", "--no-color", TREE_SUBMODULES, mb, head], { maxOutputBytes: maxBytes, truncate: true });

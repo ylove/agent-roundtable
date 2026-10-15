@@ -88,6 +88,12 @@ export function own<V>(map: Readonly<Record<string, V>> | undefined, key: string
   return map !== undefined && key !== undefined && Object.hasOwn(map, key) ? map[key] : undefined;
 }
 
+/** Own-property write that is safe for any key, "__proto__" included. */
+export function putOwn<V>(map: Record<string, V>, key: string, value: V): V {
+  Object.defineProperty(map, key, { value, enumerable: true, writable: true, configurable: true });
+  return value;
+}
+
 export function sortedKeys(map: Readonly<Record<string, unknown>> | undefined): string[] {
   return map ? Object.keys(map).sort() : [];
 }

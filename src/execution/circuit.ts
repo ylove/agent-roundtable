@@ -15,7 +15,7 @@
 // ============================================================================
 
 import type { AnyEvent, BlackboardState, EmergencyClass, WorkerDriverId } from "./types.js";
-import { draft, emitAction, escalationAction, own, sortedKeys, type WatchdogAction } from "./watchdog-actions.js";
+import { draft, emitAction, escalationAction, own, putOwn, sortedKeys, type WatchdogAction } from "./watchdog-actions.js";
 
 export type FailureKind = "error" | "rate_limit" | "auth" | "credit";
 
@@ -52,10 +52,22 @@ const SPAWNABLE_DRIVERS: readonly WorkerDriverId[] = ["claude-code", "codex"];
 // Classification
 // ---------------------------------------------------------------------------
 
-const CREDIT_RE = /credit balance|insufficient[_ ]quota|exceeded your current quota|billing|payment required|\b402\b|out of credits/i;
-const AUTH_RE =
-  /not logged in|\/login\b|invalid (?:api|x-api)[ _-]?key|authentication[_ ]error|unauthori[sz]ed|\b401\b|\b403\b|forbidden|permission[_ ]error|(?:oauth )?token (?:has )?expired/i;
-const RATE_RE = /\b429\b|rate[ _-]?limit|too many requests|overloaded|\b529\b|usage limit reached/i;
+// Status codes count only with an HTTP context ("HTTP 401", "status: 429", "Error code: 402",
+// "403 Forbidden"), so a line number or an assertion in ordinary error output is not mistaken for one.
+const STATUS = String.raw`\b(?:http(?:\/\d(?:\.\d)?)?|status|code)[ :=]*`;
+const CREDIT_RE = new RegExp(
+  String.raw`credit balance|insufficient[_ ]quota|exceeded your current quota|plan and billing details|payment required|out of credits|${STATUS}402\b`,
+  "i"
+);
+const AUTH_RE = new RegExp(
+  String.raw`not logged in|please run \/login|invalid (?:api|x-api)[ _-]?key|authentication[_ ]error|permission[_ ]error|oauth token (?:has )?expired|` +
+    String.raw`${STATUS}40[13]\b|\b401 unauthori[sz]ed|\b403 forbidden`,
+  "i"
+);
+const RATE_RE = new RegExp(
+  String.raw`${STATUS}(?:429|529)\b|too many requests|rate[_ ]limit(?:_error|ed| exceeded| reached)|overloaded_error|usage limit reached`,
+  "i"
+);
 
 /** credit before auth before rate_limit; anything else is a plain error. */
 export function classifyFailure(message: string): FailureKind {
@@ -213,14 +225,9 @@ export function outcomesFromEvents(
       } else if (p.reason === "completed") outcomes.push({ driver: d, at, kind: "success" });
     } else if (e.type === "watchdog.circuit_opened") {
       const h = own(history, e.payload.driver) ?? { opens: 0 };
-      Object.defineProperty(history, e.payload.driver, {
-        value: { ...h, opens: h.opens + 1, openedAt: at },
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
+      putOwn(history, e.payload.driver, { ...h, opens: h.opens + 1, openedAt: at });
     } else if (e.type === "watchdog.circuit_closed") {
-      Object.defineProperty(history, e.payload.driver, { value: { opens: 0, closedAt: at }, enumerable: true, writable: true, configurable: true });
+      putOwn(history, e.payload.driver, { opens: 0, closedAt: at });
     }
   }
   return { outcomes, history };

@@ -28,6 +28,15 @@ test("classifyFailure recognizes credit, auth and rate-limit messages", () => {
     ["error_during_execution", "error"],
     ["exit code 1 after 4013 ms", "error"],
     ["", "error"],
+    // Words and numbers in ordinary error output are not provider failures.
+    ["TypeError at src/billing/invoice.ts:402", "error"],
+    ["AssertionError: expected 401 to equal 200", "error"],
+    ["src/login.ts: Forbidden import of fs", "error"],
+    ["line 429: unexpected token", "error"],
+    ["RateLimiter test failed", "error"],
+    ["HTTP/1.1 403", "auth"],
+    ["status: 529", "rate_limit"],
+    ["Error code: 402 Payment Required", "credit"],
   ];
   for (const [msg, want] of cases) assert.equal(classifyFailure(msg), want, msg);
 });

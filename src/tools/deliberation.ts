@@ -60,7 +60,6 @@ import { startUltraplan, submitPlan, endUltraplan, ultraplans } from "../session
 import { createAgent, improveAgent } from "../sessions/agent-creation.js";
 import { prototypeTrailer } from "../sessions/prototype-mode.js";
 import { prototypeDiagnostics } from "../prototypes/index.js";
-import { checkArgs } from "../tools.js";
 import {
   START_MEETING,
   SAY,
@@ -101,9 +100,9 @@ import {
   type ToolDefinition,
 } from "./shared.js";
 
-/** Only the new flag is type-checked on the legacy start tools, so their other arguments behave exactly as before. */
-function checkPrototypeArg(tool: string, args: Record<string, unknown> | undefined): void {
-  checkArgs(tool, { prototype: args?.prototype });
+/** Cross-field check for the workshop and ultraplan starters (runs after value checks, before required). */
+function checkProviderArgs(args: Record<string, unknown>): void {
+  validateProviderOptions(args.provider as LLMProvider | undefined, args.base_url as string | undefined);
 }
 
 /** Origin only: webhook URLs often carry the secret in the path or query. */
@@ -154,6 +153,7 @@ export const deliberationTools: ToolDefinition[] = [
         provider: {
           type: "string",
           enum: PROVIDER_IDS,
+          "x-advisory-enum": true,
           description:
             "LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
@@ -336,6 +336,7 @@ export const deliberationTools: ToolDefinition[] = [
         provider: {
           type: "string",
           enum: PROVIDER_IDS,
+          "x-advisory-enum": true,
           description:
             "LLM provider to use. Default: openai. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
@@ -403,6 +404,7 @@ export const deliberationTools: ToolDefinition[] = [
         mode: {
           type: "string",
           enum: [...COLLABORATION_MODES],
+          "x-advisory-enum": true,
           description:
             "debate: agents[0] is the proponent; every other agent is a challenger that stress-tests the proponent. " +
             "waffle-house: agents[0] is the defender of an idea (the topic) and every other agent is an adversarial attacker (needs 2+ agents); " +
@@ -419,6 +421,7 @@ export const deliberationTools: ToolDefinition[] = [
         provider: {
           type: "string",
           enum: PROVIDER_IDS,
+          "x-advisory-enum": true,
           description:
             "LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
@@ -545,6 +548,7 @@ export const deliberationTools: ToolDefinition[] = [
   {
     name: START_ULTRAPLAN,
     modes: ORCHESTRATOR_ONLY,
+    precheck: checkProviderArgs,
     annotations: { title: "Start ultraplan", ...SESSION_TURN },
     description:
       "Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: \"plan\" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. Public runs post the task and phase outputs, never context.",
@@ -552,7 +556,7 @@ export const deliberationTools: ToolDefinition[] = [
       type: "object",
       properties: {
         agents: { type: "array", items: { type: "string" }, minItems: 1, description: "Specialists contributing input, independent reviews and sign-offs. A planner may also be a participant." },
-        task: { type: "string", description: "What the plan must accomplish; required and non-empty." },
+        task: { type: "string", description: "What the plan must accomplish; required and non-empty.", "x-hint": "describe what the plan is for" },
         context: { type: "string", description: "Optional background shared with the agents; never posted publicly." },
         draft_plan: { type: "string", description: "Optional full draft: becomes v1 by orchestrator and skips the input phase. Whitespace-only counts as absent." },
         planner: { type: "string", description: "Optional persona that owns drafting and revision server-side; runs the whole loop in one call." },
@@ -596,6 +600,7 @@ export const deliberationTools: ToolDefinition[] = [
   {
     name: CREATE_AGENT,
     modes: ORCHESTRATOR_ONLY,
+    precheck: checkProviderArgs,
     annotations: { title: "Create agent", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     description:
       "Have specialists design a new Claude Code subagent in one call: sequential contributions, architect draft, independent reviews, then revision if needed. Pass agents and task, or from_session (a live collab-N or meeting-N) to inherit participants, topic and discussion; explicit agents are combined with inherited ones. Each contributes expertise, guardrails and skills. Default write: true saves the agent to ROUNDTABLE_AGENTS_DIR and new skills to ROUNDTABLE_SKILLS_DIR; existing agents are never overwritten. write: false previews files without writes. " +
@@ -621,6 +626,7 @@ export const deliberationTools: ToolDefinition[] = [
   {
     name: IMPROVE_AGENT,
     modes: ORCHESTRATOR_ONLY,
+    precheck: checkProviderArgs,
     annotations: { title: "Improve agent", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     description:
       "Refine an existing Claude Code agent in one call, preserving its identity and useful instructions. By default the target reviews itself candidly; add specialists with with or inherit participants/discussion from a live collab-N or meeting-N via from_session. They suggest gaps, replacements, skills and cuts; an architect drafts the definition, participants review independently, and the architect revises if needed. The target may be any existing .md path, including outside the agents directory. write: false previews without writes. " +
@@ -633,7 +639,11 @@ export const deliberationTools: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        agent: { type: "string", description: "Existing agent identifier or .md file path to improve, including paths outside ROUNDTABLE_AGENTS_DIR. Written targets are backed up first." },
+        agent: {
+          type: "string",
+          description: "Existing agent identifier or .md file path to improve, including paths outside ROUNDTABLE_AGENTS_DIR. Written targets are backed up first.",
+          "x-hint": "pass the agent name or .md path to improve",
+        },
         with: { type: "array", items: { type: "string" }, description: "Additional specialists; combined with target (when include_self) and from_session participants." },
         include_self: { type: "boolean", description: "Default true: the target contributes to its own refinement. If false, supply at least one participant via with or from_session." },
         focus: { type: "string", description: "Optional aspect to improve, such as escalation rules, output quality or missing skills." },
@@ -664,7 +674,6 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
   switch (name) {
     // === Meeting Tools ===
     case START_MEETING: {
-      checkPrototypeArg(name, args);
       const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype } = args as {
         agent: string;
         agenda: string;
@@ -723,7 +732,6 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Local Meeting Tools (CLI-based) ===
     case START_LOCAL_MEETING: {
-      checkPrototypeArg(name, args);
       const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype } = args as {
         agent: string;
         agenda: string;
@@ -803,7 +811,6 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Collaboration Tools ===
     case START_COLLABORATION: {
-      checkPrototypeArg(name, args);
       const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, base_url, mode, debate_focus, grounding, public: isPublic, prototype } = args as {
         agents: string[];
         topic?: string;
@@ -940,7 +947,6 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Ultraplan Tools ===
     case START_ULTRAPLAN: {
-      checkArgs(name, args);
       const { agents, task, context, draft_plan, planner, revision_rounds, public: isPublic, provider, model, base_url } = (args ?? {}) as {
         agents: string[];
         task: string;
@@ -953,7 +959,6 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         model?: string;
         base_url?: string;
       };
-      validateProviderOptions(provider, base_url);
       const result = await startUltraplan(agents, task, {
         context,
         draftPlan: draft_plan,
@@ -968,14 +973,12 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
     }
 
     case SUBMIT_PLAN: {
-      checkArgs(name, args);
       const { ultraplan_id, plan, final } = (args ?? {}) as { ultraplan_id: string; plan?: string; final?: boolean };
       const result = await submitPlan(ultraplan_id, plan, final === true);
       return { content: [{ type: "text", text: formatUltraplanResult(result) }] };
     }
 
     case END_ULTRAPLAN: {
-      checkArgs(name, args);
       const { ultraplan_id } = (args ?? {}) as { ultraplan_id: string };
       const result = await endUltraplan(ultraplan_id);
       return { content: [{ type: "text", text: formatUltraplanResult(result) }] };
@@ -983,7 +986,6 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Agent Creation and Refinement Tools ===
     case CREATE_AGENT: {
-      checkArgs(name, args);
       const { agents, task, context, from_session, name: agentName, rounds, write, perform_task, public: isPublic, provider, model, base_url } = (args ?? {}) as {
         agents?: string[];
         task?: string;
@@ -998,7 +1000,6 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         model?: string;
         base_url?: string;
       };
-      validateProviderOptions(provider, base_url);
       const result = await createAgent({
         agents, task, context, fromSession: from_session, name: agentName, rounds, write,
         performTask: perform_task, public: isPublic === true, provider, model, baseUrl: base_url,
@@ -1007,7 +1008,6 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
     }
 
     case IMPROVE_AGENT: {
-      checkArgs(name, args);
       const { agent, with: specialists, include_self, focus, context, from_session, rounds, write, public: isPublic, provider, model, base_url } = (args ?? {}) as {
         agent: string;
         with?: string[];
@@ -1022,10 +1022,6 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         model?: string;
         base_url?: string;
       };
-      validateProviderOptions(provider, base_url);
-      if (typeof agent !== "string" || !agent.trim()) {
-        throw new Error('improve_agent: "agent" is required: pass the agent name or .md path to improve');
-      }
       const result = await improveAgent({
         agent, with: specialists, includeSelf: include_self, focus, context, fromSession: from_session,
         rounds, write, public: isPublic === true, provider, model, baseUrl: base_url,

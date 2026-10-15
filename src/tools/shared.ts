@@ -26,6 +26,8 @@ export interface ToolDefinition {
   annotations: ToolAnnotations;
   /** Servers that list and accept this tool. Never sent to clients. */
   modes: readonly ToolMode[];
+  /** Cross-field checks run after the value checks and before `required` (e.g. provider/base_url). */
+  precheck?: (args: Record<string, unknown>) => void;
 }
 
 export type ToolArgs = Record<string, unknown> | undefined;
@@ -53,6 +55,7 @@ export const PROVIDER_PROPS = {
     enum: PROVIDER_IDS,
     description:
       "LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
+    "x-advisory-enum": true,
   },
   model: { type: "string", description: MODEL_PARAM_DESCRIPTION },
   base_url: {
@@ -66,6 +69,7 @@ export const MEETING_MODE_PROPS = {
   mode: {
     type: "string",
     enum: [...MEETING_MODES],
+    "x-advisory-enum": true,
     description:
       "debate: the agent acts as a challenger and stress-tests your agenda instead of helping execute it. Default: standard.",
   },

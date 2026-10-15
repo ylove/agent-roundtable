@@ -97,3 +97,60 @@ test("workshop proposals report an unchanged agent and retain recovery details",
   assert.ok(text.includes(JSON.stringify(result, null, 2)));
   assert.ok(text.endsWith(result.publicBlock));
 });
+
+test("every tool's arguments are validated before routing, with nested paths for new rules", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => { calls++; throw new Error("Unexpected provider call"); });
+  for (const [tool, args, message] of [
+    ["say", { meeting_id: "m", message: 5 }, 'say: "message" must be a string'],
+    ["say_local", { meeting_id: 7, message: "hi" }, 'say_local: "meeting_id" must be a string'],
+    ["end_meeting", { meeting_id: "m", request_summary: "yes" }, 'end_meeting: "request_summary" must be a boolean'],
+    ["start_collaboration", { agents: "cfo", topic: "t" }, 'start_collaboration: "agents" must be an array of non-empty strings'],
+    ["continue_collaboration", { collaboration_id: "c", rounds: "2" }, 'continue_collaboration: "rounds" must be a finite number'],
+    ["chat_completion", { messages: "hi" }, 'chat_completion: "messages" must be an array'],
+    ["chat_completion", { messages: ["hi"] }, 'chat_completion: "messages[0]" must be an object'],
+    ["chat_completion", { messages: [{ role: "bot", content: "hi" }] }, 'chat_completion: "messages[0].role" must be one of: system, user, assistant'],
+    ["chat_completion", { messages: [{ role: "user" }] }, 'chat_completion: "messages[0].content" is required'],
+    ["chat_completion", { messages: [{ role: "user", content: "hi" }], max_tokens: "8" }, 'chat_completion: "max_tokens" must be a finite number'],
+    // Required fields are now enforced for the legacy tools too (after type and provider checks).
+    ["say", {}, 'say: "meeting_id" is required'],
+    ["say", { meeting_id: "m", message: "  " }, 'say: "message" is required'],
+    ["end_local_meeting", {}, 'end_local_meeting: "meeting_id" is required'],
+    ["nudge_collaboration", { collaboration_id: "c" }, 'nudge_collaboration: "message" is required'],
+    ["end_collaboration", { collaboration_id: null }, 'end_collaboration: "collaboration_id" is required'],
+    ["start_meeting", { agent: "cfo" }, 'start_meeting: "agenda" is required'],
+    ["start_collaboration", { topic: "t" }, 'start_collaboration: "agents" is required'],
+    ["chat_completion", {}, 'chat_completion: "messages" is required'],
+    ["submit_plan", {}, 'submit_plan: "ultraplan_id" is required'],
+    ["start_ultraplan", { agents: ["cfo"] }, 'start_ultraplan: "task" is required: describe what the plan is for'],
+    ["start_ultraplan", { task: "Plan", provider: "openai", base_url: "http://x.test/v1" }, 'base_url is only supported with provider "openai_compatible" (got "openai")'],
+  ]) {
+    const result = await handleToolCall(tool, args);
+    assert.equal(result.isError, true, `${tool} ${JSON.stringify(args)}`);
+    assert.equal(result.content[0].text, `Error: ${message}`);
+  }
+  assert.equal(calls, 0);
+});
+
+test("legacy enums stay with the engines, so their messages (with the valid list) are unchanged", async () => {
+  const meeting = await handleToolCall("start_meeting", { agent: "x", agenda: "y", mode: "Debate" });
+  assert.match(meeting.content[0].text, /^Error: Unknown mode "Debate"\. Valid modes: standard, debate$/);
+  const collab = await handleToolCall("start_collaboration", { agents: ["x", "y"], topic: "t", mode: "waffle_house" });
+  assert.match(collab.content[0].text, /Unknown mode "waffle_house"\. Valid modes: collaborate, debate, waffle-house, conversation/);
+  const chat = await handleToolCall("chat_completion", { messages: [{ role: "user", content: "hi" }], provider: "grok" });
+  assert.match(chat.content[0].text, /^Error: Unknown provider "grok"\. Valid providers: /);
+  // minItems is not part of the subset: the engines keep their own participant-count messages.
+  const ultra = await handleToolCall("start_ultraplan", { agents: [], task: "Plan" });
+  assert.equal(ultra.content[0].text, "Error: Ultraplan requires at least 1 agent");
+  const pair = await handleToolCall("start_collaboration", { agents: ["solo"], topic: "t" });
+  assert.equal(pair.content[0].text, "Error: Collaboration requires at least 2 agents");
+});
+
+test("checkArgs checks given values only and never reports a missing field", () => {
+  for (const tool of tools.map((entry) => entry.name)) {
+    assert.doesNotThrow(() => checkArgs(tool, {}), tool);
+    assert.doesNotThrow(() => checkArgs(tool, undefined), tool);
+  }
+  assert.throws(() => checkArgs("chat_completion", { messages: [{ role: "user" }] }), { message: 'chat_completion: "messages[0].content" is required' });
+  assert.doesNotThrow(() => checkArgs("no_such_tool", { anything: 1 }));
+});

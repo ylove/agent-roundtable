@@ -3,7 +3,7 @@
 // ============================================================================
 
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { publicSchema } from "./validate.js";
+import { assertValid, publicSchema } from "./validate.js";
 import { deliberationTools, handleDeliberationTool } from "./tools/deliberation.js";
 import type { ToolArgs, ToolDefinition, ToolGroup, ToolMode } from "./tools/shared.js";
 
@@ -41,22 +41,21 @@ export function toolsFor(mode: ToolMode): Tool[] {
 /** The orchestrator server's tool list. */
 export const tools: Tool[] = toolsFor("orchestrator");
 
-/** Check declared argument types; engines still handle missing required values. */
+/**
+ * Check every given argument against the tool's schema (types, enums, constraints, nested fields) and
+ * throw `<tool>: "<field>" ...` on the first problem. Missing required fields are not reported here:
+ * handleToolCall checks them after the tool's cross-field checks. Unknown tools pass.
+ */
 export function checkArgs(tool: string, args: Record<string, unknown> | undefined): void {
-  const properties = routes.get(tool)?.definition.inputSchema.properties ?? {};
-  for (const [field, schema] of Object.entries(properties)) {
-    const value = args?.[field];
-    if (value === undefined || value === null) continue;
-    const type = (schema as { type?: string }).type;
-    let requirement: string | undefined;
-    if (type === "string" && typeof value !== "string") requirement = "a string";
-    if (type === "array" && (!Array.isArray(value) || !Array.from(value).every((item) => typeof item === "string" && item.trim().length > 0))) {
-      requirement = "an array of non-empty strings";
-    }
-    if (type === "number" && (typeof value !== "number" || !Number.isFinite(value))) requirement = "a finite number";
-    if (type === "boolean" && typeof value !== "boolean") requirement = "a boolean";
-    if (requirement) throw new Error(`${tool}: "${field}" must be ${requirement}`);
-  }
+  const definition = routes.get(tool)?.definition;
+  if (definition) assertValid(tool, definition.inputSchema, args, ["values"]);
+}
+
+/** Values, then cross-field checks, then required fields: the order every error message relies on. */
+function validateToolArgs(definition: ToolDefinition, args: Record<string, unknown> | undefined): void {
+  checkArgs(definition.name, args);
+  definition.precheck?.(args ?? {});
+  assertValid(definition.name, definition.inputSchema, args, ["required"]);
 }
 
 export async function handleToolCall(
@@ -67,6 +66,7 @@ export async function handleToolCall(
   try {
     const route = routes.get(name);
     if (!route || !route.definition.modes.includes(mode)) throw new Error(`Unknown tool: ${name}`);
+    validateToolArgs(route.definition, args);
     return await route.group.handle(name, args as ToolArgs);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

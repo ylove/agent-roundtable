@@ -209,6 +209,21 @@ export function defaultBudgetUsd(): number | undefined {
   return raw && Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/**
+ * The provider, model and base URL of the runner's persona calls (micro-huddles, the lead
+ * fallback, goal review): ROUNDTABLE_EXECUTION_PROVIDER, ROUNDTABLE_EXECUTION_MODEL and
+ * ROUNDTABLE_EXECUTION_BASE_URL. Like the tools, anthropic and the provider's default model when
+ * unset; `unknown` names a provider that is not one of PROVIDER_IDS (then anthropic is used).
+ */
+export function executionLLM(): { provider: LLMProvider; model: string; baseUrl?: string; unknown?: string } {
+  const raw = (process.env.ROUNDTABLE_EXECUTION_PROVIDER || "").trim();
+  const known = (PROVIDER_IDS as string[]).includes(raw);
+  const provider: LLMProvider = known ? (raw as LLMProvider) : "anthropic";
+  const model = (process.env.ROUNDTABLE_EXECUTION_MODEL || "").trim() || DEFAULT_MODELS[provider];
+  const baseUrl = (process.env.ROUNDTABLE_EXECUTION_BASE_URL || "").trim();
+  return { provider, model, ...(baseUrl && { baseUrl }), ...(raw && !known && { unknown: raw }) };
+}
+
 export const EXECUTION_RETENTION_DEFAULT_DAYS = 30;
 export const SESSION_RETENTION_DEFAULT_DAYS = 30;
 export const AUDIT_RETENTION_DEFAULT_DAYS = 365;

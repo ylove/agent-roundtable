@@ -3,10 +3,14 @@
 //
 // The runner calls them outside transact and never awaits them inside its tick: a hook may make
 // LLM calls and take minutes. Every hook must be idempotent: after a crash, a restarted runner
-// offers the same open escalation, or the same lead fallback, again. The defaults only log.
+// offers the same open escalation, or the same lead fallback, again. A hook returns the process
+// operations its resolution needs (resume, retry, kill); the runner applies each once by its key,
+// stops before starts, as it applies handed-over ones (handoff.ts). runRunner installs WS10's
+// createRunnerHooks; the defaults (DEFAULT_HOOKS, for tests) only log.
 // ============================================================================
 
 import { createHash } from "node:crypto";
+import type { ProcessOp } from "./escalation.js";
 import type { TaskCardOptions } from "./task-card.js";
 import type {
   AnyEventDraft,
@@ -51,17 +55,24 @@ export interface GoalReview {
   reason?: string;
 }
 
+export type { ProcessOp };
+
 export interface RunnerHooks {
   /**
    * A new escalation that is still open (the watchdog did not resolve it). Called once per
    * escalation per runner process. Routing (watchdog first, micro-huddle, orchestrator with
    * wake, lead fallback, awaiting_human) is WS10's.
    */
-  escalationRouter(ctx: RunnerContext, escalation: Escalation): Promise<void>;
+  escalationRouter(ctx: RunnerContext, escalation: Escalation): Promise<void | readonly ProcessOp[]>;
   /** The watchdog's lead_fallback for an escalation; obs.leadInFlight is set while it runs. */
-  leadFallback(ctx: RunnerContext, escalationId: string): Promise<void>;
+  leadFallback(ctx: RunnerContext, escalationId: string): Promise<void | readonly ProcessOp[]>;
   /** Every task is accepted and the final validation passed: is the ultimate goal met? */
   goalReview(ctx: RunnerContext, input: GoalReviewInput): Promise<GoalReview>;
+  /**
+   * Every runner pass: what resolutions left undone after a failure or a crash (a resume not yet
+   * started, a huddle concluded but not applied). Idempotent; its operations may repeat.
+   */
+  escalationPass?(ctx: RunnerContext): Promise<void | readonly ProcessOp[]>;
 }
 
 export const DEFAULT_HOOKS: RunnerHooks = {

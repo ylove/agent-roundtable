@@ -22,7 +22,7 @@
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { DEFAULT_MODELS, type LLMProvider } from "../config.js";
+import { executionLLM, type LLMProvider } from "../config.js";
 import { loadAgent, renderSkillsSection } from "../agents.js";
 import { newId } from "../ids.js";
 import { callLLM, withUsageSink, type UsageReport } from "../providers/index.js";
@@ -1114,39 +1114,37 @@ export async function finishConcludedHuddle(ctx: HookCtx, id: string, opts: Esca
 // ============================================================================
 
 export interface RunnerHookOptions extends EscalationOptions {
-  /** Defaults to the provider layer's OpenAI model. */
+  /** Defaults to executionLLM(): ROUNDTABLE_EXECUTION_PROVIDER, _MODEL and _BASE_URL, else anthropic. */
   llm?: HuddleLLM;
+}
+
+/** The persona-call settings from the environment (config.executionLLM), read when a hook runs. */
+export function executionHuddleLLM(): HuddleLLM {
+  const { provider, model, baseUrl } = executionLLM();
+  return { provider, model, ...(baseUrl !== undefined && { baseUrl }) };
 }
 
 /** Adapt the WS08 controls to the context shared by WS10 and WS11. */
 export async function runnerHookContext(ctx: RunnerContext, opts: RunnerHookOptions = {}): Promise<HookCtx> {
   return {
     store: ctx.store, state: await ctx.store.state(), header: ctx.header,
+    // The run's driver: a live claude-code worker answers a micro-huddle through driver.answer().
     driver: ctx.driver(), worker: (agent) => ctx.worker(agent),
-    llm: opts.llm ?? { provider: "openai", model: DEFAULT_MODELS.openai },
+    llm: opts.llm ?? executionHuddleLLM(),
   };
 }
 
-async function applyOps(ctx: RunnerContext, ops: ProcessOp[]): Promise<void> {
-  // Stop the old attempt before asking the runner to start its replacement.
-  for (const op of ops) {
-    if (op.type !== "kill_worker") continue;
-    const rec = ctx.worker(op.agent);
-    if (rec) await ctx.driver().stop(rec, op.reason);
-  }
-  for (const op of ops) {
-    if (op.type === "resume_worker") await ctx.resumeTask(op.task, { kind: "resolution", text: op.card });
-    else if (op.type === "spawn_retry") await ctx.resumeTask(op.task, { kind: "resolution", text: `Retry attempt ${op.attempt} after escalation resolution. Re-read the contract and your task.` });
-  }
-}
-
+/**
+ * WS10's hooks for the runner. Each returns the process operations of what it resolved (a resume,
+ * a retry, a kill); the runner applies them once per key, stops before starts.
+ */
 export function createRunnerHooks(opts: RunnerHookOptions = {}): RunnerHooks {
   return {
     async escalationRouter(ctx, escalation) {
-      await applyOps(ctx, await routeEscalation(await runnerHookContext(ctx, opts), escalation.id, opts));
+      return routeEscalation(await runnerHookContext(ctx, opts), escalation.id, opts);
     },
     async leadFallback(ctx, id) {
-      await applyOps(ctx, await leadFallback(await runnerHookContext(ctx, opts), id, opts));
+      return leadFallback(await runnerHookContext(ctx, opts), id, opts);
     },
     async escalationPass(ctx) {
       // No model call here: owed resumes, and concluded huddles applied from their records.
@@ -1155,7 +1153,7 @@ export function createRunnerHooks(opts: RunnerHookOptions = {}): RunnerHooks {
       for (const esc of Object.values(h.state.escalations)) {
         if (esc.status === "in_huddle" && own(h.state.huddles, esc.huddle)?.outcome !== undefined) ops.push(...await finishConcludedHuddle(h, esc.id, opts));
       }
-      await applyOps(ctx, ops);
+      return ops;
     },
     async goalReview(ctx, input) {
       const r = await goalReview({ ...await runnerHookContext(ctx, opts), integrationSha: input.integrationSha });

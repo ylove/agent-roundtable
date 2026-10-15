@@ -11,9 +11,15 @@
 //   cost: usd       the reported total_cost_usd (default 0.05)
 //   content: text   what it writes
 //   sessionGone     a --resume launch fails as if the session were gone
+//   escalate: args  on its first launch, call escalate(args) instead of working, and end its turn
 // Every launch is logged to <control>/calls.jsonl.
+//
+// Runner processes run WS10's real hooks. Their persona calls (the goal review, the lead) go to
+// `provider`, an OpenAI-compatible stub on loopback (default answer: Verdict COMPLETE), as the
+// contract's lead persona "lead" from ROUNDTABLE_AGENTS_DIR.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,12 +76,17 @@ async function main() {
   try {
     await server.init();
     const bb = await server.callTool("read_blackboard", {});
-    const task = JSON.parse(bb.text).you.task;
-    const file = path.join("src", task, task + ".txt");
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, b.content ?? (task + " by " + agent + "\\n"));
-    const sub = await server.callTool("submit_work", { summary: task + " done", ready: true });
-    log({ agent, submit: sub.text.slice(0, 3000), isError: sub.isError });
+    if (b.escalate && n === 0) {
+      const esc = await server.callTool("escalate", b.escalate);
+      log({ agent, escalate: esc.text.slice(0, 3000), isError: esc.isError });
+    } else {
+      const task = JSON.parse(bb.text).you.task;
+      const file = path.join("src", task, task + ".txt");
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, b.content ?? (task + " by " + agent + "\\n"));
+      const sub = await server.callTool("submit_work", { summary: task + " done", ready: true });
+      log({ agent, submit: sub.text.slice(0, 3000), isError: sub.isError });
+    }
   } finally {
     server.stop();
     await server.exited();
@@ -96,7 +107,38 @@ async function main() {
   };
 }
 
-export const RUNNER_ENV = { ROUNDTABLE_ALLOW_LOCAL_SANDBOX: "1", ROUNDTABLE_DOTENV: "off", ROUNDTABLE_RUNNER_TICK_MS: "200" };
+/** The stub provider runner processes call: `calls` are the request bodies, `reply(body)` the answer's text. */
+export const provider = await (async () => {
+  const stub = { calls: [], reply: () => "Verdict: COMPLETE\nGaps: None" };
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (d) => (raw += d));
+    req.on("end", () => {
+      let body = {};
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        /* answered all the same */
+      }
+      stub.calls.push(body);
+      res.writeHead(200, { "content-type": "application/json", connection: "close" });
+      res.end(JSON.stringify({ model: body.model ?? "stub", choices: [{ message: { content: stub.reply(body) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  server.unref();
+  stub.env = { ROUNDTABLE_EXECUTION_PROVIDER: "openai_compatible", ROUNDTABLE_EXECUTION_MODEL: "stub-model", ROUNDTABLE_EXECUTION_BASE_URL: `http://127.0.0.1:${server.address().port}/v1` };
+  return stub;
+})();
+
+// The contract fixture's lead (authority.lead "lead") must resolve for the goal review.
+if (process.env.ROUNDTABLE_AGENTS_DIR) {
+  mkdirSync(process.env.ROUNDTABLE_AGENTS_DIR, { recursive: true });
+  const lead = join(process.env.ROUNDTABLE_AGENTS_DIR, "lead.md");
+  if (!existsSync(lead)) writeFileSync(lead, "---\nname: lead\ndescription: The test run's lead\n---\nYou are the lead of a test run.\n");
+}
+
+export const RUNNER_ENV = { ROUNDTABLE_ALLOW_LOCAL_SANDBOX: "1", ROUNDTABLE_DOTENV: "off", ROUNDTABLE_RUNNER_TICK_MS: "200", ...provider.env };
 
 /** `agent-roundtable run <exe>` as a child process; stderr is collected. */
 export function startRunner(exe, env = {}) {

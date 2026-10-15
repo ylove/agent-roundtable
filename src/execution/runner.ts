@@ -24,7 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { VERSION } from "../config.js";
+import { executionLLM, PROVIDER_IDS, VERSION } from "../config.js";
 import { executionTag } from "../ids.js";
 import { loadAgent } from "../agents.js";
 import { pidAlive } from "../prototypes/sandbox.js";
@@ -40,6 +40,7 @@ import { stopGroup, workerExit, type WorkerExit } from "../workers/process.js";
 import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
 import { classifyFailure } from "./circuit.js";
+import { createRunnerHooks } from "./escalation.js";
 import { integrationBranch, SubmodulesUnsupportedError } from "./git.js";
 import { takeHandoffs } from "./handoff.js";
 import { decideLeaseRequest, leaseDrafts, leasesFor } from "./leases.js";
@@ -53,7 +54,7 @@ import {
   writeRunnerInfo,
   type RunnerInfo,
 } from "./runner-launch.js";
-import { runnerEscalation, withDefaults, type RunnerContext, type RunnerEscalationSpec, type RunnerHooks } from "./runner-hooks.js";
+import { runnerEscalation, withDefaults, type ProcessOp, type RunnerContext, type RunnerEscalationSpec, type RunnerHooks } from "./runner-hooks.js";
 import { executionDir, openExecutionStore, type FileExecutionStore } from "./store.js";
 import { buildTaskCard, interruptedContext, respawnContext, type Immediate, type TaskCardOptions } from "./task-card.js";
 import type {
@@ -93,7 +94,11 @@ import { GitHubSync } from "../github/sync.js";
 // ============================================================================
 
 export interface RunnerOptions {
-  /** WS10's escalation router, lead fallback and goal review (defaults log, and review COMPLETE). */
+  /**
+   * WS10's escalation router, lead fallback, goal review and escalation pass. runRunner installs
+   * createRunnerHooks (persona calls per ROUNDTABLE_EXECUTION_*); a Runner built without them uses
+   * DEFAULT_HOOKS, which only log and review COMPLETE (tests).
+   */
   hooks?: Partial<RunnerHooks>;
   /** Worker drivers by id (default ClaudeCodeDriver and CodexDriver). */
   drivers?: Partial<Record<WorkerDriverId, WorkerDriver>>;
@@ -118,6 +123,8 @@ export interface RunnerOptions {
 }
 
 const HOUR = 3_600_000;
+/** The escalation pass runs at least this often (and whenever the log moved). */
+const PASS_MS = 5_000;
 const SNAPSHOT_EVENTS = 500;
 const SNAPSHOT_MS = 60_000;
 const TERMINAL_RUN: ReadonlySet<string> = new Set(["completed", "failed", "aborted"]);
@@ -309,6 +316,10 @@ export class Runner {
   private readonly opsDone = new Set<string>();
   private readonly routed = new Set<string>();
   private readonly leadInFlight = new Set<string>();
+  /** The hooks' escalation pass: one at a time, when the log moved or every PASS_MS. */
+  private passInFlight = false;
+  private passSeq = -1;
+  private passAt = 0;
   private readonly pending = new Set<Promise<unknown>>();
   /** Claims present at startup: their TTLs restart now (heads-down.md §3). */
   private readonly renewed: Record<string, { renewedAt: number }> = {};
@@ -607,6 +618,7 @@ export class Runner {
     if (TERMINAL_RUN.has(state.status)) return this.finish(state);
 
     this.routeEscalations(state);
+    this.passEscalations();
     await this.retireMerged();
     await this.schedule(state);
     this.merge.feed(await this.store.state());
@@ -680,6 +692,7 @@ export class Runner {
       drafts = [...drafts, ...t.monitor.finish({ code: t.exit.code, signal: t.exit.signal, ...(reason && { reason }) })];
     }
     drafts = this.classifyExit(t, drafts);
+    drafts = this.markPaused(t, drafts, await this.store.state());
     drafts = this.unseen(t, drafts);
     try {
       await this.commit(drafts);
@@ -737,6 +750,17 @@ export class Runner {
       preDrafts: drafts,
       immediate: interruptedContext({ why: "Your worker was interrupted and its session could not be resumed.", fresh: true, ...(wipStat && { wipStat }) }),
     });
+  }
+
+  /**
+   * A worker that exits while its task or the run is paused stopped for the pause (it was told to):
+   * its agent.exited names the pause, so the watchdog resumes it on the same attempt.
+   */
+  private markPaused(t: Tracked, drafts: AnyEventDraft[], state: Readonly<BlackboardState>): AnyEventDraft[] {
+    if (state.status !== "paused" && !state.paused_tasks.includes(t.task)) return drafts;
+    const pause = [...this.log].reverse().find((e) => e.type === "execution.paused" && (e.payload.scope === "all" || e.payload.scope.includes(t.task)));
+    const paused = pause?.type === "execution.paused" ? scrubAndCap(pause.correlation ?? pause.payload.reason, 300) : "paused";
+    return drafts.map((d) => (d.type === "agent.exited" && d.payload.paused === undefined ? { ...d, payload: { ...d.payload, paused } } : d));
   }
 
   /** Rate limits, auth and credit failures in a worker's error output feed the circuit breaker. */
@@ -1009,12 +1033,14 @@ export class Runner {
     return p;
   }
 
+  /** The lead fallback, with obs.leadInFlight set until its call and its operations are done. */
   private startLead(id: string): void {
     if (this.leadInFlight.has(id)) return;
     this.leadInFlight.add(id);
     this.track(
       this.hooks
         .leadFallback(this.ctx, id)
+        .then((ops) => this.applyResolutionOps(ops ?? [], `lead ${id}`))
         .catch((e) => this.say(`lead fallback for ${id}: ${errText(e)}`))
         .finally(() => this.leadInFlight.delete(id))
     );
@@ -1025,8 +1051,32 @@ export class Runner {
     for (const esc of Object.values(state.escalations)) {
       if (esc.status !== "open" || this.routed.has(esc.id)) continue;
       this.routed.add(esc.id);
-      this.track(this.hooks.escalationRouter(this.ctx, structuredClone(esc)).catch((e) => this.say(`escalation router on ${esc.id}: ${errText(e)}`)));
+      this.track(
+        this.hooks
+          .escalationRouter(this.ctx, structuredClone(esc))
+          .then((ops) => this.applyResolutionOps(ops ?? [], `escalation ${esc.id}`))
+          .catch((e) => this.say(`escalation router on ${esc.id}: ${errText(e)}`))
+      );
     }
+  }
+
+  /**
+   * The hooks' escalation pass (owed resumes, concluded huddles), one at a time: when the log has
+   * moved since the last one, and every PASS_MS anyway (a resume the respawn gate held).
+   */
+  private passEscalations(): void {
+    const pass = this.hooks.escalationPass;
+    const seq = this.log.length ? this.log[this.log.length - 1].seq : 0;
+    if (!pass || this.passInFlight || (seq === this.passSeq && Date.now() - this.passAt < PASS_MS)) return;
+    this.passInFlight = true;
+    this.passSeq = seq;
+    this.passAt = Date.now();
+    this.track(
+      pass(this.ctx)
+        .then((ops) => this.applyResolutionOps(ops ?? [], "escalation pass"))
+        .catch((e) => this.say(`escalation pass: ${errText(e)}`))
+        .finally(() => (this.passInFlight = false))
+    );
   }
 
   // ==========================================================================
@@ -1321,21 +1371,32 @@ export class Runner {
     return this.startWorker(task, { claim: true, ...(im && { immediate: im }) });
   }
 
-  /**
-   * Process operations an orchestrator tool handed over (handoff.ts: resolve_escalation's resume,
-   * retry and kill), applied as WS10's runner hooks apply their own: each once per process.
-   */
+  /** Process operations an orchestrator tool handed over (handoff.ts: resolve_escalation's resume, retry and kill). */
   private async applyHandoffs(): Promise<void> {
-    for (const op of takeHandoffs(this.execution)) {
-      const key = `handoff\0${op.type}\0${op.key}`;
+    await this.applyResolutionOps(takeHandoffs(this.execution), "handed-over");
+  }
+
+  /**
+   * A resolution's process operations, from a handoff or a hook: kills first, then resumes and
+   * retries. Each is done once per process by its deterministic key, shared by both paths (a hook
+   * may offer again what was handed over). One that could not start now (paused, the respawn gate,
+   * a live worker) or failed is forgotten, so a later offer of it (the escalation pass) applies it.
+   */
+  async applyResolutionOps(ops: readonly ProcessOp[], from: string): Promise<void> {
+    const kills = ops.filter((op) => op.type === "kill_worker");
+    for (const op of [...kills, ...ops.filter((op) => op.type !== "kill_worker")]) {
+      const key = `resolution\0${op.type}\0${op.key}`;
       if (this.opsDone.has(key)) continue;
       this.opsDone.add(key);
       try {
+        let done = true;
         if (op.type === "kill_worker") await this.killWorker(op.agent, "killed", op.reason);
-        else if (op.type === "resume_worker") await this.resumeTask(op.task, { kind: "resolution", text: op.card });
-        else await this.resumeTask(op.task, { kind: "resolution", text: `Retry attempt ${op.attempt} after escalation resolution. Re-read the contract and your task.` });
+        else if (op.type === "resume_worker") done = await this.resumeTask(op.task, { kind: "resolution", text: op.card });
+        else done = await this.resumeTask(op.task, { kind: "resolution", text: `Retry attempt ${op.attempt} after escalation resolution. Re-read the contract and your task.` });
+        if (!done) this.opsDone.delete(key);
       } catch (e) {
-        this.say(`handed-over ${op.type} ${op.target}: ${errText(e)}`);
+        this.opsDone.delete(key);
+        this.say(`${from} ${op.type} ${op.target}: ${errText(e)}`);
       }
     }
   }
@@ -1586,7 +1647,10 @@ export class Runner {
 
 /** Run the runner of an execution until it stops; resolves with the process exit code. */
 export async function runRunner(execution: string, opts: RunnerOptions = {}): Promise<number> {
-  const r = new Runner(execution, { ...opts, signals: false });
+  const llm = executionLLM();
+  if (llm.unknown) console.error(`agent-roundtable run: ROUNDTABLE_EXECUTION_PROVIDER ${JSON.stringify(llm.unknown.slice(0, 40))} is not a provider (${PROVIDER_IDS.join(", ")}); using ${llm.provider}`);
+  // The real hooks: escalation routing, huddles, the lead fallback and goal review (WS10).
+  const r = new Runner(execution, { ...opts, hooks: opts.hooks ?? createRunnerHooks(), signals: false });
   const onSignal = (sig: string) => r.stop(`signal ${sig}`);
   if (opts.signals) {
     process.on("SIGTERM", onSignal);

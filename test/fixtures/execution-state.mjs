@@ -5,8 +5,14 @@
 // type throws, so a new watchdog event cannot slip through untested. The watchdog tests also check
 // that it agrees with the real reducer on every scenario.
 
+const BB = await import("../../dist/execution/blackboard.js");
+const EV = await import("../../dist/execution/events.js");
+const WD = await import("../../dist/execution/watchdog.js");
+
 export const MIN = 60_000;
+export const SEC = 1000;
 export const T0 = Date.parse("2026-10-15T12:00:00.000Z");
+export const RUNNER = { kind: "runner", id: "runner", pid: 1 };
 
 export function contract(over = {}) {
   return {
@@ -110,6 +116,42 @@ export const eventTypes = (actions) => emitted(actions).map((e) => e.type);
 export const ofType = (actions, type) => emitted(actions).filter((e) => e.type === type);
 export const opsOf = (actions) => actions.filter((a) => a.type !== "emit");
 export const escalations = (actions) => ofType(actions, "escalation.raised").map((e) => e.payload.escalation);
+/** Actions that are not standing repeats: what a pass newly decided. */
+export const fresh = (actions) => actions.filter((a) => !a.standing);
+
+// ---------------------------------------------------------------------------
+// A small runner simulator over the real store pieces
+// ---------------------------------------------------------------------------
+
+/**
+ * evaluate → actionsToDrafts → validateDraft → the strict reducer, with a log that observeEvents
+ * rebuilds the observations from on every step (as the runner would after a restart).
+ */
+export class World {
+  constructor(state, now = T0) {
+    this.state = structuredClone(state);
+    this.now = now;
+    this.log = [];
+  }
+  commit(drafts) {
+    for (const d of drafts) {
+      const v = EV.validateDraft(d);
+      const seq = this.state.seq + 1;
+      const event = { ...v, v: 1, id: `evt-${seq}`, seq, ts: new Date(this.now).toISOString(), execution: this.state.execution, mode: "execution", prev: "0".repeat(64), hash: "0".repeat(64) };
+      BB.applyInPlace(this.state, event, {}, { strict: true });
+      this.log.push(event);
+    }
+  }
+  emit(type, payload, source = RUNNER) {
+    this.commit([{ type, payload, source }]);
+  }
+  /** One watchdog pass; `base` is the runner's process observations. Returns the actions. */
+  step(base = {}, cfg = {}) {
+    const actions = WD.evaluate(this.state, this.now, WD.observeEvents(this.log, base), cfg);
+    this.commit(WD.actionsToDrafts(actions, { pid: 99 }));
+    return actions;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Minimal reducer
@@ -198,16 +240,19 @@ const HANDLERS = {
     if (p.decision !== undefined) h.decision = p.decision;
   },
   "budget.threshold_crossed": (s, p) => {
+    if (s.budget.thresholds_budget_usd !== undefined && s.budget.thresholds_budget_usd !== p.budget_usd) s.budget.thresholds_crossed = [];
+    s.budget.thresholds_budget_usd = p.budget_usd;
     if (!s.budget.thresholds_crossed.includes(p.pct)) s.budget.thresholds_crossed = [...s.budget.thresholds_crossed, p.pct].sort((a, b) => a - b);
   },
   "budget.exhausted": () => {},
   "watchdog.action": () => {},
   "watchdog.stall_detected": () => {},
   "watchdog.circuit_opened": (s, p) => {
-    s.watchdog.circuits[p.driver] = { open: true, until: p.until, reason: p.reason };
+    s.watchdog.circuits[p.driver] = { open: true, until: p.until, reason: p.reason, ...(p.opens !== undefined ? { opens: p.opens } : {}) };
   },
   "watchdog.circuit_closed": (s, p) => {
-    s.watchdog.circuits[p.driver] = { open: false };
+    const until = s.watchdog.circuits[p.driver]?.until;
+    s.watchdog.circuits[p.driver] = until !== undefined ? { open: false, until } : { open: false };
   },
   "watchdog.deadlock_detected": (s, p) => {
     s.watchdog.deadlocks.push([...p.cycle]);

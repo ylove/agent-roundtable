@@ -3,13 +3,14 @@
 //
 // closed ──(5 failures in 10 min with no success between, or any rate limit / auth / credit
 //           failure)──▶ open until now + backoff
-// open ──(now ≥ until)──▶ half-open: the runner may start one trial on the driver
+// open ──(now ≥ until)──▶ half-open: exactly one trial spawn on the driver (watchdog.ts gates it)
 // half-open ──(first outcome at or after until: success)──▶ closed
 //           ──(failure)──▶ open again, the backoff doubled: 1, 2, 4, 8, 16, then 30 minutes
 //
-// The blackboard keeps only {open, until, reason} per circuit, so the rules also take the
-// outcomes (failures and successes with their times) and the open/close history, which
-// outcomesFromEvents derives from the log; the runner adds the failures it sees in worker output.
+// The blackboard keeps {open, until, reason, opens} per circuit; the rules also take the
+// outcomes (failures and successes with their times), which outcomesFromEvents derives from the
+// log and the runner adds to from the driver and provider layers. Only those layers' messages
+// are classified: a worker's own command or test output never is (see classifyFailure).
 // Auth and credit failures are also an immediate emergency awaiting the human, listing the
 // alternatives: the other worker drivers and the contract's fallback model.
 // ============================================================================
@@ -52,28 +53,43 @@ const SPAWNABLE_DRIVERS: readonly WorkerDriverId[] = ["claude-code", "codex"];
 // Classification
 // ---------------------------------------------------------------------------
 
-// Status codes count only with an HTTP context ("HTTP 401", "status: 429", "Error code: 402",
-// "403 Forbidden"), so a line number or an assertion in ordinary error output is not mistaken for one.
-const STATUS = String.raw`\b(?:http(?:\/\d(?:\.\d)?)?|status|code)[ :=]*`;
-const CREDIT_RE = new RegExp(
-  String.raw`credit balance|insufficient[_ ]quota|exceeded your current quota|plan and billing details|payment required|out of credits|${STATUS}402\b`,
-  "i"
-);
-const AUTH_RE = new RegExp(
-  String.raw`not logged in|please run \/login|invalid (?:api|x-api)[ _-]?key|authentication[_ ]error|permission[_ ]error|oauth token (?:has )?expired|` +
-    String.raw`${STATUS}40[13]\b|\b401 unauthori[sz]ed|\b403 forbidden`,
-  "i"
-);
-const RATE_RE = new RegExp(
-  String.raw`${STATUS}(?:429|529)\b|too many requests|rate[_ ]limit(?:_error|ed| exceeded| reached)|overloaded_error|usage limit reached`,
-  "i"
-);
+/** Where a failure message came from. Never a worker's command or test output. */
+export type FailureSource = "driver" | "provider";
 
-/** credit before auth before rate_limit; anything else is a plain error. */
-export function classifyFailure(message: string): FailureKind {
-  if (CREDIT_RE.test(message)) return "credit";
-  if (AUTH_RE.test(message)) return "auth";
-  if (RATE_RE.test(message)) return "rate_limit";
+type Classified = Exclude<FailureKind, "error">;
+const ORDER: readonly Classified[] = ["credit", "auth", "rate_limit"];
+
+// A status code counts only inside an API error line: "API Error: 429 {…}" (the claude CLI) or
+// "Error code: 401 - {…}" (the Anthropic and OpenAI SDKs).
+const API_STATUS = String.raw`(?:api error|error code)\s*:?\s*`;
+
+/** Provider API error bodies: the error type or code fields, or an API error line with its status. */
+const PROVIDER: Readonly<Record<Classified, RegExp>> = {
+  credit: new RegExp(String.raw`credit balance is too low|\binsufficient_quota\b|${API_STATUS}402\b`, "i"),
+  auth: new RegExp(String.raw`\b(?:authentication_error|permission_error|invalid_api_key)\b|${API_STATUS}40[13]\b`, "i"),
+  rate_limit: new RegExp(String.raw`\b(?:rate_limit_error|overloaded_error|rate_limit_exceeded)\b|${API_STATUS}(?:429|529)\b`, "i"),
+};
+
+/** What the worker CLIs themselves print for those conditions (claude -p result text and stderr). */
+const DRIVER: Readonly<Record<Classified, RegExp>> = {
+  credit: /credit balance is too low/i,
+  auth: /not logged in\s*·|please run \/login|invalid api key\s*·|oauth token has expired/i,
+  rate_limit: /claude ai usage limit reached/i,
+};
+
+/**
+ * Classify a failure reported by the driver layer (a worker CLI's error result or stderr) or the
+ * provider layer (an API error body). Only provider-shaped messages count: an error type such as
+ * "rate_limit_error", "Credit balance is too low", "Not logged in · Please run /login", or a status
+ * inside an API error line. Command and test output must never be passed here: it is full of
+ * status codes and words like "credit" that mean nothing about the driver. Credit wins over auth,
+ * auth over rate_limit; anything else is a plain error.
+ */
+export function classifyFailure(message: string, opts: { source: FailureSource }): FailureKind {
+  for (const kind of ORDER) {
+    if (PROVIDER[kind].test(message)) return kind;
+    if (opts.source === "driver" && DRIVER[kind].test(message)) return kind;
+  }
   return "error";
 }
 
@@ -143,15 +159,18 @@ export function circuitRules(
   const open = (d: string, rule: string, reason: string, opens: number) => {
     const key = `circuit:${d}:${rule}`;
     const until = new Date(now + backoffMs(opens, cfg)).toISOString();
-    out.push(emitAction("circuit", key, d, [draft("watchdog.circuit_opened", { driver: d, reason, until }, key)]));
+    out.push(emitAction("circuit", key, d, [draft("watchdog.circuit_opened", { driver: d, reason, until, opens }, key)]));
   };
 
   for (const d of drivers) {
     const list = outcomes.filter((o) => o.driver === d);
     const h = own(input.history, d);
     const lastSuccess = list.reduce((t, o) => (o.kind === "success" ? Math.max(t, o.at) : t), -Infinity);
-    // The current incident: failures since the last success (or the last close).
-    const since = Math.max(h?.closedAt ?? -Infinity, lastSuccess);
+    // The current incident: failures since the last success, the last close, or (on a closed
+    // circuit) the end of its last open period, whose failures that incident already counted.
+    const c = own(state.watchdog.circuits, d);
+    const lastOpenEnd = c && !c.open && c.until !== undefined ? Date.parse(c.until) : NaN;
+    const since = Math.max(h?.closedAt ?? -Infinity, lastSuccess, Number.isFinite(lastOpenEnd) ? lastOpenEnd : -Infinity);
     const incident = list.filter((o) => o.kind !== "success" && o.at > since);
 
     const hard = incident.find((o) => o.kind === "auth" || o.kind === "credit");
@@ -189,7 +208,9 @@ export function circuitRules(
         const key = `circuit:${d}:closed:${trial.at}`;
         out.push(emitAction("circuit", key, d, [draft("watchdog.circuit_closed", { driver: d }, key)]));
       } else {
-        open(d, `reopened:${trial.at}`, `half-open trial failed: ${describe(trial)}`, Math.max(1, h?.opens ?? 1) + 1);
+        // The open count lives on the blackboard (opens); the log's history covers older states.
+        const opens = Math.max(1, own(state.watchdog.circuits, d)?.opens ?? 0, h?.opens ?? 0) + 1;
+        open(d, `reopened:${trial.at}`, `half-open trial failed: ${describe(trial)}`, opens);
       }
     }
   }
@@ -201,9 +222,9 @@ export function circuitRules(
 // ---------------------------------------------------------------------------
 
 /**
- * Outcomes and history from events: agent.exited with reason "error" is a failure (classified
- * from result_subtype) and "completed" a success, attributed to the agent's driver; circuit
- * opened/closed events give the history. Pass the log since the run started for exact backoff.
+ * Outcomes and history from events: agent.exited with reason "error" is a failure (its
+ * result_subtype classified as a driver message) and "completed" a success, attributed to the
+ * agent's driver; circuit opened/closed events give the history.
  */
 export function outcomesFromEvents(
   events: readonly AnyEvent[],
@@ -221,7 +242,7 @@ export function outcomesFromEvents(
       if (d === undefined) continue;
       if (p.reason === "error") {
         const message = p.result_subtype ?? `exit code ${p.code ?? "none"}`;
-        outcomes.push({ driver: d, at, kind: classifyFailure(message), message });
+        outcomes.push({ driver: d, at, kind: classifyFailure(message, { source: "driver" }), message });
       } else if (p.reason === "completed") outcomes.push({ driver: d, at, kind: "success" });
     } else if (e.type === "watchdog.circuit_opened") {
       const h = own(history, e.payload.driver) ?? { opens: 0 };

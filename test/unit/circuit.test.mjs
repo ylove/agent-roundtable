@@ -10,35 +10,43 @@ const fail = (minutesAgo, kind = "error", message = "boom", driver = "claude-cod
 const ok = (minutesAgo, driver = "claude-code") => ({ driver, at: T0 - minutesAgo * MIN, kind: "success" });
 const opened = (actions) => ofType(actions, "watchdog.circuit_opened").map((e) => e.payload);
 
-test("classifyFailure recognizes credit, auth and rate-limit messages", () => {
+test("classifyFailure recognizes provider-shaped credit, auth and rate-limit failures", () => {
+  const D = "driver";
+  const P = "provider";
   const cases = [
-    ["Your credit balance is too low to access the Anthropic API", "credit"],
-    ["Error code: 429 - insufficient_quota", "credit"],
-    ["You exceeded your current quota, please check your plan and billing details", "credit"],
-    ["Invalid API key · Please run /login", "auth"],
-    ["Not logged in", "auth"],
-    ["HTTP 401 Unauthorized", "auth"],
-    ["403 Forbidden", "auth"],
-    ["authentication_error: invalid x-api-key", "auth"],
-    ["OAuth token has expired", "auth"],
-    ["429 Too Many Requests", "rate_limit"],
-    ["rate_limit_error: Number of request tokens has exceeded your per-minute rate limit", "rate_limit"],
-    ["overloaded_error", "rate_limit"],
-    ["Claude AI usage limit reached|1760000000", "rate_limit"],
-    ["error_during_execution", "error"],
-    ["exit code 1 after 4013 ms", "error"],
-    ["", "error"],
-    // Words and numbers in ordinary error output are not provider failures.
-    ["TypeError at src/billing/invoice.ts:402", "error"],
-    ["AssertionError: expected 401 to equal 200", "error"],
-    ["src/login.ts: Forbidden import of fs", "error"],
-    ["line 429: unexpected token", "error"],
-    ["RateLimiter test failed", "error"],
-    ["HTTP/1.1 403", "auth"],
-    ["status: 529", "rate_limit"],
-    ["Error code: 402 Payment Required", "credit"],
+    // The claude CLI (driver layer)
+    ["Credit balance is too low", D, "credit"],
+    ["Invalid API key · Please run /login", D, "auth"],
+    ["Not logged in · Please run /login", D, "auth"],
+    ["OAuth token has expired. Please run /login", D, "auth"],
+    ['API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}', D, "rate_limit"],
+    ['API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', D, "rate_limit"],
+    ["Claude AI usage limit reached|1760000000", D, "rate_limit"],
+    ["API Error: 401 authentication_error", D, "auth"],
+    ["error_during_execution", D, "error"],
+    // Provider API error bodies and SDK error lines
+    ['{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}', P, "auth"],
+    ['{"type":"error","error":{"type":"permission_error","message":"..."}}', P, "auth"],
+    ["Error code: 429 - {'error': {'message': 'You exceeded your current quota', 'code': 'insufficient_quota'}}", P, "credit"],
+    ["Error code: 401 - {'error': {'code': 'invalid_api_key'}}", P, "auth"],
+    ["Error code: 402", P, "credit"],
+    ["Error code: 429 - {'error': {'code': 'rate_limit_exceeded'}}", P, "rate_limit"],
+    ['{"type":"error","error":{"type":"overloaded_error"}}', P, "rate_limit"],
+    // CLI phrasing is not accepted from the provider layer
+    ["Not logged in · Please run /login", P, "error"],
+    ["Claude AI usage limit reached|1760000000", P, "error"],
+    // Ordinary command and test output never counts, from either layer
+    ["expected status 401", D, "error"],
+    ["GET /admin 403 Forbidden", D, "error"],
+    ["returns 429 Too Many Requests", D, "error"],
+    ["credit balance is shown on the invoice page", D, "error"],
+    ["AssertionError: expected 'Not logged in' to be hidden", D, "error"],
+    ["TypeError at src/billing/invoice.ts:402", P, "error"],
+    ["HTTP 401 Unauthorized", P, "error"],
+    ["rate limit exceeded in RateLimiter.test.ts", D, "error"],
+    ["", D, "error"],
   ];
-  for (const [msg, want] of cases) assert.equal(classifyFailure(msg), want, msg);
+  for (const [msg, source, want] of cases) assert.equal(classifyFailure(msg, { source }), want, `${source}: ${msg}`);
 });
 
 test("backoff doubles from 1 minute and caps at 30", () => {
@@ -109,11 +117,11 @@ test("half-open: the first outcome after `until` closes the circuit or reopens i
 test("auth and credit failures are emergencies that list alternatives", () => {
   const cases = [
     ["Invalid API key · Please run /login", "credentials", /Sign claude-code in again/],
-    ["Your credit balance is too low", "money", /Add credit/],
+    ["Credit balance is too low", "money", /Add credit/],
   ];
   for (const [message, cls, hint] of cases) {
     const s = makeState();
-    const outcomes = [fail(1, classifyFailure(message), message)];
+    const outcomes = [fail(1, classifyFailure(message, { source: "driver" }), message)];
     const actions = circuitRules(s, T0, { outcomes });
     const [esc] = escalations(actions);
     assert.equal(esc.kind, "emergency");
@@ -161,4 +169,36 @@ test("outcomesFromEvents reads exits and circuit history from the log", () => {
     { driver: "codex", at: T0 - 19 * MIN, kind: "success" },
   ]);
   assert.deepEqual(history, { codex: { opens: 2, openedAt: T0 - 10 * MIN }, anthropic: { opens: 0, closedAt: T0 - 5 * MIN } });
+});
+
+test("the open count lives on the blackboard: backoff keeps doubling without the log's history", () => {
+  const s = makeState();
+  let state = settle(s, circuitRules(s, T0, { outcomes: [fail(0.5, "rate_limit")] }));
+  assert.equal(state.watchdog.circuits["claude-code"].opens, 1);
+  const untils = [];
+  let now = T0;
+  for (let i = 0; i < 6; i++) {
+    now = Date.parse(state.watchdog.circuits["claude-code"].until) + 1000;
+    const trial = { driver: "claude-code", at: now - 500, kind: "error", message: "still down" };
+    const actions = circuitRules(state, now, { outcomes: [trial] }); // no history passed
+    state = settle(state, actions);
+    untils.push((Date.parse(state.watchdog.circuits["claude-code"].until) - now) / MIN);
+  }
+  assert.deepEqual(untils, [2, 4, 8, 16, 30, 30]);
+  assert.equal(state.watchdog.circuits["claude-code"].opens, 7);
+});
+
+test("a closed circuit does not reopen on the incident it already handled, even without history", () => {
+  const s = makeState();
+  s.watchdog.circuits["claude-code"] = { open: true, until: new Date(T0 - 2 * MIN).toISOString(), reason: "429", opens: 1 };
+  const outage = [fail(5, "rate_limit"), fail(4, "rate_limit"), fail(3, "error")];
+  const closing = circuitRules(s, T0, { outcomes: [...outage, ok(1)] });
+  assert.deepEqual(eventTypes(closing), ["watchdog.circuit_closed"]);
+  const closed = settle(s, closing);
+  assert.deepEqual(closed.watchdog.circuits["claude-code"], { open: false, until: new Date(T0 - 2 * MIN).toISOString() });
+  // Later, without the success (a synthetic trial success is not in the log) and without history:
+  assert.deepEqual(circuitRules(closed, T0 + MIN, { outcomes: outage }), []);
+  // A new failure after the close opens it again, starting the backoff over.
+  const fresh = circuitRules(closed, T0 + MIN, { outcomes: [...outage, { driver: "claude-code", at: T0 + 30_000, kind: "rate_limit" }] });
+  assert.deepEqual(opened(fresh).map((p) => [p.opens, (Date.parse(p.until) - (T0 + MIN)) / MIN]), [[1, 1]]);
 });

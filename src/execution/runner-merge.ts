@@ -1,0 +1,422 @@
+// ============================================================================
+// The runner's merge queue: one job at a time, off the tick (git and the sandbox are slow)
+//
+//   merge      a task whose checks passed (merging) goes into the integration branch with
+//              mergeTask under git.lock. Success: merge.succeeded, task.merged, task.accepted and
+//              the task's leases released, in one batch; then the integration checks (smoke) run
+//              on the integration worktree. A conflict inside the task's leases is prepared in the
+//              task worktree (prepareConflictResolution) and the worker resumed with a "resolve
+//              conflicts" card; one outside them escalates as conflict. A lease violation rejects.
+//   recheck    a task amended (contract.amended lists it) after its checks passed has them run
+//              again before it merges; accepted work gets the integration checks again (WS04).
+//   complete   every task accepted: final validation on the integration branch, the goal review
+//              hook, then execution.completed (after pushing the integration branch and opening
+//              a pull request when visibility.github.pr asks for one). Never the base branch.
+// ============================================================================
+
+import { execFile } from "node:child_process";
+import { redact } from "../publishers/redact.js";
+import { childEnv } from "../security/child-env.js";
+import { scrubAndCap } from "../security/secrets.js";
+import { failureSignature, runCommandSpec, tailForTool } from "../sandbox/index.js";
+import { runGh, withBodyFile } from "../github/gh.js";
+import { assertSafeRef, integrationBranch, openRepo, runGit } from "./git.js";
+import { leaseDrafts, leasesFor, releaseLeases } from "./leases.js";
+import { classifyConflict, mergeDrafts, mergeTask, prepareConflictResolution, type MergeResult } from "./merge.js";
+import { runnerEscalation } from "./runner-hooks.js";
+import { conflictContext } from "./task-card.js";
+import type { AnyEventDraft, BlackboardState, CommandSpec } from "./types.js";
+import { ensureIntegrationWorktree, integrationWorktreePath, snapshotWip, taskWorktreePath } from "./worktrees.js";
+import type { Runner } from "./runner.js";
+
+const CHECK_MAX_MS = 15 * 60_000;
+const MERGE_RETRY_MS = 30_000;
+const MERGE_FAILURES = 3;
+
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const own = <T>(rec: Readonly<Record<string, T>>, key: string): T | undefined => (Object.hasOwn(rec, key) ? rec[key] : undefined);
+
+export interface ChecksResult {
+  ok: boolean;
+  failed: Array<{ id: string; status: "failed" | "timed_out" }>;
+  /** The end of each failing command's output (scrubbed). */
+  tails: Record<string, string>;
+}
+
+/** Every task accepted (or cancelled), at least one accepted, nothing claimed. */
+export function allAccepted(state: Readonly<BlackboardState>): boolean {
+  const tasks = Object.values(state.tasks);
+  return (
+    tasks.length > 0 &&
+    tasks.every((rt) => rt.state === "accepted" || rt.state === "cancelled") &&
+    tasks.some((rt) => rt.state === "accepted") &&
+    Object.keys(state.claims).length === 0
+  );
+}
+
+export class MergeQueue {
+  private running?: Promise<void>;
+  private readonly failures = new Map<string, { count: number; retryAt: number }>();
+  /** The last integration run: completion skips re-running the same checks at the same sha. */
+  private lastIntegration?: { sha: string; ids: string; ok: boolean };
+  private readonly completionTried = new Set<string>();
+  private recheckedAmendment = 0;
+
+  constructor(private readonly r: Runner) {}
+
+  busy(): boolean {
+    return this.running !== undefined;
+  }
+
+  /** Start the next job when none runs. */
+  feed(state: Readonly<BlackboardState>): void {
+    if (this.running || state.status !== "running") return;
+    const job = this.next(state);
+    if (!job) return;
+    this.running = this.r.background(
+      job()
+        .catch((e) => this.r.say(`merge queue: ${errText(e)}`))
+        .finally(() => {
+          this.running = undefined;
+        })
+    );
+  }
+
+  private next(state: Readonly<BlackboardState>): (() => Promise<void>) | undefined {
+    const now = Date.now();
+    for (const rt of Object.values(state.tasks)) {
+      const id = rt.spec.id;
+      if (rt.state !== "merging" || state.paused_tasks.includes(id)) continue;
+      if ((this.failures.get(id)?.retryAt ?? 0) > now) continue;
+      return () => this.mergeOne(id);
+    }
+    if (Object.values(state.tasks).some((rt) => rt.state === "merging")) return undefined;
+    const amended = this.r.lastSeq((e) => e.type === "contract.amended");
+    if (amended > this.recheckedAmendment) {
+      const checked = this.r.lastSeq((e) => e.type === "check.started" && e.payload.scope === "integration");
+      if (amended > checked && Object.values(state.tasks).some((rt) => rt.state === "accepted")) {
+        return async () => {
+          this.recheckedAmendment = amended;
+          await this.integrationChecks("the contract was amended");
+        };
+      }
+      this.recheckedAmendment = amended;
+    }
+    if (allAccepted(state)) return () => this.complete();
+    return undefined;
+  }
+
+  // ==========================================================================
+  // Merging one task
+  // ==========================================================================
+
+  private async mergeOne(task: string): Promise<void> {
+    const r = this.r;
+    const src = r.source;
+    let state = await r.store.state();
+    const rt = own(state.tasks, task);
+    if (rt?.state !== "merging") return;
+
+    // Checks that passed before an amendment touched the task run again first (WS04).
+    const amended = r.lastSeq((e) => e.type === "contract.amended" && e.payload.affected_tasks.includes(task));
+    const passed = r.lastSeq((e) => e.type === "task.checks_passed" && e.payload.task === task);
+    if (amended > passed && rt.spec.checks.length) {
+      r.say(`re-running the checks of ${task}: the contract was amended after they passed`);
+      const res = await this.runChecks(state, "task", rt.spec.checks, taskWorktreePath(r.execution, task), task);
+      if (!res.ok) {
+        await r.commit([{ type: "task.rejected", source: src, payload: { task, reasons: res.failed.map((f) => `check ${f.id} ${f.status === "timed_out" ? "timed out" : "failed"} after the contract was amended`) } }]);
+        return;
+      }
+      await r.commit([{ type: "task.checks_passed", source: src, payload: { task, commands: [...rt.spec.checks] } }]);
+      state = await r.store.state();
+    }
+
+    const leases = leasesFor(state, task);
+    let m: MergeResult;
+    try {
+      m = await mergeTask(r.header, task, { leases });
+      this.failures.delete(task);
+    } catch (e) {
+      const f = { count: (this.failures.get(task)?.count ?? 0) + 1, retryAt: Date.now() + MERGE_RETRY_MS };
+      this.failures.set(task, f);
+      r.say(`merging ${task} failed (${f.count}): ${errText(e)}`);
+      if (f.count >= MERGE_FAILURES) {
+        await r.store.transact(({ state: s }) => ({
+          events: runnerEscalation(s, { key: `merge_error:${task}:${rt.last_commit ?? ""}`, task, kind: "blocker", summary: `Merging task ${task} into the integration branch keeps failing: ${scrubAndCap(errText(e), 1500)}`, block: true }, src),
+        }));
+      }
+      return;
+    }
+
+    if (m.ok) {
+      const sha = m.sha;
+      await r.store.transact(({ state: s }) => {
+        if (own(s.tasks, task)?.state !== "merging") return { events: [] };
+        return {
+          events: [
+            mergeDrafts.succeeded(task, sha, src),
+            mergeDrafts.taskMerged(task, sha, src),
+            { type: "task.accepted", source: src, payload: { task } },
+            ...releaseLeases(s, { task }, src),
+          ] as AnyEventDraft[],
+        };
+      });
+      r.say(`merged ${task} into ${integrationBranch(r.execution)} at ${sha.slice(0, 12)}${m.already ? " (already merged)" : ""}`);
+      await this.integrationChecks(`after merging ${task}`, sha);
+      return;
+    }
+
+    const agent = own(state.claims, task)?.agent ?? rt.agent ?? "runner";
+    if (m.reason === "violation") {
+      await r.commit([
+        leaseDrafts.violation(task, agent, m.violations, src),
+        { type: "task.rejected", source: src, payload: { task, reasons: [`Changes outside the task's leases cannot be merged: ${m.violations.slice(0, 20).join(", ")}`], violations: m.violations.slice(0, 50) } },
+      ]);
+      return;
+    }
+
+    // A conflict.
+    if (classifyConflict(m.conflicts, leases) === "outside") {
+      await r.store.transact(({ state: s }) => ({
+        events: [
+          mergeDrafts.conflicted(task, m.conflicts, src),
+          ...runnerEscalation(
+            s,
+            {
+              key: `conflict:${task}:${rt.last_commit ?? ""}:${m.conflicts.join(",")}`,
+              task,
+              kind: "conflict",
+              summary: `Task ${task} conflicts with the integration branch outside its leases: ${m.conflicts.slice(0, 20).join(", ")}.`,
+              question: "Who resolves these files?",
+              options: ["Lease the files to the task and resume it", "Resolve them by hand on the integration branch", "Reassign the task"],
+              block: true,
+            },
+            src
+          ),
+        ],
+      }));
+      r.say(`${task} conflicts outside its leases (${m.conflicts.join(", ")}): escalated`);
+      return;
+    }
+    await r.commit([mergeDrafts.conflicted(task, m.conflicts, src)]);
+    const exit = await r.stopTaskWorker(task, "killed", "its merge conflicted");
+    const wt = taskWorktreePath(r.execution, task);
+    await snapshotWip(wt, "rt: wip snapshot", leases);
+    const prep = await prepareConflictResolution(r.header, task);
+    if (!prep.conflicts.length) {
+      // The integration branch merged cleanly into the task branch: the next attempt merges.
+      await r.commit(exit);
+      return;
+    }
+    r.say(`${task} conflicts in ${prep.conflicts.join(", ")}: resuming its worker to resolve them`);
+    const rejected: AnyEventDraft = { type: "task.rejected", source: src, payload: { task, reasons: [`Merge conflicts to resolve: ${prep.conflicts.slice(0, 20).join(", ")}`] } };
+    await r.startWorker(task, {
+      claim: false,
+      reopen: true,
+      preDrafts: [...exit, rejected],
+      immediate: conflictContext({ files: prep.conflicts, integrationBranch: integrationBranch(r.execution) }),
+    });
+  }
+
+  // ==========================================================================
+  // Checks in the sandbox
+  // ==========================================================================
+
+  /** Run contract commands as checks of `scope` in `workdir`: check.started, then passed, failed or timed_out. */
+  async runChecks(state: Readonly<BlackboardState>, scope: "task" | "integration", ids: readonly string[], workdir: string, task?: string): Promise<ChecksResult> {
+    const r = this.r;
+    const src = r.source;
+    const backend = await r.sandbox();
+    const commands = state.contract?.validation.commands ?? [];
+    const image = state.contract?.sandbox.image || undefined;
+    const out: ChecksResult = { ok: true, failed: [], tails: {} };
+    const at = task !== undefined ? { task } : {};
+    for (const id of ids) {
+      const spec: CommandSpec | undefined = commands.find((c) => c.id === id);
+      await r.commit([{ type: "check.started", source: src, payload: { command_id: id, scope, ...at } }]);
+      let output: string;
+      let exit: number | null = null;
+      let timedOut = false;
+      let duration = 0;
+      if (!spec) output = `The contract defines no command ${id}`;
+      else {
+        try {
+          const res = await runCommandSpec(backend, spec, workdir, { ...(image && { image }), maxTimeoutMs: CHECK_MAX_MS });
+          ({ output, exit, timedOut, durationMs: duration } = res);
+        } catch (e) {
+          output = scrubAndCap(errText(e), 4000);
+        }
+      }
+      const blob = await r.store.putBlob(output || "(no output)");
+      if (timedOut) {
+        out.ok = false;
+        out.failed.push({ id, status: "timed_out" });
+        out.tails[id] = tailForTool(output, 2000);
+        await r.commit([{ type: "check.timed_out", source: src, payload: { command_id: id, scope, ...at } }]);
+      } else if (exit === 0) {
+        await r.commit([{ type: "check.passed", source: src, payload: { command_id: id, scope, ...at, duration_ms: duration } }]);
+      } else {
+        out.ok = false;
+        out.failed.push({ id, status: "failed" });
+        out.tails[id] = tailForTool(output, 2000);
+        await r.commit([{ type: "check.failed", source: src, payload: { command_id: id, scope, ...at, exit, signature: failureSignature(id, output), output_blob: blob } }]);
+      }
+    }
+    return out;
+  }
+
+  /** The smoke checks on the integration worktree (after a merge, or after an amendment). */
+  private async integrationChecks(why: string, sha?: string): Promise<ChecksResult | undefined> {
+    const state = await this.r.store.state();
+    const ids = this.r.integrationCheckIds(state);
+    if (!ids.length) return undefined;
+    const head = sha ?? (await ensureIntegrationWorktree(this.r.header)).head;
+    const res = await this.runChecks(state, "integration", ids, integrationWorktreePath(this.r.execution));
+    this.lastIntegration = { sha: head, ids: ids.join(","), ok: res.ok };
+    this.r.say(`integration checks ${why}: ${res.ok ? "passed" : `failed (${res.failed.map((f) => f.id).join(", ")})`}`);
+    return res;
+  }
+
+  // ==========================================================================
+  // Completion
+  // ==========================================================================
+
+  private async complete(): Promise<void> {
+    const r = this.r;
+    const state = await r.store.state();
+    if (!allAccepted(state) || r.hasAnyLiveWorker()) return;
+    const sha = (await ensureIntegrationWorktree(r.header)).head;
+    const key = `${sha}|${Object.keys(state.tasks).join(",")}|${state.contract?.version ?? 0}`;
+    if (this.completionTried.has(key)) return;
+    this.completionTried.add(key);
+
+    // 1. Final validation on the integration branch.
+    const known = new Set((state.contract?.validation.commands ?? []).map((c) => c.id));
+    const final = (state.contract?.validation.final ?? []).filter((id) => known.has(id));
+    const reuse = this.lastIntegration && this.lastIntegration.sha === sha && this.lastIntegration.ids === final.join(",") && this.lastIntegration.ok;
+    if (final.length && !reuse) {
+      const res = await this.runChecks(state, "integration", final, integrationWorktreePath(r.execution));
+      this.lastIntegration = { sha, ids: final.join(","), ok: res.ok };
+      if (!res.ok) {
+        const failed = res.failed.map((f) => f.id).join(", ");
+        await r.store.transact(({ state: s }) => ({
+          events: runnerEscalation(
+            s,
+            {
+              key: `final_validation:${sha}`,
+              kind: "blocker",
+              summary: `Every task is accepted, but the final validation failed on the integration branch (${sha.slice(0, 12)}): ${failed}.`,
+              question: "Add a task to fix it, amend the validation, or accept the result as it is?",
+              options: ["Add a fix-up task with amend_contract", "Amend the final validation", "Abort the run"],
+            },
+            r.source
+          ),
+        }));
+        r.say(`final validation failed (${failed}): escalated`);
+        return;
+      }
+    }
+
+    // 2. The goal review (WS10's lead; the default says COMPLETE).
+    const review = await r.hooks.goalReview(r.ctx, { integrationSha: sha, state });
+    if (review.verdict !== "COMPLETE") {
+      r.say(`goal review: ${review.verdict}${review.reason ? ` (${review.reason})` : ""}; the run stays open`);
+      return;
+    }
+
+    // 3. A pull request, when asked for; then execution.completed.
+    let prUrl: string | undefined;
+    const gh = r.githubSettings();
+    if (gh?.pr && gh.repo) {
+      try {
+        prUrl = await openPullRequest(r, state, gh.repo, sha);
+        r.say(`opened ${prUrl}`);
+      } catch (e) {
+        r.say(`no pull request: ${errText(e)}`);
+      }
+    }
+    await r.store.transact(({ state: s }) => {
+      if (s.status !== "running" || !allAccepted(s)) return { events: [] };
+      return { events: [{ type: "execution.completed", source: r.source, payload: { integration_sha: sha, ...(prUrl && { pr_url: prUrl }) } }] };
+    });
+    r.say(`the run completed at ${sha.slice(0, 12)}`);
+  }
+}
+
+// ============================================================================
+// Pushing the integration branch and opening the pull request
+// ============================================================================
+
+const REMOTE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** The remote whose URL names `repo` (owner/name), else origin. */
+async function remoteFor(repoRoot: string, repo: string): Promise<string> {
+  const t = await openRepo(repoRoot);
+  const r = await runGit(t, ["remote", "-v"]);
+  const want = repo.toLowerCase();
+  for (const line of r.stdout.split("\n")) {
+    const m = /^(\S+)\s+(\S+)\s+\(push\)$/.exec(line.trim());
+    if (!m) continue;
+    const url = m[2].toLowerCase().replace(/\.git$/, "");
+    if (url.endsWith(`/${want}`) || url.endsWith(`:${want}`)) return m[1];
+  }
+  return "origin";
+}
+
+/**
+ * Push refs/heads/<integration> to the same name on the remote, never another ref: the base
+ * branch is out of reach by construction. Git's hardening stays on except transports (a push
+ * needs one); hooks never run (--no-verify, core.hooksPath=/dev/null).
+ */
+export async function pushIntegrationBranch(repoRoot: string, executionId: string, repo: string, base: string): Promise<void> {
+  const branch = integrationBranch(executionId);
+  assertSafeRef(branch);
+  if (branch === base || `refs/heads/${branch}` === base) throw new Error(`Refusing to push: the base branch ${base} is the integration branch`);
+  const remote = await remoteFor(repoRoot, repo);
+  if (!REMOTE_RE.test(remote)) throw new Error(`Unusable remote name ${remote}`);
+  const t = await openRepo(repoRoot);
+  const args = [
+    "--git-dir", t.gitDir, "--work-tree", t.workTree,
+    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.pager=cat", "-c", "gc.auto=0",
+    "-c", "maintenance.auto=false", "-c", "submodule.recurse=false", "-c", "push.recurseSubmodules=no",
+    "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never",
+    "push", "--no-verify", "--porcelain", remote, `refs/heads/${branch}:refs/heads/${branch}`,
+  ];
+  await new Promise<void>((resolve, reject) => {
+    execFile("git", args, { cwd: t.workTree, env: childEnv("git", { GIT_TERMINAL_PROMPT: "0" }), timeout: 120_000, maxBuffer: 1 << 20, shell: false }, (err, _out, stderr) => {
+      if (err) reject(new Error(`git push ${remote} ${branch} failed: ${scrubAndCap(String(stderr || err.message), 500)}`));
+      else resolve();
+    });
+  });
+}
+
+function prBody(state: Readonly<BlackboardState>, sha: string): string {
+  const c = state.contract!;
+  const tasks = Object.values(state.tasks).filter((rt) => rt.state === "accepted");
+  const lines = [
+    `Heads-down run \`${state.execution}\` (contract ${c.id} v${c.version}).`,
+    "",
+    `**Goal:** ${state.goal?.ultimate ?? c.goal.ultimate}`,
+    "",
+    `**Tasks (${tasks.length}):**`,
+    ...tasks.map((rt) => `- \`${rt.spec.id}\`: ${rt.spec.title}${own(state.diffs, rt.spec.id)?.stat ? ` (${state.diffs[rt.spec.id].stat})` : ""}`),
+    "",
+    `Integration head: \`${sha}\`. Review before merging: nothing here merges by itself.`,
+  ];
+  return redact(lines.join("\n")).text;
+}
+
+/** Push the integration branch and open a pull request into the contract's base branch; returns its URL. */
+export async function openPullRequest(r: Runner, state: Readonly<BlackboardState>, repo: string, sha: string): Promise<string> {
+  const base = state.contract?.scope.base_ref;
+  if (!base) throw new Error("the contract names no base branch");
+  assertSafeRef(base);
+  await pushIntegrationBranch(r.header.repo_root, r.execution, repo, base);
+  const title = redact(`[roundtable] ${state.contract!.title}`).text.slice(0, 200);
+  const out = await withBodyFile(prBody(state, sha), (file) =>
+    runGh(["pr", "create", "--repo", repo, "--base", base, "--head", integrationBranch(r.execution), "--title", title, "--body-file", file], { timeoutMs: 60_000 })
+  );
+  const url = out.stdout.trim().split("\n").pop() ?? "";
+  if (!/^https:\/\/\S+$/.test(url)) throw new Error("gh pr create did not print a URL");
+  return url;
+}

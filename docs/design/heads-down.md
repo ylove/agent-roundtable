@@ -600,3 +600,16 @@ On the worker server, the worker tools are bound to the token. On the orchestrat
 - **Documentation.** `SECURITY.md`, `docs/THREAT_MODEL.md` (STRIDE for each trust boundary, including prompt injection from repo content) and `docs/SECURITY_CONTROLS.md`.
 
 Supported platforms are macOS and Linux. Windows is not supported for heads-down runs in 1.0.
+
+## 17. Shared primitives (landed in WS03a)
+
+These modules exist so the workstreams can run in parallel without depending on each other. Each workstream must reuse them rather than write its own.
+
+| Module | API |
+|---|---|
+| `src/execution/types.ts` | Every shared type above, plus `EVENT_TYPES` (checked at compile time against the catalog), `GENESIS_HASH`, `CONTRACT_SCHEMA` and `CONTRACT_DEFAULTS` |
+| `src/ids.ts` | `newId(prefix)`, `newExecutionId()`, `executionTag(id)`, `EXECUTION_ID_RE` |
+| `src/security/fs-safe.ts` | `mkdirPrivate`, `writeFileAtomic`, `isContained`, `normalizeRelPath` |
+| `src/security/child-env.ts` | `childEnv(profile, extra?, source?)`, `SECRET_NAME_RE`. Profiles: claude-worker, codex-worker, local-meeting, git, gh, docker, browser, open, sandbox-local, cloud-cli, runner |
+| `src/security/secrets.ts` | `scrubSecrets(text)` (exact env secret values first, then credential patterns), `scrub`, `scrubAndCap` |
+| `src/publishers/redact.ts` | `redactSecrets` and `redactPII`. `redact` composes the two, so public output is unchanged |

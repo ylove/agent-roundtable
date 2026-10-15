@@ -601,9 +601,9 @@ test("tools fail closed on malformed or entirely unknown restrictions", () => {
   const o = dirs();
   const targetPath = fixture(join(o.agentsDir, "inherit.md"), "Body");
   const options = { ...o, mode: "improve", targetPath, timestamp: "now" };
-  assert.ok(f.planAgentFiles(improveSpec(), options).warnings.includes("tools omitted: the agent inherits all tools"));
+  assert.ok(f.planAgentFiles(improveSpec(), options).warnings.includes(f.IMPROVE_NO_TOOLS_WARNING));
   fs.writeFileSync(targetPath, "---\ntools: Read\n---\nBody");
-  assert.ok(!f.planAgentFiles(improveSpec(), options).warnings.includes("tools omitted: the agent inherits all tools"));
+  assert.ok(!f.planAgentFiles(improveSpec(), options).warnings.includes(f.IMPROVE_NO_TOOLS_WARNING));
 });
 
 test("concurrent edits preserve the original and save an exclusive proposal plus skills", () => {

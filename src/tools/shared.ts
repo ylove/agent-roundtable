@@ -61,7 +61,7 @@ export const PROVIDER_PROPS = {
   base_url: {
     type: "string",
     description:
-      'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent to whichever base URL is used.',
+      'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address.',
   },
 } as const;
 

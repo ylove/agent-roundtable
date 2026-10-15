@@ -14,6 +14,8 @@ export const TOOL_ALLOWLIST = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", 
 /** A new agent whose definition lists no tools gets these (read-only), never Claude Code's inherit-all default. */
 export const DEFAULT_AGENT_TOOLS = ["Read", "Grep", "Glob"] as const;
 export const DEFAULT_TOOLS_WARNING = `tools omitted: defaulting to ${DEFAULT_AGENT_TOOLS.join(", ")} (read-only)`;
+/** Improvement keeps a target's missing tools line (the user's choice), and says what that means. */
+export const IMPROVE_NO_TOOLS_WARNING = "tools omitted: the target has no tools line, so it still inherits every tool; list tools to restrict it";
 export const RESERVED_SKILL_NAMES = ["synced", "anthropic-skills"];
 
 /** A reusable procedure, either newly authored or attached by its existing name. */
@@ -560,7 +562,7 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
     assertReadableFrontmatter(frontmatter, agentPath);
     const { data } = frontmatter;
     if (!spec.tools && data.tools == null) {
-      warnings.push("tools omitted: the agent inherits all tools");
+      warnings.push(IMPROVE_NO_TOOLS_WARNING);
     }
     agentName = (typeof data.name === "string" || typeof data.name === "number") && String(data.name).trim()
       ? String(data.name).trim() : agentKey(agentPath);

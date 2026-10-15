@@ -23,6 +23,11 @@ export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: JsonSchema & { type: "object" };
+  /**
+   * A different schema in some modes (worker tools: the orchestrator server's copy also takes
+   * agent_token and execution_id). Listing and validation use it in that mode. Never sent to clients.
+   */
+  inputSchemaByMode?: Partial<Record<ToolMode, JsonSchema & { type: "object" }>>;
   annotations: ToolAnnotations;
   /** Servers that list and accept this tool. Never sent to clients. */
   modes: readonly ToolMode[];
@@ -32,10 +37,23 @@ export interface ToolDefinition {
 
 export type ToolArgs = Record<string, unknown> | undefined;
 
+/** What a call knows besides its arguments: the server's mode and, when the client asked, a progress channel. */
+export interface ToolCallContext {
+  mode: ToolMode;
+  /** Sends an MCP progress notification; absent when the client sent no progressToken. Never throws. */
+  progress?: (progress: number, total?: number, message?: string) => void;
+  signal?: AbortSignal;
+}
+
 /** One group of tools (deliberation, and later contract, execution, worker) with its own dispatcher. */
 export interface ToolGroup {
   definitions: readonly ToolDefinition[];
-  handle(name: string, args: ToolArgs): Promise<CallToolResult>;
+  handle(name: string, args: ToolArgs, ctx?: ToolCallContext): Promise<CallToolResult>;
+}
+
+/** The schema a mode lists and validates against. */
+export function schemaFor(definition: ToolDefinition, mode: ToolMode): JsonSchema & { type: "object" } {
+  return definition.inputSchemaByMode?.[mode] ?? definition.inputSchema;
 }
 
 // Annotation presets. Hints are advisory for clients; they never gate a call.

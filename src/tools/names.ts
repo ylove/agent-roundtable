@@ -51,3 +51,20 @@ export const IMPROVE_AGENT = "improve_agent";
 
 // Diagnostics
 export const DEBUG_ENV = "debug_env";
+
+// === Execution (heads-down) ===
+
+// Run (orchestrator server only)
+export const JOIN_EXECUTION = "join_execution";
+
+// Worker tools: bound to the token on the worker server; on the orchestrator server they take agent_token
+export const READ_BLACKBOARD = "read_blackboard";
+export const CLAIM_TASK = "claim_task";
+export const LEASE = "lease";
+export const POST_UPDATE = "post_update";
+export const RUN_COMMAND = "run_command";
+export const SUBMIT_WORK = "submit_work";
+export const ESCALATE = "escalate";
+
+/** The worker server's whole tool list. */
+export const WORKER_TOOL_NAMES = [READ_BLACKBOARD, CLAIM_TASK, LEASE, POST_UPDATE, RUN_COMMAND, SUBMIT_WORK, ESCALATE] as const;

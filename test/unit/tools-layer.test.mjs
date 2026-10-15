@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 const { tools, toolsFor, handleToolCall } = await import("../../dist/tools.js");
 const names = await import("../../dist/tools/names.js");
 const { deliberationTools } = await import("../../dist/tools/deliberation.js");
+const { workerTools } = await import("../../dist/tools/worker.js");
 
 const HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"];
 const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
 test("every tool has a title and all four MCP hints", () => {
-  assert.equal(tools.length, 22);
+  assert.equal(tools.length, 30);
+  assert.equal(toolsFor("worker").length, 7);
   for (const tool of tools) {
     assert.equal(typeof tool.annotations?.title, "string", tool.name);
     assert.ok(tool.annotations.title.length > 0, tool.name);
@@ -39,27 +41,39 @@ test("annotation values: read-only diagnostics and listings, file-writing worksh
   }
 });
 
-test("the mode filter: every existing tool is orchestrator-only, the worker list is empty", () => {
+test("the mode filter: deliberation tools and join_execution are orchestrator-only; the worker server lists the seven worker tools", () => {
   assert.deepEqual(toolsFor("orchestrator"), tools);
-  assert.deepEqual(toolsFor("worker"), []);
   for (const def of deliberationTools) assert.deepEqual([...def.modes], ["orchestrator"], def.name);
+  assert.deepEqual(toolsFor("worker").map((t) => t.name), [...names.WORKER_TOOL_NAMES]);
+  for (const def of workerTools) {
+    assert.deepEqual([...def.modes], def.name === "join_execution" ? ["orchestrator"] : ["worker", "orchestrator"], def.name);
+  }
+  // The same tool, two schemas: the orchestrator's copy authenticates with agent_token.
+  const w = Object.fromEntries(toolsFor("worker").map((t) => [t.name, t]));
+  for (const name of names.WORKER_TOOL_NAMES) {
+    assert.equal(w[name].inputSchema.properties.agent_token, undefined, name);
+    assert.deepEqual(byName[name].inputSchema.required.slice(0, 2), ["execution_id", "agent_token"], name);
+  }
 });
 
 test("listed tools carry no internal fields or schema extensions", () => {
-  const serialized = JSON.stringify(tools);
-  assert.doesNotMatch(serialized, /"modes"|"x-[a-z-]+"/);
-  for (const tool of tools) assert.deepEqual(Object.keys(tool).sort(), ["annotations", "description", "inputSchema", "name"], tool.name);
+  for (const list of [tools, toolsFor("worker")]) {
+    const serialized = JSON.stringify(list);
+    assert.doesNotMatch(serialized, /"modes"|"inputSchemaByMode"|"x-[a-z-]+"/);
+    for (const tool of list) assert.deepEqual(Object.keys(tool).sort(), ["annotations", "description", "inputSchema", "name"], tool.name);
+  }
 });
 
 test("a tool not offered in a mode is unknown there", async () => {
   const r = await handleToolCall("list_meetings", {}, "worker");
   assert.equal(r.isError, true);
   assert.equal(r.content[0].text, "Error: Unknown tool: list_meetings");
+  assert.equal((await handleToolCall("join_execution", { execution_id: "exe-0000000000abcdef", agent: "x" }, "worker")).content[0].text, "Error: Unknown tool: join_execution");
   assert.equal((await handleToolCall("no_such_tool", {})).content[0].text, "Error: Unknown tool: no_such_tool");
   assert.equal((await handleToolCall("list_meetings", {})).content[0].text, "No active meetings.");
 });
 
-test("names.ts: mode labels and one constant per deliberation tool", () => {
+test("names.ts: mode labels and one constant per tool", () => {
   assert.equal(names.AT_THE_TABLE, "at the table");
   assert.equal(names.HEADS_DOWN, "heads-down");
   assert.deepEqual(names.MODE_LABELS, { deliberation: "at the table", execution: "heads-down" });

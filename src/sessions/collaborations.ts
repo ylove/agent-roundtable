@@ -457,10 +457,13 @@ async function openCollaboration(
     } catch (e) {
       if (!publicChannel) {
         // The caller never receives this id. A private prototype session is removed with its board and
-        // sandbox (it cannot prototype without them); a plain session is left as before.
+        // sandbox (it cannot prototype without them), archived first with every prototype stubbed; a plain
+        // session is left as before.
         if (prototype) {
-          collaborations.delete(collaborationId);
           await closePrototypeTracker(prototype, "ended");
+          const reason = e instanceof Error ? e.message : String(e);
+          archiveCollaboration(collaboration, collaborationHistoryView(collaboration), `Auto-run stopped: ${reason}`);
+          collaborations.delete(collaborationId);
         }
         throw e;
       }

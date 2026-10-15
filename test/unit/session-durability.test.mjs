@@ -377,6 +377,22 @@ describe("session archive", () => {
       /from_session not found: collab-nowhere1\..*or of any archived session/);
   });
 
+  test("a private prototype collaboration whose auto-run fails is archived before it is removed", async (t) => {
+    let n = 0;
+    stubFetch(t, () => (n++ === 0 ? reply("Opening turn") : json(500, { error: { message: "auto-run failed" } })));
+    const topic = "Auto-run failure topic";
+    await assert.rejects(
+      startCollaboration([sample, plain], topic, { ...opts, maxRounds: 2, autoRun: true, runRounds: 1, prototype: true }),
+      /auto-run failed/
+    );
+    const listed = archive.listArchivedSessions().filter((s) => s.topic === topic);
+    assert.equal(listed.length, 1);
+    assert.equal(collaborations.has(listed[0].id), false);
+    const r = archive.readArchivedSession(listed[0].id);
+    assert.match(r.summary, /^Auto-run stopped: .*auto-run failed/);
+    assert.deepEqual(r.turns.map((x) => x.content), ["Opening turn"]);
+  });
+
   test("from_session on a workshop archive reloads the participants' own files, not a same-key agent in AGENTS_DIR", async (t) => {
     const agentsDir = process.env.ROUNDTABLE_AGENTS_DIR;
     mkdirSync(agentsDir, { recursive: true });

@@ -175,6 +175,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
     reason: "'completed'|'error'|'killed'|'lost'|'stalled'|'budget'|'attestation'",
     "result_subtype?": "s",
     "usage?": TOKENS,
+    "paused?": "t",
   },
   "agent.left": { agent: "s", reason: "t" },
 

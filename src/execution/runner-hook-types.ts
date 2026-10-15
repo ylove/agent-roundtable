@@ -32,4 +32,9 @@ export interface RunnerHooks {
   escalationRouter(ctx: RunnerContext, escalation: Escalation): Promise<void>;
   leadFallback(ctx: RunnerContext, escalationId: string): Promise<void>;
   goalReview(ctx: RunnerContext, input: GoalReviewInput): Promise<GoalReview>;
+  /**
+   * Every runner pass: what resolutions left undone after a failure or a crash (a resume not yet
+   * started, a huddle concluded but not applied). Idempotent; its operations may repeat.
+   */
+  escalationPass?(ctx: RunnerContext): Promise<void>;
 }

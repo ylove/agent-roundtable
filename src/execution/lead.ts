@@ -18,13 +18,13 @@ import {
   askPersona,
   awaitHuman,
   cap,
+  directiveField,
+  directiveOf,
   errText,
   fencedJson,
   own,
-  parseField,
   recordDrafts,
   resolveEscalation,
-  verdictOf,
   type EscalationOptions,
   type HookCtx,
   type ProcessOp,
@@ -108,14 +108,15 @@ async function decide(ctx: HookCtx, id: string, opts: EscalationOptions): Promis
     await recordDrafts(ctx.store, meter.take(source, id));
   }
 
-  const parsed = verdictOf(answer, "Action", LEAD_ACTIONS);
-  const proposed: LeadAction | "UNCLEAR" = parsed;
-  const decision = parseField(answer, "Decision");
+  // Only the lead's own directive lines count: the escalation it quotes is agent-written.
+  const proposed = directiveOf(answer, "Action", LEAD_ACTIONS);
+  const decision = directiveField(answer, "Decision");
   let applied: ResolutionAction = "await_human";
   let reason: string | undefined;
   let ops: ProcessOp[] = [];
 
   if (proposed === "UNCLEAR") reason = "the lead's answer had no Action line";
+  else if (proposed === "CONFLICT") reason = "the lead's answer had conflicting Action lines";
   else if (NEEDS[proposed] && !c.authority.may.includes(NEEDS[proposed]!)) reason = `${proposed} needs "${NEEDS[proposed]}", which authority.may does not grant`;
   else if (proposed !== "await_human" && proposed !== "dismiss" && !decision) reason = "the lead's answer had no Decision line";
   else if (proposed !== "await_human") {
@@ -126,7 +127,7 @@ async function decide(ctx: HookCtx, id: string, opts: EscalationOptions): Promis
       else r.amendment = patch;
     }
     if (proposed === "reassign") {
-      const persona = parseField(answer, "Persona", 300)?.split(/\s/)[0]?.replace(/^[`"']+|[`"'.,]+$/g, "");
+      const persona = directiveField(answer, "Persona", 300)?.split(/\s/)[0]?.replace(/^[`"']+|[`"'.,]+$/g, "");
       if (!persona) reason = "reassign without a Persona line";
       else r.persona = persona;
     }

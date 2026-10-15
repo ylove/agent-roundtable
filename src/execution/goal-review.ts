@@ -20,12 +20,12 @@ import {
   actorSource,
   askPersona,
   cap,
+  directiveOf,
   errText,
   ev,
   oneLine,
   own,
   recordDrafts,
-  verdictOf,
   type HookCtx,
 } from "./escalation.js";
 import { AuthorityError, amendContract } from "./contract-lifecycle.js";
@@ -160,9 +160,10 @@ async function review(ctx: HookCtx): Promise<GoalReviewResult> {
   } finally {
     await recordDrafts(ctx.store, meter.take(source, correlation));
   }
-  const parsed = verdictOf(answer, "Verdict", VERDICTS);
+  // The lead's own Verdict lines only (task summaries and notes in the prompt are agent-written).
+  const parsed = directiveOf(answer, "Verdict", VERDICTS);
   const verdict = parsed === "COMPLETE" ? "COMPLETE" : "INCOMPLETE";
-  const gaps = parsed === "UNCLEAR" ? ["the goal review gave no Verdict line"] : parseGaps(answer);
+  const gaps = parsed === "UNCLEAR" ? ["the goal review gave no Verdict line"] : parsed === "CONFLICT" ? ["the goal review gave conflicting Verdict lines"] : parseGaps(answer);
   const note = ev("note.posted", { topic: GOAL_REVIEW_TOPIC, text: cap(`Verdict: ${verdict}${gaps.length ? `\nGaps:\n${gaps.map((g) => `- ${g}`).join("\n")}` : ""}`, 6000), refs: [] }, source, correlation);
   await recordDrafts(ctx.store, [note]);
   if (verdict === "COMPLETE") {

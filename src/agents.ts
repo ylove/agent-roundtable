@@ -253,26 +253,47 @@ function realpathOrNull(path: string): string | null {
  * before anything is read, and its realpath must be inside a root's realpath (no symlink escapes).
  * Returns null when it is allowed but does not exist.
  */
-function containedAgentPath(ref: string): string | null {
-  const roots = allowedAgentRoots();
-  const realRoots = roots.map(realpathOrNull).filter((r): r is string => r !== null);
-  const refuse = (why: string) => new Error(
-    `Agent ref "${ref}" ${why}. A path-like agent ref must be a .md file inside one of: ${roots.join(", ")}. ` +
-      `Add directories to ROUNDTABLE_AGENT_PATHS (separated by "${delimiter}") to allow more, or pass an agent name.`,
-  );
-  if (!/\.md$/i.test(ref)) throw refuse("is a path but not a .md file");
+function containedAgentPath(ref: string, r: AgentRoots): string | null {
+  if (!/\.md$/i.test(ref)) throw refuseRef(ref, "is a path but not a .md file", r);
   const resolved = resolve(ref);
-  if (![...roots, ...realRoots].some((root) => isContained(root, resolved))) throw refuse("is outside the allowed agent directories");
+  if (![...r.roots, ...r.realRoots].some((root) => isContained(root, resolved))) {
+    throw refuseRef(ref, "is outside the allowed agent directories", r);
+  }
   if (!isFile(resolved)) return null;
-  const real = realpathOrNull(resolved);
-  if (!real || !realRoots.some((root) => isContained(root, real))) throw refuse("resolves (through a symlink) outside the allowed agent directories");
+  assertRealpathContained(ref, resolved, r);
   return resolved;
 }
 
+interface AgentRoots {
+  roots: string[];
+  realRoots: string[];
+}
+
+function agentRoots(): AgentRoots {
+  const roots = allowedAgentRoots();
+  return { roots, realRoots: roots.map(realpathOrNull).filter((root): root is string => root !== null) };
+}
+
+function refuseRef(ref: string, why: string, { roots }: AgentRoots): Error {
+  return new Error(
+    `Agent ref "${ref}" ${why}. Agent files must be .md files inside one of: ${roots.join(", ")}. ` +
+      `Add directories to ROUNDTABLE_AGENT_PATHS (separated by "${delimiter}") to allow more.`,
+  );
+}
+
+/** The file's realpath must be inside a root's realpath: a symlink may not lead out of the roots. */
+function assertRealpathContained(ref: string, file: string, r: AgentRoots): void {
+  const real = realpathOrNull(file);
+  if (!real || !r.realRoots.some((root) => isContained(root, real))) {
+    throw refuseRef(ref, "resolves (through a symlink) outside the allowed agent directories", r);
+  }
+}
+
 export async function loadAgent(ref: string): Promise<LoadedAgent> {
+  const r = agentRoots();
   let candidates: string[];
   if (isPathLikeRef(ref)) {
-    const contained = containedAgentPath(ref);
+    const contained = containedAgentPath(ref, r);
     candidates = contained ? [contained] : [resolve(ref)];
   } else {
     // Agent names are looked up only inside the agents directory.
@@ -286,6 +307,8 @@ export async function loadAgent(ref: string): Promise<LoadedAgent> {
   for (const candidate of candidates) {
     const resolved = resolve(candidate);
     if (isFile(resolved)) {
+      // A name finds a file in the agents directory, but a symlink there may not lead out of the roots.
+      assertRealpathContained(ref, resolved, r);
       const raw = await readFile(resolved, "utf-8");
       const { data: frontmatter, body } = readFrontmatter(raw);
       const skills = await loadSkills(skillNames(frontmatter.skills), skillSearchDirs(resolved));

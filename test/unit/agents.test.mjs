@@ -106,8 +106,13 @@ describe("agent ref containment", () => {
     const link = join(process.env.ROUNDTABLE_AGENTS_DIR, "linked.md");
     symlinkSync(target, link);
     await assert.rejects(loadAgent(link), /through a symlink/);
-    // A bare name is looked up in the operator's own agents directory, whose symlinks are the operator's.
-    assert.equal((await loadAgent("linked")).body, "secret persona");
+    // A bare name may not follow it either: the name finds $AGENTS/linked.md, whose realpath is outside.
+    await assert.rejects(loadAgent("linked"), /Agent ref "linked" resolves \(through a symlink\) outside.*ROUNDTABLE_AGENT_PATHS/s);
+    // A symlink to a file inside another allowed root is fine, by name or by path.
+    const alias = join(process.env.ROUNDTABLE_AGENTS_DIR, "alias.md");
+    symlinkSync(sample, alias);
+    assert.equal((await loadAgent("alias")).body, "You are Sample.\n");
+    assert.equal((await loadAgent(alias)).body, "You are Sample.\n");
   });
 
   test("ROUNDTABLE_AGENT_PATHS takes several directories; bare names cannot climb out", async (t) => {

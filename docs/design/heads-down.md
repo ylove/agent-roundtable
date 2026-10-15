@@ -47,12 +47,13 @@ Everything lives under `~/.agent-roundtable/` (override with `ROUNDTABLE_HOME`).
 
 ```
 audit/audit-YYYY-MM.jsonl            global hash-chained security audit (the chain carries across months)
+audit/audit-anchor.json              where the chain starts after a retention prune
 sessions/<id>.json                   archived at-the-table sessions (e.g. finalized ultraplans)
 executions/<exe>/
   execution.json                     immutable header {id, schema: 1, repo_root, base_sha, agents_dir, created}
   events.jsonl                       append-only, hash-chained
   events.lock/  runner.lock/  git.lock/
-  snapshot.json                      {reducer_version, seq, offset, hash, state}; written only by the runner, every 500 events or 60 s
+  snapshot.json                      {reducer_version, seq, offset, hash, state_sha256, state}; written only by the runner, every 500 events or 60 s
   runner.json  runner.log
   contracts/<ctr>/v<N>.json  CONTRACT.md
   blobs/sha256/ab/<hash>             diffs, outputs, huddle turns, prompts (secrets redacted before writing)
@@ -71,7 +72,11 @@ Branches are named `rt/<exe6>/<task>` and `rt/<exe6>/integration`, where `exe6` 
 - At-the-table sessions keep their prefixes (`meeting-`, `local-`, `collab-`, `ultraplan-`, `create-`, `improve-`) but get random suffixes.
 
 **Writes** all go through `store.transact(fn)`:
-1. Take the `mkdir` lock `events.lock/`, which holds `owner.json {pid, host, token, at}`. Waiting uses backoff from 5 ms up to 5 s. The lock is stale when its pid is dead on the same host or it is older than 10 s; stealing it is an atomic rename.
+1. Take the `mkdir` lock `events.lock/`, which holds `owner.json {pid, host, token, at, started}`, where `started` is the holder process's start time. Waiting uses backoff from 5 ms up to 5 s.
+   - A lock is **never taken from a live holder**, however long it is held. A holder stalled by a GC pause, swap, SIGSTOP or a suspended laptop must not wake up next to a second writer. Waiters time out with `LockTimeoutError` instead: safety beats liveness.
+   - A lock is cleared only when its owner is known to be gone: its pid is dead on this host; or the pid is alive but `started` differs, meaning the pid was reused (checked with `ps` once the lock is older than 10 s); or `owner.json` is missing or unreadable 10 s after the directory was created.
+   - A lock owned by another host is never cleared, because 1.0 supports one host per home directory.
+   - Clearing is an atomic rename aside. `owner.json` is published with `link(2)`, so the lock fails closed on filesystems without hard links. A lock never recreates a missing parent directory, such as a purged execution.
 2. Replay the projection up to the tail.
 3. `fn(state)` validates against that fresh state and returns event drafts.
 4. Append with `O_APPEND`, then `fsync`.
@@ -79,7 +84,14 @@ Branches are named `rt/<exe6>/<task>` and `rt/<exe6>/integration`, where `exe6` 
 
 Writes are therefore serializable across processes.
 
-**Reads** take no lock. They tail from a byte offset and ignore a trailing partial line.
+Details of `transact` (`src/execution/store.ts`):
+- All of `fn`'s drafts are validated and their contract blobs resolved. The batch is then reduced on a copy of the state in strict mode, which throws on an invalid task transition. Only a batch that reduces cleanly is written, so no event that would break replay reaches the log.
+- A transaction's events are one **batch**. They are appended with one write, and when there is more than one, each carries `batch: {n, i}`. Readers apply a batch only once all n lines are complete. A failed or partial write is truncated back before the error is rethrown. A crash mid-write leaves an incomplete batch that no reader applies.
+- `fn` should be quick, since other writers wait for it. Slow work, such as an LLM call, happens outside `transact`. Just before writing, the store checks that `owner.json` still carries its token and that the log has not grown. If either check fails, it throws and writes nothing.
+- A writer holding the lock truncates a torn line or an incomplete batch at the end of the log. A live holder is never displaced and checks `held()` right before writing, so under the lock no live writer can be mid-append, and those bytes are a dead writer's.
+- Durability: files are fsynced. When a file is created or renamed into a directory, that directory is fsynced too (best effort). A blob therefore survives power loss whenever an event that references it does.
+
+**Reads** take no lock. They tail from a byte offset and ignore a trailing partial line or incomplete batch. A complete line that does not parse, breaks the seq or `prev` chain, or breaks batch framing throws. `verify` accepts an incomplete batch only at the end of the log.
 
 **Resume** reconciles in this order:
 1. Verify the chain.
@@ -107,15 +119,16 @@ export interface EventEnvelope<T extends EventType = EventType> {
   payload: EventPayloads[T];
   causation?: string;         // event id that caused this one
   correlation?: string;       // e.g. escalation id, task attempt id
+  batch?: { n: number; i: number }; // set by the store on each event of a multi-event transaction
   prev: string;               // hash of the previous event ("0"*64 for seq 1)
   hash: string;               // sha256(prev + canonicalJSON(envelope without hash))
 }
 ```
 
-- Payload text is passed through `redactSecrets` before hashing.
-- Payloads over 8 KB become `{blob, bytes, sha256}`.
-- Each type has a small validator in `src/execution/events.ts`, and unknown types are rejected.
-- `canonicalJSON` sorts keys recursively and has no whitespace.
+- Free-text payload fields pass through `scrub` (`src/security/secrets.ts`) before hashing. Identifiers, refs and paths are stored as given.
+- Payloads whose canonical JSON exceeds 8 KB are refused. The caller stores the large content with `putBlob` and puts the `sha256:<hex>` ref in the payload.
+- Each type has a small validator in `src/execution/events.ts`. Unknown types, unknown fields and wrongly typed fields are rejected.
+- `canonicalJSON` sorts keys recursively and has no whitespace. It rejects values that do not survive a JSON round trip, such as non-finite numbers.
 
 ## 5. Event catalog
 
@@ -132,8 +145,8 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `contract.consent_requested` | participants |
 | `contract.consent_recorded` | agent, verdict, reason |
 | `contract.objection_resolved` | agent, how: amended / withdrawn / excused, reason |
-| `contract.frozen` | by, hash |
-| `contract.amended` | version, patch_blob, reason, affected_tasks |
+| `contract.frozen` | by, hash, blob (the full contract at this version) |
+| `contract.amended` | version, patch_blob, reason, affected_tasks, blob (the full contract at the new version) |
 | `contract.superseded` | by_contract |
 | `runner.started` | pid, version |
 | `runner.takeover` | previous_pid |
@@ -223,6 +236,20 @@ The blackboard is a pure reducer, `apply(state, event) → state`, in `src/execu
 | `watchdog` | Circuits and failure signatures |
 
 The human's chat is never stored on the blackboard.
+
+**How the contract reaches the reducer.** `contract.frozen` and `contract.amended` carry `blob`: the full contract JSON at that version, stored with `putBlob(scrubbedJSON(contract), {redact: false})`. Before calling `apply(state, event, resolved)`, the store reads that blob, checks its hash, and passes the parsed contract in as `resolved.contract`. The reducer never touches the disk, and because blobs are content-addressed, every process resolves the same bytes. A frozen or amended event without a resolvable, matching blob is refused at write time. `contract.proposed` leaves the blackboard unchanged, since `contract` holds only frozen versions. The `contracts/<ctr>/v<N>.json` files are for people and tools; the reducer does not read them.
+
+**Reducer semantics** (`src/execution/blackboard.ts`; each handler is documented there):
+- Unknown types throw. An event that names a task, agent, lease or escalation the state does not know changes nothing for that part.
+- Freezing or amending sets `contract` and `goal` and merges teams, interfaces and decisions. Tasks are created `pending`, and become `ready` once all their dependencies are `accepted`. An amendment keeps existing tasks' runtime state, and the amending tool cancels removed tasks explicitly.
+- `task.merged` (and `task.accepted`) accepts the task, drops its claim and promotes dependents. Pausing never changes task states; it only fills `paused_tasks`.
+- `checks.task` is keyed `<task>/<command_id>` and `checks.integration` by command id. `task.submitted` resets that task's streaks, and `task.merged` resets the integration streaks.
+- `raised_seq`, `granted_seq` and `requested_seq` are set from the event's seq, whatever the payload says.
+- Task events are checked against the task's state. On the write path, which uses strict mode, an event that names an unknown task, or that would move a task out of `accepted`, `failed` or `cancelled`, is refused before append. The exceptions are a retry or cancel of a failed task, and a merge or accept of an accepted one, which does nothing. Replay ignores such events, so an old log never breaks.
+- `task.split` records `splits[task] = parts`. Whenever a contract version is adopted, dependencies on a split task are rewritten to its parts, recursively.
+- Task and command ids match `^[a-z0-9][a-z0-9._-]{0,63}$` in payloads and contracts, so the `/` in a check key is unambiguous.
+- `contract.amended` marks the contract `frozen` and keeps the earlier freeze record unless the blob carries one.
+- Snapshots record `REDUCER_VERSION` (now 2) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
 
 ## 7. Contract
 
@@ -596,6 +623,8 @@ On the worker server, the worker tools are bound to the token. On the orchestrat
 - **Retries.** Provider calls retry with backoff inside the original timeout.
 - **Sandbox.** Docker runs with no network, as non-root, with a read-only root, all capabilities dropped and `no-new-privileges`. Resources are limited, the env is empty, and output is capped. Dependency installs reach only allowlisted hosts through the egress proxy. The local backend requires an explicit opt-in and reports `sandbox.degraded` when it falls back.
 - **Audit.** The audit log is hash-chained, checked by `verify`, and swept for retention: runs are kept 30 days after they end, and the audit log 365 days.
+  - A prune writes `audit-anchor.json {hash, previous, files, at}` before deleting whole month files, and records an `audit.pruned` entry.
+  - `verifyAudit` requires the first remaining entry to link to the anchor, or to the genesis hash when nothing was ever pruned. Deleting the oldest entries without a prune is therefore detected.
 - **CI.** Least-privilege permissions, actions pinned by SHA, an `npm audit` gate, CodeQL, Dependabot, an SBOM, and npm provenance on release.
 - **Documentation.** `SECURITY.md`, `docs/THREAT_MODEL.md` (STRIDE for each trust boundary, including prompt injection from repo content) and `docs/SECURITY_CONTROLS.md`.
 
@@ -609,7 +638,7 @@ These modules exist so the workstreams can run in parallel without depending on 
 |---|---|
 | `src/execution/types.ts` | Every shared type above, plus `EVENT_TYPES` (checked at compile time against the catalog), `GENESIS_HASH`, `CONTRACT_SCHEMA` and `CONTRACT_DEFAULTS` |
 | `src/ids.ts` | `newId(prefix)`, `newExecutionId()`, `executionTag(id)`, `EXECUTION_ID_RE` |
-| `src/security/fs-safe.ts` | `mkdirPrivate`, `writeFileAtomic`, `isContained`, `normalizeRelPath` |
+| `src/security/fs-safe.ts` | `mkdirPrivate`, `writeFileAtomic` (which also fsyncs the directory), `fsyncDir` (added in WS03), `isContained`, `normalizeRelPath` |
 | `src/security/child-env.ts` | `childEnv(profile, extra?, source?)`, `SECRET_NAME_RE`. Profiles: claude-worker, codex-worker, local-meeting, git, gh, docker, browser, open, sandbox-local, cloud-cli, runner |
 | `src/security/secrets.ts` | `scrubSecrets(text)` (exact env secret values first, then credential patterns), `scrub`, `scrubAndCap` |
 | `src/publishers/redact.ts` | `redactSecrets` and `redactPII`. `redact` composes the two, so public output is unchanged |
@@ -624,3 +653,15 @@ WS02 added the tool layer and session durability that later workstreams build on
 | `src/tools/names.ts` | Tool-name constants, `AT_THE_TABLE`, `HEADS_DOWN`, `MODE_LABELS` |
 | `src/sessions/lock.ts` | `lockSession(id, message)`, `withSessionLock(id, message, fn)`, `isSessionBusy(id)`, `sessionBusyMessage`, `SessionBusyError`. Refuses at once, never queues |
 | `src/sessions/archive.ts` | `archiveSession(record)`, `readArchivedSession(id)`, `listArchivedSessions()`, `pruneArchivedSessions(retentionDays = 30)` (not wired in yet). Agent refs and ids are stored as passed; only content fields are scrubbed. Records are `roundtable.session/1`; ultraplans carry `document` (markdown, versions, entries, sign-offs, tally) |
+
+WS03 adds the store that the other workstreams write through:
+
+| Module | API |
+|---|---|
+| `src/execution/store.ts` | `createExecutionStore({repoRoot, baseSha, agentsDir, id?})`, `openExecutionStore(id)`, `listExecutions()`, `executionDir(id)`, `REDUCER_VERSION`. Stores implement `ExecutionStore` plus `writeSnapshot()` |
+| `src/execution/lock.ts` | `acquireLock(dir, {staleMs, timeoutMs, waitMs?})` returns `release()` with `.held()`; `withLock(dir, opts, fn)`. Never taken from a live holder; the parent directory must exist |
+| `src/execution/events.ts` | `validateDraft(draft)`, `PAYLOAD_SPECS`, `PAYLOAD_LIMIT_BYTES` |
+| `src/execution/blackboard.ts` | `initialState(id)`, `apply(state, event, resolved?, {strict?})`, `checkKey(scope, command, task?)` |
+| `src/execution/blobs.ts` | `putBlob`, `getBlob`, `scrubbedJSON(value)` for structured blobs |
+| `src/execution/verify.ts` | `verifyExecution(idOrDir)` returns `{ok, seq, badSeq?, reason?}` |
+| `src/security/audit.ts` | `appendAudit({actor, action, target?, details?})`, `verifyAudit()`, `pruneAudit(retentionDays = 365)` |

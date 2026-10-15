@@ -314,8 +314,21 @@ export interface EventPayloads {
   "contract.consent_requested": { contract: string; version: number; participants: string[] };
   "contract.consent_recorded": { contract: string; agent: string; verdict: ConsentVerdict; reason?: string };
   "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused"; reason: string };
-  "contract.frozen": { contract: string; version: number; by: string; hash: string };
-  "contract.amended": { contract: string; version: number; patch_blob: string; reason: string; affected_tasks: string[] };
+  /**
+   * `blob` (added in WS03) is the full contract JSON at this version, stored with putBlob. The store
+   * requires it at runtime: the blackboard reads the contract from it (heads-down.md §6). It is
+   * optional here only to keep this frozen interface additive.
+   */
+  "contract.frozen": { contract: string; version: number; by: string; hash: string; blob?: string };
+  /** `blob`: the full contract JSON at the new version (required at runtime, as for contract.frozen). */
+  "contract.amended": {
+    contract: string;
+    version: number;
+    patch_blob: string;
+    reason: string;
+    affected_tasks: string[];
+    blob?: string;
+  };
   "contract.superseded": { contract: string; by_contract: string };
 
   "runner.started": { pid: number; version: string };
@@ -474,6 +487,12 @@ export interface EventEnvelope<T extends EventType = EventType> {
   payload: EventPayloads[T];
   causation?: string;
   correlation?: string;
+  /**
+   * Added in WS03; set by the store, never by drafts. Present on every event of a transaction
+   * that appended more than one: the batch has n events and this is number i (0-based). Readers
+   * apply a batch only once all n lines are complete, so a crash mid-append never exposes half.
+   */
+  batch?: { n: number; i: number };
   /** Hash of the previous event; GENESIS_HASH for seq 1. */
   prev: string;
   /** sha256(prev + canonicalJSON(envelope without hash)), lowercase hex. */
@@ -571,6 +590,11 @@ export interface BlackboardState {
   notes: Array<{ seq: number; agent: string; topic: string; text: string; refs: string[] }>;
   inbox: Record<string, Array<{ seq: number; kind: "directive" | "decision"; id: string; text: string; requires_ack?: boolean }>>;
   watchdog: { circuits: Record<string, { open: boolean; until?: string; reason?: string }>; deadlocks: string[][] };
+  /**
+   * Added in WS03: split task id → the ids of its parts (task.split). When a contract version
+   * is adopted, dependencies on a split task are rewritten to its parts.
+   */
+  splits?: Record<string, string[]>;
 }
 
 // ---------------------------------------------------------------------------

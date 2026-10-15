@@ -15,8 +15,24 @@ export function mkdirPrivate(dir: string): void {
 }
 
 /**
+ * Make a directory's entries durable (a file just created or renamed into it). Best effort:
+ * platforms that cannot fsync a directory (EISDIR, EINVAL, EPERM, …) are ignored.
+ */
+export function fsyncDir(dir: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(dir, "r");
+    fsyncSync(fd);
+  } catch {
+    /* not supported here */
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
  * Write a file atomically: a sibling temp file is written (exclusive create, given mode), fsynced
- * and renamed over the target. Readers never observe a partial file.
+ * and renamed over the target, and the directory is fsynced. Readers never observe a partial file.
  */
 export function writeFileAtomic(path: string, data: string | Buffer, mode = 0o600): void {
   const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
@@ -38,6 +54,7 @@ export function writeFileAtomic(path: string, data: string | Buffer, mode = 0o60
     rmSync(tmp, { force: true });
     throw err;
   }
+  fsyncDir(dirname(path));
 }
 
 /** True when target resolves inside root (or is root). Purely lexical; callers also check symlinks. */

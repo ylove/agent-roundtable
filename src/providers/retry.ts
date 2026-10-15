@@ -41,6 +41,11 @@ export function isRetryableError(error: unknown): boolean {
   return error instanceof ProviderHttpError ? isRetryableStatus(error.status) : isNetworkError(error);
 }
 
+/** Only a 429: the request was refused before any work, so repeating it cannot do the work twice. */
+export function isRateLimited(error: unknown): boolean {
+  return error instanceof ProviderHttpError && error.status === 429;
+}
+
 export const RETRY_BASE_DELAY_MS = 500;
 export const RETRY_MAX_DELAY_MS = 8_000;
 export const RETRY_AFTER_CAP_MS = 60_000;
@@ -67,6 +72,11 @@ export interface RetryOptions {
   maxDelayMs?: number;
   /** Names the request in the retry log line, e.g. "Anthropic". */
   label?: string;
+  /**
+   * Which failures to retry. Default: isRetryableError. Narrow it for requests that are not
+   * idempotent (a request that may have been processed must not be repeated).
+   */
+  retryIf?: (error: unknown) => boolean;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   random?: () => number;
 }
@@ -95,7 +105,7 @@ export async function withRetry<T>(fn: (attempt: number) => Promise<T>, o: Retry
     try {
       return await fn(attempt);
     } catch (error) {
-      if (attempt >= attempts || o.signal?.aborted || !isRetryableError(error)) throw error;
+      if (attempt >= attempts || o.signal?.aborted || !(o.retryIf ?? isRetryableError)(error)) throw error;
       const wait = retryDelayMs(attempt, error, o);
       const why = error instanceof ProviderHttpError ? `HTTP ${error.status}` : "network error";
       console.error(`[Providers] ${o.label ?? "request"} failed (${why}); retry ${attempt} of ${attempts - 1} in ${wait} ms`);

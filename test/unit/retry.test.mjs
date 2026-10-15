@@ -183,15 +183,52 @@ describe("providers throw ProviderHttpError and retry their calls", () => {
     assert.equal(chats, 2);
   });
 
-  test("replicate retries the create call", async (t) => {
+  const schema = () => json(200, { latest_version: { openapi_schema: { components: { schemas: { Input: { properties: { prompt: {} } } } } } } });
+  const GET_URL = "https://api.replicate.com/v1/predictions/p1";
+
+  test("replicate retries a create refused with 429", async (t) => {
     providerRetries(t);
     clearReplicateSchemaCache();
     let creates = 0;
     stubFetch(t, (url, init) => {
-      if (init.method !== "POST") return json(200, { latest_version: { openapi_schema: { components: { schemas: { Input: { properties: { prompt: {} } } } } } } });
+      if (init.method !== "POST") return schema();
       return ++creates === 1 ? json(429, { detail: "throttled" }) : json(201, { status: "succeeded", output: ["ok"] });
     });
     assert.equal((await createReplicateCall({ pollIntervalMs: 1 })(messages, opts("meta/llama"))).content, "ok");
     assert.equal(creates, 2);
+  });
+
+  test("replicate never repeats a create that may have been processed (5xx, 504, network error)", async (t) => {
+    // Retries are on; a create that fails like this is never retried, so nothing sleeps.
+    providerRetries(t);
+    for (const failure of [() => json(504, { detail: "gateway timeout" }), () => json(500, {}), () => Promise.reject(netError())]) {
+      clearReplicateSchemaCache();
+      let creates = 0;
+      stubFetch(t, (url, init) => {
+        if (init.method !== "POST") return schema();
+        creates++;
+        return failure();
+      });
+      await assert.rejects(createReplicateCall({ pollIntervalMs: 1 })(messages, opts("meta/llama")));
+      assert.equal(creates, 1, "one billed prediction at most");
+      t.mock.restoreAll();
+    }
+  });
+
+  test("replicate retries transient poll failures (GETs are safe to repeat)", async (t) => {
+    const waits = providerRetries(t);
+    clearReplicateSchemaCache();
+    let polls = 0;
+    stubFetch(t, (url, init) => {
+      if (init.method === "POST") return json(201, { status: "processing", urls: { get: GET_URL } });
+      if (url !== GET_URL) return schema();
+      polls++;
+      if (polls === 1) return json(503, {});
+      if (polls === 2) return Promise.reject(netError());
+      return json(200, { status: "succeeded", output: ["done"] });
+    });
+    assert.equal((await createReplicateCall({ pollIntervalMs: 1 })(messages, opts("meta/llama"))).content, "done");
+    assert.equal(polls, 3);
+    assert.equal(waits.length, 2);
   });
 });

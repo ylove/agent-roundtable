@@ -17,6 +17,7 @@
 // ============================================================================
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, posix, relative, sep } from "node:path";
 import { WORKTREES_DIR } from "../config.js";
@@ -66,6 +67,11 @@ export function taskWorktreePath(executionId: string, task: string): string {
 
 export function integrationWorktreePath(executionId: string): string {
   return join(executionWorktreesDir(executionId), INTEGRATION_WORKTREE);
+}
+
+/** Where submission checks check out the commit under test: executions/<exe>/checks, out of every worker's reach. */
+export function executionChecksDir(executionId: string): string {
+  return join(executionDir(executionId), "checks");
 }
 
 const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -279,6 +285,59 @@ export async function ensureTaskWorktree(header: ExecutionHeader, taskId: string
 }
 
 // ============================================================================
+// Check checkouts
+// ============================================================================
+
+/** Remove a check checkout: through git when its record still matches, else by hand. Never throws. */
+async function dropCheckout(repo: GitTarget, path: string): Promise<void> {
+  const admin = findWorktreeAdmin(repo, path);
+  try {
+    if (admin && existsSync(path)) {
+      openLinkedWorktree(repo, path);
+      await runGit(repo, ["worktree", "remove", "--force", path]);
+    }
+  } catch {
+    /* tampered or half-made: removed by hand below */
+  }
+  rmSync(path, { recursive: true, force: true });
+  const left = findWorktreeAdmin(repo, path) ?? admin;
+  if (left) rmSync(left, { recursive: true, force: true });
+}
+
+/**
+ * Run fn in a fresh detached checkout of `commit` (a full commit id), made for one submission's
+ * checks under executions/<exe>/checks/<label>-<random> and removed afterwards. Worker tools never
+ * reach that directory, so a check sees exactly the committed bytes, whatever the worker does to its
+ * worktree meanwhile. The checkout's .git is a gitfile, which the docker backend mounts read-only.
+ */
+export async function withCommitCheckout<T>(header: ExecutionHeader, label: string, commit: string, fn: (dir: string) => Promise<T>): Promise<T> {
+  checkHeader(header);
+  if (typeof label !== "string" || !ID_RE.test(label)) throw new Error(`Not a checkout label: ${preview(label)}`);
+  if (typeof commit !== "string" || !SHA_RE.test(commit)) throw new Error(`commit must be a full commit id, not ${preview(commit)}`);
+  const repo = await openRepo(header.repo_root);
+  const dir = await withGitLock(header.id, async () => {
+    if (await resolveCommit(repo, commit) !== commit) throw new GitSafetyError(`${commit} is not a commit of ${header.repo_root}`);
+    await assertNoGitlinksInTree(repo, commit);
+    const base = executionChecksDir(header.id);
+    mkdirPrivate(base);
+    const path = join(realpathSync(base), `${label}-${randomBytes(6).toString("hex")}`);
+    mkdirSync(path, { mode: 0o700 });
+    try {
+      await runGit(repo, ["worktree", "add", "-q", "--detach", path, commit], { timeoutMs: ADD_TIMEOUT_MS });
+      return openLinkedWorktree(repo, path).workTree;
+    } catch (e) {
+      await dropCheckout(repo, path);
+      throw e;
+    }
+  });
+  try {
+    return await fn(dir);
+  } finally {
+    await withGitLock(header.id, () => dropCheckout(repo, dir));
+  }
+}
+
+// ============================================================================
 // Removing and pruning
 // ============================================================================
 
@@ -327,8 +386,9 @@ export interface PruneResult {
 
 /**
  * Drop the execution's stale worktree records (directories that are gone; other worktrees of the
- * repository are never touched). With remove, also remove all of its worktrees and their
- * directory; with branches, also delete its rt/<tag>/* branches.
+ * repository are never touched). With remove, also remove all of its worktrees, any check
+ * checkouts a crash left behind, and their directories; with branches, also delete its
+ * rt/<tag>/* branches.
  */
 export async function pruneWorktrees(
   execution: string | ExecutionHeader,
@@ -341,6 +401,8 @@ export async function pruneWorktrees(
   return withGitLock(header.id, async () => {
     const out: PruneResult = { pruned: [], removed: [], branches: [] };
     const realExe = real(exeDir);
+    const checksDir = executionChecksDir(header.id);
+    const realChecks = real(checksDir);
     const base = join(repo.commonDir, "worktrees");
     for (const name of existsSync(base) ? readdirSync(base) : []) {
       const admin = join(base, name);
@@ -350,7 +412,16 @@ export async function pruneWorktrees(
       } catch {
         continue;
       }
-      if (dirname(wt) !== realExe && dirname(wt) !== exeDir) continue;
+      const isCheck = dirname(wt) === realChecks || dirname(wt) === checksDir;
+      if (!isCheck && dirname(wt) !== realExe && dirname(wt) !== exeDir) continue;
+      if (isCheck && existsSync(wt)) {
+        // A check checkout left by a crash: nothing in it is worth keeping.
+        if (opts.remove) {
+          await dropCheckout(repo, wt);
+          out.removed.push(wt);
+        }
+        continue;
+      }
       if (!existsSync(wt)) {
         rmSync(admin, { recursive: true, force: true });
         out.pruned.push(wt);
@@ -366,6 +437,7 @@ export async function pruneWorktrees(
       }
       rmSync(exeDir, { recursive: true, force: true });
     }
+    if (opts.remove) rmSync(checksDir, { recursive: true, force: true });
     if (opts.branches) {
       const prefix = `refs/heads/${dirname(integrationBranch(header.id))}/`;
       const r = await runGit(repo, ["for-each-ref", "--format=%(refname)", prefix]);

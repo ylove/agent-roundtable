@@ -3,7 +3,7 @@ import type { LLMCompletionResult, ProviderCall } from "./shared.js";
 import { assertNonEmpty, assertNotRedirect, readProviderJson, stripThinkTags } from "./shared.js";
 import { providerHttpError, withRetry } from "./retry.js";
 import type { LLMProvider } from "../config.js";
-import { openAICompatibleKeyOrigins, requireEnv } from "../config.js";
+import { openAICompatibleTrustedOrigins, requireEnv } from "../config.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { guardUrl } from "../security/url-guard.js";
 
@@ -66,19 +66,19 @@ function originOf(raw: string | undefined): string | null {
   }
 }
 
-const badKeyOrigins = new Set<string>();
+const badTrustedOrigins = new Set<string>();
 
-/** Origins trusted with the key: the configured base URL's, plus ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS. */
-function keyOrigins(configured: string | undefined): Set<string> {
+/** Origins trusted with the key: the configured base URL's, plus ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS. */
+function trustedOrigins(configured: string | undefined): Set<string> {
   const origins = new Set<string>();
   const own = originOf(configured);
   if (own) origins.add(own);
-  for (const entry of openAICompatibleKeyOrigins()) {
+  for (const entry of openAICompatibleTrustedOrigins()) {
     const origin = originOf(entry);
     if (origin) origins.add(origin);
-    else if (!badKeyOrigins.has(entry)) {
-      badKeyOrigins.add(entry);
-      console.error(`[Providers] ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS: ignoring "${entry}" (not an origin such as https://host:port)`);
+    else if (!badTrustedOrigins.has(entry)) {
+      badTrustedOrigins.add(entry);
+      console.error(`[Providers] ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS: ignoring "${entry}" (not an origin such as https://host:port)`);
     }
   }
   return origins;
@@ -105,7 +105,7 @@ export function createOpenAICompatibleCall(spec: OpenAICompatibleSpec): Provider
       // other origin comes from a tool call (so possibly from injected text): guard it, and bind the
       // key to the configured origins so it never travels there.
       const origin = originOf(override);
-      if (!origin || !keyOrigins(configured).has(origin)) {
+      if (!origin || !trustedOrigins(configured).has(origin)) {
         await guardUrl(override, { label: "base_url" });
         apiKey = undefined;
       }

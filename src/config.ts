@@ -175,8 +175,8 @@ export function allowPrivateBaseUrls(): boolean {
 }
 
 /** Origins besides OPENAI_COMPATIBLE_BASE_URL's that may receive OPENAI_COMPATIBLE_API_KEY (comma-separated). */
-export function openAICompatibleKeyOrigins(): string[] {
-  return (process.env.ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
+export function openAICompatibleTrustedOrigins(): string[] {
+  return (process.env.ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 /** Directories besides the agents directories that path-like agent refs may resolve into. */

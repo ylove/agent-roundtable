@@ -41,6 +41,23 @@ test("activity topics and outcomes are scrubbed before they are stored", () => {
   assert.match(entry.outcome, /^new token \[redacted:api_key\] issued$/);
 });
 
+test("configuration that is not secret survives scrubbing (no over-redaction)", async (t) => {
+  const { scrub } = await import("../../dist/security/secrets.js");
+  const { SECRET_NAME_RE } = await import("../../dist/security/child-env.js");
+  const saved = { a: process.env.GIT_AUTHOR_NAME, o: process.env.ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS };
+  process.env.GIT_AUTHOR_NAME = "Some Name";
+  process.env.ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS = "https://api.good.com";
+  t.after(() => {
+    for (const [k, v] of [["GIT_AUTHOR_NAME", saved.a], ["ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS", saved.o]]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+  assert.ok(!SECRET_NAME_RE.test("ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS"));
+  const text = "Kickoff with Some Name about https://api.good.com";
+  assert.equal(scrub(text), text);
+});
+
 test("tool errors are scrubbed at the dispatch boundary", async () => {
   // A bare agent name that is a secret: the not-found error echoes the ref.
   const r = await handleToolCall("start_meeting", { agent: ANTHROPIC, agenda: "x", provider: "openai_compatible", base_url: "http://localhost:1234/v1" });

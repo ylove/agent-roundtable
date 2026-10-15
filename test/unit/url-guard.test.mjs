@@ -6,7 +6,7 @@ import { json, stubDns, stubFetch } from "./helpers.mjs";
 delete process.env.OPENAI_COMPATIBLE_BASE_URL;
 delete process.env.OPENAI_COMPATIBLE_API_KEY;
 delete process.env.ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS;
-delete process.env.ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS;
+delete process.env.ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS;
 
 const { classifyAddress, checkUrl, guardUrl, describeUrl, UrlGuardError } = await import("../../dist/security/url-guard.js");
 const { callOpenAICompatible } = await import("../../dist/providers/openai-compatible.js");
@@ -195,10 +195,10 @@ describe("openai_compatible per-call base_url", () => {
     assert.equal(calls[2].url, "https://elsewhere.example.test/v1/chat/completions");
   });
 
-  test("ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS lists more origins for the key", async (t) => {
+  test("ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS lists more origins for the key", async (t) => {
     env(t, {
       OPENAI_COMPATIBLE_API_KEY: "sk-compat-bound-key",
-      ROUNDTABLE_OPENAI_COMPATIBLE_KEY_ORIGINS: "http://localhost:1234, https://router.example.test:8443/ignored-path, not-an-origin",
+      ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS: "http://localhost:1234, https://router.example.test:8443/ignored-path, not-an-origin",
     });
     const calls = stubFetch(t, () => ok());
     await callOpenAICompatible(messages, opts({ baseUrl: "http://localhost:1234/v1" }));

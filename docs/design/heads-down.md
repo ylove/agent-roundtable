@@ -202,11 +202,11 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `huddle.turn` | id, seat, blob |
 | `huddle.concluded` | id, outcome, decision? |
 | `budget.usage_recorded` | agent?, task?, source: worker / huddle / consent / lead, model, tokens, usd, estimated |
-| `budget.threshold_crossed` | pct |
+| `budget.threshold_crossed` | pct, spent_usd, budget_usd (the total, extensions included, that pct refers to) |
 | `budget.exhausted` | scope: execution / task / agent, ref? |
 | `budget.extended` | by, usd |
 | `watchdog.action` | rule, action, target |
-| `watchdog.circuit_opened` | driver, reason, until |
+| `watchdog.circuit_opened` | driver, reason, until, opens? (consecutive opens since the last close) |
 | `watchdog.circuit_closed` | driver |
 | `watchdog.deadlock_detected` | cycle |
 | `watchdog.stall_detected` | agent, task |
@@ -230,10 +230,10 @@ The blackboard is a pure reducer, `apply(state, event) → state`, in `src/execu
 | `checks` | [scope][command] → {status, signature, streak, since_patch_seq, blob} |
 | `escalations`, `huddles` | Open and resolved |
 | `agents`, `teams` | Registered agents and team membership |
-| `budget` | Totals by agent, task, team and execution |
+| `budget` | Totals by agent, task, team and execution; thresholds crossed for the current total (`thresholds_budget_usd`) |
 | `notes` | Broadcast notes |
 | `inbox` | Per-agent directives and decisions |
-| `watchdog` | Circuits and failure signatures |
+| `watchdog` | Circuits (`open`, `until`, `reason`, `opens`; a closed circuit keeps the end of its last open period in `until`) and deadlocks |
 
 The human's chat is never stored on the blackboard.
 
@@ -243,13 +243,13 @@ The human's chat is never stored on the blackboard.
 - Unknown types throw. An event that names a task, agent, lease or escalation the state does not know changes nothing for that part.
 - Freezing or amending sets `contract` and `goal` and merges teams, interfaces and decisions. Tasks are created `pending`, and become `ready` once all their dependencies are `accepted`. An amendment keeps existing tasks' runtime state, and the amending tool cancels removed tasks explicitly.
 - `task.merged` (and `task.accepted`) accepts the task, drops its claim and promotes dependents. Pausing never changes task states; it only fills `paused_tasks`.
-- `checks.task` is keyed `<task>/<command_id>` and `checks.integration` by command id. `task.submitted` resets that task's streaks, and `task.merged` resets the integration streaks.
+- `checks.task` is keyed `<task>/<command_id>` and `checks.integration` by command id. `task.submitted` resets that task's streaks only when its `diff_blob` differs from the task's previous submission (resubmitting the same diff is no patch), and `task.merged` resets the integration streaks. `budget.threshold_crossed` for a new `budget_usd` starts a new list.
 - `raised_seq`, `granted_seq` and `requested_seq` are set from the event's seq, whatever the payload says.
 - Task events are checked against the task's state. On the write path, which uses strict mode, an event that names an unknown task, or that would move a task out of `accepted`, `failed` or `cancelled`, is refused before append. The exceptions are a retry or cancel of a failed task, and a merge or accept of an accepted one, which does nothing. Replay ignores such events, so an old log never breaks.
 - `task.split` records `splits[task] = parts`. Whenever a contract version is adopted, dependencies on a split task are rewritten to its parts, recursively.
 - Task and command ids match `^[a-z0-9][a-z0-9._-]{0,63}$` in payloads and contracts, so the `/` in a check key is unambiguous.
 - `contract.amended` marks the contract `frozen` and keeps the earlier freeze record unless the blob carries one.
-- Snapshots record `REDUCER_VERSION` (now 2) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
+- Snapshots record `REDUCER_VERSION` (now 3) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
 
 ## 7. Contract
 
@@ -473,14 +473,14 @@ The runner never pushes to the base branch, and nothing auto-merges.
 | Rule | Automatic action | Escalates when |
 |---|---|---|
 | Lease or claim expiry | Reclaim and grant the head of the queue | — |
-| Worker died or lost | Retry with `--resume`, attempt+1 | Attempts exceed `max_attempts` |
+| Worker died or lost | Retry with `--resume`, attempt+1; a death from a transient driver failure (rate limit, auth, credit) is not counted against `max_attempts` | Attempts exceed `max_attempts`; transient deaths exceed `infraRetries` (20) |
 | Stall (pid alive, no output or heartbeat for 10 min) | SIGTERM, then SIGKILL, then resume | 2 stalls on the same task |
 | Dependency wait | Block the task; unblock on `dependency.satisfied` or `task.merged` | A wait-for cycle → `deadlock_detected`, sent to the common orchestrator |
 | Repeated failure | — | The same check signature 3× with no patch in between (a diff-hash change resets the streak); or diff-hash ping-pong A→B→A |
-| Budget | Ledger fed by `total_cost_usd`/usage plus huddle usage; `threshold_crossed` at 50% and 80% (80% wakes the orchestrator) | 100% of the execution budget → stop spawning, `awaiting_human{money}`; a per-task cap → kill and escalate `resource` |
-| Circuit breaker (per driver or provider) | 5 failures in 10 min, or a 429 → open; half-open after 1, 2, 4… up to 30 min | Auth or credit failures → immediate emergency that lists alternatives |
+| Budget | Ledger fed by `total_cost_usd`/usage plus huddle usage; `threshold_crossed` at 50% and 80% of the current total, re-armed after an extension (80% wakes the orchestrator) | 100% of the execution budget → stop spawning, `awaiting_human{money}`; a per-task cap → kill and escalate `resource` |
+| Circuit breaker (per driver or provider) | 5 failures in 10 min, or a 429 → open; half-open after 1, 2, 4… up to 30 min, admitting exactly one trial worker, which closes the circuit once it has run 2 min | Auth or credit failures → immediate emergency that lists alternatives |
 | Note ping-pong (A and B alternate on a topic ≥4×) | — | Suggest a micro-huddle |
-| Huddle caps | Micro-huddle = 2 turns; collaboration huddles ≤ 3 rounds | No outcome → orchestrator |
+| Huddle caps | Micro-huddle = 2 turns; collaboration huddles ≤ 3 rounds | No outcome, or none after `huddleTimeoutMs` (20 min) → orchestrator |
 
 **Failure signatures** (`src/sandbox/signature.ts`): strip ANSI codes, timestamps, durations, temp paths and hex addresses; keep the first 60 error-like lines; hash them with sha256 together with the command id.
 
@@ -488,6 +488,18 @@ The runner never pushes to the base branch, and nothing auto-merges.
 - `callLLMDetailed` plus an `AsyncLocalStorage` usage sink (`src/providers/usage.ts`), so the existing engines feed the ledger.
 - `pricing.ts` is a data table that can be overridden with `ROUNDTABLE_PRICING_FILE`.
 - Models missing from the table are recorded as `estimated: true`.
+
+**Implementation** (`src/execution/watchdog.ts`, with `budget.ts`, `pricing.ts`, `circuit.ts`, `deadlock.ts`, and the action types shared by all of them in `watchdog-actions.ts`):
+- The signature is `evaluate(state, now, obs, cfg?)`. `obs` holds what the blackboard does not: agent liveness and output and heartbeat times, watcher liveness, lead calls in flight, and times kept only in the log. `observeEvents(events, base)` derives the log part: claim renewals, spawn times, huddle starts, routing times, lead fallback issue times, diff history, open dependency needs, stall counts, transient driver deaths, driver outcomes and circuit history.
+- An action is `emit` (event drafts) or a process operation: `kill_worker`, `resume_worker`, `spawn_retry`, `stop_spawning`, `lead_fallback` or `wake_orchestrator`. Each carries a `rule` and a deterministic `key`. Watchdog escalation ids derive from the key, which is how a rule knows it has already escalated. `actionsToDrafts` adds one `watchdog.action` per action for the audit trail.
+- The runner evaluates inside `transact` against the fresh state, commits the drafts, then performs the process operations. **Every process operation is idempotent for the runner**: it can arrive again after a crash or on the next pass. Operations whose condition persists are *standing* (`standing: true`, not audited, no events): `stop_spawning` while the budget is spent, and `kill_worker` while a worker runs on a task at its cap or blocked by the watchdog. A lost `lead_fallback` is issued again `leadRetryMs` (5 min) after it was last issued, unless `obs.leadInFlight` marks the call as running. A lost `spawn_retry` leaves a `ready` task that the runner's scheduler starts.
+- Every respawn path (retry, resume, the runner's own spawns via `canRespawn`) goes through one gate: budget left, and the driver's circuit closed, or half-open with no trial worker started yet. While the gate is shut, a dead worker waits and no attempt is counted.
+- The lead fallback first re-routes the escalation to `authority.lead` (`wake: false`), which marks it handled. A huddle that times out concludes `NO_OUTCOME`, and its escalation is routed to the orchestrator.
+- Budget thresholds fire once per budget total. After `budget.extended` the 50% and 80% warnings re-arm, and spending through the extension escalates again. The circuit counts failures since the last success or the end of its last open period.
+- `classifyFailure(message, {source: "driver" | "provider"})` reads only provider-shaped messages (an API error type, "Credit balance is too low", "Not logged in · Please run /login", a status inside an API error line). A worker's command or test output must never be classified.
+- A deadlock is reported once per occurrence. The same set of tasks is reported again only after the escalation for its last report is resolved or withdrawn. A task blocked on a dependency that failed or was cancelled escalates.
+- The leases of a finished task (accepted, failed or cancelled) expire, and queued requests of tasks without a claim are withdrawn. Claims do not expire while the run or the task is paused, or while the task's submitted work is being checked or merged; a resume, a rejection or a check restarts their TTL.
+- The lease grants and overlap check here are a conservative stand-in until the WS06 lease engine replaces them.
 
 ## 12. Escalations and huddles
 

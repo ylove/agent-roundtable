@@ -265,7 +265,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "budget.extended": { by: "s", usd: "n" },
 
   "watchdog.action": { rule: "t", action: "t", target: "t" },
-  "watchdog.circuit_opened": { driver: "s", reason: "t", until: "s" },
+  "watchdog.circuit_opened": { driver: "s", reason: "t", until: "s", "opens?": "int" },
   "watchdog.circuit_closed": { driver: "s" },
   "watchdog.deadlock_detected": { cycle: "s[]" },
   "watchdog.stall_detected": { agent: "s", "task?": "id" },

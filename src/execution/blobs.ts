@@ -5,19 +5,27 @@
 // it is hashed, so the ref names the redacted content and the raw secret never touches disk.
 // ============================================================================
 
-import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fsyncDir, mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
 import { canonicalJSON, sha256Hex } from "./chain.js";
+import { preview } from "./events.js";
 
 const REF_RE = /^sha256:([0-9a-f]{64})$/;
 
 /** The hex digest of a "sha256:<hex>" ref; throws on anything else. */
 export function blobHex(ref: string): string {
   const m = typeof ref === "string" ? REF_RE.exec(ref) : null;
-  if (!m) throw new Error(`Not a blob ref: ${JSON.stringify(ref)} (expected "sha256:<64 hex>")`);
+  if (!m) throw new Error(`Not a blob ref: ${preview(ref, 80)} (expected "sha256:<64 hex>")`);
   return m[1];
+}
+
+/** mkdir with mode 0700, fsyncing the parent when the directory is new (so a stored blob survives power loss). */
+function ensureDir(dir: string): void {
+  if (existsSync(dir)) return mkdirPrivate(dir);
+  mkdirPrivate(dir);
+  fsyncDir(dirname(dir));
 }
 
 export function blobPath(blobsDir: string, ref: string): string {
@@ -53,12 +61,15 @@ export function putBlob(blobsDir: string, content: string | Buffer, opts: { reda
   const ref = `sha256:${sha256Hex(buf)}`;
   const path = blobPath(blobsDir, ref);
   try {
-    if (statSync(path).size === buf.length) return ref;
+    // Already stored, unless a damaged copy sits there: same size is not enough, the hash must match.
+    if (statSync(path).size === buf.length && sha256Hex(readFileSync(path)) === blobHex(ref)) return ref;
   } catch {
     /* not stored yet */
   }
-  mkdirPrivate(join(path, ".."));
-  writeFileAtomic(path, buf);
+  if (!existsSync(blobsDir)) throw new Error(`Blob directory ${blobsDir} does not exist`); // never recreate a purged execution
+  ensureDir(join(blobsDir, "sha256"));
+  ensureDir(dirname(path));
+  writeFileAtomic(path, buf); // fsyncs the file and its directory
   return ref;
 }
 

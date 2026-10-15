@@ -3,6 +3,7 @@
 //
 // Field types (a "?" suffix on the key marks it optional; "|" separates alternatives):
 //   s     non-empty string (identifiers, refs, paths: stored as given)
+//   id    a task or command id: ID_RE, the contract's id rule (id[] is an array of them)
 //   t     string of free text: passed through scrub() before hashing
 //   n     finite number            int   safe integer        b   boolean     null
 //   s[]   array of s               t[]   array of t (each scrubbed)
@@ -13,7 +14,7 @@
 
 import { scrub } from "../security/secrets.js";
 import { canonicalJSON } from "./chain.js";
-import { EVENT_TYPES, type AnyEventDraft, type EventType } from "./types.js";
+import { EVENT_TYPES, type AnyEvent, type AnyEventDraft, type EventType } from "./types.js";
 
 type Field = string | Shape | readonly [Shape];
 export interface Shape {
@@ -22,6 +23,15 @@ export interface Shape {
 
 /** Largest canonical payload the log accepts; anything bigger goes in a blob. */
 export const PAYLOAD_LIMIT_BYTES = 8192;
+/** Task and command ids (heads-down.md §7). They never contain "/", which check keys rely on. */
+export const ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/** A caller-supplied value, safe to put in an error message: strings quoted and capped. */
+export function preview(v: unknown, max = 64): string {
+  if (typeof v === "number" || typeof v === "boolean" || v === null || v === undefined) return String(v);
+  const s = String(v);
+  return JSON.stringify(s.length > max ? s.slice(0, max) + "…" : s);
+}
 /** Cap on everything in a draft except its payload (source, ids, correlation). */
 const ENVELOPE_LIMIT_BYTES = 2048;
 
@@ -62,15 +72,15 @@ const BUDGET: Shape = {
 const TOKENS: Shape = { inputTokens: "n", outputTokens: "n", "cacheReadTokens?": "n", "cacheWriteTokens?": "n" };
 const ARTIFACT_REF: Shape = { kind: "'file'|'blob'|'text'|'url'", ref: "t", "title?": "t" };
 const TASK_SPEC: Shape = {
-  id: "s",
+  id: "id",
   title: "t",
   "team?": "s",
   persona: "s",
   kind: "'build'|'subcontract'|'review'",
-  depends_on: "s[]",
+  depends_on: "id[]",
   paths: { write: "s[]", "read?": "s[]" },
   acceptance: "t[]",
-  checks: "s[]",
+  checks: "id[]",
   "effort?": "'low'|'medium'|'high'",
   "budget_usd?": "n",
   "context?": [ARTIFACT_REF],
@@ -78,7 +88,7 @@ const TASK_SPEC: Shape = {
 const LEASE: Shape = {
   id: "s",
   agent: "s",
-  task: "s",
+  task: "id",
   paths: "s[]",
   mode: LEASE_MODE,
   branch: "s",
@@ -88,7 +98,7 @@ const LEASE: Shape = {
 const LEASE_REQUEST: Shape = {
   id: "s",
   agent: "s",
-  task: "s",
+  task: "id",
   paths: "s[]",
   mode: LEASE_MODE,
   reason: "t",
@@ -98,7 +108,7 @@ const LEASE_REQUEST: Shape = {
 const DECISION: Shape = { id: "s", scope: "s", text: "t", "rationale?": "t", by: "s", "supersedes?": "s" };
 const ESCALATION: Shape = {
   id: "s",
-  "task?": "s",
+  "task?": "id",
   agent: "s",
   kind: "'blocker'|'ambiguity'|'resource'|'conflict'|'assistance'|'emergency'",
   with: "'orchestrator'|'management'|'team'|'agent'|'path_owner'",
@@ -131,11 +141,11 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
     sandbox: SANDBOX,
     drivers: "s[]",
   },
-  "execution.paused": { scope: "'all'|s[]", reason: "t" },
-  "execution.resumed": { scope: "'all'|s[]", "reason?": "t" },
+  "execution.paused": { scope: "'all'|id[]", reason: "t" },
+  "execution.resumed": { scope: "'all'|id[]", "reason?": "t" },
   "execution.steered": { message: "t", targets: "s[]" },
   "execution.mode_changed": { from: MODE, to: MODE, reason: "t", "session?": "s" },
-  "execution.completed": { integration_sha: "s", "pr_url?": "s" },
+  "execution.completed": { integration_sha: "s", "pr_url?": "t" },
   "execution.failed": { reason: "t" },
   "execution.aborted": { reason: "t" },
 
@@ -146,7 +156,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   // `blob` (the full contract at this version) is optional in the type but required here: the
   // blackboard reads the contract from it (see blackboard.ts).
   "contract.frozen": { contract: "s", version: "int", by: "s", hash: "s", blob: "s" },
-  "contract.amended": { contract: "s", version: "int", patch_blob: "s", reason: "t", affected_tasks: "s[]", blob: "s" },
+  "contract.amended": { contract: "s", version: "int", patch_blob: "s", reason: "t", affected_tasks: "id[]", blob: "s" },
   "contract.superseded": { contract: "s", by_contract: "s" },
 
   "runner.started": { pid: "int", version: "s" },
@@ -154,11 +164,11 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "runner.stopped": { reason: "t" },
 
   "agent.registered": { agent: "s", persona: "s", "team?": "s", driver: DRIVER, token_sha256: "s", external: "b" },
-  "agent.spawned": { agent: "s", task: "s", attempt: "int", pid: "int", "session_id?": "s" },
+  "agent.spawned": { agent: "s", task: "id", attempt: "int", pid: "int", "session_id?": "s" },
   "agent.attested": { agent: "s", tools: "s[]", mcp_servers: "s[]", ok: "b" },
   "agent.exited": {
     agent: "s",
-    "task?": "s",
+    "task?": "id",
     code: "int|null",
     reason: "'completed'|'error'|'killed'|'lost'|'stalled'|'budget'|'attestation'",
     "result_subtype?": "s",
@@ -166,50 +176,50 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   },
   "agent.left": { agent: "s", reason: "t" },
 
-  "task.ready": { task: "s" },
-  "task.claimed": { task: "s", agent: "s", attempt: "int", ttl_s: "n" },
-  "task.released": { task: "s", agent: "s", "note?": "t" },
-  "task.progress": { task: "s", "percent?": "n", note: "t" },
-  "task.submitted": { task: "s", commit: "s", diff_blob: "s", stat: "t", files: "s[]", rewrites: "s[]" },
-  "task.checks_passed": { task: "s", commands: "s[]" },
-  "task.rejected": { task: "s", reasons: "t[]", "violations?": "t[]" },
-  "task.merged": { task: "s", integration_sha: "s" },
-  "task.accepted": { task: "s" },
-  "task.blocked": { task: "s", "escalation?": "s", "deps?": "s[]" },
-  "task.unblocked": { task: "s" },
-  "task.retried": { task: "s", attempt: "int", why: "t" },
-  "task.reassigned": { task: "s", from: "s", to: "s" },
-  "task.split": { task: "s", into: [TASK_SPEC] },
-  "task.failed": { task: "s", why: "t" },
-  "task.cancelled": { task: "s", why: "t" },
+  "task.ready": { task: "id" },
+  "task.claimed": { task: "id", agent: "s", attempt: "int", ttl_s: "n" },
+  "task.released": { task: "id", agent: "s", "note?": "t" },
+  "task.progress": { task: "id", "percent?": "n", note: "t" },
+  "task.submitted": { task: "id", commit: "s", diff_blob: "s", stat: "t", files: "s[]", rewrites: "s[]" },
+  "task.checks_passed": { task: "id", commands: "id[]" },
+  "task.rejected": { task: "id", reasons: "t[]", "violations?": "t[]" },
+  "task.merged": { task: "id", integration_sha: "s" },
+  "task.accepted": { task: "id" },
+  "task.blocked": { task: "id", "escalation?": "s", "deps?": "id[]" },
+  "task.unblocked": { task: "id" },
+  "task.retried": { task: "id", attempt: "int", why: "t" },
+  "task.reassigned": { task: "id", from: "s", to: "s" },
+  "task.split": { task: "id", into: [TASK_SPEC] },
+  "task.failed": { task: "id", why: "t" },
+  "task.cancelled": { task: "id", why: "t" },
 
   "lease.granted": { lease: LEASE },
   "lease.queued": { request: LEASE_REQUEST },
   "lease.released": { lease_id: "s" },
   "lease.expired": { lease_id: "s" },
   "lease.revoked": { lease_id: "s", by: "s", reason: "t" },
-  "lease.violation": { task: "s", agent: "s", paths: "s[]" },
+  "lease.violation": { task: "id", agent: "s", paths: "s[]" },
 
-  "artifact.published": { name: "s", kind: "'interface'|'design'|'doc'", "path?": "s", "blob?": "s", task: "s" },
+  "artifact.published": { name: "s", kind: "'interface'|'design'|'doc'", "path?": "s", "blob?": "s", task: "id" },
   "artifact.changed": { name: "s", version: "int", consumers: "s[]" },
 
-  "dependency.requested": { task: "s", need: NEED },
-  "dependency.satisfied": { task: "s", need: NEED, by_event: "s" },
+  "dependency.requested": { task: "id", need: NEED },
+  "dependency.satisfied": { task: "id", need: NEED, by_event: "s" },
 
-  "check.started": { command_id: "s", scope: CHECK_SCOPE, "task?": "s" },
-  "check.passed": { command_id: "s", scope: CHECK_SCOPE, "task?": "s", duration_ms: "n" },
+  "check.started": { command_id: "id", scope: CHECK_SCOPE, "task?": "id" },
+  "check.passed": { command_id: "id", scope: CHECK_SCOPE, "task?": "id", duration_ms: "n" },
   "check.failed": {
-    command_id: "s",
+    command_id: "id",
     scope: CHECK_SCOPE,
-    "task?": "s",
+    "task?": "id",
     exit: "int|null",
     signature: "s",
     "output_blob?": "s",
   },
-  "check.timed_out": { command_id: "s", scope: CHECK_SCOPE, "task?": "s" },
+  "check.timed_out": { command_id: "id", scope: CHECK_SCOPE, "task?": "id" },
 
   "command.completed": {
-    task: "s",
+    task: "id",
     argv: "t[]",
     exit: "int|null",
     duration_ms: "n",
@@ -217,8 +227,8 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
     "output_blob?": "s",
   },
 
-  "merge.succeeded": { task: "s", sha: "s" },
-  "merge.conflicted": { task: "s", files: "s[]" },
+  "merge.succeeded": { task: "id", sha: "s" },
+  "merge.conflicted": { task: "id", files: "s[]" },
 
   "note.posted": { topic: "t", text: "t", refs: "s[]" },
   "decision.recorded": { decision: DECISION },
@@ -227,7 +237,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
 
   "escalation.raised": { escalation: ESCALATION },
   "escalation.routed": { id: "s", to: "s", "format?": HUDDLE_FORMAT, wake: "b" },
-  "escalation.auto_resolved": { id: "s", rule: "s" },
+  "escalation.auto_resolved": { id: "s", rule: "t" },
   "escalation.resolved": { id: "s", action: RESOLUTION, decision: "t", by: "s" },
   "escalation.awaiting_human": { id: "s", class: EMERGENCY, message: "t", "alternatives?": "t[]" },
   "escalation.withdrawn": { id: "s", reason: "t" },
@@ -243,7 +253,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "budget.usage_recorded": {
     source: "'worker'|'huddle'|'consent'|'lead'|'structuring'",
     "agent?": "s",
-    "task?": "s",
+    "task?": "id",
     "provider?": "s",
     model: "s",
     tokens: TOKENS,
@@ -254,11 +264,11 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "budget.exhausted": { scope: "'execution'|'task'|'agent'", "ref?": "s" },
   "budget.extended": { by: "s", usd: "n" },
 
-  "watchdog.action": { rule: "s", action: "s", target: "s" },
+  "watchdog.action": { rule: "t", action: "t", target: "t" },
   "watchdog.circuit_opened": { driver: "s", reason: "t", until: "s" },
   "watchdog.circuit_closed": { driver: "s" },
   "watchdog.deadlock_detected": { cycle: "s[]" },
-  "watchdog.stall_detected": { agent: "s", "task?": "s" },
+  "watchdog.stall_detected": { agent: "s", "task?": "id" },
 
   "sandbox.degraded": { backend: SANDBOX, reason: "t" },
 };
@@ -294,6 +304,10 @@ function primitive(v: unknown, t: string): unknown {
   switch (t) {
     case "s":
       return typeof v === "string" && v.length > 0 ? v : NO;
+    case "id":
+      return typeof v === "string" && ID_RE.test(v) ? v : NO;
+    case "id[]":
+      return Array.isArray(v) && v.every((x) => typeof x === "string" && ID_RE.test(x)) ? [...v] : NO;
     case "t":
       return typeof v === "string" ? scrub(v) : NO;
     case "n":
@@ -315,6 +329,8 @@ function primitive(v: unknown, t: string): unknown {
 
 const NAMES: Record<string, string> = {
   s: "a non-empty string",
+  id: "an id (lowercase letters, digits, '.', '_' or '-'; at most 64)",
+  "id[]": "an array of ids (lowercase letters, digits, '.', '_' or '-'; at most 64 each)",
   t: "a string",
   n: "a finite number",
   int: "an integer",
@@ -358,9 +374,59 @@ function checkShape(value: unknown, shape: Shape, path: string): Record<string, 
     out[key] = checkField(v, field, `${path}.${key}`);
   }
   for (const key of Object.keys(value)) {
-    if (!known.has(key) && value[key] !== undefined) throw new Invalid(`${path}.${key}`, "is not a known field");
+    if (!known.has(key) && value[key] !== undefined) throw new Invalid(`${path}[${preview(key, 32)}]`, "is not a known field");
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Batch framing: a transaction's events become visible all at once or not at all
+// ---------------------------------------------------------------------------
+
+/**
+ * Groups log events into whole transactions. An event without `batch` is a batch of one; events
+ * with batch {n, i} must arrive as i = 0, 1, …, n-1 with no other event in between. push()
+ * returns the completed batch, or null while one is still open; bad framing throws.
+ */
+export class BatchFramer {
+  private pending: AnyEvent[] = [];
+  private n = 0;
+
+  /** True while a batch has started and not yet completed (an incomplete tail, if the log ends here). */
+  get open(): boolean {
+    return this.pending.length > 0;
+  }
+
+  /** Seq of the first event of the open batch. */
+  get openSeq(): number | undefined {
+    return this.pending[0]?.seq;
+  }
+
+  push(ev: AnyEvent): AnyEvent[] | null {
+    const b = (ev as { batch?: unknown }).batch as { n?: unknown; i?: unknown } | undefined;
+    if (
+      b !== undefined &&
+      !(typeof b === "object" && b !== null && Number.isSafeInteger(b.n) && (b.n as number) >= 2 &&
+        Number.isSafeInteger(b.i) && (b.i as number) >= 0 && (b.i as number) < (b.n as number))
+    ) {
+      throw new Error(`seq ${ev.seq} has a malformed batch field`);
+    }
+    if (this.pending.length) {
+      if (!b || b.n !== this.n || b.i !== this.pending.length) {
+        throw new Error(`the batch that starts at seq ${this.pending[0].seq} is incomplete: seq ${ev.seq} does not continue it`);
+      }
+    } else if (b && b.i !== 0) {
+      throw new Error(`seq ${ev.seq} continues a batch that never started`);
+    }
+    if (!b) return [ev];
+    this.pending.push(ev);
+    this.n = b.n as number;
+    if (this.pending.length < this.n) return null;
+    const done = this.pending;
+    this.pending = [];
+    this.n = 0;
+    return done;
+  }
 }
 
 export function isEventType(type: unknown): type is EventType {
@@ -377,7 +443,7 @@ export function validateDraft(draft: AnyEventDraft): AnyEventDraft {
   if (!isPlainObject(raw)) throw new Error("Invalid event draft: must be an object");
   const type = raw.type;
   if (!isEventType(type)) {
-    throw new Error(`Unknown event type ${JSON.stringify(type)}; known types: ${EVENT_TYPES.join(", ")}`);
+    throw new Error(`Unknown event type ${preview(type)}; known types: ${EVENT_TYPES.join(", ")}`);
   }
   let out: Record<string, unknown>;
   try {

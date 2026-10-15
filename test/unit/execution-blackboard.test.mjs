@@ -29,7 +29,7 @@ function sample(field) {
   if (typeof field === "object") return sampleShape(field);
   const alt = field.split("|")[0];
   if (alt.startsWith("'")) return alt.slice(1, -1);
-  return { s: "x", t: "text", n: 1, int: 1, b: true, null: null, "s[]": ["x"], "t[]": ["text"] }[alt];
+  return { s: "x", id: "x", t: "text", n: 1, int: 1, b: true, null: null, "s[]": ["x"], "id[]": ["x"], "t[]": ["text"] }[alt];
 }
 function sampleShape(shape) {
   const out = {};

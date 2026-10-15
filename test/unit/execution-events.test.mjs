@@ -56,17 +56,22 @@ test("every catalog type has a payload spec, and nothing else does", () => {
   for (const t of ["task.exploded", "constructor", "__proto__", "toString", 7, null]) assert.equal(isEventType(t), false);
 });
 
-test("unknown types are rejected", () => {
+test("unknown types are rejected, and the echoed type is capped", () => {
   assert.throws(() => validateDraft({ type: "task.exploded", source: src, payload: {} }), /Unknown event type "task\.exploded"/);
   assert.throws(() => validateDraft({ type: "constructor", source: src, payload: {} }), /Unknown event type/);
+  assert.throws(() => validateDraft({ type: "x".repeat(10_000), source: src, payload: {} }), (e) => e.message.length < 2000 && /"x{64}…"/.test(e.message));
 });
 
 test("bad payloads are rejected with the field path", () => {
   const cases = [
     [{ type: "task.claimed", source: src, payload: { task: "a", agent: "w1", attempt: 1.5, ttl_s: 0 } }, /payload\.attempt must be an integer/],
     [{ type: "task.claimed", source: src, payload: { task: "a", agent: "w1", ttl_s: 0 } }, /payload\.attempt is required/],
-    [{ type: "task.ready", source: src, payload: { task: "" } }, /payload\.task must be a non-empty string/],
-    [{ type: "task.ready", source: src, payload: { task: "a", extra: 1 } }, /payload\.extra is not a known field/],
+    [{ type: "task.ready", source: src, payload: { task: "" } }, /payload\.task must be an id/],
+    [{ type: "task.ready", source: src, payload: { task: "a/x" } }, /payload\.task must be an id/],
+    [{ type: "task.ready", source: src, payload: { task: "A" } }, /payload\.task must be an id/],
+    [{ type: "check.started", source: src, payload: { command_id: "Unit Tests", scope: "integration" } }, /payload\.command_id must be an id/],
+    [{ type: "task.split", source: src, payload: { task: "a", into: [{ id: "a1", title: "t", persona: "p", kind: "build", depends_on: ["../a"], paths: { write: [] }, acceptance: [], checks: [] }] } }, /payload\.into\[0\]\.depends_on must be an array of ids/],
+    [{ type: "task.ready", source: src, payload: { task: "a", extra: 1 } }, /payload\["extra"\] is not a known field/],
     [{ type: "task.ready", source: src, payload: "a" }, /payload must be an object/],
     [{ type: "check.failed", source: src, payload: { command_id: "t", scope: "repo", exit: 1, signature: "s" } }, /payload\.scope must be "task" or "integration"/],
     [{ type: "lease.granted", source: src, payload: { lease: { id: "L", agent: "w", task: "a", paths: ["x"], mode: "rw", branch: "b", reason: "r", granted_seq: 0 } } }, /payload\.lease\.mode/],
@@ -77,7 +82,8 @@ test("bad payloads are rejected with the field path", () => {
     [{ type: "task.ready", source: "w1", payload: { task: "a" } }, /draft\.source must be an object/],
     [{ type: "task.ready", source: { kind: "robot", id: "x", pid: 1 }, payload: { task: "a" } }, /draft\.source\.kind/],
     [{ type: "task.ready", source: src, payload: { task: "a" }, mode: "fast" }, /draft\.mode/],
-    [{ type: "task.ready", source: src, payload: { task: "a" }, seq: 9 }, /draft\.seq is not a known field/],
+    [{ type: "task.ready", source: src, payload: { task: "a" }, seq: 9 }, /draft\["seq"\] is not a known field/],
+    [{ type: "task.ready", source: src, payload: { task: "a", ["k".repeat(500)]: 1 } }, /payload\["k{32}…"\] is not a known field/],
   ];
   for (const [draft, re] of cases) assert.throws(() => validateDraft(draft), re, JSON.stringify(draft));
 });
@@ -107,6 +113,11 @@ test("text fields are scrubbed of secrets; identifiers are left alone", () => {
   assert.match(out.payload.escalation.summary, /\[redacted:api_key\]/);
   assert.equal(out.payload.escalation.options[1], "wait");
   assert.equal(out.payload.escalation.id, "E1");
+  // Fields that can carry operator or tool text are scrubbed too.
+  const scrubbed = (type, payload) => JSON.stringify(validateDraft({ type, source: src, payload }).payload);
+  assert.doesNotMatch(scrubbed("execution.completed", { integration_sha: "i", pr_url: `https://x/pr?token=${FAKE_KEY}` }), /sk-ant-test/);
+  assert.doesNotMatch(scrubbed("watchdog.action", { rule: FAKE_KEY, action: FAKE_KEY, target: FAKE_KEY }), /sk-ant-test/);
+  assert.doesNotMatch(scrubbed("escalation.auto_resolved", { id: "E1", rule: FAKE_KEY }), /sk-ant-test/);
 });
 
 test("secrets are scrubbed before hashing, so the log never holds them and still verifies", async () => {

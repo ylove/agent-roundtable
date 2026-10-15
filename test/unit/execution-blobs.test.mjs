@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,12 +38,21 @@ test("getBlob verifies the hash and rejects bad refs", () => {
   }
 });
 
-test("re-putting content repairs a truncated blob file", () => {
+test("re-putting content repairs a truncated or same-size damaged blob file", () => {
   const dir = freshDir();
   const ref = putBlob(dir, "complete content");
   writeFileSync(blobPath(dir, ref), "comp");
   assert.equal(putBlob(dir, "complete content"), ref);
   assert.equal(getBlob(dir, ref).toString(), "complete content");
+  writeFileSync(blobPath(dir, ref), "COMPLETE CONTENT");
+  assert.equal(putBlob(dir, "complete content"), ref);
+  assert.equal(getBlob(dir, ref).toString(), "complete content", "same size is not enough: the hash is checked");
+});
+
+test("a missing blob directory is refused, never recreated", () => {
+  const gone = join(freshDir(), "purged", "blobs");
+  assert.throws(() => putBlob(gone, "x"), /does not exist/);
+  assert.equal(existsSync(join(gone, "..")), false);
 });
 
 test("content is scrubbed of secrets before hashing and writing, unless redact is false", () => {

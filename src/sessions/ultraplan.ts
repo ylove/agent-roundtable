@@ -44,6 +44,8 @@ export interface Ultraplan {
   publicChannel?: PublicChannel;
   /** Plans end with a roundtable-tasks block that propose_contract can build a contract from. */
   executionReady?: boolean;
+  /** Who it runs for, e.g. a heads-down huddle; tags its activity entry and archive record. */
+  origin?: string;
 }
 
 type Input = { agent: string; content: string };
@@ -373,6 +375,7 @@ async function finalize(u: Ultraplan, signoffs: Verdict[], collected: boolean): 
     agents: [...new Set([...u.agents.map((a) => a.key), ...(u.planner ? [u.planner.key] : [])])],
     topic: u.task, public: !!u.publicChannel,
     outcome,
+    ...(u.origin !== undefined && { origin: u.origin }),
   });
   // Archived before it leaves the live map, so the session is always either live or archived.
   const archived = archiveUltraplan(u, { markdown: document, signedOff, version, signoffs, tally, outcome }) !== null;
@@ -396,7 +399,7 @@ function available(id: string): Ultraplan {
 export async function startUltraplan(
   agents: string[], task: string,
   opts: { context?: string; draftPlan?: string; planner?: string; revisionRounds?: number; public?: boolean;
-    provider?: LLMProvider; model?: string; baseUrl?: string; executionReady?: boolean } = {}
+    provider?: LLMProvider; model?: string; baseUrl?: string; executionReady?: boolean; origin?: string } = {}
 ): Promise<UltraplanStepResult | UltraplanFinalResult> {
   if (!Array.isArray(agents) || agents.length < 1) throw new Error("Ultraplan requires at least 1 agent");
   if (typeof task !== "string" || !task.trim()) throw new Error("task is required: describe what the plan is for");
@@ -419,6 +422,7 @@ export async function startUltraplan(
     ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }), status: "awaiting_plan",
     versions: [], entries: [], startedAt: new Date(), ...(publicChannel && { publicChannel }),
     ...(opts.executionReady === true && { executionReady: true }),
+    ...(opts.origin !== undefined && { origin: opts.origin }),
   };
   ultraplans.set(id, u);
   const release = lockSession(id, ultraplanBusy(id));

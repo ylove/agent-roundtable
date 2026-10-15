@@ -19,6 +19,8 @@ export interface ActivityEntry {
   topic: string;
   outcome?: string;
   public: boolean;
+  /** Set for sessions run on behalf of something else, e.g. a heads-down huddle ("huddle:<exe>:<escalation>"). */
+  origin?: string;
 }
 
 function excerpt(text: string, max: number): string {
@@ -41,6 +43,7 @@ export function recordActivity(entry: Omit<ActivityEntry, "at"> & { at?: string 
       topic: excerpt(scrub(entry.topic), 300),
       ...(entry.outcome !== undefined && { outcome: excerpt(scrub(entry.outcome), 600) }),
       public: entry.public,
+      ...(entry.origin !== undefined && { origin: entry.origin }),
     };
     mkdirSync(dirname(path), { recursive: true });
     appendFileSync(path, JSON.stringify(normalized) + "\n", { mode: 0o600 });
@@ -61,7 +64,8 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
     && Array.isArray(e.agents) && e.agents.every((key) => typeof key === "string" && !/[\\/]/.test(key) && key.toLowerCase() === key)
     && typeof e.topic === "string" && typeof e.public === "boolean"
     && (e.mode === undefined || typeof e.mode === "string")
-    && (e.outcome === undefined || typeof e.outcome === "string");
+    && (e.outcome === undefined || typeof e.outcome === "string")
+    && (e.origin === undefined || typeof e.origin === "string");
 }
 
 export function readActivity(path: string | null = ACTIVITY_LOG_PATH): ActivityEntry[] {

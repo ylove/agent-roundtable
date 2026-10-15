@@ -51,7 +51,7 @@ const { readActivity } = await import("../../dist/activity.js");
 test("config derives workspace, skills, activity, parallel turns, and version", () => {
   function config(env = {}) {
     const childEnv = { ...process.env, ...env };
-    for (const name of ["ROUNDTABLE_SKILLS_DIR", "ROUNDTABLE_WORKSPACE_DIR", "ROUNDTABLE_ACTIVITY_LOG", "ROUNDTABLE_PARALLEL_TURNS"]) {
+    for (const name of ["ROUNDTABLE_HOME", "ROUNDTABLE_SKILLS_DIR", "ROUNDTABLE_WORKSPACE_DIR", "ROUNDTABLE_ACTIVITY_LOG", "ROUNDTABLE_PARALLEL_TURNS"]) {
       if (!(name in env)) delete childEnv[name];
     }
     const child = spawnSync(process.execPath, ["--input-type=module", "-e", 'const c = await import("./dist/config.js"); process.stdout.write(JSON.stringify(c));'], {

@@ -427,3 +427,55 @@ test("threshold crossings are recorded per budget total; circuits keep their ope
   s = reduce([["watchdog.circuit_opened", { driver: "codex", reason: "429", until: "2026-10-15T01:00:00Z", opens: 2 }]], s);
   assert.deepEqual(s.watchdog.circuits.codex, { open: true, until: "2026-10-15T01:00:00Z", reason: "429", opens: 2 });
 });
+
+test("blocked_by.needs follows dependency.requested and dependency.satisfied; task.blocked keeps the other reasons", () => {
+  const c = makeContract();
+  const need = (ref, kind = "interface") => ({ task: "a", need: { kind, ref } });
+  let s = reduce([
+    ["contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob: "b" }, { contract: c }],
+    ["task.claimed", { task: "a", agent: "w1", attempt: 1, ttl_s: 900 }],
+    ["dependency.requested", need("NavProps")],
+    ["task.blocked", { task: "a" }],
+    ["dependency.requested", need("Theme", "artifact")],
+    ["task.blocked", { task: "a" }],
+    ["dependency.requested", { task: "a", need: { kind: "task", ref: "b" } }],
+    ["task.blocked", { task: "a", deps: ["b"] }],
+  ]);
+  assert.deepEqual(s.tasks.a.blocked_by, { deps: ["b"], needs: [{ kind: "interface", ref: "NavProps" }, { kind: "artifact", ref: "Theme" }] }, "task needs are deps");
+  s = reduce([["task.blocked", { task: "a", escalation: "E1" }], ["dependency.requested", need("NavProps")]], s);
+  assert.deepEqual(s.tasks.a.blocked_by, { escalation: "E1", deps: ["b"], needs: [{ kind: "interface", ref: "NavProps" }, { kind: "artifact", ref: "Theme" }] }, "kept, and no duplicate need");
+  s = reduce([["dependency.satisfied", { ...need("NavProps"), by_event: "evt-x" }], ["dependency.satisfied", { ...need("Theme", "artifact"), by_event: "evt-y" }]], s);
+  assert.deepEqual([s.tasks.a.state, s.tasks.a.blocked_by], ["blocked", { escalation: "E1", deps: ["b"] }], "satisfying needs never unblocks by itself");
+  s = reduce([["task.unblocked", { task: "a" }], ["dependency.requested", need("NavProps")], ["dependency.satisfied", { ...need("NavProps"), by_event: "evt-z" }]], s);
+  assert.equal(s.tasks.a.state, "in_progress");
+  assert.equal("blocked_by" in s.tasks.a, false, "an unblocked task drops an emptied blocked_by");
+});
+
+test("checks and task.checks_passed bound to an older submission change nothing", () => {
+  const c = makeContract();
+  const sub = (commit) => ["task.submitted", { task: "a", commit, diff_blob: `d-${commit}`, stat: "s", files: [], rewrites: [] }];
+  let s = reduce([
+    ["contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob: "b" }, { contract: c }],
+    ["task.claimed", { task: "a", agent: "w1", attempt: 1, ttl_s: 900 }],
+    sub("c1"),
+  ]);
+  const first = s.tasks.a.submitted_seq;
+  s = reduce([["check.started", { command_id: "test", scope: "task", task: "a", commit: "c1", submitted_seq: first }], sub("c2")], s);
+  const second = s.tasks.a.submitted_seq;
+  s = reduce([["check.failed", { command_id: "test", scope: "task", task: "a", exit: 1, signature: "sig", commit: "c2", submitted_seq: second }]], s);
+  const before = structuredClone(s.checks.task);
+  s = reduce([
+    ["check.passed", { command_id: "test", scope: "task", task: "a", duration_ms: 1, commit: "c1", submitted_seq: first }],
+    ["check.failed", { command_id: "test", scope: "task", task: "a", exit: 1, signature: "sig", commit: "c1", submitted_seq: first }],
+  ], s);
+  assert.deepEqual(s.checks.task, before, "the stale checks are ignored");
+  const stale = ev("task.checks_passed", { task: "a", commands: ["test"], commit: "c1", submitted_seq: first });
+  assert.throws(() => apply(s, stale, {}, { strict: true }), /not its latest/);
+  assert.equal(apply(s, stale).tasks.a.state, "submitted", "replay ignores it");
+  const wrongCommit = ev("task.checks_passed", { task: "a", commands: ["test"], commit: "c1", submitted_seq: second });
+  assert.throws(() => apply(s, wrongCommit, {}, { strict: true }), /not its latest/);
+  const rejected = reduce([["task.rejected", { task: "a", reasons: ["test failed"] }]], s);
+  assert.throws(() => apply(rejected, ev("task.checks_passed", { task: "a", commands: ["test"], commit: "c2", submitted_seq: second }), {}, { strict: true }), /in_progress, not checking/);
+  assert.equal(apply(s, ev("task.checks_passed", { task: "a", commands: ["test"], commit: "c2", submitted_seq: second }), {}, { strict: true }).tasks.a.state, "merging");
+  assert.equal(apply(rejected, ev("task.checks_passed", { task: "a", commands: ["test"] })).tasks.a.state, "merging", "an unbound one is unchanged");
+});

@@ -343,18 +343,20 @@ test("stall: the full sequence, applied by hand, escalates on the second stall o
 // Dependency wait
 // ---------------------------------------------------------------------------
 
-test("a task blocked on deps is unblocked once every dep is accepted or published", () => {
+test("a task blocked on deps is unblocked once every dep is accepted or published and no need is open", () => {
   const cases = [
     { deps: ["a", "b"], a: "accepted", b: "in_progress", want: false },
     { deps: ["a", "b"], a: "accepted", b: "accepted", want: true },
     { deps: ["api"], iface: 1, want: true },
     { deps: ["api"], iface: 0, want: false },
     { deps: ["a"], a: "accepted", escalation: "esc-1", want: false },
+    { deps: ["a"], a: "accepted", needs: [{ kind: "interface", ref: "Theme" }], want: false },
+    { deps: ["a"], a: "accepted", needs: [], want: true },
   ];
   for (const c of cases) {
     const s = makeState({ tasks: [task("a", { state: c.a ?? "ready" }), task("b", { state: c.b ?? "ready" }), task("t")] });
     s.tasks.t.state = "blocked";
-    s.tasks.t.blocked_by = { deps: c.deps, ...(c.escalation ? { escalation: c.escalation } : {}) };
+    s.tasks.t.blocked_by = { deps: c.deps, ...(c.escalation ? { escalation: c.escalation } : {}), ...(c.needs ? { needs: c.needs } : {}) };
     if (c.iface !== undefined) s.interfaces.api = { version: c.iface };
     const actions = evaluate(s, T0, {});
     assert.deepEqual(eventTypes(actions), c.want ? ["task.unblocked"] : [], JSON.stringify(c));

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 const W = await import("../../dist/execution/worktrees.js");
@@ -9,7 +9,7 @@ const { mergeTask } = await import("../../dist/execution/merge.js");
 const { initialState } = await import("../../dist/execution/blackboard.js");
 const { WORKTREES_DIR } = await import("../../dist/config.js");
 const { executionTag } = await import("../../dist/ids.js");
-const { git, lines, makeExecution, write } = await import("../fixtures/execution/git-fixture.mjs");
+const { git, gitTry, lines, makeExecution, write } = await import("../fixtures/execution/git-fixture.mjs");
 
 const trailers = (ex, task, agent = "w1") => ({ execution: ex.header.id, task, agent });
 const mode = (p) => statSync(p).mode & 0o777;
@@ -377,4 +377,40 @@ test("snapshotWip commits all WIP, or only leased paths; diffForTask is capped; 
   const capped = await W.diffForTask(t.path, integrationBranch(ex.header.id), 500);
   assert.ok(Buffer.byteLength(capped) < 600);
   assert.match(capped, /\[diff truncated at 500 bytes\]\n$/);
+});
+
+test("withCommitCheckout: a private detached checkout of one commit, removed afterwards (also on a throw and by prune)", async () => {
+  const ex = await makeExecution({ "README.md": "base\n" });
+  const t = await W.ensureTaskWorktree(ex.header, "build-nav");
+  write(t.path, "README.md", "committed\n");
+  git(t.path, "-c", "user.name=x", "-c", "user.email=x@y", "commit", "-qam", "change");
+  const sha = git(t.path, "rev-parse", "HEAD");
+  write(t.path, "README.md", "uncommitted\n");
+  let checks;
+  const seen = await W.withCommitCheckout(ex.header, "build-nav", sha, async (dir) => {
+    checks = realpathSync(W.executionChecksDir(ex.header.id));
+    assert.ok(dir.startsWith(`${checks}/build-nav-`), dir);
+    assert.equal(mode(dir), 0o700);
+    assert.ok(statSync(join(dir, ".git")).isFile(), "a gitfile, mounted read-only by the docker backend");
+    assert.equal(git(dir, "rev-parse", "HEAD"), sha);
+    assert.equal(gitTry(dir, "symbolic-ref", "-q", "HEAD").status, 1, "detached");
+    return readFileSync(join(dir, "README.md"), "utf8");
+  });
+  assert.equal(seen, "committed\n");
+  assert.deepEqual(readdirSync(checks), []);
+  assert.doesNotMatch(git(ex.root, "worktree", "list", "--porcelain"), /\/checks\//);
+
+  await assert.rejects(W.withCommitCheckout(ex.header, "build-nav", sha, async () => { throw new Error("check crashed"); }), /check crashed/);
+  assert.deepEqual(readdirSync(checks), []);
+  await assert.rejects(W.withCommitCheckout(ex.header, "build-nav", "HEAD", async () => 1), /full commit id/);
+  await assert.rejects(W.withCommitCheckout(ex.header, "build-nav", "0".repeat(40), async () => 1), /does not name a commit/);
+
+  // A crash mid-check leaves the checkout behind: prune with remove takes it and its record.
+  const left = join(checks, "build-nav-dead");
+  git(ex.root, "worktree", "add", "-q", "--detach", left, sha);
+  assert.match(git(ex.root, "worktree", "list", "--porcelain"), /\/checks\//);
+  const pruned = await W.pruneWorktrees(ex.header, { remove: true });
+  assert.ok(pruned.removed.includes(left), JSON.stringify(pruned));
+  assert.equal(existsSync(checks), false);
+  assert.doesNotMatch(git(ex.root, "worktree", "list", "--porcelain"), /\/checks\//);
 });

@@ -34,14 +34,31 @@ function cliUsesApiKey(source: NodeJS.ProcessEnv): boolean {
   return (source.ROUNDTABLE_WORKER_AUTH ?? "").toLowerCase() === "api_key";
 }
 
+/**
+ * The claude CLI's own login always passes (CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`, is the
+ * CLI's credential, not the roundtable's). The roundtable's Anthropic credentials pass only with
+ * ROUNDTABLE_WORKER_AUTH=api_key; a cloud platform's credentials only when the CLI is set to use it.
+ */
 function claudeCliNames(source: NodeJS.ProcessEnv): string[] {
-  const names = [...BASE, ...PROXY, "CLAUDE_CONFIG_DIR"];
-  if (cliUsesApiKey(source)) names.push("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL");
+  const names = [...BASE, ...PROXY, "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"];
+  if (cliUsesApiKey(source)) names.push("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL");
   if (source.CLAUDE_CODE_USE_BEDROCK) {
-    names.push("CLAUDE_CODE_USE_BEDROCK", "AWS_REGION", "AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN");
+    names.push(
+      "CLAUDE_CODE_USE_BEDROCK", "AWS_REGION", "AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+      "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    );
   }
   if (source.CLAUDE_CODE_USE_VERTEX) {
-    names.push("CLAUDE_CODE_USE_VERTEX", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID", "GOOGLE_APPLICATION_CREDENTIALS");
+    names.push(
+      "CLAUDE_CODE_USE_VERTEX", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID", "GOOGLE_APPLICATION_CREDENTIALS",
+      "ANTHROPIC_VERTEX_BASE_URL", "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    );
+  }
+  if (source.CLAUDE_CODE_USE_FOUNDRY) {
+    names.push(
+      "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY",
+      "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+    );
   }
   return names;
 }

@@ -439,17 +439,26 @@ interface Lease { id: string; agent: string; task: string; paths: string[]; mode
 - When a claim expires, its leases expire too and the task returns to `ready`. The WIP stays in its worktree.
 
 **Leases.**
-- Globs support `**`, `*` and `?`, with no braces.
-- Overlap is judged conservatively: two leases overlap if the static prefix of one is a path prefix of the other.
-- An exclusive lease conflicts with anything; a shared lease conflicts only with an exclusive one.
+- Globs support `**`, `*` and `?`, with no braces. `*` and `?` never cross `/`, a trailing `/**` needs at least one segment, and `[` and `]` are literal.
+- Overlap is judged conservatively: two leases overlap if the static prefix of one is a whole-segment path prefix of the other. This never misses an overlap, but it can report one that cannot happen (`src/*.ts` and `src/*.css`), so requests may queue unnecessarily.
+- An exclusive lease conflicts with anything; a shared lease conflicts only with an exclusive one. An agent never conflicts with itself on the same task.
 - A conflicting request is queued. The response names the leaseholder, its task and its progress, and suggests `escalate(with: "path_owner")`.
+- The queue is FIFO: a request also waits behind an earlier queued request it conflicts with, so a stream of compatible requests cannot starve a waiting one.
+- Git metadata needs an explicit lease. A path with a segment starting with `.git` (`.gitattributes`, `.gitmodules`, `.gitignore`, `.github/…`) is covered only by a glob that names that segment literally. A `.git` segment is never covered.
+- The task id `integration` is reserved, because `rt/<exe6>/integration` names the integration branch.
 
 **Enforcement** happens at three points:
 1. The PreToolUse hook.
-2. `submit_work`, where every path in `git diff --name-status -M <merge-base>..HEAD` must be covered by a lease.
+2. `submit_work`, where every path in `git diff --raw -M <merge-base>..HEAD` must be covered by a lease. Both sides of a rename count, gitlinks are refused, and so are symlinks that leave the repository. The merge base is taken with the integration branch, so other tasks' merged work never counts.
 3. Before merging.
 
-**Commits.** The worker server commits only leased paths, using `git -c core.hooksPath=/dev/null -c gc.auto=0 -c commit.gpgsign=false`. Commits carry the trailers `Roundtable-Execution`, `Roundtable-Task` and `Roundtable-Agent`.
+**Commits.** The worker server commits only leased paths (`src/execution/worktrees.ts`). Changed paths outside the leases stay uncommitted and are reported. Commits carry the trailers `Roundtable-Execution`, `Roundtable-Task` and `Roundtable-Agent`, and their messages are scrubbed.
+
+Every host-side git call goes through `src/execution/git.ts`:
+- argv only, `childEnv("git")`, a timeout and capped output;
+- no fsmonitor, hooks, pager, external diff, textconv, signing, auto gc or maintenance, transports, rerere or submodule recursion;
+- an explicit `--git-dir`/`--work-tree` taken from the main repository's worktree records. A worktree whose `.git` file was rewritten, or is a symlink, is refused;
+- the commit identity, read from the main repository.
 
 **`submit_work`.** Commits, checks leases, then runs the task's checks in the sandbox. It is capped at 15 minutes and sends progress notifications. With `ready: false` it only makes a checkpoint commit.
 
@@ -665,3 +674,12 @@ WS03 adds the store that the other workstreams write through:
 | `src/execution/blobs.ts` | `putBlob`, `getBlob`, `scrubbedJSON(value)` for structured blobs |
 | `src/execution/verify.ts` | `verifyExecution(idOrDir)` returns `{ok, seq, badSeq?, reason?}` |
 | `src/security/audit.ts` | `appendAudit({actor, action, target?, details?})`, `verifyAudit()`, `pruneAudit(retentionDays = 365)` |
+
+WS06 adds worktrees, leases and the merge queue:
+
+| Module | API |
+|---|---|
+| `src/execution/git.ts` | `runGit(target, args, opts)` (hardened; see §10), `openRepo(root)`, `openLinkedWorktree(repo, path)`, `gitIdentity(repo)`, `taskBranch(exe, task)`, `integrationBranch(exe)`, `assertSafeRef`, `resolveCommit`, `GIT_HARDENING`, `GitError`, `GitSafetyError` |
+| `src/execution/leases.ts` | Pure. `matchGlob`, `staticPrefix`, `globsOverlap`, `leasesConflict`, `decideLeaseRequest(state, req)`, `nextGrants(state, source, {gone?})`, `releaseLeases(state, filter, source, opts?)`, `pathCovered`, `uncoveredPaths`, `leasesFor`, `leaseDrafts.*` |
+| `src/execution/worktrees.ts` | `ensureIntegrationWorktree(header)`, `ensureTaskWorktree(header, task, startPoint?)`, `taskStartPoint(state, task)`, `removeWorktree(path, {deleteBranch?})`, `pruneWorktrees(exe, {remove?, branches?})`, `worktreeStatus(path)`, `withGitLock(exe, fn)`, `mergeBase`, `changedPaths`, `checkLeaseCoverage`, `commitLeasedPaths`, `snapshotWip`, `diffForTask`, `taskDiffSummary` |
+| `src/execution/merge.ts` | `mergeTask(header, task, {leases?})`, `prepareConflictResolution(header, task)`, `classifyConflict(conflicts, leases)`, `mergeDrafts.{succeeded, conflicted, taskMerged}` |

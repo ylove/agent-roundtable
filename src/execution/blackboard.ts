@@ -37,8 +37,9 @@ import {
 /**
  * Bump whenever apply's output for an existing log changes; snapshots of other versions are ignored.
  * 2: split map, terminal-state guards, amended contracts marked frozen.
+ * 3: an identical resubmitted diff is no patch; threshold epochs; circuit open counts.
  */
-export const REDUCER_VERSION = 2;
+export const REDUCER_VERSION = 3;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -440,7 +441,11 @@ const HANDLERS: Handlers = {
     rt.last_note = p.note;
     if (rt.state === "claimed") rt.state = "in_progress";
   },
-  /** state submitted; diffs and files updated; the task's check streaks reset (a new patch). */
+  /**
+   * state submitted; diffs and files updated. The task's check streaks reset only for a new patch:
+   * a diff_blob that differs from the task's previous submission. Resubmitting the same diff is no
+   * patch, so the same failure keeps counting (heads-down.md §11).
+   */
   "task.submitted": (s, e, x) => {
     const p = e.payload;
     const rt = liveTask(s, e, x);
@@ -448,9 +453,11 @@ const HANDLERS: Handlers = {
     rt.state = "submitted";
     rt.last_commit = p.commit;
     rt.submitted_seq = e.seq;
+    const patched = own(s.diffs, p.task)?.blob !== p.diff_blob;
     put(s.diffs, p.task, { stat: p.stat, blob: p.diff_blob, commit: p.commit });
     const agent = rt.agent ?? e.source.id;
     for (const f of p.files) put(s.files, f, { task: p.task, agent, last_commit: p.commit, merged: false });
+    if (!patched) return;
     for (const [key, c] of Object.entries(s.checks.task)) {
       if (checkTask(key) === p.task) {
         c.streak = 0;
@@ -720,8 +727,15 @@ const HANDLERS: Handlers = {
     const team = own(s.agents, p.agent)?.team ?? own(s.tasks, p.task)?.spec.team;
     if (team !== undefined) addUsd(b.by_team, team, p.usd);
   },
+  /**
+   * Recorded per budget epoch: a threshold crossed at a new total (after budget.extended) starts a
+   * new list. A list recorded before epochs existed is adopted by the first total named.
+   */
   "budget.threshold_crossed": (s, { payload: p }) => {
-    const t = s.budget.thresholds_crossed;
+    const b = s.budget;
+    if (b.thresholds_budget_usd !== undefined && b.thresholds_budget_usd !== p.budget_usd) b.thresholds_crossed = [];
+    b.thresholds_budget_usd = p.budget_usd;
+    const t = b.thresholds_crossed;
     if (!t.includes(p.pct)) {
       t.push(p.pct);
       t.sort((a, b) => a - b);
@@ -735,10 +749,14 @@ const HANDLERS: Handlers = {
   // --- watchdog and sandbox ------------------------------------------------
   "watchdog.action": none,
   "watchdog.circuit_opened": (s, { payload: p }) => {
-    put(s.watchdog.circuits, p.driver, { open: true, until: p.until, reason: p.reason });
+    const c: BlackboardState["watchdog"]["circuits"][string] = { open: true, until: p.until, reason: p.reason };
+    if (p.opens !== undefined) c.opens = p.opens;
+    put(s.watchdog.circuits, p.driver, c);
   },
+  /** Closed; `until` keeps the end of the last open period, so that incident is not counted again. */
   "watchdog.circuit_closed": (s, { payload: p }) => {
-    put(s.watchdog.circuits, p.driver, { open: false });
+    const until = own(s.watchdog.circuits, p.driver)?.until;
+    put(s.watchdog.circuits, p.driver, until !== undefined ? { open: false, until } : { open: false });
   },
   "watchdog.deadlock_detected": (s, { payload: p }) => {
     s.watchdog.deadlocks.push([...p.cycle]);

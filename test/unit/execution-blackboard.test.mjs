@@ -269,7 +269,7 @@ test("escalations, huddles, circuits and deadlocks", () => {
   assert.deepEqual(s.budget.thresholds_crossed, [50, 80]);
   assert.equal(s.budget.extensions_usd, 2);
   s = reduce([["watchdog.circuit_closed", { driver: "codex" }], ["escalation.withdrawn", { id: "E2", reason: "moot" }]], s);
-  assert.deepEqual(s.watchdog.circuits.codex, { open: false });
+  assert.deepEqual(s.watchdog.circuits.codex, { open: false, until: "2026-10-15T01:00:00Z" }, "the last open period is kept");
   assert.equal(s.escalations.E2.status, "withdrawn");
   s = reduce([["escalation.raised", { escalation: { ...esc, id: "E3" } }], ["escalation.auto_resolved", { id: "E3", rule: "dead_leaseholder" }]], s);
   assert.deepEqual(s.escalations.E3.resolution, { action: "decide", decision: "dead_leaseholder", by: "runner" });
@@ -404,4 +404,26 @@ test("a submit resets only its own task's check streaks", () => {
   ]);
   assert.equal(s.checks.task["a/test"].streak, 0);
   assert.equal(s.checks.task["a.b/test"].streak, 2);
+});
+
+test("resubmitting the same diff is no patch: the streak keeps counting", () => {
+  const c = makeContract({ tasks: [taskSpec("a")] });
+  const fail = ["check.failed", { command_id: "test", scope: "task", task: "a", exit: 1, signature: "S" }];
+  const submit = (diff_blob) => ["task.submitted", { task: "a", commit: "c", diff_blob, stat: "s", files: [], rewrites: [] }];
+  const s = reduce([[...frozenEvent(), { contract: c }], submit("d1"), fail, submit("d1"), fail, submit("d1"), fail]);
+  assert.equal(s.checks.task["a/test"].streak, 3);
+  const patched = reduce([submit("d2"), fail], s);
+  assert.equal(patched.checks.task["a/test"].streak, 1, "a different diff resets it");
+});
+
+test("threshold crossings are recorded per budget total; circuits keep their open count", () => {
+  let s = reduce([
+    ["budget.threshold_crossed", { pct: 50, spent_usd: 55, budget_usd: 100 }],
+    ["budget.threshold_crossed", { pct: 80, spent_usd: 85, budget_usd: 100 }],
+  ]);
+  assert.deepEqual([s.budget.thresholds_crossed, s.budget.thresholds_budget_usd], [[50, 80], 100]);
+  s = reduce([["budget.threshold_crossed", { pct: 50, spent_usd: 105, budget_usd: 200 }]], s);
+  assert.deepEqual([s.budget.thresholds_crossed, s.budget.thresholds_budget_usd], [[50], 200]);
+  s = reduce([["watchdog.circuit_opened", { driver: "codex", reason: "429", until: "2026-10-15T01:00:00Z", opens: 2 }]], s);
+  assert.deepEqual(s.watchdog.circuits.codex, { open: true, until: "2026-10-15T01:00:00Z", reason: "429", opens: 2 });
 });

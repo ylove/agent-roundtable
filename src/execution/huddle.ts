@@ -132,6 +132,8 @@ export function counterpartSeat(state: Readonly<BlackboardState>, esc: Escalatio
 
 /** The record driver.answer needs, for a counterpart that is a live claude-code worker; else undefined. */
 export function liveWorkerRecord(ctx: HookCtx, state: Readonly<BlackboardState>, seat: Seat, alive: (pid: number) => boolean): WorkerRecord | undefined {
+  const live = seat.agent ? ctx.worker?.(seat.agent) : undefined;
+  if (ctx.worker) return live?.driver === "claude-code" && ctx.driver?.id === "claude-code" && ctx.driver.answer ? live : undefined;
   const rec = own(state.agents, seat.agent);
   if (!rec || !seat.agent || !seat.task || !ctx.driver?.answer || ctx.driver.id !== "claude-code") return undefined;
   if (rec.driver !== "claude-code" || rec.status !== "running" || !rec.session_id || rec.pid === undefined || !alive(rec.pid)) return undefined;
@@ -215,7 +217,7 @@ export interface MicroHuddleOptions extends EscalationOptions {
  * a failure, routes it to the scope's orchestrator. Idempotent: an escalation not in o.expect is
  * left alone.
  */
-export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOptions): Promise<ProcessOp[]> {
+export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOptions = { actor: { kind: "runner" }, expect: ["open"] }): Promise<ProcessOp[]> {
   const { store } = ctx;
   const state = await store.state();
   const esc = own(state.escalations, id);
@@ -254,17 +256,13 @@ export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOpt
   let answer: string;
   try {
     const rec = liveWorkerRecord(ctx, state, cp, o.alive ?? defaultAlive);
-    let fromWorker: string | undefined;
     if (rec) {
-      try {
-        const r = await ctx.driver!.answer!(rec, `${ANSWER_INTRO}\n\n${turn0}`, MICRO_ANSWER_USD);
-        meter.add(r.usage);
-        fromWorker = r.text;
-      } catch (e) {
-        console.error(`[Huddle] ${hud}: ${cp.seat} could not answer from its session (${errText(e)}); asking its persona`);
-      }
+      const r = await meter.run(() => ctx.driver!.answer!(rec, `${ANSWER_INTRO}\n\n${turn0}`, MICRO_ANSWER_USD));
+      meter.add(r.usage);
+      answer = r.text;
+    } else {
+      answer = await askPersona(meter, ctx.llm, cp.persona, COUNTERPART_DIRECTIVE, counterpartPrompt(state, turn0, cp));
     }
-    answer = fromWorker ?? await askPersona(meter, ctx.llm, cp.persona, COUNTERPART_DIRECTIVE, counterpartPrompt(state, turn0, cp));
   } catch (e) {
     return fail(`${cp.seat} could not answer: ${errText(e)}`);
   }

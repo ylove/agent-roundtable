@@ -6,13 +6,14 @@
 // summaries, the integration diff stat and the validation results, and answers
 // `Verdict: COMPLETE | INCOMPLETE` with its gaps and, optionally, a fenced roundtable-tasks block of
 // tasks that would close them. INCOMPLETE with tasks inside the lead's authority (add_task) amends
-// the contract; that is one review cycle, and a run gets GOAL_REVIEW_CYCLES of them (counted from
-// the contract.amended events the reviews made). Otherwise, or beyond the cap, the gaps go to the
+// the contract; a run gets GOAL_REVIEW_CYCLES reviews, counted from their note.posted events.
+// Otherwise, or beyond the cap, the gaps go to the
 // orchestrator as an escalation. Each review is recorded as a note (topic goal-review) with its
 // usage (source lead); the provider call runs outside transact.
 // ============================================================================
 
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { blockToContract, findTaskBlock, TASK_BLOCK_TAG } from "./contract-parse.js";
 import {
   UsageMeter,
@@ -28,11 +29,12 @@ import {
   type HookCtx,
 } from "./escalation.js";
 import { AuthorityError, amendContract } from "./contract-lifecycle.js";
+import { acquireLock } from "./lock.js";
 import { integrationWorktreePath, taskDiffSummary } from "./worktrees.js";
 import type { AnyEventDraft, BlackboardState, Contract, Escalation, TaskSpec } from "./types.js";
 
 export const GOAL_REVIEW_CYCLES = 2;
-/** The reason prefix of a review's amendment: how cycles are counted from the log. */
+/** The reason prefix of amendments produced by goal review. */
 export const GOAL_REVIEW_REASON = "Goal review";
 export const GOAL_REVIEW_TOPIC = "goal-review";
 
@@ -40,7 +42,7 @@ export interface GoalReviewResult {
   verdict: "COMPLETE" | "INCOMPLETE";
   gaps: string[];
   /** Task ids the review added to the contract. */
-  added?: string[];
+  added: string[];
   /** The contract version the added tasks are in. */
   amended?: number;
   /** The escalation raised to the orchestrator (beyond the cap, outside authority, or nothing to add). */
@@ -102,7 +104,7 @@ export function buildGoalReviewPrompt(state: Readonly<BlackboardState>, c: Contr
     `## Tasks\n\n${tasks.join("\n") || "(none)"}`,
     `## Integration\n\n${stat ? `Diff against the base: ${oneLine(stat, 300)}` : "(no diff stat available)"}`,
     `## Validation\n\nFinal commands: ${final.join(", ") || "(none)"}\n${checks.join("\n") || "(no integration results recorded)"}`,
-    `## Your answer (review ${cycle + 1}; at most ${GOAL_REVIEW_CYCLES} rounds of added tasks)\n\n` +
+    `## Your answer (review ${cycle + 1}; at most ${GOAL_REVIEW_CYCLES} reviews per run)\n\n` +
       "Reply with exactly:\nVerdict: COMPLETE | INCOMPLETE\nGaps:\n- <what is missing or wrong, one per line; \"None\" when complete>\n\n" +
       `When INCOMPLETE and new tasks would close the gaps, end with a fenced \`\`\`${TASK_BLOCK_TAG} block holding only "tasks": the new tasks, with new ids, ` +
       `each with title, persona (one of: ${[...new Set(c.tasks.map((t) => t.persona))].slice(0, 12).join(", ")}), depends_on, paths.write, acceptance and checks ` +
@@ -114,30 +116,47 @@ function shortHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 12);
 }
 
-/** Review cycles used: amendments a goal review made in this execution. */
-async function cyclesUsed(ctx: HookCtx): Promise<number> {
-  return (await ctx.store.events({ types: ["contract.amended"] })).filter((e) => e.type === "contract.amended" && e.payload.reason.startsWith(GOAL_REVIEW_REASON)).length;
+/** Every completed review counts, including a review that could not add tasks. */
+async function priorReviews(ctx: HookCtx): Promise<string[]> {
+  return (await ctx.store.events({ types: ["note.posted"] }))
+    .filter((e) => e.type === "note.posted" && e.payload.topic === GOAL_REVIEW_TOPIC && e.correlation?.startsWith("goal-review:"))
+    .map((e) => e.type === "note.posted" ? e.payload.text : "");
 }
 
 /**
  * The lead's goal review. COMPLETE returns at once; INCOMPLETE adds the proposed tasks within the
- * lead's authority (at most GOAL_REVIEW_CYCLES times per run), or escalates the gaps to the
+ * lead's authority (at most GOAL_REVIEW_CYCLES reviews per run), or escalates the gaps to the
  * orchestrator. Throws only when there is no frozen contract or the lead's call fails.
  */
 export async function goalReview(ctx: HookCtx): Promise<GoalReviewResult> {
+  const release = await acquireLock(join(ctx.store.dir, "goal-review.lock"), { staleMs: 10_000, timeoutMs: 30_000 });
+  try {
+    return await review(ctx);
+  } finally {
+    await release();
+  }
+}
+
+async function review(ctx: HookCtx): Promise<GoalReviewResult> {
   const state = await ctx.store.state();
   const c = state.contract;
   if (!c) throw new Error(`Execution ${ctx.store.id} has no frozen contract`);
   const lead = c.authority.lead;
   const actor = { kind: "lead" as const, id: lead };
   const source = actorSource(actor);
-  const cycles = await cyclesUsed(ctx);
+  const reviews = await priorReviews(ctx);
+  const cycles = reviews.length;
+  if (cycles >= GOAL_REVIEW_CYCLES) {
+    const gaps = parseGaps(reviews.at(-1) ?? "");
+    const escalation = await escalateGaps(ctx, c, gaps, `${GOAL_REVIEW_CYCLES} review cycles have already run`, "cap", []);
+    return { verdict: "INCOMPLETE", gaps, added: [], escalation };
+  }
   const meter = new UsageMeter("lead");
   const correlation = `goal-review:${c.version}:${cycles}`;
 
   let answer: string;
   try {
-    answer = await askPersona(meter, ctx.llm, lead, LEAD_DIRECTIVE, buildGoalReviewPrompt(state, c, await integrationStat(ctx), cycles));
+    answer = await askPersona(meter, ctx.llm, lead, LEAD_DIRECTIVE, buildGoalReviewPrompt(state, c, await integrationStat(ctx), cycles) + (ctx.integrationSha ? `\n\nIntegration commit: ${ctx.integrationSha}` : ""));
   } finally {
     await recordDrafts(ctx.store, meter.take(source, correlation));
   }
@@ -145,8 +164,8 @@ export async function goalReview(ctx: HookCtx): Promise<GoalReviewResult> {
   const verdict = parsed === "COMPLETE" ? "COMPLETE" : "INCOMPLETE";
   const gaps = parsed === "UNCLEAR" ? ["the goal review gave no Verdict line"] : parseGaps(answer);
   const note = ev("note.posted", { topic: GOAL_REVIEW_TOPIC, text: cap(`Verdict: ${verdict}${gaps.length ? `\nGaps:\n${gaps.map((g) => `- ${g}`).join("\n")}` : ""}`, 6000), refs: [] }, source, correlation);
+  await recordDrafts(ctx.store, [note]);
   if (verdict === "COMPLETE") {
-    await recordDrafts(ctx.store, [note]);
     return { verdict, gaps, added: [] };
   }
 
@@ -162,8 +181,7 @@ export async function goalReview(ctx: HookCtx): Promise<GoalReviewResult> {
   } catch (e) {
     why = `its ${TASK_BLOCK_TAG} block is not usable: ${errText(e)}`;
   }
-  if (cycles >= GOAL_REVIEW_CYCLES) why = `${GOAL_REVIEW_CYCLES} review cycles have already added tasks`;
-  else if (!why && !proposed.length) why = "the review proposed no tasks to close the gaps";
+  if (!why && !proposed.length) why = "the review proposed no tasks to close the gaps";
   else if (!why && !c.authority.may.includes("add_task")) why = 'the lead\'s authority does not include "add_task"';
 
   if (!why) {
@@ -172,13 +190,12 @@ export async function goalReview(ctx: HookCtx): Promise<GoalReviewResult> {
         by: lead, authority: [...c.authority.may], source,
         reason: `${GOAL_REVIEW_REASON} ${cycles + 1}: ${oneLine(gaps.join("; ") || "gaps found", 400)}`,
       });
-      await recordDrafts(ctx.store, [note]);
       return { verdict, gaps, added: proposed.map((t) => t.id), amended: r.version };
     } catch (e) {
       why = `${e instanceof AuthorityError ? "the added tasks are outside the lead's authority" : "the added tasks could not be applied"}: ${errText(e).split("\n").slice(0, 4).join(" ")}`;
     }
   }
-  const escalation = await escalateGaps(ctx, c, gaps, why, `${c.version}:${cycles}`, [note]);
+  const escalation = await escalateGaps(ctx, c, gaps, why, `${c.version}:${cycles}`, []);
   return { verdict, gaps, added: [], escalation };
 }
 

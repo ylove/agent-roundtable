@@ -20,7 +20,9 @@
 // budget.usage_recorded) are recorded afterwards.
 // ============================================================================
 
-import type { LLMProvider } from "../config.js";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { DEFAULT_MODELS, type LLMProvider } from "../config.js";
 import { loadAgent, renderSkillsSection } from "../agents.js";
 import { newId } from "../ids.js";
 import { callLLM, withUsageSink, type UsageReport } from "../providers/index.js";
@@ -28,16 +30,19 @@ import { scrub } from "../security/secrets.js";
 import { parseVerdict } from "../sessions/workshop.js";
 import { writeAgentLeases } from "../workers/files.js";
 import { classifyFailure } from "./circuit.js";
-import { AuthorityError, amendContract, type ContractResult } from "./contract-lifecycle.js";
+import { AuthorityError, amendContract } from "./contract-lifecycle.js";
 import { contractRecord, openContractStore, orchestratorSource } from "./contract-state.js";
 import { leasesInQuestion, readDiagnostics, targetPaths, type Diagnostics } from "./context-bundle.js";
 import { globWithin } from "./contract.js";
-import { goalReview, type GoalReviewResult } from "./goal-review.js";
+import { goalReview } from "./goal-review.js";
 import { runFormatHuddle, runMicroHuddle } from "./huddle.js";
 import { leadFallback } from "./lead.js";
+import { acquireLock } from "./lock.js";
 import { normalizeGlob } from "./leases.js";
 import { estimateUsd } from "./pricing.js";
 import { buildTaskCard } from "./task-card.js";
+import type { RunnerContext, RunnerHooks } from "./runner-hook-types.js";
+export type { RunnerContext, RunnerHooks, GoalReviewInput, GoalReview } from "./runner-hook-types.js";
 import type {
   AnyEventDraft,
   BlackboardState,
@@ -77,6 +82,8 @@ export interface HookCtx {
   header: ExecutionHeader;
   /** The claude-code driver: live workers answer micro-huddles through answer(). */
   driver?: WorkerDriver;
+  worker?: RunnerContext["worker"];
+  integrationSha?: string;
   /** Provider and model for persona calls (huddles, the lead, goal review). */
   llm: HuddleLLM;
 }
@@ -96,15 +103,6 @@ export type ProcessOp =
   | (OpBase & { type: "spawn_retry"; task: string; attempt: number })
   /** Stop a worker whose task was retried or reassigned under it. */
   | (OpBase & { type: "kill_worker"; agent: string; reason: string });
-
-export interface RunnerHooks {
-  /** After escalation.raised is committed. Idempotent. */
-  onEscalationRaised(ctx: HookCtx, escalationId: string): Promise<ProcessOp[]>;
-  /** The watchdog's lead_fallback op: the lead decides in one persona call. Idempotent. */
-  leadFallback(ctx: HookCtx, escalationId: string): Promise<ProcessOp[]>;
-  /** Once every task is accepted and the final validation ran. */
-  goalReview(ctx: HookCtx): Promise<GoalReviewResult>;
-}
 
 export interface EscalationOptions {
   /** Whether a pid is alive on this host (default: signal 0). */
@@ -306,13 +304,30 @@ export function fencedJson(text: string): Record<string, unknown> | undefined {
 // Committing: every write re-checks the escalation under the lock
 // ============================================================================
 
-/** Task ids paused by this escalation (execution.paused correlated to it) that are still paused. */
+/** Resume only pauses owned by this escalation, preserving other emergencies and manual pauses. */
 async function pausedBy(store: ExecutionStore, state: Readonly<BlackboardState>, id: string): Promise<string[]> {
-  const out = new Set<string>();
-  for (const e of await store.events({ types: ["execution.paused"] })) {
-    if (e.type === "execution.paused" && e.correlation === id && Array.isArray(e.payload.scope)) for (const t of e.payload.scope) out.add(t);
+  const owners = new Map<string, Set<string>>();
+  for (const e of await store.events({ types: ["execution.paused", "execution.resumed"] })) {
+    if (e.type === "execution.paused" && Array.isArray(e.payload.scope)) {
+      for (const task of e.payload.scope) {
+        const set = owners.get(task) ?? new Set<string>();
+        set.add(e.correlation ?? `manual:${e.seq}`);
+        owners.set(task, set);
+      }
+    } else if (e.type === "execution.resumed") {
+      const scope = e.payload.scope === "all" ? [...owners.keys()] : e.payload.scope;
+      for (const task of scope) {
+        if (e.correlation) owners.get(task)?.delete(e.correlation);
+        else owners.delete(task);
+      }
+    }
   }
-  return [...out].filter((t) => state.paused_tasks.includes(t));
+  return state.paused_tasks.filter((task) => {
+    const set = owners.get(task);
+    if (!set?.has(id)) return false;
+    return ![...set].some((other) => other !== id &&
+      (other.startsWith("manual:") || UNRESOLVED.includes(own(state.escalations, other)?.status ?? "resolved")));
+  });
 }
 
 async function hasPaused(store: ExecutionStore, id: string): Promise<boolean> {
@@ -475,7 +490,7 @@ export async function routeToOrchestrator(ctx: HookCtx, id: string, o: CommitOpt
 /** The failing driver behind an emergency: named by the watchdog's diagnostics, or the raiser's driver while its circuit is open. */
 export function emergencyDriver(state: Readonly<BlackboardState>, esc: Escalation, diag?: Pick<Diagnostics, "notes">): string | undefined {
   const named = /\bdriver ([a-z][a-z0-9-]*)/.exec(diag?.notes ?? "")?.[1];
-  if (esc.agent === "watchdog" && named) return named;
+  if (named && Object.values(state.agents).some((a) => a.driver === named)) return named;
   const rec = own(state.agents, esc.agent);
   return rec && own(state.watchdog.circuits, rec.driver)?.open ? rec.driver : undefined;
 }
@@ -483,13 +498,13 @@ export function emergencyDriver(state: Readonly<BlackboardState>, esc: Escalatio
 /**
  * The tasks an emergency pauses: the escalating task and its transitive dependents and, for
  * credentials or money failing on a driver, every task whose agent runs on that driver. Only
- * tasks that are not finished and not already paused.
+ * tasks that are not finished; overlapping pauses keep their separate owners.
  */
 export function affectedByEmergency(state: Readonly<BlackboardState>, esc: Escalation, cls: EmergencyClass, driver?: string): string[] {
   const out: string[] = [];
   const add = (t: string) => {
     const rt = own(state.tasks, t);
-    if (rt && !TERMINAL.has(rt.state) && !state.paused_tasks.includes(t) && !out.includes(t)) out.push(t);
+    if (rt && !TERMINAL.has(rt.state) && !out.includes(t)) out.push(t);
   };
   if (esc.task) {
     add(esc.task);
@@ -755,12 +770,25 @@ function needAuthority(state: Readonly<BlackboardState>, actor: Actor, action: "
   if (actor.kind === "lead" && !c.authority.may.includes(action)) throw new AuthorityError(c.id, [`${action === "retry" ? "retrying" : "reassigning"} a task needs "${action}"`]);
 }
 
+interface AppliedAmendment {
+  version: number;
+  affected?: { all: string[] };
+}
+
 /** amendContract as the actor: the lead within authority.may, the orchestrator without a limit. */
-async function amendAs(ctx: HookCtx, actor: Actor, patch: Record<string, unknown>, reason: string, fromSession?: string): Promise<ContractResult> {
+async function amendAs(ctx: HookCtx, actor: Actor, patch: Record<string, unknown>, reason: string, fromSession?: string, escalationId?: string): Promise<AppliedAmendment> {
+  const marker = escalationId ? `Escalation ${escalationId} amendment: ` : undefined;
+  if (marker) {
+    const previous = (await ctx.store.events({ types: ["contract.amended"] }))
+      .find((e) => e.type === "contract.amended" && e.payload.reason.startsWith(marker));
+    if (previous?.type === "contract.amended") {
+      return { version: previous.payload.version, affected: { all: previous.payload.affected_tasks } };
+    }
+  }
   const c = (await ctx.store.state()).contract!;
   return amendContract(ctx.store, patch, {
     by: actorName(actor),
-    reason,
+    reason: (marker ?? "") + reason,
     ...(fromSession && { fromSession }),
     ...(actor.kind === "lead" && { authority: [...c.authority.may] }),
     source: actorSource(actor),
@@ -774,6 +802,17 @@ async function amendAs(ctx: HookCtx, actor: Actor, patch: Record<string, unknown
  * otherwise). decide, dismiss and await_human change no contract and need no authority.
  */
 export async function resolveEscalation(ctx: HookCtx, id: string, opts: ResolveOptions, x: EscalationOptions = {}): Promise<ResolveResult> {
+  const key = createHash("sha256").update(id).digest("hex").slice(0, 24);
+  // This separate lock serializes resolvers, including engines, without holding events.lock.
+  const release = await acquireLock(join(ctx.store.dir, `resolution-${key}.lock`), { staleMs: 10_000, timeoutMs: 30_000 });
+  try {
+    return await resolve(ctx, id, opts, x);
+  } finally {
+    await release();
+  }
+}
+
+async function resolve(ctx: HookCtx, id: string, opts: ResolveOptions, x: EscalationOptions): Promise<ResolveResult> {
   if (!ACTIONS.includes(opts.action)) throw new Error(`Unknown action ${JSON.stringify(opts.action)}; expected one of ${ACTIONS.join(", ")}`);
   const state = await ctx.store.state();
   const esc = own(state.escalations, id);
@@ -814,7 +853,7 @@ export async function resolveEscalation(ctx: HookCtx, id: string, opts: ResolveO
       if (task.state === "accepted" || task.state === "cancelled") throw new Error(`Task ${esc.task} is ${task.state}: it cannot be reassigned`);
       const c = state.contract;
       const patch = { tasks: c.tasks.map((t) => (t.id === esc.task ? { ...t, persona } : t)) };
-      const amended = await amendAs(ctx, actor, patch, `reassign ${esc.task} to ${persona} (escalation ${id})`);
+      const amended = await amendAs(ctx, actor, patch, `reassign ${esc.task} to ${persona} (escalation ${id})`, undefined, id);
       const after = await ctx.store.state();
       const text = decision ?? `Task ${esc.task} was reassigned to ${persona}.`;
       return done(await commitResolution(ctx.store, id, reassignPlan(after, esc, persona, text, by, source)), {
@@ -823,7 +862,7 @@ export async function resolveEscalation(ctx: HookCtx, id: string, opts: ResolveO
     }
     case "amend": {
       if (!opts.amendment || typeof opts.amendment !== "object" || Array.isArray(opts.amendment)) throw new Error("amend needs an amendment (an RFC 7396 merge patch of the contract)");
-      const amended = await amendAs(ctx, actor, opts.amendment, decision ?? `escalation ${id}`);
+      const amended = await amendAs(ctx, actor, opts.amendment, decision ?? `escalation ${id}`, undefined, id);
       const text = decision ?? `The contract was amended to v${amended.version}; re-read it before you continue.`;
       return done(await commitResolution(ctx.store, id, { action: "amend", decision: text, by, source, directive: `Escalation ${id}: ${text}` }), {
         amended: { version: amended.version, affected: amended.affected?.all ?? [] },
@@ -867,7 +906,7 @@ function reassignPlan(state: Readonly<BlackboardState>, esc: Escalation, persona
   const before: AnyEventDraft[] = [];
   const ops: ProcessOp[] = [];
   const started = rt.state !== "pending" && rt.state !== "ready";
-  if (agent && !TERMINAL.has(rt.state)) before.push(ev("task.reassigned", { task, from: agent, to: persona }, source, esc.id));
+  if (!TERMINAL.has(rt.state)) before.push(ev("task.reassigned", { task, from: agent ?? rt.spec.persona, to: persona }, source, esc.id));
   if (started) {
     // A fresh attempt: the runner spawns the new persona from the amended spec.
     const attempt = rt.attempt + 1;
@@ -882,20 +921,40 @@ function reassignPlan(state: Readonly<BlackboardState>, esc: Escalation, persona
 
 /** The huddle action: a micro-huddle, or a format run through the engines and concluded by the lead. */
 async function resolveByHuddle(ctx: HookCtx, id: string, opts: ResolveOptions, actor: Actor, warnings: string[], x: EscalationOptions): Promise<ResolveResult> {
-  const format = opts.format ?? "micro";
+  let format = opts.format ?? "micro";
   const state = await ctx.store.state();
   const esc = own(state.escalations, id)!;
-  if (esc.status === "in_huddle") {
-    warnings.push(`${id} is already in huddle ${esc.huddle ?? ""}`.trim());
-    return current(ctx, id, { ops: [], noop: true, warnings });
+  const previous = own(state.huddles, esc.huddle);
+  if (esc.status === "in_huddle" && previous) format = previous.format;
+  let h: Awaited<ReturnType<typeof runFormatHuddle>>;
+  if (esc.status === "in_huddle" && previous?.outcome === "DECIDED" && previous.decision && esc.huddle) {
+    // An engine concluded before a crash; apply its persisted result without running it again.
+    let session: string | undefined;
+    let action: "decide" | "retry" | "dismiss" = "decide";
+    for (const e of (await ctx.store.events({ types: ["huddle.turn"] })).reverse()) {
+      if (e.type !== "huddle.turn" || e.payload.id !== esc.huddle) continue;
+      const text = (await ctx.store.getBlob(e.payload.blob)).toString("utf8");
+      session = /^Session: ([a-z0-9-]+)\n/.exec(text)?.[1];
+      if (session) {
+        const parsed = verdictOf(text, "Action", ["decide", "retry", "dismiss"] as const);
+        if (parsed !== "UNCLEAR") action = parsed;
+        break;
+      }
+    }
+    h = { huddle: esc.huddle, outcome: "DECIDED", decision: previous.decision, session, action };
+  } else {
+    if (esc.status === "in_huddle") {
+      warnings.push(`${id} is already in huddle ${esc.huddle ?? ""}`.trim());
+      return current(ctx, id, { ops: [], noop: true, warnings });
+    }
+    const expect: EscalationStatus[] = ["open", "routed", "awaiting_human"];
+    if (format === "micro") {
+      const ops = await runMicroHuddle(ctx, id, { ...x, actor, expect });
+      const after = own((await ctx.store.state()).escalations, id)!;
+      return { escalation: after, ops, noop: after.huddle === esc.huddle, ...(after.huddle && { huddle: after.huddle }), ...(after.resolution && { applied: after.resolution.action, decision: after.resolution.decision }), warnings };
+    }
+    h = await runFormatHuddle(ctx, id, { format, participants: opts.participants, actor, expect });
   }
-  const expect: EscalationStatus[] = ["open", "routed", "awaiting_human"];
-  if (format === "micro") {
-    const ops = await runMicroHuddle(ctx, id, { ...x, actor, expect });
-    const after = own((await ctx.store.state()).escalations, id)!;
-    return { escalation: after, ops, noop: after.huddle === esc.huddle, ...(after.huddle && { huddle: after.huddle }), ...(after.resolution && { applied: after.resolution.action, decision: after.resolution.decision }), warnings };
-  }
-  const h = await runFormatHuddle(ctx, id, { format, participants: opts.participants, actor, expect });
   if (!h) return current(ctx, id, { ops: [], noop: true, warnings });
   const source = actorSource(actor);
   const by = actorName(actor);
@@ -908,9 +967,9 @@ async function resolveByHuddle(ctx: HookCtx, id: string, opts: ResolveOptions, a
   if (h.outcome !== "DECIDED" || !h.decision) return fallback(h.error ?? `the ${format} huddle reached no decision`);
   const base = { expect: ["in_huddle", "open", "routed", "awaiting_human"] as EscalationStatus[] };
   if ((format === "replan" || format === "ultraplan") && h.session) {
-    let amended: ContractResult;
+    let amended: AppliedAmendment;
     try {
-      amended = await amendAs(ctx, actor, {}, `re-plan of escalation ${id} (huddle ${h.huddle})`, h.session);
+      amended = await amendAs(ctx, actor, {}, `re-plan of escalation ${id} (huddle ${h.huddle})`, h.session, id);
     } catch (e) {
       if (/changes nothing/.test(errText(e))) {
         warnings.push(`the re-plan in ${h.session} left the contract unchanged`);
@@ -941,12 +1000,44 @@ async function finishHuddle(ctx: HookCtx, id: string, huddle: string, plan: Reso
 // Runner hooks (WS08 plugs these in)
 // ============================================================================
 
-export type RunnerHookOptions = EscalationOptions;
+export interface RunnerHookOptions extends EscalationOptions {
+  /** Defaults to the provider layer's OpenAI model. */
+  llm?: HuddleLLM;
+}
+
+/** Adapt the WS08 controls to the context shared by WS10 and WS11. */
+export async function runnerHookContext(ctx: RunnerContext, opts: RunnerHookOptions = {}): Promise<HookCtx> {
+  return {
+    store: ctx.store, state: await ctx.store.state(), header: ctx.header,
+    driver: ctx.driver(), worker: (agent) => ctx.worker(agent),
+    llm: opts.llm ?? { provider: "openai", model: DEFAULT_MODELS.openai },
+  };
+}
+
+async function applyOps(ctx: RunnerContext, ops: ProcessOp[]): Promise<void> {
+  // Stop the old attempt before asking the runner to start its replacement.
+  for (const op of ops) {
+    if (op.type !== "kill_worker") continue;
+    const rec = ctx.worker(op.agent);
+    if (rec) await ctx.driver().stop(rec, op.reason);
+  }
+  for (const op of ops) {
+    if (op.type === "resume_worker") await ctx.resumeTask(op.task, { kind: "resolution", text: op.card });
+    else if (op.type === "spawn_retry") await ctx.resumeTask(op.task, { kind: "resolution", text: `Retry attempt ${op.attempt} after escalation resolution. Re-read the contract and your task.` });
+  }
+}
 
 export function createRunnerHooks(opts: RunnerHookOptions = {}): RunnerHooks {
   return {
-    onEscalationRaised: (ctx, id) => routeEscalation(ctx, id, opts),
-    leadFallback: (ctx, id) => leadFallback(ctx, id, opts),
-    goalReview: (ctx) => goalReview(ctx),
+    async escalationRouter(ctx, escalation) {
+      await applyOps(ctx, await routeEscalation(await runnerHookContext(ctx, opts), escalation.id, opts));
+    },
+    async leadFallback(ctx, id) {
+      await applyOps(ctx, await leadFallback(await runnerHookContext(ctx, opts), id, opts));
+    },
+    async goalReview(ctx, input) {
+      const r = await goalReview({ ...await runnerHookContext(ctx, opts), integrationSha: input.integrationSha });
+      return { verdict: r.verdict, ...(r.gaps.length && { reason: r.gaps.join("; ") }) };
+    },
   };
 }

@@ -46,13 +46,19 @@ export interface Diagnostics extends EscalationDiagnostics {
 /** The escalation's diagnostics blob (scrubbed JSON written by escalate), or undefined. Never throws. */
 export async function readDiagnostics(store: Pick<ExecutionStore, "getBlob">, esc: Escalation): Promise<Diagnostics | undefined> {
   if (!esc.diagnostics_blob) return undefined;
-  let raw: unknown;
+  let text: string;
   try {
-    raw = JSON.parse((await store.getBlob(esc.diagnostics_blob)).toString("utf8"));
+    text = (await store.getBlob(esc.diagnostics_blob)).toString("utf8");
   } catch {
     return undefined;
   }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { text: cap(text, LIMITS.diagnostics), files: [] };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { text: cap(text, LIMITS.diagnostics), files: [] };
   const o = raw as Record<string, unknown>;
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : undefined);
   const files = Array.isArray(o.files) ? o.files.filter((f): f is string => typeof f === "string" && !!f).slice(0, 200) : [];
@@ -123,6 +129,8 @@ export function involvedTasks(state: Readonly<BlackboardState>, esc: Escalation,
     add(t);
     add(own(state.agents, t)?.task);
     add(own(state.interfaces, t)?.spec?.owner);
+    for (const a of own(state.teams, t)?.members ?? []) add(own(state.agents, a)?.task);
+    for (const rt of Object.values(state.tasks)) if (rt.spec.persona === t) add(rt.spec.id);
   }
   for (const l of leasesInQuestion(state, esc, diag)) add(l.task);
   for (const d of own(state.tasks, esc.task)?.spec.depends_on ?? []) add(d);
@@ -216,12 +224,12 @@ function decisionsSection(state: Readonly<BlackboardState>, tasks: string[]): st
  * does not fit is cut and the rest are left out.
  */
 export function buildContextBundle(state: Readonly<BlackboardState>, esc: Escalation, opts: BundleOptions = {}): string {
-  const limit = opts.limit ?? BUNDLE_LIMIT;
+  const limit = Math.max(0, Math.min(BUNDLE_LIMIT, opts.limit ?? BUNDLE_LIMIT));
   const tasks = involvedTasks(state, esc, opts.diagnostics);
   const sections = [
     contractSection(state),
     escalationSection(esc),
-    opts.diagnostics?.text ? `## Diagnostics\n\n${opts.diagnostics.text}` : "",
+    opts.diagnostics?.text ? `## Diagnostics\n\n${cap(opts.diagnostics.text, LIMITS.diagnostics)}` : "",
     tasksSection(state, tasks),
     leasesSection(state, esc, opts.diagnostics),
     notesSection(state, esc, tasks),
@@ -238,5 +246,5 @@ export function buildContextBundle(state: Readonly<BlackboardState>, esc: Escala
     if (room > 200) out = `${out}${out ? "\n\n" : ""}${s.slice(0, room).trimEnd()}\n… [context truncated]`;
     break;
   }
-  return out;
+  return scrub(out).slice(0, limit);
 }

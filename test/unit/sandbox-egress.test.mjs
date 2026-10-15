@@ -79,7 +79,8 @@ test("isBlockedAddress refuses private, loopback, link-local, metadata and reser
 });
 
 test("decideAddresses refuses a host when any answer is non-public (no rebinding through a mixed answer)", () => {
-  assert.deepEqual(decideAddresses(["104.16.1.35", "2606:4700::6810:123"]), { ok: true, address: "104.16.1.35" });
+  // IPv4 first: containers often have no IPv6 route, and the proxy falls back through the list.
+  assert.deepEqual(decideAddresses(["2606:4700::6810:123", "104.16.1.35", "104.16.0.35"]), { ok: true, addresses: ["104.16.1.35", "104.16.0.35", "2606:4700::6810:123"] });
   assert.equal(decideAddresses(["104.16.1.35", "127.0.0.1"]).ok, false);
   assert.equal(decideAddresses([]).ok, false);
 });

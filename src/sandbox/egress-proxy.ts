@@ -152,11 +152,15 @@ export function decideConnect(target: string, allowlist: readonly string[]): Con
   return { allow: true, host: name, port };
 }
 
-/** After DNS: the address to dial, or the reason to refuse (every answer must be public). */
-export function decideAddresses(addresses: readonly string[]): { ok: true; address: string } | { ok: false; reason: string } {
+/**
+ * After DNS: the addresses to dial, IPv4 first (containers often have no IPv6 route), or the
+ * reason to refuse. Every answer must be public, or the host is refused outright.
+ */
+export function decideAddresses(addresses: readonly string[]): { ok: true; addresses: string[] } | { ok: false; reason: string } {
   if (!addresses.length) return { ok: false, reason: "no addresses" };
   for (const a of addresses) if (isBlockedAddress(a)) return { ok: false, reason: `resolves to a non-public address (${a})` };
-  return { ok: true, address: addresses[0] };
+  const v4 = addresses.filter((a) => /^\d+\.\d+\.\d+\.\d+$/.test(a));
+  return { ok: true, addresses: [...v4, ...addresses.filter((a) => !v4.includes(a))] };
 }
 
 // ============================================================================
@@ -199,35 +203,46 @@ server.on("connect", (req, sock, head) => {
     if (!pick.ok) return refuse(sock, 403, d.host + " " + pick.reason);
     active++;
     let done = false;
-    const up = net.connect({ host: pick.address, port: d.port });
-    const close = () => {
+    let up = null;
+    // keepClient lets a refusal written with sock.end() flush instead of being cut off.
+    const finish = (keepClient) => {
       if (done) return;
       done = true;
       active--;
-      up.destroy();
-      sock.destroy();
+      if (up) up.destroy();
+      if (!keepClient) sock.destroy();
     };
-    up.setTimeout(CONNECT_TIMEOUT_MS, () => {
-      if (!up.connecting) return;
-      log("connect timeout " + d.host);
-      refuse(sock, 502, "upstream connect timed out");
-      close();
-    });
-    up.on("connect", () => {
-      log("allow " + d.host + " -> " + pick.address);
-      up.setTimeout(IDLE_TIMEOUT_MS, close);
-      sock.setTimeout(IDLE_TIMEOUT_MS, close);
-      sock.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      if (head && head.length) up.write(head);
-      up.pipe(sock);
-      sock.pipe(up);
-    });
-    up.on("error", (e) => {
-      if (up.connecting) refuse(sock, 502, "upstream connect failed");
-      close();
-    });
-    up.on("close", close);
+    const close = () => finish(false);
     sock.on("close", close);
+    // Dial the checked addresses in order; move to the next one only before a tunnel exists.
+    const dial = (i) => {
+      if (done) return;
+      const address = pick.addresses[i];
+      const conn = net.connect({ host: address, port: d.port });
+      let connected = false;
+      up = conn;
+      conn.setTimeout(CONNECT_TIMEOUT_MS, () => {
+        if (!connected) conn.destroy(new Error("connect timed out"));
+      });
+      conn.once("connect", () => {
+        connected = true;
+        log("allow " + d.host + " -> " + address);
+        conn.setTimeout(IDLE_TIMEOUT_MS, close);
+        sock.setTimeout(IDLE_TIMEOUT_MS, close);
+        sock.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        if (head && head.length) conn.write(head);
+        conn.pipe(sock);
+        sock.pipe(conn);
+        conn.on("close", close);
+      });
+      conn.on("error", (e) => {
+        if (connected) return close();
+        if (i + 1 < pick.addresses.length) return dial(i + 1);
+        refuse(sock, 502, d.host + " upstream connect failed (" + (e && e.code ? e.code : "error") + ")");
+        finish(true);
+      });
+    };
+    dial(0);
   });
 });
 

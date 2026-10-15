@@ -596,28 +596,32 @@ It warns when the main worktree is dirty. Otherwise it returns `{execution_id, r
 ## 14. Visibility
 
 **Dashboard** (`src/dashboard/`, served by the runner) builds on `src/http/secure-server.ts`, which is extracted from the prototype board. The shared server:
-- binds to 127.0.0.1;
-- requires a capability token, compared in constant time;
+- binds to 127.0.0.1 on a random port;
+- requires a capability token (`randomBytes(18)`, base64url) as the first path segment of every route. It is compared with `timingSafeEqual` on sha256 digests, so neither its length nor a near miss shows: any request without it is the same plain 404. The token is never logged;
 - checks the Host header and answers 421 when it does not match;
-- serves only GET and HEAD;
-- sends strict headers.
+- serves only GET and HEAD (405 otherwise), and refuses CONNECT, upgrades and proxy requests (unless it is a deny-all proxy, as the board is for the screenshot browser);
+- sends `nosniff`, `no-store`, `no-referrer`, same-origin CORP and COOP, `X-Frame-Options: DENY`, a Permissions-Policy denying camera, microphone, geolocation and similar features, and a CSP on every response (`default-src 'none'` unless the route sets its own).
 
-Pages: overview, tasks, task detail (with the diff escaped and redacted), escalations, events, contract, and a server-rendered SVG of the task DAG. Updates arrive over SSE, with `state.json` polling as a fallback.
+`startDashboard(executionId, {store?})` returns `{url, close()}` and writes `dashboard.json {url, pid, host, started_at}` while it runs. Pages: overview (goal, status, completion with the §13 weights, budget, runner heartbeat from `runner.json`, open escalations, the DAG, recent notes), tasks, task detail (acceptance, checks with signatures and redacted failing output, the latest diff from its blob, recent events), escalations, events (newest first, paged, filtered by type, group or task through plain links), contract (markdown generated from the frozen contract, plus `contracts/<ctr>/CONTRACT.md` when present, through a converter that escapes everything, passes no raw HTML and builds no links), and a server-rendered SVG of the task DAG (layered layout, colored by state; also at `dag.svg`). Every string from the run is redacted (secrets and personal data) and escaped. A banner on every page names the escalations awaiting a human.
 
-The dashboard's CSP is `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`. It also sends COOP and a Permissions-Policy.
+Updates arrive over SSE (`<token>/stream?since=<seq>` sends `rev {seq}` when the log grows), with polling of `state.json`, a redacted subset of the blackboard without diffs, outputs or blobs, as a fallback. The dashboard is read-only: it has no mutating route, so CSRF does not apply; steering stays in the orchestrator's tools.
 
-The prototype board's own scripts move to static routes, so `'unsafe-inline'` is no longer needed for the board and viewer. Mermaid is pinned with SRI.
+The dashboard's CSP is `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`. Its stylesheet and script are TypeScript string constants served under `<token>/static/`, and no page has an inline script, style or event handler.
 
-**GitHub sync** (`src/github/`) is a runner loop with its own cursor, and it never blocks the run.
-- On start it creates a parent issue, then one issue per task carrying the marker `<!-- roundtable:<exe>:<task> -->`.
-- Each task issue is linked with `addSubIssue` through `gh api graphql` and added to the project with `gh project item-add`.
-- Status changes go through `item-edit`, coalesced so only the latest state per task is written.
-- When a human is needed, the issue gets a comment and the `needs-human` label.
-- On completion the issues are closed and the PR is linked.
-- Idempotency: `github.json`, plus a search for the body marker after a crash.
-- Rate limits: 20 creates per minute and 60 other calls per minute.
-- Every call is an argv spawn with `childEnv("gh")`. Bodies are redacted, and diffs and command output are never posted.
-- Only GraphQL is used.
+The prototype board's own scripts and stylesheet move to static routes too, so `BOARD_CSP` and `VIEWER_CSP` allow no `'unsafe-inline'`. Diagrams render with Mermaid's `securityLevel: "sandbox"` and `htmlLabels: false`, inside a script-less, opaque-origin `data:` frame, so a diagram cannot restyle or overlay the viewer; a diagram carrying a configuration directive (`%%{…}%%` or front matter, which can hold `themeCSS`) is shown as source and never rendered, and `secure` locks every styling key. `DIAGRAM_VIEWER_CSP` allows that frame (`frame-src data:`) and inline styles (never scripts) for it. Residual risk: inside its frame a diagram draws what it likes, and a link in it can open a popup on a click. A live prototype's missing file answers in plain text that only the board may frame. `APP_CSP` keeps `'unsafe-inline'` as an accepted risk: prototype pages are agent-written and run in a sandboxed, opaque origin that can read nothing from the board. Mermaid is pinned to 11.17.2, the newest 11.x release without a GitHub advisory, and loaded as the single file `dist/mermaid.min.js` with a sha384 `integrity` attribute and `crossorigin="anonymous"`; the viewer CSP names that one file.
+
+**GitHub sync** (`src/github/`) is a runner loop with its own cursor, and it never blocks the run. The runner builds `new GitHubSync({executionId, repo, projectOwner?, projectNumber?, createProject?, pr?})` and calls `syncOnce()`, which never throws and returns a `SyncReport`.
+- On start it creates a parent issue (a redacted contract summary, `<!-- roundtable:<exe> -->`), then one issue per task carrying the marker `<!-- roundtable:<exe>:<task> -->`, all labelled `roundtable`.
+- Each task issue is linked with `addSubIssue` through `gh api graphql` and added to the project with `gh project item-add`. With `createProject` and no number, the project is created.
+- Status changes go through `item-edit`, coalesced so only the latest state per task is written: Todo for pending and ready, Done for accepted, failed and cancelled (the last two with a comment), In Progress otherwise. The project's `Status` field is used when it has those options; otherwise a `Roundtable Status` single-select field is created.
+- When a human is needed, the issue (the parent when the escalation names no task) gets a comment and the `needs-human` label, created if missing and removed once the escalation is resolved or withdrawn.
+- Progress notes become at most one comment per task per 10 minutes.
+- On completion the parent gets a comment linking the PR, and the issues are closed.
+- Idempotency: `github.json` (atomic) holds the cursor, the issue numbers and node ids, the project ids and an outbox of comments, labels and closes. An issue is recorded as soon as `gh issue create` prints its URL (its node id is fetched afterwards). A lost mapping is rebuilt by searching for the body markers before anything is created, a create interrupted before it was recorded is looked up before it is retried, and comments carry an event marker so neither a rebuilt sync nor a post that timed out repeats them. Markers are public, so only issues authored by the gh account itself (`author:@me`, checked again against the GraphQL viewer) and labelled `roundtable` are trusted, and only that account's comments count when looking for a posted marker.
+- Rate limits: token buckets of 20 creates per minute and 60 other calls per minute. A rate-limit answer backs off 60 s plus jitter. Three failing rounds in a row mark the report `degraded`.
+- Every call is an argv spawn with `childEnv("gh")`, a 30 s timeout and capped output; bodies go through 0600 `--body-file` temp files. Bodies are redacted and escaped (no HTML, so no forged markers; @mentions, `#123`, `owner/repo#123`, `GH-123` and github.com URLs are broken with a zero-width space, so nothing notifies anyone or backlinks another issue), and diffs and command output are never read or posted.
+- Only GraphQL is used: gh subcommands and `gh api graphql`, never a REST path.
+- `checkGhReady({repo, project})` returns `{ok, missing[]}` for the `execute` preflight: a gh login with the `repo` and `project` scopes, write access to the repository, and a readable project when one is named.
 
 ## 15. Tool surface
 
@@ -724,3 +728,13 @@ WS06 adds worktrees, leases and the merge queue:
 | `src/execution/leases.ts` | Pure. `matchGlob`, `staticPrefix`, `globsOverlap`, `leasesConflict`, `decideLeaseRequest(state, req)`, `nextGrants(state, source, {gone?})`, `releaseLeases(state, filter, source, opts?)`, `pathCovered`, `uncoveredPaths`, `leasesFor`, `leaseDrafts.*` |
 | `src/execution/worktrees.ts` | `ensureIntegrationWorktree(header)`, `ensureTaskWorktree(header, task, startPoint?)`, `taskStartPoint(state, task)`, `removeWorktree(path, {deleteBranch?})`, `pruneWorktrees(exe, {remove?, branches?})`, `worktreeStatus(path)`, `withGitLock(exe, fn)`, `mergeBase`, `changedPaths`, `checkLeaseCoverage`, `commitLeasedPaths`, `snapshotWip`, `diffForTask`, `taskDiffSummary` |
 | `src/execution/merge.ts` | `mergeTask(header, task, {leases?})`, `prepareConflictResolution(header, task)`, `classifyConflict(conflicts, leases)`, `mergeDrafts.{succeeded, conflicted, taskMerged}` |
+
+WS12 adds the visibility modules the runner hosts:
+
+| Module | API |
+|---|---|
+| `src/http/secure-server.ts` | `SecureServer.start({name, routes, allowProxied?})` with `url`, `base`, `close()`, `closeNow()`; `COMMON_HEADERS`, `DEFAULT_CSP`, `escapeHtml`, `tokenMatches`. Routes are exact paths or RegExps; a handler gets `send`, `text`, `html(status, body, csp)`, `json`, `stream` (SSE) |
+| `src/dashboard/server.ts` | `startDashboard(executionId, {store?, pollMs?, writeInfo?})` returns `{url, close()}`; `DASHBOARD_CSP` |
+| `src/dashboard/render.ts` | `completion(state)` and `taskWeight(rt)` (the §13 weights), `publicState(state, runner)`, `markdownToHtml(md)` |
+| `src/github/sync.ts` | `new GitHubSync({executionId, repo, projectOwner?, projectNumber?, createProject?, pr?})`, `syncOnce(): Promise<SyncReport>`, `statusFor(taskState)` |
+| `src/github/gh.ts` | `runGh(args, {input?, timeoutMs?})`, `ghJson`, `ghGraphql`, `withBodyFile`, `checkGhReady({repo, project})` returns `{ok, missing[]}` |

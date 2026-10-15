@@ -5,15 +5,17 @@
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { assertValid, publicSchema } from "./validate.js";
 import { deliberationTools, handleDeliberationTool } from "./tools/deliberation.js";
+import { contractTools, handleContractTool } from "./tools/contract.js";
 import type { ToolArgs, ToolDefinition, ToolGroup, ToolMode } from "./tools/shared.js";
 import { scrub } from "./security/secrets.js";
 
 export { formatUltraplanResult, formatAgentWorkshopResult } from "./tools/shared.js";
 export type { ToolMode } from "./tools/shared.js";
 
-// Later workstreams add their groups here (contract, execution, worker).
+// Later workstreams add their groups here (execution, worker).
 const groups: ToolGroup[] = [
   { definitions: deliberationTools, handle: handleDeliberationTool },
+  { definitions: contractTools, handle: handleContractTool },
 ];
 
 const routes = new Map<string, { definition: ToolDefinition; group: ToolGroup }>();

@@ -322,6 +322,12 @@ test("affectedTasks: changed specs, added and removed tasks, interface owners an
   const cmd = check({ tasks: [task("a"), task("b", [], { checks: [] })], validation: { commands: [{ id: "test", argv: ["npm", "run", "test:ci"] }] } }).contract;
   assert.deepEqual(affectedTasks(check({ tasks: [task("a"), task("b", [], { checks: [] })] }).contract, cmd).all, ["a"], "a changed check command affects the tasks that run it");
   assert.deepEqual(affectedTasks(old, old).all, []);
+  // Added and removed interfaces and commands count as changes too.
+  const bare = check({ tasks: [task("a"), task("b"), task("c"), task("d")] }).contract;
+  assert.deepEqual(affectedTasks(old, bare).all, ["a", "c"]);
+  assert.deepEqual(affectedTasks(bare, old).all, ["a", "c"]);
+  const more = check({ validation: { commands: [{ id: "test", argv: ["npm", "test"], timeout_s: 60 }, { id: "lint", argv: ["npm", "run", "lint"] }] } }).contract;
+  assert.deepEqual(affectedTasks(check().contract, more).all, []);
 });
 
 test("renderContractMarkdown shows every section and marks a participant's own tasks", () => {

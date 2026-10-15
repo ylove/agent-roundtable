@@ -824,7 +824,8 @@ export interface AffectedTasks {
   all: string[];
 }
 
-const same = (a: unknown, b: unknown) => canonicalJSON(a) === canonicalJSON(b);
+/** Deep equality by canonical JSON; undefined (an added or removed entry) equals only undefined. */
+const same = (a: unknown, b: unknown) => (a === undefined || b === undefined ? a === b : canonicalJSON(a) === canonicalJSON(b));
 
 /** Which tasks an amendment touches: changed, added and removed specs, interface owners and consumers, changed checks. */
 export function affectedTasks(oldC: Contract, newC: Contract): AffectedTasks {

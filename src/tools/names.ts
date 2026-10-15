@@ -51,3 +51,10 @@ export const IMPROVE_AGENT = "improve_agent";
 
 // Diagnostics
 export const DEBUG_ENV = "debug_env";
+
+// === Execution (heads-down) ===
+
+// Contracts
+export const PROPOSE_CONTRACT = "propose_contract";
+export const AMEND_CONTRACT = "amend_contract";
+export const FREEZE_CONTRACT = "freeze_contract";

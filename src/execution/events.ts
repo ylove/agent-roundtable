@@ -149,7 +149,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "execution.failed": { reason: "t" },
   "execution.aborted": { reason: "t" },
 
-  "contract.proposed": { contract: "s", version: "int", source: "s", blob: "s" },
+  "contract.proposed": { contract: "s", version: "int", source: "s", blob: "s", "reason?": "t", "patch_blob?": "s" },
   "contract.consent_requested": { contract: "s", version: "int", participants: "s[]" },
   "contract.consent_recorded": { contract: "s", agent: "s", verdict: VERDICT, "reason?": "t" },
   "contract.objection_resolved": { contract: "s", agent: "s", how: "'amended'|'withdrawn'|'excused'", reason: "t" },

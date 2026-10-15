@@ -310,7 +310,11 @@ export interface EventPayloads {
   "execution.failed": { reason: string };
   "execution.aborted": { reason: string };
 
-  "contract.proposed": { contract: string; version: number; source: string; blob: string };
+  /**
+   * `reason` and `patch_blob` (added in WS04) are set when the version was made by amending a draft:
+   * before a contract is frozen an amendment proposes v(N+1), since contract.amended marks it frozen.
+   */
+  "contract.proposed": { contract: string; version: number; source: string; blob: string; reason?: string; patch_blob?: string };
   "contract.consent_requested": { contract: string; version: number; participants: string[] };
   "contract.consent_recorded": { contract: string; agent: string; verdict: ConsentVerdict; reason?: string };
   "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused"; reason: string };

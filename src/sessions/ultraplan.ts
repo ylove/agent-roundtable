@@ -12,6 +12,7 @@ import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import { mapLimit, notFoundError, parseVerdict, truncate } from "./workshop.js";
+import { TASK_BLOCK_NEXT, TASK_BLOCK_SIGNOFF_CHECK, buildTaskBlockInstructions } from "../execution/contract-parse.js";
 
 export type UltraplanStatus = "awaiting_plan" | "awaiting_revision" | "finalized";
 export const REVIEW_VERDICTS = ["APPROVE", "APPROVE WITH CHANGES", "OBJECT"] as const;
@@ -41,6 +42,8 @@ export interface Ultraplan {
   entries: UltraplanEntry[];
   startedAt: Date;
   publicChannel?: PublicChannel;
+  /** Plans end with a roundtable-tasks block that propose_contract can build a contract from. */
+  executionReady?: boolean;
 }
 
 type Input = { agent: string; content: string };
@@ -66,7 +69,10 @@ export interface UltraplanStepResult {
 export interface UltraplanFinalResult {
   ultraplanId: string;
   status: "finalized";
+  /** True only when sign-offs were collected and none is OBJECT or UNCLEAR. */
   signedOff: boolean;
+  /** Whether the session reached the archive (SESSIONS_DIR/<id>.json), so from_session can use it. */
+  archived: boolean;
   version: number | null;
   finalPlan: string;
   signoffs: Verdict[];
@@ -137,30 +143,35 @@ export function buildReviewPrompt(
     "Don't rewrite the plan. Don't repeat points that are already handled.";
 }
 
-export function buildSignoffPrompt(task: string, plan: string, version: number, ownInput?: string, context?: string): string {
+/** With executionReady, participants also check the plan's roundtable-tasks block. */
+export function buildSignoffPrompt(task: string, plan: string, version: number, ownInput?: string, context?: string, executionReady = false): string {
   return taskBlock(task, context) + `**Final plan v${version}:**\n${plan}\n\n` +
     (ownInput !== undefined ? `**Your input before the draft:**\n${ownInput}\n\n` : "") +
     "The first line must be EXACTLY one of:\nSign-off: APPROVE | APPROVE WITH RESERVATIONS | OBJECT\n\n" +
     "Reflected from my input: 1-3 bullets or \"Nothing specific\".\n" +
-    "Still missing or disagree: or \"None\".\nWatch: one thing to monitor during execution.\n\nBrief.";
+    "Still missing or disagree: or \"None\".\nWatch: one thing to monitor during execution.\n\n" +
+    (executionReady ? `${TASK_BLOCK_SIGNOFF_CHECK}\n\n` : "") + "Brief.";
 }
 
+/** With executionReady, the plan must end with a roundtable-tasks block. */
 export function buildPlannerDraftPrompt(
-  task: string, context: string | undefined, participants: string[], inputs: Input[]
+  task: string, context: string | undefined, participants: string[], inputs: Input[], executionReady = false
 ): string {
   return taskBlock(task, context) + `**Participants:** ${participants.join(", ")}\n\n` +
     inputs.map((input) => `### ${input.agent}\n${input.content}\n\n`).join("") +
     "Write plan v1: numbered steps with owner/role, sequencing and dependencies, acceptance criteria, " +
     "risks with mitigations, open questions. Tag each step with contributing participants like [a, b]. " +
-    "Output the plan only.";
+    "Output the plan only." + (executionReady ? `\n\n${buildTaskBlockInstructions()}` : "");
 }
 
-export function buildPlannerRevisePrompt(task: string, plan: string, version: number, reviews: Verdict[], context?: string): string {
+/** With executionReady, the revised plan must end with an updated roundtable-tasks block. */
+export function buildPlannerRevisePrompt(task: string, plan: string, version: number, reviews: Verdict[], context?: string, executionReady = false): string {
   return taskBlock(task, context) + `**Current plan v${version}:**\n${plan}\n\n` +
     reviews.map((review) => `### ${review.agent} (${review.verdict})\n${review.content}\n\n`).join("") +
     `Write plan v${version + 1}: for each amendment accept, modify or reject. Output the full revised plan, ` +
     `then a section \"## Changes from v${version}\" listing each amendment by reviewer and what was done, ` +
-    "with a one-line reason for each rejection.";
+    "with a one-line reason for each rejection." +
+    (executionReady ? ` The roundtable-tasks block, updated to match, goes last, after that section.\n\n${buildTaskBlockInstructions()}` : "");
 }
 
 // ----------------------------------------------------------------------------
@@ -338,10 +349,10 @@ async function finalize(u: Ultraplan, signoffs: Verdict[], signedOff: boolean): 
     outcome,
   });
   // Archived before it leaves the live map, so the session is always either live or archived.
-  archiveUltraplan(u, { markdown: document, signedOff, version, signoffs, tally, outcome });
+  const archived = archiveUltraplan(u, { markdown: document, signedOff, version, signoffs, tally, outcome }) !== null;
   ultraplans.delete(u.id);
   const publicBlock = u.publicChannel ? formatPublicBlock(u.publicChannel, await u.publicChannel.finalize({ summary: document })) : undefined;
-  return { ultraplanId: u.id, status: "finalized", signedOff, version, finalPlan: document, signoffs, tally,
+  return { ultraplanId: u.id, status: "finalized", signedOff, archived, version, finalPlan: document, signoffs, tally,
     ...(publicBlock !== undefined && { publicBlock }) };
 }
 

@@ -113,7 +113,7 @@ after(() => prototypes.destroyAllPrototypes("shutdown"));
 
 describe("schemas", () => {
   test("the three start tools expose a boolean prototype flag; tool count unchanged", () => {
-    assert.equal(tools.length, 22);
+    assert.equal(tools.length, 25, "22 at-the-table tools plus the 3 contract tools");
     for (const name of ["start_meeting", "start_local_meeting", "start_collaboration"]) {
       const p = tools.find((x) => x.name === name).inputSchema.properties.prototype;
       assert.equal(p?.type, "boolean", name);

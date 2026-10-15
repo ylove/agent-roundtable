@@ -149,9 +149,9 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "execution.failed": { reason: "t" },
   "execution.aborted": { reason: "t" },
 
-  "contract.proposed": { contract: "s", version: "int", source: "s", blob: "s" },
-  "contract.consent_requested": { contract: "s", version: "int", participants: "s[]" },
-  "contract.consent_recorded": { contract: "s", agent: "s", verdict: VERDICT, "reason?": "t" },
+  "contract.proposed": { contract: "s", version: "int", source: "s", blob: "s", "reason?": "t", "patch_blob?": "s" },
+  "contract.consent_requested": { contract: "s", version: "int", participants: "s[]", "round?": "s", "hash?": "s", "host?": "s" },
+  "contract.consent_recorded": { contract: "s", agent: "s", verdict: VERDICT, "reason?": "t", "round?": "s" },
   "contract.objection_resolved": { contract: "s", agent: "s", how: "'amended'|'withdrawn'|'excused'", reason: "t" },
   // `blob` (the full contract at this version) is optional in the type but required here: the
   // blackboard reads the contract from it (see blackboard.ts).

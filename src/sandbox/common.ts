@@ -95,63 +95,133 @@ export function validateArgv(argv: unknown): string[] {
   return argv as string[];
 }
 
-const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "csh", "tcsh"]);
-/** Wrappers whose own options, assignments and values precede the real program. */
-const WRAPPERS = new Set(["env", "command", "exec", "nice", "nohup", "timeout", "stdbuf", "busybox", "xargs"]);
-/** Wrapper options that take a separate value. */
-const VALUE_OPTS: Record<string, ReadonlySet<string>> = {
-  env: new Set(["-u", "--unset", "-C", "--chdir"]),
-  nice: new Set(["-n", "--adjustment"]),
-  timeout: new Set(["-s", "--signal", "-k", "--kill-after"]),
-  stdbuf: new Set(["-i", "-o", "-e", "--input", "--output", "--error"]),
-  xargs: new Set(["-I", "-n", "-P", "-L", "-s", "-E", "-d", "-a", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--delimiter", "--arg-file", "--replace", "--eof"]),
-};
+// Shell and privilege detection over argv.
+//
+// This is a hygiene signal for contracts and the local backend, NOT the security boundary: the
+// sandbox is (no network, read-only root, dropped capabilities), and `node -e` or `python3 -c`
+// are just as arbitrary as `sh -c`. It only keeps shell command lines out of structured argv.
 
-function basenameOf(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i >= 0 ? p.slice(i + 1) : p;
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "yash", "posh", "fish", "csh", "tcsh", "pwsh", "powershell"]);
+/** Programs that change identity: never run from a contract, whatever the backend. */
+const PRIVILEGED = new Set(["sudo", "doas", "su", "pkexec", "run0"]);
+
+interface Wrapper {
+  /** Options that take a separate value. */
+  value?: readonly string[];
+  /** Non-option arguments before the program (timeout's duration, flock's lock file, chrt's priority). */
+  positional?: number;
+  /** Options that make the wrapper run a shell command line itself (flock -c, su -c). */
+  shellFlags?: readonly string[];
 }
 
-/**
- * True for `sh -c …` style argv: also `bash -lc`, `env FOO=1 bash -c`, `env -S "sh -c …"`,
- * `xargs -I{} sh -c`, `timeout 10 sh -c`, `busybox sh -c`. This is a policy signal, not a
- * security boundary: `node -e` is just as arbitrary.
- */
-export function isShellCommand(argv: readonly string[]): boolean {
+/** Wrappers whose own options, assignments and values precede the real program. */
+const WRAPPERS: Readonly<Record<string, Wrapper>> = {
+  env: { value: ["-u", "--unset", "-C", "--chdir"] },
+  command: {},
+  exec: { value: ["-a"] },
+  nice: { value: ["-n", "--adjustment"] },
+  nohup: {},
+  timeout: { value: ["-s", "--signal", "-k", "--kill-after"], positional: 1 },
+  stdbuf: { value: ["-i", "-o", "-e", "--input", "--output", "--error"] },
+  busybox: {},
+  xargs: { value: ["-I", "-n", "-P", "-L", "-s", "-E", "-d", "-a", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--delimiter", "--arg-file", "--replace", "--eof"] },
+  time: { value: ["-f", "--format", "-o", "--output"] },
+  setsid: {},
+  flock: { value: ["-w", "--wait", "--timeout", "-E", "--conflict-exit-code"], positional: 1, shellFlags: ["-c", "--command"] },
+  chrt: { value: ["-T", "-P", "-D"], positional: 1 },
+  ionice: { value: ["-c", "--class", "-n", "--classdata", "-p", "--pid"] },
+  taskset: { positional: 1 },
+  unbuffer: {},
+  caffeinate: { value: ["-t", "-w"] },
+  sudo: { value: ["-u", "--user", "-g", "--group", "-C", "--close-from", "-D", "--chdir", "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user"], shellFlags: [] },
+  doas: { value: ["-u", "-C"] },
+  su: { value: ["-g", "--group", "-G", "--supp-group", "-s", "--shell"], shellFlags: ["-c", "--command"] },
+  pkexec: { value: ["--user"] },
+  run0: { value: ["-u", "--user", "-g", "--group", "-D", "--chdir"] },
+};
+
+/** The program name as a shell would find it: basename, lowercased (case-insensitive filesystems), no .exe or version suffix. */
+function programName(p: string): string {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return (i >= 0 ? p.slice(i + 1) : p).toLowerCase().replace(/\.exe$/, "");
+}
+
+function isShell(name: string): boolean {
+  return SHELLS.has(name) || SHELLS.has(name.replace(/[-.]?\d[\d.]*$/, ""));
+}
+
+/** True when the shell's own arguments (after argv[at]) include a command-string option before any script. */
+function shellRunsString(argv: readonly string[], at: number): boolean {
+  const pwsh = /^(pwsh|powershell)/.test(programName(argv[at]));
+  for (let j = at + 1; j < argv.length; j++) {
+    const a = argv[j];
+    if (a === "--command" || /^--command=/.test(a) || /^-[A-Za-z]*c[A-Za-z]*$/.test(a)) return true;
+    if (pwsh && /^-(c|command|e|ec|encodedcommand)$/i.test(a)) return true;
+    if (/^[-+][oO]$/.test(a) || a === "--rcfile" || a === "--init-file") j++; // options that take a value
+    else if (a === "--") return false; // what follows is a script and its arguments
+    else if (!a.startsWith("-") && !a.startsWith("+")) return false; // a script path
+  }
+  return false;
+}
+
+/** Every program along a wrapper chain (lowercased), and whether the chain ends in a shell command line. */
+export function analyzeArgv(argv: readonly string[], depth = 0): { programs: string[]; shell: boolean } {
+  const programs: string[] = [];
   let i = 0;
-  while (i < argv.length && WRAPPERS.has(basenameOf(argv[i]))) {
-    const wrapper = basenameOf(argv[i]);
-    const takesValue = VALUE_OPTS[wrapper] ?? new Set<string>();
+  while (i < argv.length) {
+    const name = programName(argv[i]);
+    programs.push(name);
+    const w = Object.hasOwn(WRAPPERS, name) ? WRAPPERS[name] : undefined;
+    if (!w) break;
     i++;
+    let positional = w.positional ?? 0;
     for (; i < argv.length; i++) {
       const a = argv[i];
-      // env -S / --split-string runs a whole command line given as one string.
-      if (wrapper === "env" && /^(-S|--split-string)(=|$)|^-S./.test(a)) {
-        const joined = a === "-S" || a === "--split-string" ? (argv[i + 1] ?? "") : a.replace(/^(--split-string=|-S)/, "");
-        const rest = a === "-S" || a === "--split-string" ? argv.slice(i + 2) : argv.slice(i + 1);
-        return isShellCommand([...joined.split(/\s+/).filter(Boolean), ...rest]);
+      // env -S / -iS / --split-string runs a whole command line given as one string.
+      const split = name === "env" ? /^-([A-Za-z]*)S(.*)$/.exec(a) ?? /^--split-string(?:=(.*))?$/.exec(a) : null;
+      if (split && depth < 8) {
+        const inline = split.length === 3 ? split[2] : split[1];
+        const joined = inline ? inline : (argv[i + 1] ?? "");
+        const rest = inline ? argv.slice(i + 1) : argv.slice(i + 2);
+        const inner = analyzeArgv([...joined.split(/\s+/).filter(Boolean), ...rest], depth + 1);
+        return { programs: [...programs, ...inner.programs], shell: inner.shell };
+      }
+      if (w.shellFlags?.includes(a) || (w.shellFlags?.includes("--command") && /^--command=/.test(a))) {
+        return { programs: [...programs, "sh"], shell: true };
       }
       if (a === "--") {
         i++;
         break;
       }
-      if (takesValue.has(a)) {
+      if (w.value?.includes(a)) {
         i++;
         continue;
       }
-      if (a.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) continue;
-      if (wrapper === "timeout" && /^\d+(\.\d+)?[smhd]?$/.test(a)) continue;
+      if (a.startsWith("-") && a !== "-") continue;
+      if (name === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) continue;
+      if (positional > 0) {
+        positional--;
+        continue;
+      }
       break;
     }
   }
-  if (i >= argv.length || !SHELLS.has(basenameOf(argv[i]))) return false;
-  for (let j = i + 1; j < argv.length; j++) {
-    const a = argv[j];
-    if (a === "--command" || /^-[A-Za-z]*c[A-Za-z]*$/.test(a)) return true;
-    if (/^[-+][oO]$/.test(a)) j++; // set -o / shopt -O take a value
-    else if (!a.startsWith("-") && !a.startsWith("+")) return false;
-  }
-  return false;
+  if (i >= argv.length || !isShell(programName(argv[i]))) return { programs, shell: false };
+  return { programs, shell: shellRunsString(argv, i) };
+}
+
+/**
+ * True for `sh -c …` style argv, looking through wrapper chains: `bash -lc`, `bash --rcfile f -c`,
+ * `SH -c` (case-insensitive filesystems), `env FOO=1 bash -c`, `env -iS "sh -c …"`, `xargs -I{} sh -c`,
+ * `timeout 10 sh -c`, `busybox sh -c`, `flock f -c …`, `sudo`/`time`/`setsid`/`nice`/`nohup` chains.
+ */
+export function isShellCommand(argv: readonly string[]): boolean {
+  return analyzeArgv(argv).shell;
+}
+
+/** True when anything along the wrapper chain is sudo, doas, su, pkexec or run0. */
+export function isPrivilegedCommand(argv: readonly string[]): boolean {
+  return analyzeArgv(argv).programs.some((p) => PRIVILEGED.has(p));
 }
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;

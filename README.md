@@ -68,7 +68,7 @@ What to expect: meetings and collaborations return a session id together with th
 
 > Have product-lead act as planner with cfo and skeptic contributing. Plan a launch within our current budget, with two review/revision rounds, and show me everyone's input and sign-off.
 
-The orchestrator owns and writes the plan. `start_ultraplan` collects independent input; write v1 with contributor tags such as `[cfo]` on each step. `submit_plan` with `plan` submits a complete next version for review and leaves the session open for revision. Omit `plan` to review the latest version as-is without creating a new version, or omit it with `final: true` to sign off that version as-is. If no version exists yet, the call fails with `No plan version exists yet; pass plan.` Address amendments and explain any you reject. `submit_plan` with `final: true` collects sign-offs and closes; passing a plan allows sign-off straight after input. Show the final Markdown document verbatim: it includes the plan, every agent's input and sign-off, and revision history. A sign-off may include reservations or objections; closure does not imply unanimous approval.
+The orchestrator owns and writes the plan. `start_ultraplan` collects independent input; write v1 with contributor tags such as `[cfo]` on each step. `submit_plan` with `plan` submits a complete next version for review and leaves the session open for revision. Omit `plan` to review the latest version as-is without creating a new version, or omit it with `final: true` to sign off that version as-is. If no version exists yet, the call fails with `No plan version exists yet; pass plan.` Address amendments and explain any you reject. `submit_plan` with `final: true` collects sign-offs and closes; passing a plan allows sign-off straight after input. Show the final Markdown document verbatim: it includes the plan, every agent's input and sign-off, and revision history. A sign-off may include reservations or objections: the result's `signedOff` is true only when no sign-off is `OBJECT` or unclear, and the document otherwise says **not signed off**. The final result ends with a fenced JSON trailer `{ultraplan_id, archived, tally}`. With `execution_ready: true` every plan must end with a fenced `roundtable-tasks` JSON block (tasks, commands, interfaces) and sign-offs check it, so `propose_contract { from_session: <ultraplan_id> }` can turn the plan into a contract.
 
 Pass `draft_plan` to skip input and review it as v1. Pass a `planner` persona for the whole draft/review/revise/sign-off loop in one call; `revision_rounds` applies only to that variant (default 1, clamped to 1–3). If a planner run returns a step with an `error`, it remains open at the last committed phase. A step with `phase: "plan"` contains the unreviewed latest version, with `previousReviews` when an earlier version was reviewed. Continue with `submit_plan`: omit `plan` to review or sign off the latest version as-is, or pass a full revised plan. You can also close with `end_ultraplan`. Closing with `end_ultraplan` collects no sign-offs and marks the document **not signed off**. Participants work independently within each phase; concurrent calls are bounded by `ROUNDTABLE_PARALLEL_TURNS`.
 
@@ -158,7 +158,7 @@ The five new tools validate argument types before any engine call: strings, arra
 
 See the [Agent workshop tool calls](#agent-workshop-tool-calls) below.
 
-## Tools (22)
+## Tools (25)
 
 ### Meetings (API-backed)
 
@@ -204,7 +204,7 @@ One turn runs per session at a time. While a turn is in flight, `continue_collab
 
 | Tool | Arguments |
 | --- | --- |
-| `start_ultraplan` | `{ agents[], task, context?, draft_plan?, planner?, revision_rounds?, public?, provider?, model?, base_url? }` |
+| `start_ultraplan` | `{ agents[], task, context?, draft_plan?, planner?, revision_rounds?, execution_ready?, public?, provider?, model?, base_url? }` |
 | `submit_plan` | `{ ultraplan_id, plan?, final? }` |
 | `end_ultraplan` | `{ ultraplan_id }` |
 
@@ -214,6 +214,20 @@ One turn runs per session at a time. While a turn is in flight, `continue_collab
 | --- | --- |
 | `create_agent` | `{ agents[]?, task?, context?, from_session?, name?, rounds?, write?, perform_task?, public?, provider?, model?, base_url? }` |
 | `improve_agent` | `{ agent, with[]?, include_self?, focus?, context?, from_session?, rounds?, write?, public?, provider?, model?, base_url? }` |
+
+### Contracts (heads-down)
+
+A contract is what a heads-down run builds: the goal and the human's request verbatim, tasks (persona, dependencies, write paths, acceptance criteria, checks), interfaces, decisions, validation commands (structured argv), budget and the lead's authority. Every participant must answer `Consent: AGREE` or `Consent: OBJECT` on its current version before the orchestrator that proposed it can freeze it: an agreement to an earlier version does not count. Contracts live under `ROUNDTABLE_HOME/executions/<exe>/contracts/<ctr>/` (`v<N>.json` and `CONTRACT.md`); nothing is written to the repository. These tools take no unknown arguments.
+
+| Tool | Arguments |
+| --- | --- |
+| `propose_contract` | `{ goal, orchestrator, title?, original_prompt?, artifacts[]?, from_session?, plan?, contract?, parent_contract?, parent_task?, participants[]?, repo_dir?, base_ref?, consent?, provider?, model?, base_url? }` |
+| `amend_contract` | `{ contract_id, patch, reason, orchestrator, from_session?, consent?, override_consent?, provider?, model?, base_url? }` |
+| `freeze_contract` | `{ contract_id, orchestrator, excuse[]?, abandon_round? }` (`excuse` items are `{ agent, reason }`) |
+
+- `propose_contract` takes the structure from an explicit `contract` object with tasks, then from the last `roundtable-tasks` block in `plan` or in the archived `from_session`, then from a structuring call on the plan (one retry quoting the errors). It resolves `repo_dir` to its git top level and `base_ref` (default `HEAD`) to a commit. `consent: true` asks every participant right away; an unclear answer is re-asked once, then counts as an objection.
+- `amend_contract` applies an RFC 7396 merge patch and makes v(N+1). Amending a draft makes a new proposal that everyone must consent to again (`consent: true` asks them all). Amending a frozen contract cancels the tasks it removes and tells the agents of affected tasks to re-read the contract; a change to its budget, scope, sandbox, authority, validation, workers or goal needs `consent: true` (everyone is asked first, and it applies only if all agree) or `override_consent: true` (audited). `patch: {}` with `consent: true` asks everyone who has not agreed to the current version.
+- `freeze_contract` lists every reason it refuses: an unresolved objection or unclear answer, a participant who has not answered about the current version, a consent round in flight, a busy source session, or, for a child contract, a parent that is not frozen. `excuse` sets these aside with a reason, and `abandon_round` ends a consent round whose process died. Excusals, abandoned rounds and the frozen sha256 are written to the audit log. Freezing starts nothing.
 
 ### LLM
 

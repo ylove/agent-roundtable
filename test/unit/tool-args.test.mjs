@@ -6,7 +6,7 @@ const { checkArgs, handleToolCall, formatAgentWorkshopResult, tools } = await im
 const fields = {
   start_ultraplan: {
     string: ["task", "context", "draft_plan", "planner", "provider", "model", "base_url"],
-    array: ["agents"], number: ["revision_rounds"], boolean: ["public"],
+    array: ["agents"], number: ["revision_rounds"], boolean: ["public", "execution_ready"],
   },
   submit_plan: { string: ["ultraplan_id", "plan"], boolean: ["final"] },
   end_ultraplan: { string: ["ultraplan_id"] },
@@ -18,6 +18,15 @@ const fields = {
     string: ["agent", "focus", "context", "from_session", "provider", "model", "base_url"],
     array: ["with"], number: ["rounds"], boolean: ["include_self", "write", "public"],
   },
+  propose_contract: {
+    string: ["goal", "orchestrator", "title", "original_prompt", "from_session", "plan", "parent_contract", "parent_task", "repo_dir", "base_ref", "provider", "model", "base_url"],
+    array: ["artifacts", "participants"], boolean: ["consent"], object: ["contract"],
+  },
+  amend_contract: {
+    string: ["contract_id", "reason", "orchestrator", "from_session", "provider", "model", "base_url"],
+    boolean: ["consent", "override_consent"], object: ["patch"],
+  },
+  freeze_contract: { string: ["contract_id", "orchestrator"], boolean: ["abandon_round"], objects: ["excuse"] },
 };
 const rules = {
   string: { valid: ["text", "", " "], invalid: [5, false, [], {}], message: "a string" },
@@ -28,6 +37,8 @@ const rules = {
   },
   number: { valid: [0, -1, 2.5], invalid: ["2", "two", NaN, Infinity, -Infinity, false, {}], message: "a finite number" },
   boolean: { valid: [true, false], invalid: ["true", 0, 1, [], {}], message: "a boolean" },
+  object: { valid: [{}, { tasks: [] }], invalid: ["{}", 5, [], false], message: "an object" },
+  objects: { valid: [[], [{ agent: "cfo", reason: "out of scope" }]], invalid: ["cfo", 5, {}, false], message: "an array" },
 };
 
 for (const [tool, groups] of Object.entries(fields)) {
@@ -35,7 +46,10 @@ for (const [tool, groups] of Object.entries(fields)) {
     const schema = tools.find((entry) => entry.name === tool).inputSchema;
     assert.deepEqual(Object.keys(schema.properties).sort(), Object.values(groups).flat().sort());
     assert.equal(typeof checkArgs, "function", "export a pure argument validator");
-    for (const args of [undefined, {}, { ignored: 42 }]) assert.doesNotThrow(() => checkArgs(tool, args));
+    for (const args of [undefined, {}]) assert.doesNotThrow(() => checkArgs(tool, args));
+    // Heads-down tools reject unknown arguments (additionalProperties: false); the older ones ignore them.
+    if (schema.additionalProperties === false) assert.throws(() => checkArgs(tool, { ignored: 42 }), { message: new RegExp(`^${tool}: "ignored" is not allowed`) });
+    else assert.doesNotThrow(() => checkArgs(tool, { ignored: 42 }));
     let calls = 0;
     t.mock.method(globalThis, "fetch", async () => { calls++; throw new Error("Unexpected provider call"); });
     for (const [type, names] of Object.entries(groups)) {

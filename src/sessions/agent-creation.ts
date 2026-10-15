@@ -498,8 +498,8 @@ function sourceSession(id: string | undefined, isPublic: boolean): SourceSession
     if (!archived) {
       const activeIds = [...collaborations.keys(), ...meetings.keys()].join(", ") || "none";
       throw new Error(
-        `from_session not found: ${id}. Pass the id of a live collaboration (collab-N) or meeting (meeting-N), ` +
-          `or of any archived session. Active sessions: ${activeIds}`,
+        `from_session not found: ${id}. Pass the id of a live collaboration or meeting (collab-…, meeting-…), ` +
+          `or of an ended session in the archive. Active sessions: ${activeIds}`,
       );
     }
     // Ended sessions: the archived turns are already the stubbed views agents saw.

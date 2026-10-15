@@ -182,6 +182,17 @@ describe("per-session locks", () => {
   });
 });
 
+test("an empty nudge still resumes a paused collaboration", async (t) => {
+  stubFetch(t, () => reply());
+  const c = await startCollaboration([sample, plain], "resume", { ...opts, maxRounds: 2 });
+  await handleToolCall("pause_collaboration", { collaboration_id: c.collaborationId });
+  assert.equal(collaborations.get(c.collaborationId).status, "paused");
+  const r = await handleToolCall("nudge_collaboration", { collaboration_id: c.collaborationId, message: "" });
+  assert.equal(r.isError, undefined, text(r));
+  assert.equal(collaborations.get(c.collaborationId).status, "running");
+  await endCollaboration(c.collaborationId);
+});
+
 describe("collaboration rounds cap", () => {
   test("the schemas declare maximum 20 and the validator enforces it before any provider call", async (t) => {
     const calls = stubFetch(t, () => reply());
@@ -374,7 +385,7 @@ describe("session archive", () => {
     assert.deepEqual(r.agents, [sample, plain], "participants are stored as the refs that were passed");
     assert.deepEqual(r.turns.map((x) => x.agent), [sample, plain, sample, plain]);
     await assert.rejects(createAgent({ ...opts, fromSession: "collab-nowhere1", write: false }),
-      /from_session not found: collab-nowhere1\..*or of any archived session/);
+      /from_session not found: collab-nowhere1\..*or of an ended session in the archive/);
   });
 
   test("pruneArchivedSessions removes sessions that ended before the retention window and keeps the rest", (t) => {

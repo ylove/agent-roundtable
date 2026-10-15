@@ -119,7 +119,9 @@ function webhookOrigin(raw: string): string {
 const SKILL_LOOKUP_DESCRIPTION =
   "Creation includes the destination project's .claude/skills in lookup even when the configured skills directory differs. Skill lookup follows Claude Code precedence: personal ~/.claude/skills, then .claude/skills beside the agent file when it is in .claude/agents, then ROUNDTABLE_SKILLS_DIR. Any skill found is reused, never overwritten or shadowed. ";
 const WORKSHOP_TOOLS_DESCRIPTION =
-  "Tools fail closed: a list with no allowlisted matches or a value of the wrong type is rejected and the architect retries once. Omitting tools inherits all tools and warns: tools omitted: the agent inherits all tools. ";
+  "Tools fail closed: a list with no allowlisted matches or a value of the wrong type is rejected and the architect retries once. ";
+const CREATE_TOOLS_DEFAULT_DESCRIPTION = "Omitting tools gives the new agent tools: Read, Grep, Glob. ";
+const IMPROVE_TOOLS_DEFAULT_DESCRIPTION = "Omitting tools inherits all tools and warns: tools omitted: the agent inherits all tools. ";
 const PUBLIC_WORKSHOP_DESCRIPTION =
   "Public workshops post contributions, reviews and a redacted summary of the final definition (name, description, model, tools, skill names and status, contribution credits, changes and open questions), without its system prompt, skill instructions or descriptions derived from instructions; copied private passages in summary fields are withheld. They never post context, personas, fleet listings or source-session transcripts. ";
 
@@ -607,8 +609,8 @@ export const deliberationTools: ToolDefinition[] = [
     precheck: checkProviderArgs,
     annotations: { title: "Create agent", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     description:
-      "Have specialists design a new Claude Code subagent in one call: sequential contributions, architect draft, independent reviews, then revision if needed. Pass agents and task, or from_session (a live collab-N or meeting-N) to inherit participants, topic and discussion; explicit agents are combined with inherited ones. Each contributes expertise, guardrails and skills. Default write: true saves the agent to ROUNDTABLE_AGENTS_DIR and new skills to ROUNDTABLE_SKILLS_DIR; existing agents are never overwritten. write: false previews files without writes. " +
-      SKILL_LOOKUP_DESCRIPTION + WORKSHOP_TOOLS_DESCRIPTION +
+      "Have specialists design a new Claude Code subagent in one call: sequential contributions, architect draft, independent reviews, then revision if needed. Pass agents and task, or from_session (the id of a live collaboration or meeting, e.g. collab-4k9q2mzt, or of any ended session in the archive) to inherit participants, topic and discussion; explicit agents are combined with inherited ones. Each contributes expertise, guardrails and skills. Default write: true saves the agent to ROUNDTABLE_AGENTS_DIR and new skills to ROUNDTABLE_SKILLS_DIR; existing agents are never overwritten. write: false previews files without writes. " +
+      SKILL_LOOKUP_DESCRIPTION + WORKSHOP_TOOLS_DESCRIPTION + CREATE_TOOLS_DEFAULT_DESCRIPTION +
       "The result reports actual paths, warnings and next delegation instructions: use Claude Code's Agent tool with the returned agent.name as subagent_type when saved in .claude/agents, or start_meeting. perform_task: true with writes starts a private meeting on the task; follow its next instructions with say and end_meeting. " +
       PUBLIC_WORKSHOP_DESCRIPTION,
     inputSchema: {
@@ -617,7 +619,7 @@ export const deliberationTools: ToolDefinition[] = [
         agents: { type: "array", items: { type: "string" }, description: "Contributing personas; combined with from_session participants and deduplicated. At least one participant is required." },
         task: { type: "string", description: "What the new agent should do; required unless from_session supplies a topic." },
         context: { type: "string", description: "Optional background for the design; never posted publicly." },
-        from_session: { type: "string", description: "Live collab-N or meeting-N whose participants and discussion should shape the agent." },
+        from_session: { type: "string", description: "Id of a live collaboration or meeting (collab-…, meeting-…) or of any ended session in the archive, whose participants and discussion should shape the agent." },
         name: { type: "string", description: "Optional agent name hint; normalized to a slug, with a suffix on collision." },
         rounds: { type: "number", description: "Contribution rounds, default 1, clamped to 1..3; reviews follow the architect draft." },
         write: { type: "boolean", description: "Default true: save agent and new skills. False: return preview files and write nothing." },
@@ -633,12 +635,12 @@ export const deliberationTools: ToolDefinition[] = [
     precheck: checkProviderArgs,
     annotations: { title: "Improve agent", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     description:
-      "Refine an existing Claude Code agent in one call, preserving its identity and useful instructions. By default the target reviews itself candidly; add specialists with with or inherit participants/discussion from a live collab-N or meeting-N via from_session. They suggest gaps, replacements, skills and cuts; an architect drafts the definition, participants review independently, and the architect revises if needed. The target may be any existing .md path, including outside the agents directory. write: false previews without writes. " +
+      "Refine an existing Claude Code agent in one call, preserving its identity and useful instructions. By default the target reviews itself candidly; add specialists with with or inherit participants/discussion via from_session (the id of a live collaboration or meeting, or of any ended session in the archive). They suggest gaps, replacements, skills and cuts; an architect drafts the definition, participants review independently, and the architect revises if needed. The target may be any existing .md path, including outside the agents directory. write: false previews without writes. " +
       "Frontmatter is read the way Claude Code reads it, including one quoting and leading-tab recovery pass. Exactly the keys Claude Code sees are preserved; improve refuses files Claude Code cannot parse or whose frontmatter contains '---' inside a value, with an error asking you to fix the file first. Identity collision checks use the same metadata view. Model output only supplies name/description/model/tools/skills. " +
       "Only one improve run per target is allowed; a second fails fast: improve_agent is already running for <key>; wait for it to finish. Default write: true saves <target>.bak-<timestamp>, then atomically replaces via a temp file and rename, keeping the original mode. If the target changed, was renamed or was deleted during the run it is not overwritten: changes go to <target>.proposed-<timestamp>, which is not an agent file and keeps the original mode; next explains recovery. " +
       SKILL_LOOKUP_DESCRIPTION +
       "New skills go beside a target in .claude/agents to its project's .claude/skills only if neither .claude nor .claude/skills is a symlink and the skills realpath stays inside the project. Otherwise they fall back to ROUNDTABLE_SKILLS_DIR with a warning. Results report file realpaths, warnings and next instructions. " +
-      WORKSHOP_TOOLS_DESCRIPTION + PUBLIC_WORKSHOP_DESCRIPTION +
+      WORKSHOP_TOOLS_DESCRIPTION + IMPROVE_TOOLS_DEFAULT_DESCRIPTION + PUBLIC_WORKSHOP_DESCRIPTION +
       "Public improve runs never include the target's recent activity in any prompt; contributors, reviewers and the architect point to passages rather than reproduce them. Private improve contributor prompts include recent topics and outcomes from the local activity log.",
     inputSchema: {
       type: "object",
@@ -653,7 +655,7 @@ export const deliberationTools: ToolDefinition[] = [
         include_self: { type: "boolean", description: "Default true: the target contributes to its own refinement. If false, supply at least one participant via with or from_session." },
         focus: { type: "string", description: "Optional aspect to improve, such as escalation rules, output quality or missing skills." },
         context: { type: "string", description: "Optional background for refinement; never posted publicly." },
-        from_session: { type: "string", description: "Live collab-N or meeting-N supplying participants and discussion." },
+        from_session: { type: "string", description: "Id of a live collaboration or meeting (collab-…, meeting-…) or of any ended session in the archive, supplying participants and discussion." },
         rounds: { type: "number", description: "Contribution rounds, default 1, clamped to 1..3." },
         write: { type: "boolean", description: "Default true: back up and update the target. False: preview files and write nothing." },
         public: PUBLIC_PROP,
@@ -665,7 +667,7 @@ export const deliberationTools: ToolDefinition[] = [
   {
     name: DEBUG_ENV,
     modes: ORCHESTRATOR_ONLY,
-    annotations: { title: "Debug environment", ...READ_ONLY_LOCAL },
+    annotations: { title: "Debug environment", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description: "Debug tool to check server environment and API key status.",
     inputSchema: {
       type: "object",

@@ -298,8 +298,8 @@ test("validation happens before any fetch, with accepted session kinds in errors
   await assert.rejects(createAgent({ ...opts, task: "Check" }), /create_agent needs at least one participant/);
   await assert.rejects(createAgent({ ...opts, agents: ["cfo"] }), /create_agent needs a task/);
   const missingSessionPattern = new RegExp(
-    "from_session not found: collab-missing.*live collaboration \\(collab-N\\) " +
-      "or meeting \\(meeting-N\\).*Active sessions:",
+    "from_session not found: collab-missing.*live collaboration or meeting \\(collab-…, meeting-…\\), " +
+      "or of an ended session in the archive.*Active sessions:",
   );
   await assert.rejects(createAgent({ ...opts, fromSession: "collab-missing" }), missingSessionPattern);
   await assert.rejects(

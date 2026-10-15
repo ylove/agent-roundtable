@@ -17,10 +17,13 @@ test("every tool has a title and all four MCP hints", () => {
 });
 
 test("annotation values: read-only diagnostics and listings, file-writing workshops, destructive ends", () => {
-  for (const name of ["debug_env", "list_meetings", "list_local_meetings", "list_collaborations", "get_collaboration_transcript"]) {
+  for (const name of ["list_meetings", "list_local_meetings", "list_collaborations", "get_collaboration_transcript"]) {
     assert.equal(byName[name].annotations.readOnlyHint, true, name);
     assert.equal(byName[name].annotations.openWorldHint, false, name);
   }
+  // debug_env changes nothing but probes Ollama over the network.
+  assert.equal(byName.debug_env.annotations.readOnlyHint, true);
+  assert.equal(byName.debug_env.annotations.openWorldHint, true);
   for (const name of ["create_agent", "improve_agent"]) {
     assert.equal(byName[name].annotations.readOnlyHint, false, name);
     assert.equal(byName[name].annotations.openWorldHint, true, name);

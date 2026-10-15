@@ -1,8 +1,9 @@
 // Blackboard builders and a minimal reducer for the watchdog tests.
 //
-// applyDrafts mirrors the WS03 reducer (src/execution/blackboard.ts on ws/03-store) for exactly the
-// event types the watchdog emits, so a test can apply evaluate()'s drafts by hand and evaluate
-// again. Any other type throws, so a new watchdog event cannot slip through untested.
+// applyDrafts mirrors the reducer (src/execution/blackboard.ts) for exactly the event types the
+// watchdog emits, so a test can apply evaluate()'s drafts by hand and evaluate again. Any other
+// type throws, so a new watchdog event cannot slip through untested. The watchdog tests also check
+// that it agrees with the real reducer on every scenario.
 
 export const MIN = 60_000;
 export const T0 = Date.parse("2026-10-15T12:00:00.000Z");

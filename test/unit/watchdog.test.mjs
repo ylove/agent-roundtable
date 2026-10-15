@@ -17,6 +17,8 @@ import {
   task,
 } from "../fixtures/execution-state.mjs";
 
+const { applyInPlace } = await import("../../dist/execution/blackboard.js");
+const { validateDraft } = await import("../../dist/execution/events.js");
 const {
   evaluate,
   actionsToDrafts,
@@ -772,3 +774,82 @@ test("evaluate reports deadlocks from the needs in its observations", () => {
   assert.deepEqual(actions.map((a) => a.rule), ["deadlock"]);
   assert.deepEqual(evaluate(settle(s, actions), T0, { needs }), []);
 });
+
+// ---------------------------------------------------------------------------
+// Conformance with the store: every draft validates, and the strict reducer agrees
+// ---------------------------------------------------------------------------
+
+/** The drafts through validateDraft and the real reducer in strict mode (the store's write path). */
+function applyStrict(state, drafts) {
+  const s = structuredClone(state);
+  for (const d of drafts) {
+    const v = validateDraft(d);
+    const seq = s.seq + 1;
+    const event = { ...v, v: 1, id: `evt-${seq}`, seq, ts: new Date(T0).toISOString(), execution: s.execution, mode: "execution", prev: "0".repeat(64), hash: "0".repeat(64) };
+    applyInPlace(s, event, {}, { strict: true });
+  }
+  return s;
+}
+
+/** The parts of the blackboard the watchdog's events change. */
+const touched = (s) => ({
+  tasks: Object.fromEntries(Object.entries(s.tasks).map(([k, t]) => [k, { state: t.state, attempt: t.attempt, blocked_by: t.blocked_by }])),
+  claims: Object.keys(s.claims).sort(),
+  leases: Object.keys(s.leases).sort(),
+  queue: s.lease_queue.map((r) => [r.id, r.blocking]),
+  escalations: Object.fromEntries(Object.entries(s.escalations).map(([k, e]) => [k, [e.status, e.routed_to, e.emergency, e.blocking]])),
+  huddles: s.huddles,
+  agents: Object.fromEntries(Object.entries(s.agents).map(([k, a]) => [k, a.status])),
+  thresholds: s.budget.thresholds_crossed,
+  circuits: s.watchdog.circuits,
+  deadlocks: s.watchdog.deadlocks,
+});
+
+const conformance = [
+  { name: "claim expiry and queue grants", state: leaseScenario, obs: () => ({ seqTimes: { 10: T0 - 16 * MIN } }) },
+  { name: "most rules at once", state: busyState, obs: () => busyObs(), next: () => busyObs({ stalls: 1, lastStallAt: T0, startedAt: T0 + 500 }) },
+  { name: "a lost worker", state: workerState, obs: () => ({ agents: { "w-t": { alive: false } } }) },
+  { name: "the last attempt", state: () => workerState({ attempt: 3, status: "exited" }), obs: () => ({}) },
+  { name: "a second stall", state: workerState, obs: () => ({ agents: live({ stalls: 1, lastStallAt: T0 - 40 * MIN }) }) },
+  { name: "a huddle timeout", state: () => huddleState(), obs: () => ({ huddles: { "hud-1": { startedAt: T0 - 21 * MIN } } }) },
+  {
+    name: "a lead fallback",
+    state: () => routedState(),
+    obs: () => ({ escalations: { "esc-2": { routedAt: T0 - 3 * MIN } }, watchers: { main: { alive: false } } }),
+  },
+  {
+    name: "budget exhaustion and a task cap",
+    state: () => {
+      const s = makeState({ tasks: [task("t")] });
+      claim(s, "t", "w-t");
+      s.budget = { ...s.budget, spent_usd: 100, by_task: { t: 20 } };
+      return s;
+    },
+    obs: () => ({}),
+  },
+  { name: "an auth emergency", state: () => makeState(), obs: () => ({ outcomes: [{ driver: "claude-code", at: T0 - MIN, kind: "auth", message: "Not logged in" }] }) },
+  {
+    name: "a deadlock",
+    state: () => {
+      const s = makeState({ tasks: [task("a"), task("b")] });
+      claim(s, "a", "w-a");
+      claim(s, "b", "w-b");
+      s.leases = { La: lease("La", "a", "w-a", ["src/a/**"]), Lb: lease("Lb", "b", "w-b", ["src/b/**"]) };
+      s.lease_queue = [request("Qa", "a", "w-a", ["src/b/**"], "exclusive", ["Lb"], 70), request("Qb", "b", "w-b", ["src/a/**"], "exclusive", ["La"], 71)];
+      return s;
+    },
+    obs: () => ({}),
+  },
+];
+
+for (const c of conformance) {
+  test(`store conformance: ${c.name}`, () => {
+    const s = c.state();
+    const actions = evaluate(s, T0, c.obs());
+    assert.ok(actions.length > 0, "the scenario fires");
+    const drafts = actionsToDrafts(actions, { pid: 1234 });
+    const real = applyStrict(s, drafts);
+    assert.deepEqual(touched(real), touched(applyDrafts(s, drafts)), "the test reducer agrees with the real one");
+    assert.deepEqual(evaluate(real, T0 + 1000, (c.next ?? c.obs)()), [], "idempotent on the real blackboard");
+  });
+}

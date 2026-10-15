@@ -57,6 +57,9 @@ export const BUDGET_FALLBACK = { usd: 20, per_task_usd: 5, wall_clock_min: 120 }
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/** Task ids that would clash with run infrastructure: rt/<exe6>/integration is the integration branch. */
+export const RESERVED_TASK_IDS: readonly string[] = ["integration"];
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -514,6 +517,9 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     if (!o) continue;
     ck.known(o, ["id", "title", "team", "persona", "kind", "depends_on", "paths", "acceptance", "checks", "effort", "budget_usd", "context"], p);
     const tid = ck.id(o.id, `${p}.id`);
+    if (tid !== undefined && RESERVED_TASK_IDS.includes(tid)) {
+      ck.err(`${p}.id`, `${q(tid)} is reserved: its branch would clash with the run's integration branch`);
+    }
     const taskTitle = ck.str(o.title, `${p}.title`, { required: true, max: 200 });
     const persona = ck.str(o.persona, `${p}.persona`, { required: true });
     const kind = ck.oneOf(o.kind, `${p}.kind`, TASK_KINDS, "build")!;
@@ -566,8 +572,14 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   const cycle = findCycle(tasks.map((t) => ({ id: t.id, depends_on: t.depends_on.filter((d) => d !== t.id) })));
   if (cycle) ck.err("tasks", `depends_on has a cycle: ${cycle.join(" → ")}`);
 
-  // Participants default to the task personas, in task order.
-  if (participants.length === 0) for (const t of tasks) if (!participants.some((x) => x.agent === t.persona)) participants.push({ agent: t.persona });
+  // Participants default to the task personas, in task order. Every task persona must consent, so
+  // one missing from a given list is added.
+  const listed = participants.length > 0;
+  for (const t of tasks) {
+    if (participants.some((x) => x.agent === t.persona)) continue;
+    participants.push({ agent: t.persona });
+    if (listed) ck.warn("participants", `did not include task persona ${q(t.persona)}; added it, since every task persona must consent`);
+  }
   const agents = new Set(participants.map((x) => x.agent));
   for (const [i, t] of teams.entries()) {
     for (const [j, m] of t.members.entries()) if (!agents.has(m)) ck.err(`teams[${i}].members[${j}]`, `${q(m)} is not a participant`);

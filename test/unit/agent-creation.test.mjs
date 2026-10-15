@@ -82,7 +82,7 @@ const { readFrontmatter } = await import("../../dist/agents.js");
 const { startCollaboration, collaborations, ORCHESTRATOR } = await import("../../dist/sessions/collaborations.js");
 const { startMeeting, meetings } = await import("../../dist/sessions/meetings.js");
 const { readActivity, recordActivity } = await import("../../dist/activity.js");
-const opts = { provider: "openai_compatible", model: "m", baseUrl: "http://llm.localhost/v1" };
+const opts = { provider: "openai_compatible", model: "m", baseUrl: "http://localhost:4141/v1" };
 const two = ["cfo", "marketing-coordinator"];
 const definition = (extra = {}) => ({
   name: "marketing-budget",
@@ -116,7 +116,7 @@ function harness(t, options = {}) {
     if (url.startsWith("http://publisher.test")) {
       return init.method === "POST" ? json(200, { id: "x", time: 1 }) : new Response("", { status: 200 });
     }
-    assert.equal(url, "http://llm.localhost/v1/chat/completions", "Unexpected network destination");
+    assert.equal(url, "http://localhost:4141/v1/chat/completions", "Unexpected network destination");
     const body = JSON.parse(init.body);
     const system = body.messages[0].content;
     const user = body.messages.at(-1).content;
@@ -467,7 +467,7 @@ test("public mirror orders header, contributions, reviews and summary with no pr
     assert.ok(!p.body.message.includes("## Existing skills"));
     assert.ok(!p.body.title.includes(agentsDir));
   }
-  for (const call of h.calls.filter(c => c.url.startsWith("http://llm.localhost"))) {
+  for (const call of h.calls.filter(c => c.url.startsWith("http://localhost:4141"))) {
     assert.match(call.body.messages[0].content, /PUBLIC SESSION NOTICE/);
     assert.ok(call.body.messages.every(m => !m.content.includes(agentsDir)));
   }
@@ -859,7 +859,7 @@ test("public improve redacts the final definition and omits private activity fro
   assert.ok(summary.body.message.includes("cfo contributed expertise"));
   const transcript = readFileSync(/Saved: (.+?) ·/.exec(result.publicBlock)[1], "utf8");
   for (const text of [JSON.stringify(posts), transcript]) for (const marker of [persona, outcome, "## System prompt"]) assert.ok(!text.includes(marker), marker);
-  for (const call of h.calls.filter(c => c.url.startsWith("http://llm.localhost"))) assert.ok(!JSON.stringify(call.body).includes(outcome));
+  for (const call of h.calls.filter(c => c.url.startsWith("http://localhost:4141"))) assert.ok(!JSON.stringify(call.body).includes(outcome));
   for (const call of h.requests.contributions) {
     const prompt = call.messages.at(-1).content;
     assert.ok(prompt.includes("2. Corrections (point to the passage by its heading or a short paraphrase and give the replacement guidance; do not reproduce the current text)"));

@@ -28,11 +28,11 @@ const example = name => frontmatterCases.find(c => c.name === name).text;
 const validated = extra => files.validateAgentSpec({ ...definition, ...extra }, { mode: "improve", existingSkills: [] });
 const options = targetPath => ({ targetPath, skillsDir: config.SKILLS_DIR, createdFrom: ["reviewer"], date: "2026-10-08", timestamp: "now" });
 const target = (text = example("strict")) => put(path.join(root, `case-${++seq}`, ".claude", "agents", "reviewer.md"), text);
-const llm = { provider: "openai_compatible", model: "m", baseUrl: "http://llm.localhost/v1" };
+const llm = { provider: "openai_compatible", model: "m", baseUrl: "http://localhost:4141/v1" };
 function harness(t, { architect, review } = {}) {
   const requests = [];
   stubFetch(t, async (url, init) => {
-    assert.equal(url, "http://llm.localhost/v1/chat/completions");
+    assert.equal(url, "http://localhost:4141/v1/chat/completions");
     const body = JSON.parse(init.body);
     requests.push(body);
     const prompt = body.messages.at(-1).content;
@@ -203,7 +203,7 @@ test("dash verdicts survive review and signoff in an offline ultraplan", async t
   const one = target();
   const two = put(path.join(path.dirname(one), "ops.md"), "You handle operations.");
   stubFetch(t, async (url, init) => {
-    assert.equal(url, "http://llm.localhost/v1/chat/completions");
+    assert.equal(url, "http://localhost:4141/v1/chat/completions");
     const body = JSON.parse(init.body);
     const prompt = body.messages.at(-1).content;
     const content = prompt.includes("Sign-off: APPROVE |")

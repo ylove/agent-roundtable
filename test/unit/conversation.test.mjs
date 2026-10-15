@@ -48,7 +48,7 @@ const sessions = await import("../../dist/sessions/collaborations.js");
 const { loadAgent } = await import("../../dist/agents.js");
 const { readActivity } = await import("../../dist/activity.js");
 const { publicLabel } = await import("../../dist/publishers/index.js");
-const opts = { mode: "conversation", provider: "openai_compatible", model: "test", baseUrl: "http://llm.localhost/v1" };
+const opts = { mode: "conversation", provider: "openai_compatible", model: "test", baseUrl: "http://localhost:4141/v1" };
 const alpha = join(agentsDir, "alpha.md");
 const beta = join(agentsDir, "beta.md");
 const system = (call) => call.body.messages[0].content;

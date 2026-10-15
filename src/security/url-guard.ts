@@ -1,9 +1,11 @@
 // ============================================================================
 // Outbound URL guard (SSRF) for per-call provider base URLs and the webhook publisher
 //
-// Rules: https only, except http to loopback; no userinfo; cloud metadata targets always blocked;
-// private, CGNAT, link-local and ULA targets blocked unless opted in. Loopback is always allowed,
-// because local model servers (LM Studio, vLLM, llama.cpp, Ollama) live there.
+// Rules: no userinfo; cloud metadata targets always blocked; private, CGNAT, link-local and ULA
+// targets blocked unless opted in. Loopback is always allowed, because local model servers (LM
+// Studio, vLLM, llama.cpp, Ollama) live there. https everywhere, except plain http to loopback and,
+// when private targets are allowed, to private addresses (LAN model servers and webhook receivers).
+// Only the literal name "localhost" and IP literals are classified without DNS.
 //
 // Limitation (DNS rebinding, a TOCTOU gap): the guard resolves the host and checks every address,
 // but fetch resolves the name again when it connects. A hostile resolver can answer the guard with
@@ -113,18 +115,33 @@ function parseV6(ip: string): number[] | null {
 const isZero = (h: number[], from: number, to: number) => h.slice(from, to).every((g) => g === 0);
 const embeddedV4 = (hi: number, lo: number) => hi * 65536 + lo;
 
+/**
+ * An IPv4 reached through a translator or relay: its metadata stays metadata, but nothing behind it
+ * is this host's loopback, so anything non-public is "private". `localUse` prefixes are never public.
+ */
+function viaTranslator(v4: number, localUse = false): AddressClass {
+  const inner = classifyV4(v4);
+  if (inner === "metadata") return "metadata";
+  return inner === "public" && !localUse ? "public" : "private";
+}
+
 function classifyV6(h: number[]): AddressClass {
   if (isZero(h, 0, 8)) return "private"; // unspecified
   if (isZero(h, 0, 7) && h[7] === 1) return "loopback";
   // AWS IMDS over IPv6: fd00:ec2::254
   if (h[0] === 0xfd00 && h[1] === 0x0ec2 && isZero(h, 2, 7) && h[7] === 0x254) return "metadata";
-  // IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d) and NAT64 (64:ff9b::a.b.c.d): the IPv4 decides.
-  if (isZero(h, 0, 5) && (h[5] === 0xffff || h[5] === 0)) return classifyV4(embeddedV4(h[6], h[7]));
-  if (h[0] === 0x64 && h[1] === 0xff9b && isZero(h, 2, 6)) return classifyV4(embeddedV4(h[6], h[7]));
+  // IPv4-mapped (::ffff:0:0/96, ::ffff:a.b.c.d): the host's own IPv4 stack, so the IPv4 decides.
+  if (isZero(h, 0, 5) && h[5] === 0xffff) return classifyV4(embeddedV4(h[6], h[7]));
+  // IPv4-translated (::ffff:0:a.b.c.d, SIIT) and IPv4-compatible (::a.b.c.d, deprecated).
+  if (isZero(h, 0, 4) && h[4] === 0xffff && h[5] === 0) return viaTranslator(embeddedV4(h[6], h[7]));
+  if (isZero(h, 0, 6)) return viaTranslator(embeddedV4(h[6], h[7]));
+  // NAT64: the well-known 64:ff9b::/96, and the local-use 64:ff9b:1::/48 (RFC 8215), never public.
+  if (h[0] === 0x64 && h[1] === 0xff9b && isZero(h, 2, 6)) return viaTranslator(embeddedV4(h[6], h[7]));
+  if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) return viaTranslator(embeddedV4(h[6], h[7]), true);
   // 6to4 (2002:a.b.c.d::/48) reaches the embedded IPv4 through a relay.
   if (h[0] === 0x2002) {
-    const inner = classifyV4(embeddedV4(h[1], h[2]));
-    if (inner !== "public") return inner === "metadata" ? "metadata" : "private";
+    const inner = viaTranslator(embeddedV4(h[1], h[2]));
+    if (inner !== "public") return inner;
   }
   if ((h[0] & 0xfe00) === 0xfc00) return "private"; // ULA fc00::/7
   if ((h[0] & 0xffc0) === 0xfe80) return "private"; // link-local fe80::/10
@@ -155,20 +172,19 @@ function hostOf(url: URL): string {
   return url.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
 }
 
-/** localhost and *.localhost always mean loopback (RFC 6761); they are never sent to DNS. */
-function isLoopbackName(host: string): boolean {
-  return host === "localhost" || host.endsWith(".localhost");
-}
-
 export interface UrlGuardOptions {
   /** How the URL is named in errors, e.g. "base_url" or "ROUNDTABLE_WEBHOOK_URL". */
   label?: string;
-  /** Allow private, CGNAT, link-local and ULA targets. Default: ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS. */
+  /**
+   * Allow private, CGNAT, link-local and ULA targets, over http too.
+   * Default: ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS.
+   */
   allowPrivate?: boolean;
   lookupTimeoutMs?: number;
 }
 
-function assertAllowed(cls: AddressClass, what: string, label: string, allowPrivate: boolean): void {
+/** Throw unless a target of class `cls` is allowed over the URL's scheme. */
+function assertAllowed(cls: AddressClass, what: string, url: URL, label: string, allowPrivate: boolean): void {
   if (cls === "metadata") {
     throw new UrlGuardError(`${label} refused: ${what} is a cloud metadata address`);
   }
@@ -178,11 +194,17 @@ function assertAllowed(cls: AddressClass, what: string, label: string, allowPriv
         `(set ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1 to allow private networks)`
     );
   }
+  if (url.protocol === "http:" && cls === "public") {
+    throw new UrlGuardError(
+      `${label} must use https (http is allowed only to loopback${allowPrivate ? " and private addresses" : ""}): ${describeUrl(url)}`
+    );
+  }
 }
 
 /**
- * The checks that need no DNS: a valid URL, https (or http to a loopback literal or localhost), no
- * userinfo, no metadata host name, and an allowed class for a literal address. Returns the parsed URL.
+ * The checks that need no DNS: a valid http(s) URL, no userinfo, no metadata host name, and an allowed
+ * class (and scheme) for an IP literal or "localhost". Any other host name is decided by guardUrl's
+ * lookup. Returns the parsed URL.
  */
 export function checkUrl(raw: string, opts: UrlGuardOptions = {}): URL {
   const label = opts.label ?? "URL";
@@ -193,19 +215,15 @@ export function checkUrl(raw: string, opts: UrlGuardOptions = {}): URL {
   } catch {
     throw new UrlGuardError(`${label} is not a valid URL`);
   }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new UrlGuardError(`${label} must use https: ${describeUrl(url)}`);
+  }
   if (url.username || url.password) {
     throw new UrlGuardError(`${label} must not contain credentials (user:password@): ${describeUrl(url)}`);
   }
   const host = hostOf(url);
-  const literal = isIP(host) ? classifyAddress(host) : undefined;
-  const loopback = literal === "loopback" || (literal === undefined && isLoopbackName(host));
-  if (url.protocol === "http:") {
-    if (!loopback) throw new UrlGuardError(`${label} must use https (http is allowed only to loopback): ${describeUrl(url)}`);
-  } else if (url.protocol !== "https:") {
-    throw new UrlGuardError(`${label} must use https: ${describeUrl(url)}`);
-  }
-  if (METADATA_HOSTS.has(host)) assertAllowed("metadata", host, label, allowPrivate);
-  if (literal) assertAllowed(literal, host, label, allowPrivate);
+  if (METADATA_HOSTS.has(host)) assertAllowed("metadata", host, url, label, allowPrivate);
+  if (isIP(host)) assertAllowed(classifyAddress(host), host, url, label, allowPrivate);
   return url;
 }
 
@@ -232,17 +250,18 @@ async function lookupAll(host: string, label: string, timeoutMs: number): Promis
 }
 
 /**
- * checkUrl, then resolve a host name (short timeout) and check every address it has. Literal
- * addresses and localhost names are never sent to DNS. Throws UrlGuardError; returns the parsed URL.
+ * checkUrl, then resolve a host name (short timeout) and check every address it has, and the scheme
+ * against each. IP literals and "localhost" are never sent to DNS; every other name is (*.localhost
+ * included). Throws UrlGuardError; returns the parsed URL.
  */
 export async function guardUrl(raw: string, opts: UrlGuardOptions = {}): Promise<URL> {
   const url = checkUrl(raw, opts);
   const host = hostOf(url);
-  if (isIP(host) || isLoopbackName(host)) return url;
+  if (isIP(host) || host === "localhost") return url;
   const label = opts.label ?? "URL";
   const allowPrivate = opts.allowPrivate ?? allowPrivateBaseUrls();
   for (const address of await lookupAll(host, label, opts.lookupTimeoutMs ?? URL_GUARD_LOOKUP_TIMEOUT_MS)) {
-    assertAllowed(classifyAddress(address), `${host} (${address})`, label, allowPrivate);
+    assertAllowed(classifyAddress(address), `${host} (${address})`, url, label, allowPrivate);
   }
   return url;
 }

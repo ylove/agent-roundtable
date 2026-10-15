@@ -57,19 +57,53 @@ describe("classifyAddress", () => {
     }
     for (const ip of ["2606:4700:4700::1111", "2001:db8::1", "::ffff:8.8.8.8"]) assert.equal(classifyAddress(ip), "public", ip);
   });
+
+  test("translated, compatible and local-use NAT64 addresses: never this host's loopback", () => {
+    // IPv4-translated ::ffff:0:a.b.c.d (SIIT), IPv4-compatible ::a.b.c.d.
+    assert.equal(classifyAddress("::ffff:0:a9fe:a9fe"), "metadata");
+    assert.equal(classifyAddress("::ffff:0:169.254.169.254"), "metadata");
+    assert.equal(classifyAddress("::ffff:0:a00:1"), "private");
+    assert.equal(classifyAddress("::ffff:0:808:808"), "public");
+    assert.equal(classifyAddress("::ffff:0:7f00:1"), "private");
+    assert.equal(classifyAddress("::a9fe:a9fe"), "metadata");
+    assert.equal(classifyAddress("::127.0.0.1"), "private");
+    // NAT64: well-known 64:ff9b::/96 and local-use 64:ff9b:1::/48 (never public).
+    assert.equal(classifyAddress("64:ff9b::7f00:1"), "private", "loopback behind a translator is not ours");
+    assert.equal(classifyAddress("64:ff9b::808:808"), "public");
+    assert.equal(classifyAddress("64:ff9b:1::808:808"), "private");
+    assert.equal(classifyAddress("64:ff9b:1::a9fe:a9fe"), "metadata");
+    assert.equal(classifyAddress("2002:7f00:1::1"), "private");
+  });
 });
 
 describe("checkUrl / guardUrl", () => {
-  test("https anywhere public; http only to loopback; no other schemes", async (t) => {
-    stubDns(t);
+  test("https anywhere public; http only to loopback (literal or resolved); no other schemes", async (t) => {
+    stubDns(t, { "llm.localhost": ["127.0.0.1"], "api.example.test": ["203.0.113.10"] });
     assert.equal((await guardUrl("https://api.example.test/v1")).host, "api.example.test");
-    for (const u of ["http://localhost:1234/v1", "http://127.0.0.1:8000/v1", "http://[::1]:8000/v1", "http://llm.localhost/v1", "https://localhost/v1"]) {
-      assert.ok(checkUrl(u) instanceof URL, u);
+    for (const u of ["http://localhost:1234/v1", "http://127.0.0.1:8000/v1", "http://[::1]:8000/v1", "https://localhost/v1"]) {
+      assert.ok(await guardUrl(u), u);
     }
-    for (const u of ["http://api.example.test/v1", "http://10.0.0.5:8000/v1", "ftp://example.test/", "file:///etc/passwd"]) {
+    for (const u of ["http://8.8.8.8/v1", "http://[2606:4700:4700::1111]/v1", "ftp://example.test/", "file:///etc/passwd"]) {
       assert.throws(() => checkUrl(u, { label: "base_url" }), /base_url must use https/, u);
     }
+    await assert.rejects(guardUrl("http://api.example.test/v1", { label: "base_url" }), /base_url must use https \(http is allowed only to loopback\)/);
+    // *.localhost is resolved like any other name (only the literal "localhost" is trusted as is).
+    assert.ok(await guardUrl("http://llm.localhost/v1"));
+    t.mock.restoreAll();
+    stubDns(t, { "llm.localhost": ["203.0.113.7"] });
+    await assert.rejects(guardUrl("http://llm.localhost/v1"), /must use https/);
     assert.throws(() => checkUrl("not a url", { label: "base_url" }), /base_url is not a valid URL/);
+  });
+
+  test("with private targets allowed, plain http reaches private and LAN addresses too (never metadata)", async (t) => {
+    stubDns(t, { "receiver.lan": ["192.168.1.10"], "lmstudio.lan": ["fd12::7"], "public.example.test": ["203.0.113.10"], "imds.lan": ["169.254.169.254"] });
+    for (const u of ["http://192.168.1.10:8080/hook", "http://10.0.0.5:8000/v1", "http://[fd12::7]:1234/v1", "http://receiver.lan/hook", "http://lmstudio.lan:1234/v1"]) {
+      await assert.rejects(guardUrl(u, { label: "base_url" }), /private, link-local or reserved/, u);
+      assert.ok(await guardUrl(u, { allowPrivate: true }), u);
+    }
+    await assert.rejects(guardUrl("http://public.example.test/", { allowPrivate: true }), /http is allowed only to loopback and private addresses/);
+    assert.throws(() => checkUrl("http://169.254.169.254/latest", { allowPrivate: true }), /cloud metadata/);
+    await assert.rejects(guardUrl("http://imds.lan/", { allowPrivate: true }), /cloud metadata/);
   });
 
   test("userinfo is refused and never echoed", () => {
@@ -102,14 +136,17 @@ describe("checkUrl / guardUrl", () => {
     assert.ok(await guardUrl("https://ula.example.test/"));
   });
 
-  test("loopback is always allowed; localhost and literals never reach DNS", async (t) => {
-    const asked = stubDns(t, { "loop.example.test": ["127.0.0.1", "::1"] });
+  test("loopback is always allowed; the literal localhost and IP literals never reach DNS", async (t) => {
+    const asked = stubDns(t, { "loop.example.test": ["127.0.0.1", "::1"], "a.localhost": ["127.0.0.1"] });
     assert.ok(await guardUrl("http://localhost:1234/v1"));
+    assert.ok(await guardUrl("http://LOCALHOST.:1234/v1"));
     assert.ok(await guardUrl("http://127.0.0.1:1234/v1"));
     assert.ok(await guardUrl("https://8.8.8.8/v1"));
     assert.deepEqual(asked, []);
     assert.ok(await guardUrl("https://loop.example.test/v1"));
-    assert.deepEqual(asked, ["loop.example.test"]);
+    assert.ok(await guardUrl("http://loop.example.test/v1"), "http to a name that resolves only to loopback");
+    assert.ok(await guardUrl("http://a.localhost/v1"));
+    assert.deepEqual(asked, ["loop.example.test", "loop.example.test", "a.localhost"]);
   });
 
   test("resolution failures and timeouts are retryable refusals", async (t) => {
@@ -208,28 +245,34 @@ describe("display", () => {
 });
 
 describe("webhook publisher URL", () => {
-  test("constructor refuses metadata, plain http off loopback and userinfo; allows private and loopback", () => {
+  test("constructor refuses metadata, plain http to a public literal and userinfo; allows private (http too) and loopback", () => {
     const make = (url) => new WebhookPublisher({ url, topicPrefix: "rt" });
     assert.throws(() => make("https://169.254.169.254/hook"), /ROUNDTABLE_WEBHOOK_URL refused: .*cloud metadata/);
+    assert.throws(() => make("http://169.254.169.254/hook"), /cloud metadata/);
     assert.throws(() => make("https://metadata.google.internal/hook"), /cloud metadata/);
-    assert.throws(() => make("http://hooks.example.test/hook"), /ROUNDTABLE_WEBHOOK_URL must use https/);
+    assert.throws(() => make("http://8.8.8.8/hook"), /ROUNDTABLE_WEBHOOK_URL must use https \(http is allowed only to loopback and private addresses\)/);
     assert.throws(() => make("https://u:p@hooks.example.test/hook"), /must not contain credentials/);
-    assert.ok(make("https://10.0.0.8/hook"));
-    assert.ok(make("http://127.0.0.1:8080/hook"));
+    for (const url of ["https://10.0.0.8/hook", "http://192.168.1.10:8080/hook", "http://receiver.lan/hook", "http://127.0.0.1:8080/hook"]) {
+      assert.ok(make(url), url);
+    }
   });
 
-  test("send resolves the host: metadata is refused (not retried), private is allowed", async (t) => {
-    stubDns(t, { "imds.example.test": ["169.254.169.254"], "lan.example.test": ["10.0.0.8"] });
+  test("send resolves the host: metadata and plain http to a public host are refused (not retried), LAN is allowed", async (t) => {
+    stubDns(t, { "imds.example.test": ["169.254.169.254"], "lan.example.test": ["10.0.0.8"], "receiver.lan": ["192.168.1.10"], "hooks.example.test": ["203.0.113.10"] });
     const calls = stubFetch(t, () => new Response("", { status: 200 }));
     const channel = { id: "rt-x", sessionId: "s", suffix: "x" };
     const msg = { turn: 1, part: 1, parts: 1, speaker: "a", kind: "turn", content: "c", timestamp: "t" };
-    const bad = await new WebhookPublisher({ url: "https://imds.example.test/hook", topicPrefix: "rt" }).send(channel, msg);
-    assert.equal(bad.ok, false);
-    assert.equal(bad.retryable, false);
-    assert.match(bad.error, /cloud metadata/);
+    for (const [url, why] of [["https://imds.example.test/hook", /cloud metadata/], ["http://hooks.example.test/hook", /must use https/]]) {
+      const bad = await new WebhookPublisher({ url, topicPrefix: "rt" }).send(channel, msg);
+      assert.equal(bad.ok, false);
+      assert.equal(bad.retryable, false);
+      assert.match(bad.error, why);
+    }
     assert.equal(calls.length, 0);
-    const good = await new WebhookPublisher({ url: "https://lan.example.test/hook", topicPrefix: "rt" }).send(channel, msg);
-    assert.deepEqual(good, { ok: true });
+    for (const url of ["https://lan.example.test/hook", "http://receiver.lan/hook"]) {
+      assert.deepEqual(await new WebhookPublisher({ url, topicPrefix: "rt" }).send(channel, msg), { ok: true }, url);
+    }
+    assert.equal(calls.length, 2);
     assert.equal(calls[0].init.redirect, "manual");
   });
 

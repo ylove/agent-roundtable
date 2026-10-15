@@ -28,7 +28,8 @@ export class WebhookPublisher implements Publisher {
     if (!/^https?:\/\/[^\s/]+/i.test(opts.url)) {
       throw new Error("ROUNDTABLE_WEBHOOK_URL is not a valid http(s) URL.");
     }
-    // The URL guard with private networks allowed (self-hosted receivers) but metadata always blocked.
+    // The URL guard with private networks allowed, over plain http too (self-hosted LAN receivers), but
+    // metadata always blocked and http to a public host refused.
     // Here the checks that need no DNS; send() resolves the host and checks every address.
     checkUrl(opts.url, WEBHOOK_GUARD);
     if (opts.authHeader) {

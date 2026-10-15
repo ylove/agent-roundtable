@@ -11,6 +11,9 @@
     "node": ">=22"
   },
   "license": "MIT",
+  "publishConfig": {
+    "provenance": true
+  },
   "files": [
     "dist",
     "examples",

@@ -225,8 +225,11 @@ export function spawnCaptured(file: string, args: string[], o: CaptureOptions): 
     child.on("exit", (code, sig) => {
       exitCode = code;
       exitSignal = sig;
+      // The command finished: a slow pipe drain is not a timeout.
+      clearTimeout(timer);
       // Background processes left in the group die with the command.
       killTree(pid);
+      if (drain) clearTimeout(drain);
       drain = setTimeout(finish, DRAIN_GRACE_MS);
     });
     child.on("close", () => finish());

@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { childEnv } from "../security/child-env.js";
 import { DEFAULT_PROXY_IMAGE, SANDBOX_ENV, SandboxRequestError, validateWorkdir } from "./common.js";
-import { registerInflight, runQuiet } from "./process.js";
+import { registerInflight, runQuiet, sandboxShuttingDown } from "./process.js";
 
 export const EGRESS_PROXY_PORT = 3128;
 /** The only port a tunnel may reach. */
@@ -292,7 +292,7 @@ export interface EgressOptions {
   signal?: AbortSignal;
 }
 
-const TAG_RE = /^[a-z0-9]{1,32}$/;
+export const EGRESS_TAG_RE = /^[a-z0-9]{1,32}$/;
 const DOCKER_TIMEOUT_MS = 60_000;
 const PULL_TIMEOUT_MS = 600_000;
 const READY_TIMEOUT_MS = 15_000;
@@ -325,7 +325,7 @@ async function waitForReady(docker: string, name: string, signal?: AbortSignal):
  */
 export async function ensureEgressNetwork(opts: EgressOptions): Promise<EgressNetwork> {
   const tag = String(opts.executionTag ?? "").toLowerCase();
-  if (!TAG_RE.test(tag)) throw new SandboxRequestError(`execution tag ${JSON.stringify(opts.executionTag)} must be 1-32 lowercase letters or digits`);
+  if (!EGRESS_TAG_RE.test(tag)) throw new SandboxRequestError(`execution tag ${JSON.stringify(opts.executionTag)} must be 1-32 lowercase letters or digits`);
   const allowlist = normalizeAllowlist(opts.allowlist);
   const docker = opts.dockerPath ?? "docker";
   const env = opts.env ?? process.env;
@@ -337,21 +337,39 @@ export async function ensureEgressNetwork(opts: EgressOptions): Promise<EgressNe
   validateWorkdir(tmpdir());
   const dir = mkdtempSync(join(tmpdir(), "rt-egress-"));
 
+  // Removal is idempotent and may race with setup (a shutdown mid-setup). Every setup step
+  // re-checks afterwards and cleans up again if a teardown ran meanwhile, so whichever finishes
+  // last leaves nothing behind.
   let tornDown = false;
   let untrack = () => {};
-  const teardown = async () => {
-    if (tornDown) return;
-    tornDown = true;
-    untrack();
+  const cleanup = async () => {
     await runQuiet(docker, ["rm", "-f", proxy], dockerEnv(), DOCKER_TIMEOUT_MS);
     await runQuiet(docker, ["network", "rm", network], dockerEnv(), DOCKER_TIMEOUT_MS);
     rmSync(dir, { recursive: true, force: true });
   };
+  const teardown = async () => {
+    if (tornDown) return;
+    tornDown = true;
+    untrack();
+    await cleanup();
+  };
+  if (sandboxShuttingDown()) {
+    rmSync(dir, { recursive: true, force: true });
+    throw new Error("egress proxy: sandbox is shutting down");
+  }
   untrack = registerInflight({ label: proxy, stop: teardown });
 
-  const fail = async (what: string, output: string): Promise<never> => {
-    await teardown();
+  const fail = async (what: string, output = ""): Promise<never> => {
+    if (tornDown) await cleanup();
+    else await teardown();
     throw new Error(`egress proxy: ${what}${output ? `: ${output.slice(0, 500)}` : ""}`);
+  };
+  const step = async (what: string, args: string[], timeoutMs = DOCKER_TIMEOUT_MS) => {
+    if (tornDown) return fail("stopped during setup");
+    const r = await runQuiet(docker, args, dockerEnv(), timeoutMs, opts.signal);
+    if (tornDown) return fail("stopped during setup");
+    if (!r.ok) return fail(what, r.output);
+    return r;
   };
 
   try {
@@ -362,49 +380,34 @@ export async function ensureEgressNetwork(opts: EgressOptions): Promise<EgressNe
     chmodSync(dir, 0o755);
 
     const label = `${EGRESS_LABEL}=${tag}`;
-    const created = await runQuiet(docker, ["network", "create", "--internal", "--label", label, network], dockerEnv(), DOCKER_TIMEOUT_MS, opts.signal);
-    if (!created.ok) return await fail("could not create the internal network", created.output);
-
+    await step("could not create the internal network", ["network", "create", "--internal", "--label", label, network]);
     const present = await runQuiet(docker, ["image", "inspect", "--format", "{{.Id}}", image], dockerEnv(), DOCKER_TIMEOUT_MS, opts.signal);
-    if (!present.ok) {
-      const pulled = await runQuiet(docker, ["pull", image], dockerEnv(), PULL_TIMEOUT_MS, opts.signal);
-      if (!pulled.ok) return await fail(`could not pull ${image}`, pulled.output);
-    }
-
-    const run = await runQuiet(
-      docker,
-      [
-        "run", "-d", "--rm",
-        "--name", proxy,
-        "--label", label,
-        "--network", "bridge",
-        "--read-only",
-        "--tmpfs", "/tmp:rw,nosuid,nodev,size=16m",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
-        "--pids-limit", "64",
-        "--memory", "256m",
-        "--cpus", "1",
-        "--user", PROXY_USER,
-        "--mount", `type=bind,src=${dir},dst=/proxy,readonly`,
-        "-e", `RT_EGRESS_ALLOW=${allowlist.join(",")}`,
-        "-e", `RT_PROXY_PORT=${EGRESS_PROXY_PORT}`,
-        image,
-        "node", "/proxy/egress-proxy.mjs",
-      ],
-      dockerEnv(),
-      DOCKER_TIMEOUT_MS,
-      opts.signal
-    );
-    if (!run.ok) return await fail("could not start the proxy container", run.output);
-
-    const joined = await runQuiet(docker, ["network", "connect", network, proxy], dockerEnv(), DOCKER_TIMEOUT_MS, opts.signal);
-    if (!joined.ok) return await fail("could not attach the proxy to the internal network", joined.output);
-
+    if (!present.ok) await step(`could not pull ${image}`, ["pull", image], PULL_TIMEOUT_MS);
+    await step("could not start the proxy container", [
+      "run", "-d", "--rm",
+      "--name", proxy,
+      "--label", label,
+      "--network", "bridge",
+      "--read-only",
+      "--tmpfs", "/tmp:rw,nosuid,nodev,size=16m",
+      "--cap-drop", "ALL",
+      "--security-opt", "no-new-privileges",
+      "--pids-limit", "64",
+      "--memory", "256m",
+      "--cpus", "1",
+      "--user", PROXY_USER,
+      "--mount", `type=bind,src=${dir},dst=/proxy,readonly`,
+      "-e", `RT_EGRESS_ALLOW=${allowlist.join(",")}`,
+      "-e", `RT_PROXY_PORT=${EGRESS_PROXY_PORT}`,
+      image,
+      "node", "/proxy/egress-proxy.mjs",
+    ]);
+    await step("could not attach the proxy to the internal network", ["network", "connect", network, proxy]);
     if (!(await waitForReady(docker, proxy, opts.signal))) {
       const logs = await runQuiet(docker, ["logs", proxy], dockerEnv(), 5_000);
       return await fail("the proxy did not start", logs.output);
     }
+    if (tornDown) return await fail("stopped during setup");
   } catch (e) {
     if (!tornDown) await teardown();
     throw e;
@@ -416,7 +419,7 @@ export async function ensureEgressNetwork(opts: EgressOptions): Promise<EgressNe
 /** Remove every egress proxy and network left for an execution (e.g. after a crash). Never throws. */
 export async function sweepEgress(executionTag: string, dockerPath = "docker"): Promise<void> {
   const tag = String(executionTag ?? "").toLowerCase();
-  if (!TAG_RE.test(tag)) return;
+  if (!EGRESS_TAG_RE.test(tag)) return;
   const filter = `label=${EGRESS_LABEL}=${tag}`;
   const ps = await runQuiet(dockerPath, ["ps", "-aq", "--filter", filter], dockerEnv(), DOCKER_TIMEOUT_MS);
   const ids = ps.ok ? ps.output.split(/\s+/).filter(Boolean) : [];

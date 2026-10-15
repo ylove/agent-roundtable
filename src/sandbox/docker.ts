@@ -7,10 +7,12 @@
 // the caller's validated non-secret variables. The worktree is the only host path mounted.
 // ============================================================================
 
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
 import type { SandboxBackend, SandboxResult, SandboxRunRequest } from "../execution/types.js";
 import { randomBase32 } from "../ids.js";
 import { childEnv } from "../security/child-env.js";
+import { isContained } from "../security/fs-safe.js";
 import {
   DEFAULT_SANDBOX_IMAGE,
   SANDBOX_ENV,
@@ -22,7 +24,7 @@ import {
   validateEnv,
   validateWorkdir,
 } from "./common.js";
-import { ensureEgressNetwork, type EgressNetwork } from "./egress-proxy.js";
+import { EGRESS_TAG_RE, ensureEgressNetwork, normalizeAllowlist, type EgressNetwork } from "./egress-proxy.js";
 import { runQuiet, sandboxShuttingDown, spawnCaptured } from "./process.js";
 
 // ============================================================================
@@ -190,6 +192,7 @@ export class DockerBackend implements SandboxBackend {
     this.image = opts.image ?? defaultSandboxImage(this.env);
     this.limits = { ...dockerLimitsFromEnv(this.env), ...opts.limits };
     this.tag = (opts.executionTag ?? randomBase32(6)).toLowerCase();
+    if (!EGRESS_TAG_RE.test(this.tag)) throw new SandboxRequestError(`execution tag ${JSON.stringify(opts.executionTag)} must be 1-32 lowercase letters or digits`);
   }
 
   async available(): Promise<{ ok: boolean; reason?: string; degraded?: string }> {
@@ -239,13 +242,19 @@ export class DockerBackend implements SandboxBackend {
     const wantsEgress = Array.isArray(req.egress) && req.egress.length > 0;
     // Validate everything before touching Docker (a placeholder stands in for the egress network).
     buildDockerRunArgs(req, wantsEgress ? { ...base, egress: { network: "rt-egress-check", proxyUrl: "http://rt-proxy-check:3128" } } : base);
-    let st;
+    if (wantsEgress) normalizeAllowlist(req.egress!);
+    // The cwd must already exist inside the worktree: Docker would otherwise create it, root-owned,
+    // in the bind mount.
+    let target: string;
     try {
-      st = statSync(req.workdir);
-    } catch {
-      throw new SandboxRequestError(`workdir ${req.workdir} does not exist`);
+      const root = realpathSync(req.workdir);
+      target = realpathSync(join(root, resolveCwd(req.cwd)));
+      if (!isContained(root, target)) throw new SandboxRequestError("cwd resolves outside the workdir");
+    } catch (e) {
+      if (e instanceof SandboxRequestError) throw e;
+      throw new SandboxRequestError(`workdir or cwd does not exist: ${e instanceof Error ? e.message : String(e)}`);
     }
-    if (!st.isDirectory()) throw new SandboxRequestError(`workdir ${req.workdir} is not a directory`);
+    if (!statSync(target).isDirectory()) throw new SandboxRequestError("workdir or cwd is not a directory");
 
     const deadline = AbortSignal.timeout(timeoutMs);
     const setupSignal = req.signal ? AbortSignal.any([req.signal, deadline]) : deadline;

@@ -131,14 +131,19 @@ switch (args[0]) {
     console.log("27.1.1"); process.exit(0);
   case "image":
     console.log(args[3].includes("RepoDigests") ? "rt-test-image@sha256:feedface" : "sha256:deadbeef"); process.exit(0);
+  case "logs":
+    console.log("listening 3128"); process.exit(0);
+  case "inspect":
+    console.log("true"); process.exit(0);
   case "run": {
     const name = args[args.indexOf("--name") + 1];
+    if (args[1] === "-d") { console.log("c0ffee"); process.exit(0); }
     fs.writeFileSync(dir + "/" + name + ".pid", String(process.pid));
     const cmd = args.slice(args.indexOf("rt-test-image:1") + 1);
     if (cmd[0] === "hang") { setInterval(() => {}, 1000); break; }
     console.log("ran " + cmd.join(" "));
     console.error("leaked " + (process.env.SANDBOX_DOCKER_TEST_TOKEN || "nothing"));
-    process.exit(Number(cmd[1] || 0));
+    process.exit(/^\\d+$/.test(cmd[1] || "") ? Number(cmd[1]) : 0);
   }
   case "kill": {
     try { process.kill(Number(fs.readFileSync(dir + "/" + args[1] + ".pid", "utf8")), "SIGKILL"); } catch {}
@@ -217,7 +222,34 @@ test("run() refuses invalid requests before touching docker", async () => {
   const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1" });
   await assert.rejects(backend.run({ argv: ["true"], workdir: "/nonexistent-rt-workdir", timeoutMs: 1000 }), /does not exist/);
   await assert.rejects(backend.run({ argv: ["true"], workdir: tmpdir(), env: { GH_TOKEN: "x" }, timeoutMs: 1000 }), /credential/);
+  await assert.rejects(backend.run({ argv: ["true"], workdir: tmpdir(), cwd: "rt-missing-subdir", timeoutMs: 1000 }), /does not exist/);
+  await assert.rejects(backend.run({ argv: ["true"], workdir: tmpdir(), egress: ["*"], timeoutMs: 1000 }), /allowlist/);
   assert.equal(fake.calls().length, 0);
+  assert.throws(() => new DockerBackend({ executionTag: "Not A Tag" }), /execution tag/);
+});
+
+test("egress run() joins a fresh internal network with the proxy variables, then tears it down", async () => {
+  const fake = fakeDocker();
+  const work = mkdtempSync(join(tmpdir(), "rt-wt-"));
+  const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1", executionTag: "abc123" });
+  const r = await backend.run({ argv: ["npm", "ci"], workdir: work, egress: ["registry.npmjs.org"], timeoutMs: 20_000 });
+  assert.equal(r.exit, 0, r.output);
+  const calls = fake.calls().map((c) => c.args);
+  const create = calls.find((a) => a[0] === "network" && a[1] === "create");
+  assert.ok(create.includes("--internal"));
+  const network = create.at(-1);
+  assert.match(network, /^rt-egress-abc123-[0-9a-f]{8}$/);
+  const proxyRun = calls.find((a) => a[0] === "run" && a[1] === "-d");
+  const proxy = proxyRun[proxyRun.indexOf("--name") + 1];
+  for (const flag of ["--read-only", "no-new-privileges", "ALL", "65534:65534", "RT_EGRESS_ALLOW=registry.npmjs.org"]) assert.ok(proxyRun.includes(flag), flag);
+  assert.ok(proxyRun.some((a) => a.endsWith("dst=/proxy,readonly")));
+  assert.deepEqual(calls.find((a) => a[0] === "network" && a[1] === "connect"), ["network", "connect", network, proxy]);
+  const cmd = calls.find((a) => a[0] === "run" && a[1] === "--rm");
+  assert.equal(cmd[cmd.indexOf("--network") + 1], network);
+  assert.ok(cmd.includes(`HTTPS_PROXY=http://${proxy}:3128`));
+  const rmProxy = calls.findIndex((a) => a[0] === "rm" && a.includes(proxy));
+  const rmNet = calls.findIndex((a) => a[0] === "network" && a[1] === "rm" && a[2] === network);
+  assert.ok(rmProxy > calls.indexOf(cmd) && rmNet > rmProxy, "proxy and network removed after the command");
 });
 
 // ============================================================================

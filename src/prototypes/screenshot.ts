@@ -10,6 +10,7 @@ import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { rm, stat } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { CHROME_PATH_OVERRIDE } from "../config.js";
+import { childEnv } from "../security/child-env.js";
 
 export interface Viewport {
   name: string;
@@ -132,7 +133,7 @@ function runOnce(
   chrome: string,
   args: string[],
   timeoutMs: number,
-  env: NodeJS.ProcessEnv,
+  env: Record<string, string>,
   processes?: ChromeProcesses
 ): Promise<{ code: number | null; timedOut: boolean }> {
   return new Promise((resolve) => {
@@ -195,8 +196,8 @@ export async function captureScreenshots(
     const timeoutMs = opts.timeoutMs ?? SCREENSHOT_TIMEOUT_MS;
     // Chrome's temporary files (its process-singleton directory included) go to the shots directory, so
     // they are removed with the prototype even when Chrome is killed. macOS Chrome ignores TMPDIR for these
-    // and reads MAC_CHROMIUM_TMPDIR instead.
-    const env = { ...process.env, TMPDIR: outDir, TMP: outDir, TEMP: outDir, MAC_CHROMIUM_TMPDIR: outDir };
+    // and reads MAC_CHROMIUM_TMPDIR instead. Nothing else of this process's environment reaches Chrome.
+    const env = childEnv("browser", { TMPDIR: outDir, TMP: outDir, TEMP: outDir, MAC_CHROMIUM_TMPDIR: outDir });
     const results = await Promise.all(
       viewports.map(async (vp) => {
         if (opts.processes?.killed) return null;

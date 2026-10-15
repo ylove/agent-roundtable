@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import type { Message } from "./meetings.js";
 import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
+import { childEnv } from "../security/child-env.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
@@ -110,7 +111,7 @@ export async function executeClaudeCLI(
 
     const proc = spawn("claude", args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+      env: childEnv("local-meeting"),
     });
 
     let stdout = "";

@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import type { LoadedAgent } from "../agents.js";
 import { recentActivityForKey } from "../activity.js";
 import { WORKSPACE_DIR } from "../config.js";
+import { childEnv } from "../security/child-env.js";
 import { truncate } from "./workshop.js";
 
 export interface Grounding {
@@ -82,7 +83,7 @@ export function workspaceSnapshot(dir: string = WORKSPACE_DIR): string | undefin
   ] as const) {
     try {
       const output = execFileSync("git", ["-C", root, ...args], {
-        timeout: 2000, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+        timeout: 2000, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], env: childEnv("git"),
       }).trim();
       if (output) parts.push(`${label}:\n${output}`);
     } catch {

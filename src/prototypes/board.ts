@@ -14,6 +14,7 @@ import { lstat, readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { Duplex } from "node:stream";
+import { childEnv } from "../security/child-env.js";
 import { diagramFile, mermaidSourceOf, validatePath } from "./parse.js";
 import type { PrototypeFile, PrototypeRecord } from "./types.js";
 
@@ -553,11 +554,17 @@ function refuseSocket(socket: Duplex): void {
   }
 }
 
-/** Open the board in the default browser. Best effort: detached, errors ignored; only our own local URL. */
+/**
+ * Open the board in the default browser. Best effort: detached, errors ignored; only our own local URL.
+ * The opener gets the "open" allowlist environment (plus what cmd.exe needs on Windows), never secrets.
+ */
 export function openInBrowser(url: string): void {
   if (!/^http:\/\/127\.0\.0\.1:\d{1,5}\/[A-Za-z0-9_-]{8,64}\/$/.test(url)) return;
   try {
-    const opts = { detached: true, stdio: "ignore" as const, windowsHide: true };
+    const env = childEnv("open", process.platform === "win32"
+      ? { SystemRoot: process.env.SystemRoot, ComSpec: process.env.ComSpec }
+      : {});
+    const opts = { detached: true, stdio: "ignore" as const, windowsHide: true, env };
     const child =
       process.platform === "darwin"
         ? spawn("open", [url], opts)

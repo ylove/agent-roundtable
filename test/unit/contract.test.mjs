@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const {
   checkContract, validateContract, contractHash, applyMergePatch, createMergePatch, affectedTasks, renderContractMarkdown,
   contractPath, contractMarkdownPath, contractIdFor, contractTag, globWithin, normalizeGlob, findCycle, BUDGET_FALLBACK, RESERVED_TASK_IDS,
+  CONTRACT_SECRET_ENV_RE, childBudgetCap,
 } = await import("../../dist/execution/contract.js");
 const { CONTRACT_DEFAULTS } = await import("../../dist/execution/types.js");
 
@@ -126,13 +127,23 @@ test("commands: argv strings only; a shell command line is an error on local and
 });
 
 test("commands: no secret-shaped env keys, timeout_s between 1 and 900 (default 300), relative cwd", () => {
-  for (const key of ["API_KEY", "GITHUB_TOKEN", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY", "MY_PASS"]) {
+  for (const key of ["API_KEY", "GITHUB_TOKEN", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY", "MY_PASS", "PASSWD", "AUTHORIZATION", "NPM_CONFIG__AUTH",
+    "CREDENTIALS", "MY_CREDS", "COOKIE", "SESSION", "SESSION_ID", "GH_PAT", "DATABASE_URL", "SENTRY_DSN", "PGPASS", "GIT_AUTHOR_NAME"]) {
     refused({ validation: { commands: [{ id: "test", argv: ["npm", "test"], env: { [key]: "x" } }] } }, new RegExp(`env\\.${key} looks like a credential`));
+  }
+  assert.match(String(CONTRACT_SECRET_ENV_RE), /DATABASE_URL\|DSN/);
+  // A value that scrubbing would change is refused too, so the stored command is the validated one.
+  refused({ validation: { commands: [{ id: "test", argv: ["npm", "test"], env: { FOO: "ghp_" + "a".repeat(36) } }] } }, /env\.FOO has a value that looks like a credential/);
+  process.env.CONTRACT_TEST_DEPLOY_TOKEN = "Q7x9Lm2Pz8Rt4Vw6";
+  try {
+    refused({ validation: { commands: [{ id: "test", argv: ["npm", "test"], env: { TARGET: "Q7x9Lm2Pz8Rt4Vw6" } }] } }, /env\.TARGET has a value that looks like a credential/);
+  } finally {
+    delete process.env.CONTRACT_TEST_DEPLOY_TOKEN;
   }
   refused({ validation: { commands: [{ id: "test", argv: ["npm", "test"], env: { "bad name": "x" } }] } }, /is not a valid variable name/);
   refused({ validation: { commands: [{ id: "test", argv: ["npm", "test"], env: { NODE_ENV: 1 } }] } }, /env\.NODE_ENV must be a string/);
-  const env = check({ validation: { commands: [{ id: "test", argv: ["npm", "test"], env: { NODE_ENV: "test", GIT_AUTHOR_NAME: "ci" } }] } });
-  assert.deepEqual(env.contract.validation.commands[0].env, { NODE_ENV: "test", GIT_AUTHOR_NAME: "ci" });
+  const env = check({ validation: { commands: [{ id: "test", argv: ["npm", "test"], env: { NODE_ENV: "test", LOG_LEVEL: "debug" } }] } });
+  assert.deepEqual(env.contract.validation.commands[0].env, { NODE_ENV: "test", LOG_LEVEL: "debug" });
   refused({ validation: { commands: [{ id: "test", argv: ["npm", "test"], timeout_s: 0 }] } }, /timeout_s must be at least 1/);
   refused({ validation: { commands: [{ id: "test", argv: ["npm", "test"], timeout_s: 901 }] } }, /timeout_s must be at most 900/);
   refused({ validation: { commands: [{ id: "test", argv: ["npm", "test"], timeout_s: "60" }] } }, /timeout_s must be a finite number/);
@@ -169,7 +180,24 @@ test("budgets are greater than 0 and max_parallel is 1..16; a missing budget def
   assert.equal(missing.ok, true);
   assert.equal(missing.contract.budget.usd, BUDGET_FALLBACK.usd);
   assert.ok(missing.warnings.some((w) => /budget\.usd was not given; defaulted/.test(w)));
-  assert.ok(check({ tasks: [task("a", [], { budget_usd: 9 })] }).warnings.some((w) => /exceeds budget\.per_task_usd/.test(w)));
+  refused({ tasks: [task("a", [], { budget_usd: 9 })] }, /tasks\[0\]\.budget_usd \(\$9\) must not exceed budget\.per_task_usd \(\$5\)/);
+  assert.equal(check({ tasks: [task("a", [], { budget_usd: 5 })] }).ok, true);
+});
+
+test("sudo and doas are refused on every backend; wildcard egress needs two labels; glob lists are capped", () => {
+  for (const argv of [["sudo", "npm", "test"], ["doas", "make"], ["env", "-S", "sudo ls"], ["time", "sudo", "ls"]]) {
+    refused({ validation: { commands: [{ id: "test", argv }] } }, /commands never change identity/);
+    refused({ sandbox: { backend: "local" }, validation: { commands: [{ id: "test", argv }] } }, /commands never change identity/);
+  }
+  const install = (egress) => ({ sandbox: { backend: "docker", install: { argv: ["npm", "ci"], egress } } });
+  refused(install(["*.com"]), /"\*\.com" is too broad/);
+  refused(install(["*.co:443"]), /is too broad/);
+  refused(install(["*"]), /must be a host name/);
+  assert.equal(check(install(["*.npmjs.org", "registry.npmjs.org", "pypi.org:443"])).ok, true);
+  const many = Array.from({ length: 65 }, (_, i) => `src/a/f${i}.ts`);
+  refused({ tasks: [task("a", [], { paths: { write: many } })] }, /tasks\[0\]\.paths\.write has 65 items; the limit is 64/);
+  refused({ scope: { orchestrator: "main", repo_root: "/srv/repo", base_ref: "abc", paths: many } }, /scope\.paths has 65 items; the limit is 64/);
+  assert.equal(check({ tasks: [task("a", [], { paths: { write: many.slice(0, 64) } })] }).ok, true);
 });
 
 test("personas resolve through loadAgent; names are warnings only while the agents directory is unavailable", async () => {
@@ -242,7 +270,14 @@ test("a child contract fits its parent task's write paths and budget; depth is b
   const asChild = (over, depth = 0) => checkContract(child(over), { parent: { contract: parent, depth } });
   assert.ok(asChild({ scope: { orchestrator: "dev", repo_root: "/srv/repo", base_ref: "abc", parent: { contract: "ctr-parent-1", task: "sub" }, paths: ["src/other/**"] } })
     .errors.some((e) => /scope\.paths\[0\] "src\/other\/\*\*" is outside the parent task's write paths/.test(e)));
-  assert.ok(asChild({ budget: { usd: 5, per_task_usd: 1 } }).errors.some((e) => /budget\.usd \(\$5\) exceeds the parent task's budget \(\$4\)/.test(e)));
+  assert.ok(asChild({ budget: { usd: 5, per_task_usd: 1 } }).errors.some((e) => /budget\.usd \(\$5\) exceeds what the parent task may spend \(\$4/.test(e)));
+  // The cap is also bounded by what the parent has left, and shared with the task's other children.
+  const scoped = (over) => checkContract(child(), { parent: { contract: parent, depth: 0, ...over } });
+  assert.ok(scoped({ remainingUsd: 2 }).errors.some((e) => /exceeds what the parent task may spend \(\$2/.test(e)));
+  assert.ok(scoped({ siblingsUsd: 2 }).errors.some((e) => /plus the task's other child contracts \(\$2\) exceeds what the parent task may spend \(\$4\)/.test(e)));
+  assert.equal(scoped({ siblingsUsd: 1, remainingUsd: 4 }).ok, true);
+  assert.equal(childBudgetCap({ contract: parent, depth: 0, remainingUsd: 100 }, "sub"), 4);
+  assert.equal(childBudgetCap({ contract: parent, depth: 0 }, "plain"), 5, "a task without budget_usd: the parent's per-task cap");
   assert.ok(asChild({}, CONTRACT_DEFAULTS.max_subcontract_depth).errors.some((e) => /would nest sub-orchestration 3 levels deep; the limit is 2/.test(e)));
   assert.equal(asChild({}, CONTRACT_DEFAULTS.max_subcontract_depth - 1).ok, true);
   assert.ok(asChild({ scope: { orchestrator: "dev", repo_root: "/elsewhere", base_ref: "abc", parent: { contract: "ctr-parent-1", task: "sub" } } })

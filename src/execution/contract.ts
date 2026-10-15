@@ -11,9 +11,9 @@ import { statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { AGENTS_DIR } from "../config.js";
 import { isPathLikeRef, loadAgent } from "../agents.js";
-import { SECRET_NAME_RE } from "../security/child-env.js";
 import { normalizeRelPath } from "../security/fs-safe.js";
-import { DEFAULT_SANDBOX_IMAGE, isShellCommand, resolveCwd, validateArgv } from "../sandbox/common.js";
+import { scrubSecrets } from "../security/secrets.js";
+import { DEFAULT_SANDBOX_IMAGE, isPrivilegedCommand, isShellCommand, resolveCwd, validateArgv } from "../sandbox/common.js";
 import { canonicalJSON, sha256Hex } from "./chain.js";
 import { ID_RE } from "./events.js";
 import {
@@ -48,7 +48,13 @@ const DRIVERS = ["claude-code", "codex"] as const;
 export const COMMAND_TIMEOUT_S = { min: 1, max: 900, default: 300 } as const;
 export const MAX_PARALLEL_LIMIT = 16;
 /** Size caps: a contract is a plan for one run, not a backlog. */
-export const CONTRACT_LIMITS = { tasks: 200, commands: 100, participants: 50, interfaces: 200, decisions: 200 } as const;
+export const CONTRACT_LIMITS = { tasks: 200, commands: 100, participants: 50, interfaces: 200, decisions: 200, globs: 64 } as const;
+
+/**
+ * Env names a contract command may not set: broader than SECRET_NAME_RE on purpose, since a
+ * contract's env is copied into every check run (DATABASE_URL and DSN carry credentials in the value).
+ */
+export const CONTRACT_SECRET_ENV_RE = /KEY|TOKEN|SECRET|PASS|AUTH|CRED|COOKIE|SESSION|(^|_)PAT$|DATABASE_URL|DSN/i;
 /**
  * Budget values used when a structure (a fenced block or a structuring call) gives none. Each use
  * is reported as a warning; execute asks the human to confirm the real cap.
@@ -165,9 +171,26 @@ export interface ContractValidation {
   contract: Contract;
 }
 
+export interface ParentContext {
+  contract: Contract;
+  /** The parent's sub-orchestration depth (0 at the top). */
+  depth: number;
+  /** What the parent run has left (its budget, extensions included, minus what it has spent). */
+  remainingUsd?: number;
+  /** Budgets of the parent task's other child contracts, which share its cap. */
+  siblingsUsd?: number;
+}
+
 export interface CheckOptions {
-  /** The parent of a child contract (scope.parent) and the parent's sub-orchestration depth (0 at the top). */
-  parent?: { contract: Contract; depth: number };
+  /** The parent of a child contract (scope.parent). */
+  parent?: ParentContext;
+}
+
+/** What a child of `task` may have in total: the task's budget (else the parent's per-task cap) and the parent's remaining budget. */
+export function childBudgetCap(parent: ParentContext, taskId: string): number {
+  const task = parent.contract.tasks.find((t) => t.id === taskId);
+  const taskCap = Math.min(task?.budget_usd ?? parent.contract.budget.per_task_usd, parent.contract.budget.per_task_usd);
+  return Math.min(taskCap, parent.remainingUsd ?? Infinity);
 }
 
 export interface ValidateOptions extends CheckOptions {
@@ -287,7 +310,7 @@ function artifacts(ck: Checker, v: unknown, path: string): ArtifactRef[] {
 
 function globs(ck: Checker, v: unknown, path: string): string[] {
   const out: string[] = [];
-  for (const [i, raw] of ck.arr(v, path).entries()) {
+  for (const [i, raw] of ck.arr(v, path, CONTRACT_LIMITS.globs).entries()) {
     const r = normalizeGlob(raw);
     if ("error" in r) ck.err(`${path}[${i}]`, `${q(raw)} ${r.error}`);
     else if (!out.includes(r.glob)) out.push(r.glob);
@@ -305,6 +328,10 @@ function argvOf(ck: Checker, v: unknown, path: string, backend: string | undefin
     argv = validateArgv(v);
   } catch (e) {
     ck.err(path, `${e instanceof Error ? e.message.replace(/^argv\s*/, "") : String(e)} (a structured argv such as ["npm", "test"], never a shell string)`);
+    return undefined;
+  }
+  if (isPrivilegedCommand(argv)) {
+    ck.err(path, `runs ${argv.slice(0, 2).join(" ")}: commands never change identity (sudo, doas, su, pkexec and run0 are refused on every backend)`);
     return undefined;
   }
   if (isShellCommand(argv)) {
@@ -338,9 +365,11 @@ function commandSpec(ck: Checker, v: unknown, path: string, backend: string | un
     env = {};
     for (const [k, val] of Object.entries(envObj)) {
       if (!ENV_KEY_RE.test(k)) ck.err(`${path}.env`, `name ${q(k)} is not a valid variable name`);
-      else if (SECRET_NAME_RE.test(k)) ck.err(`${path}.env.${k}`, "looks like a credential: secrets never go in a contract or the sandbox");
+      else if (CONTRACT_SECRET_ENV_RE.test(k)) ck.err(`${path}.env.${k}`, "looks like a credential: secrets never go in a contract or the sandbox");
       else if (typeof val !== "string") ck.err(`${path}.env.${k}`, "must be a string");
       else if (val.includes("\0")) ck.err(`${path}.env.${k}`, "contains a NUL byte");
+      // Stored contracts are scrubbed: a value scrubbing would change could not run as validated.
+      else if (scrubSecrets(val).text !== val) ck.err(`${path}.env.${k}`, "has a value that looks like a credential: secrets never go in a contract or the sandbox");
       else put(env, k, val);
     }
   }
@@ -423,6 +452,10 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     const egress = ck.strs(inst.egress, "sandbox.install.egress");
     for (const [i, host] of egress.entries()) {
       if (!/^(\*\.)?[a-z0-9.-]+(:\d+)?$/i.test(host)) ck.err(`sandbox.install.egress[${i}]`, `${q(host)} must be a host name (optionally *.domain or host:port)`);
+      // A wildcard needs a registrable domain under it: *.npmjs.org, never *.com.
+      else if (host.startsWith("*.") && host.slice(2).split(":")[0].split(".").filter(Boolean).length < 2) {
+        ck.err(`sandbox.install.egress[${i}]`, `${q(host)} is too broad: a wildcard needs at least two labels after "*." (e.g. *.npmjs.org)`);
+      }
     }
     if (argv) sandbox.install = { argv, egress };
   }
@@ -648,7 +681,9 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   // --- budget ---
   const b = ck.obj(c.budget, "budget") ?? {};
   ck.known(b, ["usd", "per_task_usd", "per_agent_usd", "wall_clock_min", "max_parallel", "max_attempts"], "budget");
-  const parentCap = parentTask && opts.parent ? parentTask.budget_usd ?? opts.parent.contract.budget.per_task_usd : undefined;
+  const parentCap = parentTask && opts.parent
+    ? Math.max(0, childBudgetCap(opts.parent, parentTask.id) - (opts.parent.siblingsUsd ?? 0)) || undefined
+    : undefined;
   const usdGiven = ck.num(b.usd, "budget.usd", { gt: 0 });
   const usdMissing = b.usd === undefined || b.usd === null;
   if (usdMissing && parentCap === undefined) ck.warn("budget.usd", `was not given; defaulted to $${BUDGET_FALLBACK.usd} (execute asks the human to confirm the cap)`);
@@ -666,7 +701,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   if (budget.per_task_usd > budget.usd) ck.err("budget.per_task_usd", `($${budget.per_task_usd}) must not exceed budget.usd ($${budget.usd})`);
   if (perAgent !== undefined && perAgent > budget.usd) ck.err("budget.per_agent_usd", `($${perAgent}) must not exceed budget.usd ($${budget.usd})`);
   for (const [i, t] of tasks.entries()) {
-    if (t.budget_usd !== undefined && t.budget_usd > budget.per_task_usd) ck.warn(`tasks[${i}].budget_usd`, `($${t.budget_usd}) exceeds budget.per_task_usd ($${budget.per_task_usd}); the per-task cap wins`);
+    if (t.budget_usd !== undefined && t.budget_usd > budget.per_task_usd) ck.err(`tasks[${i}].budget_usd`, `($${t.budget_usd}) must not exceed budget.per_task_usd ($${budget.per_task_usd})`);
   }
 
   // --- authority ---
@@ -736,8 +771,13 @@ function checkChild(ck: Checker, c: Contract, opts: CheckOptions): void {
       ck.err(`scope.paths[${i}]`, `${q(p)} is outside the parent task's write paths (${task.paths.write.join(", ") || "none"})`);
     }
   }
-  const cap = task.budget_usd ?? parent.contract.budget.per_task_usd;
-  if (c.budget.usd > cap) ck.err("budget.usd", `($${c.budget.usd}) exceeds the parent task's budget ($${cap})`);
+  const cap = childBudgetCap(parent, ref.task);
+  const siblings = parent.siblingsUsd ?? 0;
+  if (c.budget.usd > cap) {
+    ck.err("budget.usd", `($${c.budget.usd}) exceeds what the parent task may spend ($${cap}: its budget, the parent's per-task cap and the parent's remaining budget)`);
+  } else if (c.budget.usd + siblings > cap + 1e-9) {
+    ck.err("budget.usd", `($${c.budget.usd}) plus the task's other child contracts ($${siblings}) exceeds what the parent task may spend ($${cap})`);
+  }
 }
 
 /** Every rule except persona resolution, synchronously. */

@@ -3,7 +3,8 @@
 //
 // withUsageSink(sink, fn) makes `sink` active for fn and every async continuation it starts
 // (AsyncLocalStorage), so budgets can be kept without threading a parameter through the engines.
-// callLLMDetailed (and so callLLM) reports each completion there. Without a sink, reporting is a no-op.
+// chatCompletion reports each completion there, so callLLMDetailed, callLLM and the chat_completion
+// tool all do. Without a sink, reporting is a no-op.
 // ============================================================================
 
 import { AsyncLocalStorage } from "node:async_hooks";

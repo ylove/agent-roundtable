@@ -63,13 +63,16 @@ export async function chatCompletion(
       : options.model || DEFAULT_MODELS[provider];
 
   try {
-    return await call(messages, {
+    const result = await call(messages, {
       model,
       maxTokens: options.maxTokens || MAX_TOKENS,
       temperature: options.temperature,
       signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
       ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
     });
+    // Every completion (engines via callLLM, and the chat_completion tool) reaches the active usage sink.
+    reportUsage({ provider: result.provider, model: result.model, ...(result.usage && { usage: result.usage }) });
+    return result;
   } catch (error) {
     if (
       error instanceof Error &&
@@ -92,7 +95,7 @@ export interface CallLLMOptions {
 
 /**
  * Call any LLM provider for meetings/collaborations and return the whole result (content, model,
- * usage). Routes to chatCompletion(); reports { provider, model, usage } to the active usage sink.
+ * usage). Routes to chatCompletion(), which reports { provider, model, usage } to the active usage sink.
  */
 export async function callLLMDetailed(
   systemPrompt: string,
@@ -113,8 +116,6 @@ export async function callLLMDetailed(
     maxTokens,
     baseUrl,
   });
-
-  reportUsage({ provider: result.provider, model: result.model, ...(result.usage && { usage: result.usage }) });
   return result;
 }
 

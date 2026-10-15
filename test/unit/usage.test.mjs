@@ -56,6 +56,19 @@ test("engines report through the sink with their signatures unchanged", async (t
   assert.equal(seen.length, 2, "the opening reply and the summary");
 });
 
+test("the chat_completion tool reports through the sink too, exactly once per call", async (t) => {
+  stubFetch(t, (_u, _i, i) => reply(i));
+  const { handleToolCall } = await import("../../dist/tools.js");
+  const seen = [];
+  const r = await withUsageSink((u) => seen.push(u), () =>
+    handleToolCall("chat_completion", { messages: user, provider: "openai_compatible", model: "m", base_url: llm.baseUrl }));
+  assert.ok(!r.isError, r.content[0].text);
+  assert.deepEqual(seen, [{ provider: "openai_compatible", model: "served-0", usage: { inputTokens: 10, outputTokens: 0 } }]);
+  const viaCallLLM = [];
+  await withUsageSink((u) => viaCallLLM.push(u), () => callLLMDetailed("s", user, llm));
+  assert.equal(viaCallLLM.length, 1, "callLLMDetailed does not report twice");
+});
+
 test("a nested sink replaces the outer one for its scope only", async (t) => {
   stubFetch(t, (_u, _i, i) => reply(i));
   const outer = [];

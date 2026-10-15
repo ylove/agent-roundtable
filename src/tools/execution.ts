@@ -37,7 +37,7 @@ export const executionTools: ToolDefinition[] = [
       "when no sandbox is available (Docker down and the local sandbox not allowed with sandbox: \"local\"), when the worker CLI is missing or lacks flags (codex needs worker_driver: \"codex\"), " +
       "when GitHub was asked for but gh lacks scopes or access, and when the repository has submodules. A dirty main worktree only warns. " +
       "Settings given here that differ from the contract (budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model) are applied to it first as one audited amendment. " +
-      "Then the runner starts in the background and it returns {execution_id, runner_pid, dashboard_url?, watch: {argv, command, instructions}}: start watch.command as a background shell command right away, " +
+      "Then the runner starts in the background, and the result has the execution_id, the runner's pid, the dashboard URL (when there is one) and watch {argv, command, instructions}: start watch.command as a background shell command right away, " +
       "re-arm it after handling each wake, and answer progress questions with execution_status. Calling it again for a started run returns the run's current info.",
     inputSchema: {
       type: "object",
@@ -113,7 +113,7 @@ export const executionTools: ToolDefinition[] = [
       "Steer a heads-down run when the human asks. pause / resume: the whole run, or only task_ids (paused work starts nothing new; running workers finish their turn). " +
       "steer: a directive (message) to targets (agents, teams or tasks; default every agent), which workers must acknowledge. abort: stop the run and its workers, keeping the worktrees, branches and log. " +
       "purge: delete a finished (completed, failed or aborted) run's worktrees, branches and log; needs confirm: true, which only the human's agreement justifies, and is audited. " +
-      "Back to the table: pause with to_table: true (recorded as execution.mode_changed), run the format with execution_status(view: \"context\"), amend_contract(from_session), then resume with to_table: true.",
+      "Back to the table: pause with to_table: true (recorded in the log as a mode change), run the format with execution_status(view: \"context\"), amend_contract(from_session), then resume with to_table: true.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -125,7 +125,7 @@ export const executionTools: ToolDefinition[] = [
         task_ids: { type: "array", maxItems: 100, items: { type: "string" }, description: "pause / resume: only these tasks (default the whole run)." },
         targets: { type: "array", maxItems: 50, items: { type: "string" }, description: "steer: agent, team or task ids (default every agent of the run)." },
         confirm: { type: "boolean", description: "purge: true once the human agreed to delete the run's worktrees, branches and log." },
-        to_table: { type: "boolean", description: "pause: going back to the table; resume: coming back. Records execution.mode_changed." },
+        to_table: { type: "boolean", description: "pause: going back to the table; resume: coming back. Records the mode change in the log." },
         session: { type: "string", maxLength: 200, description: "With to_table: the at-the-table session id, recorded with the mode change." },
       },
       required: ["execution_id", "action"],

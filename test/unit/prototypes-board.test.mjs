@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   PrototypeBoard, APP_CSP, BOARD_CSP, VIEWER_CSP, DIAGRAM_VIEWER_CSP, MERMAID_SCRIPT_URL, MERMAID_SRI, MERMAID_VERSION, escapeHtml,
+  mermaidConfigured,
 } from "../../dist/prototypes/board.js";
 import { inlineProblems } from "./helpers.mjs";
 
@@ -325,7 +326,10 @@ test("board: diagram viewer renders Mermaid client-side from the pinned, integri
   assert.ok(v.body.indexOf(tag) < v.body.indexOf(`<script src="${base}static/mermaid-init.js"></script>`), "init runs after the library");
   const init = await get(`${board.url}static/mermaid-init.js`);
   assert.equal(init.status, 200);
-  assert.match(init.body, /securityLevel:"strict"/);
+  // Rendered into Mermaid's sandboxed data: frame, without HTML labels, with styling keys locked.
+  assert.match(init.body, /securityLevel:"sandbox",htmlLabels:false,flowchart:\{htmlLabels:false\}/);
+  assert.match(init.body, /secure:\[[^\]]*"themeCSS"[^\]]*\]/);
+  assert.match(DIAGRAM_VIEWER_CSP, /frame-src data:;/);
   assert.ok(!v.body.includes(XSS));
   assert.match(v.body, /<pre class="mermaid">flowchart TD/);
   // Scripts may come from the board and the pinned Mermaid file only; never inline, never elsewhere on the CDN.
@@ -339,6 +343,32 @@ test("board: diagram viewer renders Mermaid client-side from the pinned, integri
   assert.match(VIEWER_CSP, /style-src 'self';/);
   // No bare render page any more (diagram screenshots were dropped).
   assert.equal((await get(`${board.url}p/P1v1/render`)).status, 404);
+});
+
+test("board: a diagram that configures Mermaid (directive or front matter) is shown as source, never rendered", async (t) => {
+  const board = await PrototypeBoard.start({ sessionId: "s", mode: "collaborate", participants: ["a", "b"] });
+  t.after(() => board.close());
+  const diagram = (key, content) => ({
+    key, id: key.slice(0, 2), version: 1, label: key, title: "Flow", kind: "diagram", proposer: "a", fileCount: 1,
+    demo: "", status: "live", verdicts: [], awaiting: ["b"], createdAt: new Date().toISOString(),
+    live: { dir: "/nonexistent", files: [{ path: "flow.mmd", content }] },
+  });
+  const css = `%%{init: {"themeCSS": "body{display:none} #verdicts::after{content:'APPROVE'}"}}%%\nflowchart TD\nA-->B`;
+  const front = "---\nconfig:\n  themeCSS: 'p{color:red}'\n---\nflowchart TD\nA-->B";
+  board.update({ prototypes: [diagram("P1v1", css), diagram("P2v1", front), diagram("P3v1", "flowchart TD\n%% a comment\nA-->B")] });
+  for (const key of ["P1v1", "P2v1"]) {
+    const v = await get(`${board.url}p/${key}/`);
+    assert.equal(v.status, 200);
+    assert.doesNotMatch(v.body, /class="mermaid"/, key);
+    assert.doesNotMatch(v.body, /mermaid\.min\.js|mermaid-init\.js/, `${key}: no Mermaid on the page`);
+    assert.match(v.body, /Not rendered: this diagram sets Mermaid's own configuration/);
+    assert.match(v.body, /<details open><summary>flow\.mmd<\/summary>/, "the source is shown open instead");
+  }
+  const plain = await get(`${board.url}p/P3v1/`);
+  assert.match(plain.body, /<pre class="mermaid">flowchart TD\n%% a comment\nA--&gt;B<\/pre>/, "comments are not directives");
+  assert.equal(mermaidConfigured("flowchart TD\n%%{ init: {} }%%"), true);
+  assert.equal(mermaidConfigured("  ---\r\nconfig: {}\n---\ngraph TD"), true);
+  assert.equal(mermaidConfigured("graph TD\nA---B"), false);
 });
 
 test("board: close() stops the server and is idempotent", async () => {
@@ -381,6 +411,14 @@ test("board: no inline script, style or handler on any page; the CSPs allow none
   assert.match(home.headers["permissions-policy"], /camera=\(\).*geolocation=\(\).*microphone=\(\)/);
   const app = await get(`${board.url}p/P1v1/app/index.html`);
   assert.equal(app.headers["x-frame-options"], "SAMEORIGIN");
+  // The app route's own errors show inside the viewer's frame: framable by the board only, plain text.
+  const missing = await get(`${board.url}p/P1v1/app/nope.html`);
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers["x-frame-options"], "SAMEORIGIN");
+  assert.equal(missing.headers["content-security-policy"], "default-src 'none'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'");
+  assert.match(missing.headers["content-type"], /^text\/plain/);
+  assert.equal((await get(`${board.url}p/P9v9/app/x.html`)).headers["x-frame-options"], "DENY", "only a live prototype's app route");
+  assert.equal((await get(`${board.url}nope`)).headers["x-frame-options"], "DENY");
   // Static files: only the known ones, never through the proxy.
   for (const f of ["board.css", "board.js", "viewer.js", "mermaid-init.js"]) {
     assert.equal((await get(`${board.url}static/${f}`)).status, 200, f);

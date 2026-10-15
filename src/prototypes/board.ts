@@ -31,17 +31,21 @@ export const MERMAID_SRI = "sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQ
 export const BOARD_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
   "connect-src 'self'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
-const viewerCsp = (style: string) =>
+const viewerCsp = (style: string, frames: string) =>
   `default-src 'self'; script-src 'self' ${MERMAID_SCRIPT_URL}; style-src ${style}; ` +
-  "img-src 'self' data:; frame-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
+  `img-src 'self' data:; frame-src ${frames}; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`;
 /** Viewer and destroyed pages: scripts from the board and the pinned Mermaid file only; no inline script or style. */
-export const VIEWER_CSP = viewerCsp("'self'");
+export const VIEWER_CSP = viewerCsp("'self'", "'self'");
 /**
- * The viewer of a diagram. Mermaid's rendered SVG carries its own <style> element and style
- * attributes, so this page alone allows inline styles (never inline scripts). Agent text on it is
- * escaped, and Mermaid runs with securityLevel "strict".
+ * The viewer of a diagram. Mermaid runs with securityLevel "sandbox": it renders the diagram into a
+ * script-less, opaque-origin data: iframe, so nothing in the diagram can restyle or overlay the
+ * viewer (its verdicts, status or links). That iframe's style attribute and the SVG's own <style>
+ * (the frame inherits this policy) are why inline styles are allowed here; inline scripts never are.
+ * Configuration directives (%%{…}%% and front matter, which can carry themeCSS) are refused before
+ * rendering. Residual risk: inside its own frame a diagram shows whatever text and shapes it likes,
+ * and a link in it can open a popup or navigate the tab on a click.
  */
-export const DIAGRAM_VIEWER_CSP = viewerCsp("'self' 'unsafe-inline'");
+export const DIAGRAM_VIEWER_CSP = viewerCsp("'self' 'unsafe-inline'", "data:");
 /**
  * Prototype files. `sandbox` gives the page an opaque origin wherever it is shown (the viewer's iframe or
  * a top-level screenshot), so it behaves the same in both and can never read the board (state.json).
@@ -52,6 +56,16 @@ export const DIAGRAM_VIEWER_CSP = viewerCsp("'self' 'unsafe-inline'");
 export const APP_CSP =
   "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
   "connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-forms allow-modals";
+/**
+ * A live prototype's missing or removed file, shown inside the viewer's frame. Plain text with
+ * nosniff, framable by the board's own pages only (frame-ancestors 'self', SAMEORIGIN); every other
+ * board response keeps frame-ancestors 'none' and DENY. A destroyed prototype's routes answer with
+ * the destroyed page instead, which the viewer reloads into at top level.
+ */
+const APP_ERROR_HEADERS = {
+  "Content-Security-Policy": "default-src 'none'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+  "X-Frame-Options": "SAMEORIGIN",
+};
 /** Prototype pages run in an opaque origin: no access to the board, no top-level navigation, no popups. */
 const IFRAME_SANDBOX = "allow-scripts allow-forms allow-modals";
 
@@ -173,11 +187,24 @@ li.appendChild(b);li.appendChild(document.createTextNode(": "+v.verdict+(v.reaso
 document.getElementById("awaiting").textContent=p.awaiting.length?"Awaiting verdicts from: "+p.awaiting.join(", "):""})
 .catch(function(){clearInterval(t);document.getElementById("status").textContent="The board has closed (the session ended)."})},2000)})();`;
 
-// Runs after the pinned mermaid.min.js (a classic script that defines window.mermaid).
+// Runs after the pinned mermaid.min.js (a classic script that defines window.mermaid). The diagram is
+// rendered into a sandboxed frame, without HTML labels; `secure` keeps every styling and safety key
+// out of reach of a directive (the board also refuses diagrams that carry one).
 const MERMAID_INIT_SCRIPT =
   `(function(){if(!window.mermaid)return;` +
-  `mermaid.initialize({startOnLoad:false,securityLevel:"strict",theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default"});` +
+  `mermaid.initialize({startOnLoad:false,securityLevel:"sandbox",htmlLabels:false,flowchart:{htmlLabels:false},` +
+  `theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default",` +
+  `secure:["secure","securityLevel","startOnLoad","maxTextSize","maxEdges","suppressErrorRendering","htmlLabels","flowchart",` +
+  `"theme","themeCSS","themeVariables","fontFamily","altFontFamily","darkMode","dompurifyConfig"]});` +
   `mermaid.run({querySelector:".mermaid"})})();`;
+
+/**
+ * Mermaid source that configures Mermaid itself: an init directive (%%{…}%%) or YAML front matter,
+ * either of which can carry themeCSS. The board shows such a diagram as source and never renders it.
+ */
+export function mermaidConfigured(code: string): boolean {
+  return /%%\s*\{/.test(code) || /^\s*---[ \t]*\r?\n/.test(code);
+}
 
 const STATIC_FILES: Record<string, { body: string; type: string }> = {
   "board.css": { body: BOARD_STYLE, type: "text/css; charset=utf-8" },
@@ -277,30 +304,32 @@ export class PrototypeBoard {
   }
 
   private async serveApp(c: RouteContext, p: BoardPrototype, sub: string): Promise<void> {
+    // Plain-text errors shown inside the viewer's frame: framable by the board itself, nothing else.
+    const fail = (status: number, message: string) => c.text(status, message, APP_ERROR_HEADERS);
     const live = p.live;
-    if (p.kind !== "web" || !live) return c.notFound();
+    if (p.kind !== "web" || !live) return fail(404, "Not found");
     let path: string;
     try {
       path = sub.split("/").map((s) => decodeURIComponent(s)).join("/");
     } catch {
-      return c.text(400, "Bad request");
+      return fail(400, "Bad request");
     }
     if (path === "") path = live.entry ?? "";
     // Only the prototype's own validated files are served: nothing else in the sandbox is reachable.
-    if (validatePath(path) !== null || !live.files.some((f) => f.path === path)) return c.notFound();
+    if (validatePath(path) !== null || !live.files.some((f) => f.path === path)) return fail(404, "Not found");
     const dir = resolve(live.dir);
     const target = resolve(dir, ...path.split("/"));
     const rel = relative(dir, target);
-    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return c.notFound();
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return fail(404, "Not found");
     let bytes: Buffer;
     try {
       const st = await lstat(target);
-      if (!st.isFile()) return c.notFound();
+      if (!st.isFile()) return fail(404, "Not found");
       bytes = await readFile(target);
     } catch {
-      return c.text(410, "Destroyed after assessment");
+      return fail(410, "Destroyed after assessment");
     }
-    if (!this.state.prototypes.find((x) => x.key === p.key)?.live) return c.text(410, "Destroyed after assessment");
+    if (!this.state.prototypes.find((x) => x.key === p.key)?.live) return fail(410, "Destroyed after assessment");
     const type = contentTypeFor(path);
     return c.send(200, bytes, type, {
       "Content-Security-Policy": APP_CSP,
@@ -415,8 +444,13 @@ export class PrototypeBoard {
     } else if (p.kind === "diagram") {
       const f = diagramFile(live.files);
       const code = f ? mermaidSourceOf(f.content) ?? "" : "";
-      content = `<h2>Diagram</h2><pre class="mermaid">${esc(code)}</pre><h2>Source</h2>${this.filesHtml(live.files, false)}`;
-      mermaid = true;
+      mermaid = !mermaidConfigured(code);
+      content =
+        `<h2>Diagram</h2>` +
+        (mermaid
+          ? `<pre class="mermaid">${esc(code)}</pre>`
+          : `<p class="notice">Not rendered: this diagram sets Mermaid's own configuration (an %%{…}%% directive or front matter), which the board does not allow. Its source is below.</p>`) +
+        `<h2>Source</h2>${this.filesHtml(live.files, !mermaid)}`;
     } else {
       content = `<h2>${p.kind === "text" ? "Draft" : "Source (never executed)"}</h2>${this.filesHtml(live.files, true)}`;
     }

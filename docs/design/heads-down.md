@@ -527,7 +527,7 @@ Every host-side git call goes through `src/execution/git.ts`:
 **Completion.**
 1. All tasks are accepted.
 2. Final validation runs on the integration branch.
-3. The lead does a goal review and answers `Verdict: COMPLETE | INCOMPLETE`. INCOMPLETE allows at most 2 `add_task` cycles within authority, then escalates.
+3. The lead does a goal review and answers `Verdict: COMPLETE | INCOMPLETE`. A run gets at most 2 review cycles, counted from its goal-review notes; INCOMPLETE may add tasks within authority, then escalates when the cycles are spent.
 4. `execution.completed` is emitted. Optionally the integration branch is pushed and a PR opened with `gh pr create`.
 
 Publication follows the durable completion event. Its URL is recorded in a `note.posted` with topic `pull_request` and the URL in `refs`; GitHub sync posts that link to the parent issue. The runner looks up an existing PR before creating one, so a publication interrupted before its note can be retried.
@@ -604,6 +604,12 @@ Only the escalating task blocks.
 - Collaborate, debate, waffle-house and conversation use `startCollaboration` and `continueCollaboration`.
 - Re-plan and ultraplan use `startUltraplan({planner: lead, execution_ready: true, revisionRounds: 1})`, followed by `amend_contract`.
 - The orchestrator can also run any format itself with `execution_status(view: "context")` and then call `resolve_escalation(action: "decide")`.
+
+**Implementation (WS10).** `src/execution/escalation.ts` exports `routeEscalation`, `resolveEscalation` and `createRunnerHooks`. `huddle.ts`, `lead.ts`, `goal-review.ts` and `context-bundle.ts` supply the engines, fallback, review and bounded context. Persona calls and engine calls run under a usage sink outside event transactions; live-worker answers report their driver usage to the same ledger. A failed worker answer routes to the orchestrator without a third model attempt.
+
+Resolvers serialize through a separate per-escalation lock, leaving the event lock free during calls. An amendment's reason identifies its escalation so a retry after a crash can finish resolving without amending twice. A concluded format huddle can likewise recover its session and decision from its turn blobs. Emergency pause scopes retain separate ownership: resolving an escalation preserves overlapping emergencies and manual pauses.
+
+`createRunnerHooks({llm?, alive?})` implements WS08's `escalationRouter(ctx, escalation)`, `leadFallback(ctx, id)` and `goalReview(ctx, input)` interface. The mirror in `runner-hook-types.ts` must stay identical to WS08's `runner-hooks.ts`. The adapter uses `ctx.worker` for live session records and applies returned process operations through the driver's stop control and `ctx.resumeTask`. Persona calls use the supplied provider/model, or the provider layer's default OpenAI model. The direct WS11 resolver returns the current escalation, process operations, an idempotence flag, warnings and any amendment result; `participants[0]` supplies the new persona for a `reassign` action.
 
 ## 13. Orchestrator experience
 

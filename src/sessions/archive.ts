@@ -79,6 +79,8 @@ export interface ArchivedSession {
   result?: unknown;
   /** Public sessions: where the channel was published. */
   public: { url: string | null; topic: string } | null;
+  /** Sessions run on behalf of something else, e.g. a heads-down huddle ("huddle:<exe>:<escalation>"). */
+  origin?: string;
 }
 
 export type ArchiveInput = Omit<ArchivedSession, "schema" | "ended" | "transcript"> & { ended?: string; transcript?: string };
@@ -205,6 +207,7 @@ export function archiveCollaboration(c: Collaboration, transcript: Collaboration
       : { role: "agent", agent: m.agent, speaker: agentKey(m.agent), content: m.content, at: m.timestamp.toISOString() }),
     ...(summary && { summary }),
     public: publicOf(c.publicChannel),
+    ...(c.origin !== undefined && { origin: c.origin }),
   }));
 }
 
@@ -250,6 +253,7 @@ export function archiveUltraplan(
       tally: final.tally,
     },
     public: publicOf(u.publicChannel),
+    ...(u.origin !== undefined && { origin: u.origin }),
   }));
 }
 

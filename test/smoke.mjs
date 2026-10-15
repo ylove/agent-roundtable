@@ -320,15 +320,15 @@ try {
 
   console.log("tools/list");
   check("exposes 33 distinct tools", () => assert(tools.length === 33 && new Set(tools.map((t) => t.name)).size === 33, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("contract tools are strict (additionalProperties: false)", () => {
+    for (const name of ["propose_contract", "amend_contract", "freeze_contract"]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
+  });
   check("the orchestrator's worker tools take execution_id and agent_token", () => {
     for (const name of WORKER_TOOLS) {
       const req = byName[name]?.inputSchema?.required ?? [];
       assert(req[0] === "execution_id" && req[1] === "agent_token", `${name}: ${JSON.stringify(req)}`);
     }
     assert(byName.join_execution, "join_execution is listed");
-  });
-  check("contract tools are strict (additionalProperties: false)", () => {
-    for (const name of ["propose_contract", "amend_contract", "freeze_contract"]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });
   check("every tool carries MCP annotations (a title and four hints) and no internal fields", () => {
     for (const t of tools) {

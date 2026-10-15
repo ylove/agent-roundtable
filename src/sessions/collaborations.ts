@@ -84,6 +84,8 @@ export interface Collaboration {
   publicChannel?: PublicChannel;
   /** Set when the collaboration was started with prototype: true. */
   prototype?: PrototypeTracker;
+  /** Who it runs for, e.g. a heads-down huddle; tags its activity entry and archive record. */
+  origin?: string;
 }
 
 export const collaborations = new Map<string, Collaboration>();
@@ -262,6 +264,7 @@ export async function startCollaboration(
     public?: boolean;
     grounding?: boolean;
     prototype?: boolean;
+    origin?: string;
   } = {}
 ): Promise<{
   collaborationId: string;
@@ -382,6 +385,7 @@ async function openCollaboration(
     ...(debateFocus !== undefined && { debateFocus }),
     ...(publicChannel && { publicChannel }),
     ...(prototype && { prototype }),
+    ...(options.origin !== undefined && { origin: options.origin }),
   };
 
   collaborations.set(collaborationId, collaboration);
@@ -760,6 +764,7 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
     topic: collaboration.topic,
     outcome: summary || messages.slice().reverse().find((m) => m.agent !== ORCHESTRATOR)?.content,
     public: collaboration.publicChannel !== undefined,
+    ...(collaboration.origin !== undefined && { origin: collaboration.origin }),
   });
   const transcript = [...messages];
   archiveCollaboration(collaboration, transcript, summary);

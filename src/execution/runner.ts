@@ -645,6 +645,8 @@ export class Runner {
   private async stopSuperseded(): Promise<void> {
     const state = await this.store.state();
     for (const t of this.workers.values()) {
+      // An accepted task drops its claim; retireMerged stops its worker after the merge grace.
+      if (own(state.tasks, t.task)?.state === "accepted") continue;
       const claim = own(state.claims, t.task);
       if (!t.exit && (!claim || claim.agent !== t.agent || claim.attempt > t.attempt)) {
         await this.killWorker(t.agent, "killed", "its task claim or attempt was superseded");

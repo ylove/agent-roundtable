@@ -765,6 +765,7 @@ function claimProblem(state: Readonly<BlackboardState>, task: string): string | 
 async function claimTask(a: Actor, args: Record<string, unknown>): Promise<Json> {
   const state = await a.store.state();
   const rec = own(state.agents, a.agent);
+  if (rec?.external === false) throw new Refusal("The runner assigns your task; claim_task is for external agents only");
   if (args.release === true) {
     const task = agentTask(state, a.agent);
     if (!task || own(state.claims, task)?.agent !== a.agent) throw new Refusal("You hold no claim to release");

@@ -91,6 +91,7 @@ async function mcp(args: string[]): Promise<void> {
 }
 
 async function hook(args: string[]): Promise<void> {
+  process.umask(0o077);
   if (args.length !== 1 || args[0] !== "pre-tool-use") return usage("hook takes one argument: pre-tool-use");
   // A crash must refuse the edit: exit 1 would let it through.
   try {
@@ -183,9 +184,10 @@ async function purge(args: string[]): Promise<void> {
 
 /** Run one subcommand. Exit codes: 0 ok, 1 a refusal or failed check, 2 usage (and a denied hook). */
 export async function runCli(argv: string[]): Promise<void> {
-  process.umask(0o077);
   const [command, ...rest] = argv;
   switch (command) {
+    case undefined:
+      return mcp([]);
     case "mcp":
       return mcp(rest);
     case "hook":
@@ -201,6 +203,7 @@ export async function runCli(argv: string[]): Promise<void> {
     case "purge":
       return purge(rest);
     case "help":
+      if (rest.length) return usage("help takes no arguments");
       process.stdout.write(USAGE + "\n");
       return;
     default:

@@ -35,7 +35,7 @@ import { scrub, scrubAndCap } from "../security/secrets.js";
 import { ClaudeCodeDriver, WORKER_ATTESTATION } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
 import { agentDir, writeAgentLeases, prepareWorkerFiles } from "../workers/files.js";
-import { RunMonitor, type ExitReason } from "../workers/monitor.js";
+import { RunMonitor, type ExitReason, type MonitorCheckpoint } from "../workers/monitor.js";
 import { stopGroup, workerExit, type WorkerExit } from "../workers/process.js";
 import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
@@ -78,7 +78,6 @@ import {
   observeEvents,
   processActions,
   type AgentObservation,
-  type DriverOutcome,
   type Observations,
   type ProcessAction,
   type WatchdogAction,
@@ -135,6 +134,14 @@ export class RunnerRefusal extends Error {
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+async function bounded(p: Promise<unknown>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([p, new Promise<void>((r) => { timer = setTimeout(r, ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 const own = <T>(rec: Readonly<Record<string, T>> | undefined, key: string | undefined): T | undefined =>
   rec !== undefined && key !== undefined && Object.hasOwn(rec, key) ? rec[key] : undefined;
 
@@ -171,6 +178,7 @@ export interface RunFile {
   resumed: boolean;
   /** agent.attested's ok, once seen. */
   attested?: boolean;
+  monitor?: MonitorCheckpoint;
 }
 
 const runFilePath = (exe: string, agent: string) => join(agentDir(exe, agent), "run.json");
@@ -284,6 +292,7 @@ export class Runner {
   private info?: RunnerInfo;
   private heartbeat?: NodeJS.Timeout;
   private stopping?: string;
+  private closed = false;
   private wake?: () => void;
   private startedAt = Date.now();
 
@@ -293,21 +302,21 @@ export class Runner {
   /** Agents with a kill, resume or spawn in flight. */
   private readonly busy = new Set<string>();
   private readonly starting = new Set<string>();
+  private readonly trialReservations = new Set<string>();
+  readonly abort = new AbortController();
   /** Non-standing process operations already performed by this process. */
   private readonly opsDone = new Set<string>();
   private readonly routed = new Set<string>();
   private readonly leadInFlight = new Set<string>();
   private readonly pending = new Set<Promise<unknown>>();
-  /** Classified driver failures (rate limit, auth, credit) seen in worker output. */
-  private readonly outcomes: DriverOutcome[] = [];
   /** Claims present at startup: their TTLs restart now (heads-down.md §3). */
   private readonly renewed: Record<string, { renewedAt: number }> = {};
   private spawnBlocked = false;
-  private lastObs: Observations = {};
   private snapSeq = 0;
   private snapAt = Date.now();
   private sandboxP?: Promise<SandboxBackend>;
   private driverChecked?: Promise<{ ok: boolean; missing: string[] }>;
+  private driverCheckedId?: WorkerDriverId;
   private merge!: MergeQueue;
   private dashboard?: Dashboard;
   private github?: GitHubSync;
@@ -387,6 +396,12 @@ export class Runner {
       this.snapSeq = state.seq;
       this.driverId = state.contract?.workers.driver === "codex" ? "codex" : "claude-code";
       if (TERMINAL_RUN.has(state.status)) {
+        if (state.status === "failed") this.exitCode = 1;
+        if (state.status === "completed" && this.githubSettings()?.pr) {
+          await this.startVisibility();
+          const completed = [...this.log].reverse().find((e) => e.type === "execution.completed");
+          if (completed?.type === "execution.completed") await this.merge.publishCompleted(state, completed.payload.integration_sha);
+        }
         this.say(`${this.execution} is already ${state.status}; nothing to run`);
         this.stopping = state.status;
         return;
@@ -455,8 +470,13 @@ export class Runner {
   stop(reason: string): void {
     if (this.stopping) return;
     this.stopping = reason;
+    this.abort.abort();
     this.say(`stopping: ${reason}`);
     this.wake?.();
+  }
+
+  isStopping(): boolean {
+    return this.stopping !== undefined;
   }
 
   private beat(): void {
@@ -475,19 +495,21 @@ export class Runner {
   }
 
   private async shutdown(reason: string): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     clearInterval(this.heartbeat);
     clearInterval(this.githubTimer);
     if (!this.store) return this.release();
-    await Promise.race([Promise.allSettled([...this.pending]), sleep(10_000)]);
+    await bounded(Promise.allSettled([...this.pending]), 10_000);
     const state = await this.store.state().catch(() => undefined);
     const terminal = state !== undefined && TERMINAL_RUN.has(state.status);
     if (terminal && this.github) {
-      await Promise.race([this.github.syncOnce(), sleep(60_000)]).catch(() => undefined);
+      await bounded(this.github.syncOnce(), 60_000).catch(() => undefined);
     }
     await this.dashboard?.close().catch(() => undefined);
-    await this.store.writeSnapshot().catch((e) => this.say(`final snapshot failed: ${errText(e)}`));
     if (this.lock?.held()) {
       await this.commit([{ type: "runner.stopped", source: this.source, payload: { reason: scrub(reason) } }]).catch((e) => this.say(`runner.stopped: ${errText(e)}`));
+      await this.store.writeSnapshot().catch((e) => this.say(`final snapshot failed: ${errText(e)}`));
     }
     if (this.info) {
       try {
@@ -518,7 +540,7 @@ export class Runner {
   /** Read the new events into the cache and rewrite leases.json for every agent whose leases they changed. */
   private async refreshLog(): Promise<AnyEvent[]> {
     const since = this.log.length ? this.log[this.log.length - 1].seq : 0;
-    const fresh = await this.store.events({ sinceSeq: since });
+    const fresh = (await this.store.events({ sinceSeq: since })).filter((e) => e.seq > (this.log.at(-1)?.seq ?? 0));
     if (!fresh.length) return fresh;
     this.log.push(...fresh);
     const touched = new Set<string>();
@@ -570,6 +592,7 @@ export class Runner {
   // ==========================================================================
 
   async tick(): Promise<void> {
+    if (this.stopping) return;
     await this.refreshLog();
     let state = await this.store.state();
     if (TERMINAL_RUN.has(state.status)) return this.finish(state);
@@ -590,10 +613,12 @@ export class Runner {
   }
 
   private async finish(state: BlackboardState): Promise<void> {
+    if (state.status === "failed") this.exitCode = 1;
     if (state.status === "aborted") {
       for (const t of this.workers.values()) if (!t.exit) await this.killWorker(t.agent, "killed", "the run was aborted");
     }
     await this.pollWorkers();
+    if (this.merge.busy()) return;
     this.stop(state.status);
   }
 
@@ -612,8 +637,7 @@ export class Runner {
     const seq = this.lastSeq((e) => e.type === "execution.paused" && e.payload.scope === "all");
     const paused = seq ? this.log.find((e) => e.seq === seq) : undefined;
     const since = paused ? Date.parse(paused.ts) : this.startedAt;
-    // Measured from this runner's start at the earliest, so one started on a long-paused run stays a while.
-    if (Date.now() - Math.max(since, this.startedAt) >= this.opts.idleExitMs) this.stop(`idle: paused for ${Math.round(this.opts.idleExitMs / 60_000)} min`);
+    if (Date.now() - since >= this.opts.idleExitMs) this.stop(`idle: paused for ${Math.round(this.opts.idleExitMs / 60_000)} min`);
   }
 
   // ==========================================================================
@@ -632,6 +656,14 @@ export class Runner {
   }
 
   private async pollOne(t: Tracked): Promise<void> {
+    if (own((await this.store.state()).agents, t.agent)?.status === "registered") {
+      await this.store.transact(({ state }) => ({ events: own(state.agents, t.agent)?.status === "registered" ? [{
+        type: "agent.spawned", source: this.source,
+        payload: { agent: t.agent, task: t.task, attempt: t.attempt, pid: t.pid, ...(t.driver === "claude-code" && { session_id: t.sessionId }) },
+      }] : [] }));
+    }
+    const offset = t.monitor.offset;
+    const checkpoint = t.monitor.checkpoint();
     if (!t.exit && t.adopted && !pidAlive(t.pid)) t.exit = { code: null, signal: null };
     const p = t.monitor.poll();
     if (p.bytes > 0) t.lastOutputAt = Date.now();
@@ -643,10 +675,22 @@ export class Runner {
       const acc = t.monitor.acc;
       const reason = t.killReason ?? (t.adopted && t.exit.code === null && !t.exit.signal ? (acc.done && !acc.isError ? "completed" : "lost") : undefined);
       drafts = [...drafts, ...t.monitor.finish({ code: t.exit.code, signal: t.exit.signal, ...(reason && { reason }) })];
-      this.noteOutcome(t);
     }
+    drafts = this.classifyExit(t, drafts);
     drafts = this.unseen(t, drafts);
-    await this.commit(drafts);
+    try {
+      await this.commit(drafts);
+    } catch (e) {
+      t.monitor = this.monitorFor(this.drivers[t.driver] ?? this.driver(), t.agent, t.task, t.outputPath, offset, undefined, checkpoint);
+      t.attested = checkpoint.attestation?.ok;
+      throw e;
+    }
+    const attestation = drafts.find((d) => d.type === "agent.attested");
+    if (attestation?.type === "agent.attested") t.attested = attestation.payload.ok;
+    if (t.attested === false) {
+      await this.attestationFailed(t, p.attestation?.reasons ?? t.monitor.attestation?.reasons ?? ["worker attestation failed"]);
+      return;
+    }
     if (t.exit) {
       this.workers.delete(t.agent);
       this.writeRun(t);
@@ -654,7 +698,6 @@ export class Runner {
       return;
     }
     this.writeRun(t);
-    if (p.attestation && !p.attestation.ok) await this.attestationFailed(t, p.attestation.reasons);
   }
 
   /** Drop drafts an earlier runner already committed for an adopted run. */
@@ -677,7 +720,7 @@ export class Runner {
   /** Its session is gone: record the run as lost and start a fresh session with the WIP diff stat in the card. */
   private async restartFresh(t: Tracked): Promise<void> {
     this.workers.delete(t.agent);
-    const drafts = this.unseen(t, t.monitor.finish({ code: t.exit?.code ?? null, signal: t.exit?.signal ?? null, reason: "lost" }));
+    const drafts = this.unseen(t, t.monitor.finish({ code: t.exit?.code ?? null, signal: t.exit?.signal ?? null, reason: "lost" })).filter((d) => d.type !== "agent.attested");
     let wipStat: string | undefined;
     try {
       wipStat = (await taskDiffSummary(t.cwd, integrationBranch(this.execution))).stat || undefined;
@@ -694,12 +737,16 @@ export class Runner {
   }
 
   /** Rate limits, auth and credit failures in a worker's error output feed the circuit breaker. */
-  private noteOutcome(t: Tracked): void {
+  private classifyExit(t: Tracked, drafts: AnyEventDraft[]): AnyEventDraft[] {
     const acc = t.monitor.acc;
-    if (!acc.isError && t.exit?.code === 0) return;
+    if (!acc.isError) return drafts;
     const message = [acc.lastText, ...(acc.errors ?? [])].filter(Boolean).join("\n");
     const kind = message ? classifyFailure(message, { source: "driver" }) : "error";
-    if (kind !== "error") this.outcomes.push({ driver: t.driver, at: Date.now(), kind, message: scrubAndCap(message, 300) });
+    if (kind === "error") return drafts;
+    const label = { rate_limit: "rate_limit_error", auth: "authentication_error", credit: "insufficient_quota" }[kind];
+    return drafts.map((d) => d.type === "agent.exited" && d.payload.reason === "error"
+      ? { ...d, payload: { ...d.payload, result_subtype: `${acc.resultSubtype ?? "error"}: ${label}` } }
+      : d);
   }
 
   private writeRun(t: Tracked): void {
@@ -718,10 +765,11 @@ export class Runner {
       start_offset: t.startOffset,
       started_at: new Date(t.startedAt).toISOString(),
       resumed: t.resumed,
+      monitor: t.monitor.checkpoint(),
       ...(t.attested !== undefined && { attested: t.attested }),
     };
     try {
-      writeFileAtomic(runFilePath(this.execution, t.agent), JSON.stringify(run) + "\n");
+      writeFileAtomic(runFilePath(this.execution, t.agent), scrubbedJSON(run) + "\n");
     } catch (e) {
       this.say(`run.json of ${t.agent}: ${errText(e)}`);
     }
@@ -731,7 +779,7 @@ export class Runner {
     this.busy.add(t.agent);
     try {
       t.killReason = "attestation";
-      await this.stopProcess(t, "attestation failed");
+      if (!t.exit) await this.stopProcess(t, "attestation failed");
       const exit = await this.waitExit(t);
       const drafts = this.unseen(t, t.monitor.finish({ code: exit.code, signal: exit.signal, reason: "attestation" }));
       this.workers.delete(t.agent);
@@ -856,6 +904,12 @@ export class Runner {
   /** The runner's process observations, merged with what the log shows (observeEvents). */
   observations(state: Readonly<BlackboardState>): Observations {
     const agents: Record<string, AgentObservation> = {};
+    const claims = { ...this.renewed };
+    for (const c of Object.values(state.claims)) {
+      if (c.ttl_s <= 0) continue;
+      const heartbeat = mtimeMs(join(agentDir(this.execution, c.agent), "heartbeat"));
+      if (heartbeat !== undefined) claims[c.task] = { renewedAt: Math.max(own(claims, c.task)?.renewedAt ?? 0, heartbeat) };
+    }
     for (const [id, rec] of Object.entries(state.agents)) {
       if (rec.external || (rec.status !== "running" && rec.status !== "registered")) continue;
       const t = this.workers.get(id);
@@ -870,7 +924,7 @@ export class Runner {
             ...(heartbeat !== undefined && { lastHeartbeatAt: heartbeat }),
           }
         : { ...(rec.pid !== undefined && { pid: rec.pid }), alive: rec.pid !== undefined && pidAlive(rec.pid) };
-      if (this.busy.has(id) || (rec.status === "registered" && !t)) o.busy = true;
+      if (this.busy.has(id)) o.busy = true;
       Object.defineProperty(agents, id, { value: o, enumerable: true, writable: true, configurable: true });
     }
     const leadInFlight: Record<string, boolean> = {};
@@ -878,9 +932,9 @@ export class Runner {
     return observeEvents(this.log, {
       agents,
       watchers: watcherObservations(this.execution),
-      claims: { ...this.renewed },
+      claims,
       leadInFlight,
-      outcomes: [...this.outcomes],
+      retainedTasks: Object.values(state.tasks).filter((t) => t.state === "accepted").map((t) => t.spec.id),
     });
   }
 
@@ -888,7 +942,6 @@ export class Runner {
   private async watchdogPass(): Promise<void> {
     await this.refreshLog();
     const obs = this.observations(await this.store.state());
-    this.lastObs = obs;
     const now = Date.now();
     const r = await this.store.transact<WatchdogAction[]>(async ({ state }) => {
       const actions = evaluate(state as BlackboardState, now, obs, this.opts.watchdog);
@@ -899,7 +952,8 @@ export class Runner {
       return { events: actionsToDrafts(actions, { pid: process.pid, diagnosticsBlobs: blobs }), result: actions };
     });
     if (r.events.length) await this.refreshLog();
-    await this.applyProcessOps(processActions(r.result ?? []));
+    const ops = processActions(r.result ?? []);
+    this.background(this.applyProcessOps(ops));
   }
 
   /**
@@ -908,7 +962,7 @@ export class Runner {
    * standing ones (stop_spawning, kill_worker) repeat every pass while their condition holds.
    */
   async applyProcessOps(ops: readonly ProcessAction[]): Promise<void> {
-    this.spawnBlocked = false;
+    this.spawnBlocked = ops.some((op) => op.type === "stop_spawning");
     const resuming = new Set(ops.filter((o) => o.type === "resume_worker").map((o) => (o as { agent: string }).agent));
     for (const op of ops) {
       const key = `${op.type}\0${op.key}`;
@@ -925,11 +979,11 @@ export class Runner {
             break;
           case "resume_worker": {
             const drafts = await this.stopTaskWorker(op.task, "stalled", op.why);
-            await this.startWorker(op.task, { claim: false, preDrafts: drafts, immediate: interruptedContext({ why: op.why }) });
+            if (!(await this.startWorker(op.task, { claim: false, preDrafts: drafts, immediate: interruptedContext({ why: op.why }) }))) this.opsDone.delete(key);
             break;
           }
           case "spawn_retry":
-            await this.startWorker(op.task, { claim: true, attempt: op.attempt });
+            if (!(await this.startWorker(op.task, { claim: true, attempt: op.attempt }))) this.opsDone.delete(key);
             break;
           case "lead_fallback":
             this.startLead(op.escalation);
@@ -940,6 +994,7 @@ export class Runner {
             break;
         }
       } catch (e) {
+        this.opsDone.delete(key);
         this.say(`${op.type} ${op.target}: ${errText(e)}`);
       }
     }
@@ -988,6 +1043,8 @@ export class Runner {
   private async driverReady(state: Readonly<BlackboardState>): Promise<boolean> {
     this.driverId = state.contract?.workers.driver === "codex" ? "codex" : "claude-code";
     const d = this.driver();
+    if (this.driverCheckedId !== d.id) this.driverChecked = undefined;
+    this.driverCheckedId = d.id;
     this.driverChecked ??= d.detect().then((r) => ({ ok: r.ok, missing: r.missing }));
     const r = await this.driverChecked;
     if (r.ok) return true;
@@ -1023,12 +1080,15 @@ export class Runner {
 
   /** Why the task cannot start a worker for `agent` now, or null. */
   private startProblem(s: Readonly<BlackboardState>, task: string, agent: string, claim: boolean, reopen = false): string | null {
+    if (this.stopping) return "the runner is stopping";
     if (s.status !== "running") return `the run is ${s.status}`;
     if (s.paused_tasks.includes(task)) return `task ${task} is paused`;
     const rt = own(s.tasks, task);
     if (!rt) return `unknown task ${task}`;
     if (own(s.agents, agent)?.external) return `${agent} is an external agent`;
     if (this.hasLiveWorker(task)) return `a worker already runs on ${task}`;
+    const active = Object.values(s.tasks).filter((t) => t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id))).length;
+    if (active >= (s.contract?.budget.max_parallel ?? 1)) return "max_parallel workers already run";
     const c = own(s.claims, task);
     if (claim) {
       if (c) return `${task} is claimed by ${c.agent}`;
@@ -1076,7 +1136,9 @@ export class Runner {
     this.starting.add(task);
     let agent = workerAgentId(task);
     let registered = false;
+    let trial: string | undefined;
     try {
+      await this.refreshLog();
       const state = await this.store.state();
       const claimed = own(state.claims, task);
       if (!o.claim && claimed && !own(state.agents, claimed.agent)?.external) agent = claimed.agent;
@@ -1091,11 +1153,17 @@ export class Runner {
         return false;
       }
       const driver = this.driver();
-      const gate = canRespawn(state, Date.now(), this.lastObs, { task, agent, driver: driver.id });
+      const obs = this.observations(state);
+      const gate = canRespawn(state, Date.now(), obs, { task, agent, driver: driver.id });
       if (!gate.ok) {
         if (gate.why === "budget") this.spawnBlocked = true;
         await flush();
         return false;
+      }
+      if (state.watchdog.circuits[driver.id]?.open) {
+        if (this.trialReservations.has(driver.id)) { await flush(); return false; }
+        this.trialReservations.add(driver.id);
+        trial = driver.id;
       }
       const budgetUsd = remainingUsd(state, { task, agent });
       if (budgetUsd < 0.01) {
@@ -1117,6 +1185,8 @@ export class Runner {
       const reg = await this.store.transact<string | null>(({ state: s }) => {
         const p = this.startProblem(s, task, agent, o.claim, o.reopen);
         if (p) return { events: pre, result: p };
+        const gate = canRespawn(s, Date.now(), this.observations(s), { task, agent, driver: driver.id });
+        if (!gate.ok || remainingUsd(s, { task, agent }) < 0.01 || s.contract?.version !== state.contract?.version) return { events: pre, result: "the spawn gate changed" };
         const events: AnyEventDraft[] = [
           ...pre,
           {
@@ -1140,6 +1210,11 @@ export class Runner {
       registered = true;
       await writeAgentLeases(this.store, agent, { task });
       const after = await this.store.state();
+      const finalGate = canRespawn(after, Date.now(), this.observations(after), { task, agent, driver: driver.id });
+      if (this.stopping || after.status !== "running" || after.paused_tasks.includes(task) || after.contract?.version !== state.contract?.version || !finalGate.ok || remainingUsd(after, { task, agent }) < 0.01) {
+        await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, task, code: null, reason: "lost", result_subtype: "launch_interrupted" } }]);
+        return false;
+      }
       const sinceSeq = this.lastSeq((e) => e.type === "agent.spawned" && e.payload.task === task);
       const immediate: TaskCardOptions["immediate"] | undefined =
         o.immediate ?? (sinceSeq > 0 ? respawnContext(after, task, { sinceSeq, why: o.why ?? rt.last_note ?? "Your previous worker run ended before the task was done." }) : undefined);
@@ -1159,7 +1234,7 @@ export class Runner {
         ...(mode?.model && { model: mode.model }),
         ...(mode?.fallback_model && { fallbackModel: mode.fallback_model }),
         ...(spec.effort && { effort: spec.effort }),
-        budgetUsd,
+        budgetUsd: Math.min(budgetUsd, remainingUsd(after, { task, agent })),
         sessionId,
         outputPath,
         env: {},
@@ -1191,6 +1266,7 @@ export class Runner {
       await this.commit([
         { type: "agent.spawned", source: this.source, payload: { agent, task, attempt, pid: handle.pid, ...(driver.id === "claude-code" && { session_id: handle.sessionId }) } },
       ]);
+      await this.refreshLog();
       this.say(`${resume ? "resumed" : "started"} ${agent} on ${task} (attempt ${attempt}, pid ${handle.pid}, $${budgetUsd.toFixed(2)} budget)`);
       return true;
     } catch (e) {
@@ -1202,18 +1278,19 @@ export class Runner {
         pre = [];
       }
       await flush().catch((x) => this.say(`committing the previous run's exit: ${errText(x)}`));
-      if (registered) {
+      if (registered && !this.workers.has(agent)) {
         // Registered and claimed but nothing runs: an exit lets the watchdog retry it (and count it).
         await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, task, code: null, reason: "error", result_subtype: "spawn_failed" } }]).catch(() => undefined);
       }
-      return false;
+      return this.workers.has(agent);
     } finally {
+      if (trial) this.trialReservations.delete(trial);
       this.busy.delete(agent);
       this.starting.delete(task);
     }
   }
 
-  private monitorFor(driver: WorkerDriver, agent: string, task: string, path: string, offset: number, model?: string): RunMonitor {
+  private monitorFor(driver: WorkerDriver, agent: string, task: string, path: string, offset: number, model?: string, checkpoint?: MonitorCheckpoint): RunMonitor {
     return new RunMonitor({
       path,
       parse: (line, acc) => driver.parse(line, acc),
@@ -1224,6 +1301,7 @@ export class Runner {
       provider: driver.id,
       ...(model && { model }),
       offset,
+      ...(checkpoint && { checkpoint }),
     });
   }
 
@@ -1255,12 +1333,22 @@ export class Runner {
     const state = await this.store.state();
     for (const [agent, rec] of Object.entries(state.agents)) {
       if (rec.external || (rec.status !== "running" && rec.status !== "registered")) continue;
-      const run = readRunFile(this.execution, agent);
+      let run = readRunFile(this.execution, agent);
       const claim = Object.values(state.claims).find((c) => c.agent === agent);
       const task = claim?.task ?? rec.task ?? run?.task;
       const pid = rec.status === "running" ? rec.pid : run?.pid;
       const alive = pid !== undefined && pidAlive(pid) && (!run || run.pid === pid);
       try {
+        if (alive && !run && task !== undefined && pid !== undefined) {
+          const spawned = [...this.log].reverse().find((e) => e.type === "agent.spawned" && e.payload.agent === agent);
+          const attempt = claim?.attempt ?? state.tasks[task]?.attempt ?? 1;
+          run = {
+            v: 1, agent, task, attempt, driver: rec.driver, pid, pgid: pid,
+            session_id: rec.session_id ?? "", output: join(agentDir(this.execution, agent), "runs", `${attempt}.jsonl`),
+            cwd: taskWorktreePath(this.execution, task), offset: 0, start_offset: 0,
+            started_at: spawned?.ts ?? new Date().toISOString(), resumed: false,
+          };
+        }
         if (alive && run && task !== undefined) {
           await this.adopt(agent, run, rec.status === "registered");
           continue;
@@ -1307,7 +1395,7 @@ export class Runner {
       startOffset: run.start_offset,
       startedAt: Date.parse(run.started_at) || Date.now(),
       lastOutputAt: Date.now(),
-      monitor: this.monitorFor(driver, agent, run.task, run.output, run.offset, state.contract?.workers.model),
+      monitor: this.monitorFor(driver, agent, run.task, run.output, run.monitor ? run.offset : run.start_offset, state.contract?.workers.model, run.monitor),
       adopted: true,
       resumed: run.resumed,
       skip,
@@ -1334,7 +1422,7 @@ export class Runner {
           usage: after.some((e) => e.type === "budget.usage_recorded" && e.payload.source === "worker" && e.payload.agent === agent),
         },
       } as Tracked;
-      const m = this.monitorFor(driver, agent, task, run.output, run.offset);
+      const m = this.monitorFor(driver, agent, task, run.output, run.monitor ? run.offset : run.start_offset, undefined, run.monitor);
       return this.unseen(t, m.finish({ code: null, reason: "lost" }));
     }
     return [{ type: "agent.exited", source: this.source, payload: { agent, ...(task !== undefined && { task }), code: null, reason: "lost" } }];
@@ -1355,7 +1443,7 @@ export class Runner {
         this.say(`WIP snapshot of ${task}: ${errText(e)}`);
       }
     }
-    const pre = wasRunning ? this.lostDrafts(agent, task, run) : [];
+    const pre = this.lostDrafts(agent, task, run);
     this.say(`${agent} on ${task} is gone${wipCommit ? ` (WIP saved as ${wipCommit.slice(0, 12)})` : ""}; resuming it`);
     const why = wasRunning
       ? "The runner restarted and your worker process was gone. Your session is resumed."
@@ -1476,12 +1564,24 @@ export class Runner {
 
 /** Run the runner of an execution until it stops; resolves with the process exit code. */
 export async function runRunner(execution: string, opts: RunnerOptions = {}): Promise<number> {
-  const r = new Runner(execution, opts);
-  try {
-    await r.start();
-  } catch (e) {
-    console.error(`agent-roundtable run: ${errText(e)}`);
-    return e instanceof RunnerRefusal ? e.exitCode : 1;
+  const r = new Runner(execution, { ...opts, signals: false });
+  const onSignal = (sig: string) => r.stop(`signal ${sig}`);
+  if (opts.signals) {
+    process.on("SIGTERM", onSignal);
+    process.on("SIGINT", onSignal);
   }
-  return r.run();
+  try {
+    try {
+      await r.start();
+    } catch (e) {
+      console.error(`agent-roundtable run: ${errText(e)}`);
+      return e instanceof RunnerRefusal ? e.exitCode : 1;
+    }
+    return await r.run();
+  } finally {
+    if (opts.signals) {
+      process.off("SIGTERM", onSignal);
+      process.off("SIGINT", onSignal);
+    }
+  }
 }

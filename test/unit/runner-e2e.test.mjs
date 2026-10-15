@@ -6,13 +6,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { git } from "../fixtures/execution/git-fixture.mjs";
 import { makeRun, nodeCommand, task } from "../fixtures/workers/run.mjs";
-import { fakeClaude, killFakes, ofType, startRunner, waitFor } from "../fixtures/runner/harness.mjs";
+import { fakeClaude, killFakes, localSandboxSkip, ofType, startRunner, waitFor } from "../fixtures/runner/harness.mjs";
 
 const { verifyRun } = await import("../../dist/execution/run-admin.js");
 const { integrationBranch, taskBranch } = await import("../../dist/execution/git.js");
 const { readRunnerInfo } = await import("../../dist/execution/runner-launch.js");
 
-const skip = process.platform === "win32";
+const skip = localSandboxSkip();
 
 const twoTasks = (over = {}) => ({
   tasks: [task("a", { checks: ["unit"] }), task("b", { depends_on: ["a"], checks: ["unit"] })],

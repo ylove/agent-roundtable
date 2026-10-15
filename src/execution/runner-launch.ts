@@ -129,10 +129,10 @@ export function launchRunner(exe: string, opts: LaunchRunnerOptions = {}): { pid
       shell: false,
       windowsHide: true,
     });
-    if (child.pid === undefined) throw new Error("the runner did not start");
     child.on("error", () => {
       /* reported through runner.log and the next ensureRunner */
     });
+    if (child.pid === undefined) throw new Error("the runner did not start");
     child.unref();
     return { pid: child.pid, log };
   } finally {

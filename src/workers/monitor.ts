@@ -36,6 +36,14 @@ export interface RunMonitorOptions {
   model?: string;
   /** Start reading here (an adopted run resumes where the last runner stopped); default 0. */
   offset?: number;
+  /** Parser state persisted by the runner after committing the corresponding drafts. */
+  checkpoint?: MonitorCheckpoint;
+}
+
+export interface MonitorCheckpoint {
+  acc: WorkerRunAccumulator;
+  attestation?: AttestationResult;
+  usageRecorded: boolean;
 }
 
 export interface MonitorPoll {
@@ -68,6 +76,15 @@ export class RunMonitor {
     this.o = opts;
     this.offset = opts.offset ?? 0;
     this.source = opts.source ?? { kind: "runner", id: "runner", pid: process.pid };
+    if (opts.checkpoint) {
+      Object.assign(this.acc, structuredClone(opts.checkpoint.acc));
+      this.attestation = opts.checkpoint.attestation;
+      this.usageRecorded = opts.checkpoint.usageRecorded;
+    }
+  }
+
+  checkpoint(): MonitorCheckpoint {
+    return structuredClone({ acc: this.acc, ...(this.attestation && { attestation: this.attestation }), usageRecorded: this.usageRecorded });
   }
 
   /** New complete lines since the last call, parsed. A missing file reads as no output yet. */
@@ -118,6 +135,10 @@ export class RunMonitor {
         this.usageRecorded = true;
         drafts.push(this.usageDraft(seen, undefined));
       }
+    }
+    if (!this.attestation && this.o.expected !== null) {
+      const a = this.attestation = attest(this.acc, this.o.expected ?? WORKER_ATTESTATION);
+      drafts.push({ type: "agent.attested", source: this.source, payload: { agent: this.o.agent, tools: capPathList(a.tools, 3000), mcp_servers: capPathList(a.mcp_servers, 1000), ok: a.ok } });
     }
     const payload: EventPayloads["agent.exited"] = {
       agent: this.o.agent,

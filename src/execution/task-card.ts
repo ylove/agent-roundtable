@@ -167,8 +167,14 @@ export function buildTaskCard(state: Readonly<BlackboardState>, taskId: string, 
   // The protocol always survives the cap: it is cut from the body, never from the protocol.
   const tail = `\n\n## Protocol\n\n${protocol(opts.external === true)}\n`;
   let body = out.join("\n\n");
-  const room = CARD_LIMITS.total - tail.length;
-  if (body.length > room) body = `${body.slice(0, room - 32).trimEnd()}\n\n… [task card truncated]`;
+  const room = CARD_LIMITS.total - Buffer.byteLength(tail);
+  if (Buffer.byteLength(body) > room) {
+    const marker = "\n\n… [task card truncated]";
+    const bytes = Buffer.from(body);
+    let end = room - Buffer.byteLength(marker);
+    while ((bytes[end] & 0xc0) === 0x80) end--;
+    body = bytes.subarray(0, end).toString("utf8").trimEnd() + marker;
+  }
   return body + tail;
 }
 

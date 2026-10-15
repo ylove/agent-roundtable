@@ -3,20 +3,18 @@
 //
 //   merge      a task whose checks passed (merging) goes into the integration branch with
 //              mergeTask under git.lock. Success: merge.succeeded, task.merged, task.accepted and
-//              the task's leases released, in one batch; then the integration checks (smoke) run
-//              on the integration worktree. A conflict inside the task's leases is prepared in the
+//              one batch; integration checks run before the task's leases are released.
+//              A conflict inside the task's leases is prepared in the
 //              task worktree (prepareConflictResolution) and the worker resumed with a "resolve
 //              conflicts" card; one outside them escalates as conflict. A lease violation rejects.
 //   recheck    a task amended (contract.amended lists it) after its checks passed has them run
-//              again before it merges; accepted work gets the integration checks again (WS04).
+//              again before it merges; accepted work is checked on the integration worktree.
 //   complete   every task accepted: final validation on the integration branch, the goal review
-//              hook, then execution.completed (after pushing the integration branch and opening
-//              a pull request when visibility.github.pr asks for one). Never the base branch.
+//              hook, then execution.completed. Publishing follows when visibility.github.pr asks
+//              for it; only the integration branch is pushed.
 // ============================================================================
 
-import { execFile } from "node:child_process";
 import { redact } from "../publishers/redact.js";
-import { childEnv } from "../security/child-env.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { failureSignature, runCommandSpec, tailForTool } from "../sandbox/index.js";
 import { runGh, withBodyFile } from "../github/gh.js";
@@ -57,8 +55,6 @@ export function allAccepted(state: Readonly<BlackboardState>): boolean {
 export class MergeQueue {
   private running?: Promise<void>;
   private readonly failures = new Map<string, { count: number; retryAt: number }>();
-  /** The last integration run: completion skips re-running the same checks at the same sha. */
-  private lastIntegration?: { sha: string; ids: string; ok: boolean };
   private readonly completionTried = new Set<string>();
   private recheckedAmendment = 0;
 
@@ -75,7 +71,7 @@ export class MergeQueue {
     if (!job) return;
     this.running = this.r.background(
       job()
-        .catch((e) => this.r.say(`merge queue: ${errText(e)}`))
+        .catch((e) => { this.completionTried.clear(); this.r.say(`merge queue: ${errText(e)}`); })
         .finally(() => {
           this.running = undefined;
         })
@@ -83,6 +79,15 @@ export class MergeQueue {
   }
 
   private next(state: Readonly<BlackboardState>): (() => Promise<void>) | undefined {
+    if (this.r.isStopping()) return undefined;
+    for (const rt of Object.values(state.tasks)) {
+      if (rt.state === "accepted" && leasesFor(state, rt.spec.id).length) {
+        return async () => {
+          await this.integrationChecks(`after merging ${rt.spec.id}`);
+          await this.releaseTaskLeases(rt.spec.id);
+        };
+      }
+    }
     const now = Date.now();
     for (const rt of Object.values(state.tasks)) {
       const id = rt.spec.id;
@@ -93,14 +98,23 @@ export class MergeQueue {
     if (Object.values(state.tasks).some((rt) => rt.state === "merging")) return undefined;
     const amended = this.r.lastSeq((e) => e.type === "contract.amended");
     if (amended > this.recheckedAmendment) {
-      const checked = this.r.lastSeq((e) => e.type === "check.started" && e.payload.scope === "integration");
-      if (amended > checked && Object.values(state.tasks).some((rt) => rt.state === "accepted")) {
-        return async () => {
-          this.recheckedAmendment = amended;
-          await this.integrationChecks("the contract was amended");
-        };
-      }
-      this.recheckedAmendment = amended;
+      return async () => {
+        for (const e of this.r.events()) {
+          if (e.type !== "contract.amended" || e.seq <= this.recheckedAmendment) continue;
+          for (const task of e.payload.affected_tasks) {
+            const rt = own(state.tasks, task);
+            if (rt?.state === "accepted") {
+              const res = await this.runChecks(state, "task", rt.spec.checks, integrationWorktreePath(this.r.execution), task);
+              if (!res.ok) await this.r.store.transact(({ state: s }) => ({ events: runnerEscalation(s, {
+                key: `amended_checks:${state.contract?.version}:${task}`, task, kind: "blocker",
+                summary: `Accepted task ${task} failed its amended checks: ${res.failed.map((f) => f.id).join(", ")}. Amend the contract to add a fix-up task.`,
+              }, this.r.source) }));
+            }
+          }
+        }
+        await this.integrationChecks("the contract was amended");
+        this.recheckedAmendment = amended;
+      };
     }
     if (allAccepted(state)) return () => this.complete();
     return undefined;
@@ -157,12 +171,12 @@ export class MergeQueue {
             mergeDrafts.succeeded(task, sha, src),
             mergeDrafts.taskMerged(task, sha, src),
             { type: "task.accepted", source: src, payload: { task } },
-            ...releaseLeases(s, { task }, src),
           ] as AnyEventDraft[],
         };
       });
       r.say(`merged ${task} into ${integrationBranch(r.execution)} at ${sha.slice(0, 12)}${m.already ? " (already merged)" : ""}`);
-      await this.integrationChecks(`after merging ${task}`, sha);
+      await this.integrationChecks(`after merging ${task}`);
+      await this.releaseTaskLeases(task);
       return;
     }
 
@@ -222,6 +236,10 @@ export class MergeQueue {
   // Checks in the sandbox
   // ==========================================================================
 
+  private async releaseTaskLeases(task: string): Promise<void> {
+    await this.r.store.transact(({ state }) => ({ events: releaseLeases(state, { task }, this.r.source) }));
+  }
+
   /** Run contract commands as checks of `scope` in `workdir`: check.started, then passed, failed or timed_out. */
   async runChecks(state: Readonly<BlackboardState>, scope: "task" | "integration", ids: readonly string[], workdir: string, task?: string): Promise<ChecksResult> {
     const r = this.r;
@@ -232,6 +250,7 @@ export class MergeQueue {
     const out: ChecksResult = { ok: true, failed: [], tails: {} };
     const at = task !== undefined ? { task } : {};
     for (const id of ids) {
+      if (r.isStopping()) throw new Error("runner stopped during validation");
       const spec: CommandSpec | undefined = commands.find((c) => c.id === id);
       await r.commit([{ type: "check.started", source: src, payload: { command_id: id, scope, ...at } }]);
       let output: string;
@@ -241,12 +260,13 @@ export class MergeQueue {
       if (!spec) output = `The contract defines no command ${id}`;
       else {
         try {
-          const res = await runCommandSpec(backend, spec, workdir, { ...(image && { image }), maxTimeoutMs: CHECK_MAX_MS });
+          const res = await runCommandSpec(backend, spec, workdir, { ...(image && { image }), signal: r.abort.signal, maxTimeoutMs: CHECK_MAX_MS });
           ({ output, exit, timedOut, durationMs: duration } = res);
         } catch (e) {
           output = scrubAndCap(errText(e), 4000);
         }
       }
+      if (r.isStopping()) throw new Error("runner stopped during validation");
       const blob = await r.store.putBlob(output || "(no output)");
       if (timedOut) {
         out.ok = false;
@@ -266,13 +286,12 @@ export class MergeQueue {
   }
 
   /** The smoke checks on the integration worktree (after a merge, or after an amendment). */
-  private async integrationChecks(why: string, sha?: string): Promise<ChecksResult | undefined> {
+  private async integrationChecks(why: string): Promise<ChecksResult | undefined> {
     const state = await this.r.store.state();
     const ids = this.r.integrationCheckIds(state);
     if (!ids.length) return undefined;
-    const head = sha ?? (await ensureIntegrationWorktree(this.r.header)).head;
+    await ensureIntegrationWorktree(this.r.header);
     const res = await this.runChecks(state, "integration", ids, integrationWorktreePath(this.r.execution));
-    this.lastIntegration = { sha: head, ids: ids.join(","), ok: res.ok };
     this.r.say(`integration checks ${why}: ${res.ok ? "passed" : `failed (${res.failed.map((f) => f.id).join(", ")})`}`);
     return res;
   }
@@ -285,18 +304,16 @@ export class MergeQueue {
     const r = this.r;
     const state = await r.store.state();
     if (!allAccepted(state) || r.hasAnyLiveWorker()) return;
+    if (Object.values(state.escalations).some((e) => !["resolved", "withdrawn"].includes(e.status))) return;
     const sha = (await ensureIntegrationWorktree(r.header)).head;
     const key = `${sha}|${Object.keys(state.tasks).join(",")}|${state.contract?.version ?? 0}`;
     if (this.completionTried.has(key)) return;
     this.completionTried.add(key);
 
     // 1. Final validation on the integration branch.
-    const known = new Set((state.contract?.validation.commands ?? []).map((c) => c.id));
-    const final = (state.contract?.validation.final ?? []).filter((id) => known.has(id));
-    const reuse = this.lastIntegration && this.lastIntegration.sha === sha && this.lastIntegration.ids === final.join(",") && this.lastIntegration.ok;
-    if (final.length && !reuse) {
+    const final = state.contract?.validation.final ?? [];
+    if (final.length) {
       const res = await this.runChecks(state, "integration", final, integrationWorktreePath(r.execution));
-      this.lastIntegration = { sha, ids: final.join(","), ok: res.ok };
       if (!res.ok) {
         const failed = res.failed.map((f) => f.id).join(", ");
         await r.store.transact(({ state: s }) => ({
@@ -324,22 +341,31 @@ export class MergeQueue {
       return;
     }
 
-    // 3. A pull request, when asked for; then execution.completed.
-    let prUrl: string | undefined;
+    if (r.isStopping()) return;
+    const completed = await r.store.transact(({ state: s }) => {
+      if (r.isStopping() || s.status !== "running" || !allAccepted(s) || s.contract?.version !== state.contract?.version) return { events: [] };
+      return { events: [{ type: "execution.completed", source: r.source, payload: { integration_sha: sha } }] };
+    });
+    if (!completed.events.length) return;
+    r.say(`the run completed at ${sha.slice(0, 12)}`);
+
+    await this.publishCompleted(state, sha);
+  }
+
+  /** Retried on terminal startup if a crash interrupted publication after completion. */
+  async publishCompleted(state: Readonly<BlackboardState>, sha: string): Promise<void> {
+    const r = this.r;
+    if (r.isStopping() || state.notes.some((n) => n.agent === "runner" && n.topic === "pull_request")) return;
     const gh = r.githubSettings();
     if (gh?.pr && gh.repo) {
       try {
-        prUrl = await openPullRequest(r, state, gh.repo, sha);
+        const prUrl = await openPullRequest(r, state, gh.repo, sha);
+        await r.commit([{ type: "note.posted", source: r.source, payload: { topic: "pull_request", text: `Pull request: ${prUrl}`, refs: [prUrl] } }]);
         r.say(`opened ${prUrl}`);
       } catch (e) {
         r.say(`no pull request: ${errText(e)}`);
       }
     }
-    await r.store.transact(({ state: s }) => {
-      if (s.status !== "running" || !allAccepted(s)) return { events: [] };
-      return { events: [{ type: "execution.completed", source: r.source, payload: { integration_sha: sha, ...(prUrl && { pr_url: prUrl }) } }] };
-    });
-    r.say(`the run completed at ${sha.slice(0, 12)}`);
   }
 }
 
@@ -375,19 +401,11 @@ export async function pushIntegrationBranch(repoRoot: string, executionId: strin
   const remote = await remoteFor(repoRoot, repo);
   if (!REMOTE_RE.test(remote)) throw new Error(`Unusable remote name ${remote}`);
   const t = await openRepo(repoRoot);
-  const args = [
-    "--git-dir", t.gitDir, "--work-tree", t.workTree,
-    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.pager=cat", "-c", "gc.auto=0",
-    "-c", "maintenance.auto=false", "-c", "submodule.recurse=false", "-c", "push.recurseSubmodules=no",
-    "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never",
+  await runGit(t, [
+    "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always", "-c", "push.recurseSubmodules=no",
+    "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
     "push", "--no-verify", "--porcelain", remote, `refs/heads/${branch}:refs/heads/${branch}`,
-  ];
-  await new Promise<void>((resolve, reject) => {
-    execFile("git", args, { cwd: t.workTree, env: childEnv("git", { GIT_TERMINAL_PROMPT: "0" }), timeout: 120_000, maxBuffer: 1 << 20, shell: false }, (err, _out, stderr) => {
-      if (err) reject(new Error(`git push ${remote} ${branch} failed: ${scrubAndCap(String(stderr || err.message), 500)}`));
-      else resolve();
-    });
-  });
+  ], { timeoutMs: 120_000, maxOutputBytes: 1 << 20 });
 }
 
 function prBody(state: Readonly<BlackboardState>, sha: string): string {
@@ -412,6 +430,9 @@ export async function openPullRequest(r: Runner, state: Readonly<BlackboardState
   if (!base) throw new Error("the contract names no base branch");
   assertSafeRef(base);
   await pushIntegrationBranch(r.header.repo_root, r.execution, repo, base);
+  const existing = await runGh(["pr", "list", "--repo", repo, "--base", base, "--head", integrationBranch(r.execution), "--state", "all", "--json", "url", "--limit", "1"]);
+  const found = JSON.parse(existing.stdout) as Array<{ url?: string }>;
+  if (found[0]?.url && /^https:\/\/\S+$/.test(found[0].url)) return found[0].url;
   const title = redact(`[roundtable] ${state.contract!.title}`).text.slice(0, 200);
   const out = await withBodyFile(prBody(state, sha), (file) =>
     runGh(["pr", "create", "--repo", repo, "--base", base, "--head", integrationBranch(r.execution), "--title", title, "--body-file", file], { timeoutMs: 60_000 })

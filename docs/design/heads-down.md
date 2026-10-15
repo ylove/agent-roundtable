@@ -34,12 +34,12 @@ All three processes run from `dist/index.js`. `src/cli.ts` dispatches the subcom
 
 **Runner ownership.**
 - The runner creates `runner.lock/` with `mkdir` and writes `runner.json {pid, host, startedAt, heartbeatAt, version}` atomically every 5 s.
-- A runner counts as stale when its pid is dead on the same host or its heartbeat is older than 30 s.
+- A runner counts as stale when its pid is dead on the same host or its heartbeat is older than 30 s. A stale heartbeat is diagnostic only: takeover requires a dead owner on this host (or the lock primitive's proof of pid reuse). A live pid's lock is never stolen.
 - A runner on a different host is refused: 1.0 supports one host per home directory.
 - Takeover renames the lock, removes it, takes a new lock, and emits `runner.takeover`.
 - Every orchestrator tool that touches a live run calls `ensureRunner(id)`.
 
-**Permissions.** Every entry point calls `process.umask(0o077)`.
+**Permissions.** Heads-down subcommands (`run`, `watch`, `status`, `verify`, `purge`, the worker server and `hook`) call `process.umask(0o077)`. The default and explicit orchestrator stdio entry points preserve the caller's umask.
 
 ## 3. Store
 
@@ -96,7 +96,7 @@ Details of `transact` (`src/execution/store.ts`):
 **Resume** reconciles in this order:
 1. Verify the chain.
 2. Load the snapshot and replay the tail.
-3. Workers whose pid is still alive are adopted. Their stdout goes to a file, not a pipe, so the new runner can tail it.
+3. Workers whose pid is still alive are adopted. Their stdout goes to a file, not a pipe, so the new runner can tail it. `agents/<id>/run.json` records the output offset and parser checkpoint, including attestation, accumulated message usage and whether result usage was already recorded. The runner updates it after committing monitor drafts; adoption suppresses any drafts already in the event log if the checkpoint lagged the commit.
 4. Dead workers have their worktree WIP committed (`rt: wip snapshot`) and are respawned with `--resume <session>` and an "interrupted" card. If the session is gone, a fresh worker starts and gets the WIP diff stat.
 5. Lease TTLs restart.
 
@@ -522,12 +522,15 @@ Every host-side git call goes through `src/execution/git.ts`:
 - If the conflicted files are inside the task's leases, the runner merges the integration branch into the task worktree, leaving the conflict markers, and resumes the worker.
 - Conflicts outside the leases escalate as `conflict`.
 - When a merge succeeds, the integration smoke checks run.
+- The task's leases stay held through those checks. The runner supplies `obs.retainedTasks` for accepted tasks until it releases their leases, and reconciles such leases after a restart.
 
 **Completion.**
 1. All tasks are accepted.
 2. Final validation runs on the integration branch.
 3. The lead does a goal review and answers `Verdict: COMPLETE | INCOMPLETE`. INCOMPLETE allows at most 2 `add_task` cycles within authority, then escalates.
 4. `execution.completed` is emitted. Optionally the integration branch is pushed and a PR opened with `gh pr create`.
+
+Publication follows the durable completion event. Its URL is recorded in a `note.posted` with topic `pull_request` and the URL in `refs`; GitHub sync posts that link to the parent issue. The runner looks up an existing PR before creating one, so a publication interrupted before its note can be retried.
 
 The runner never pushes to the base branch, and nothing auto-merges.
 
@@ -692,6 +695,7 @@ On the worker server, the worker tools are bound to the token. On the orchestrat
   - `blob` is scrubbed and capped at 16 KB.
   - `query` fuzzy-matches tasks, teams, paths and interfaces, and answers questions such as "is the nav done?".
 - `claim_task`: claims a ready task whose dependencies are accepted and that nobody holds; the run must be running. It ensures the worktree and returns the task card. External claims get `ttl_s: 900`. `release` emits `task.released` and releases the task's leases.
+  Runner-managed workers cannot call `claim_task`, including release: the runner owns their assignments.
 - `lease`: `action` is `request` or `release`.
   - A request must lie within `contract.scope.paths`, or it is refused. One outside the task's write scope is granted with a warning.
   - A queued request names its holders and suggests `escalate(with: "path_owner")`.

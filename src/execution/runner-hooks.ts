@@ -71,7 +71,8 @@ export const DEFAULT_HOOKS: RunnerHooks = {
   async leadFallback(ctx, id) {
     ctx.log(`lead fallback for ${id}: no lead hook is installed`);
   },
-  async goalReview() {
+  async goalReview(ctx) {
+    ctx.log("goal review: no goal review hook is installed; defaulting to COMPLETE");
     return { verdict: "COMPLETE" };
   },
 };

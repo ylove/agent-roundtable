@@ -452,3 +452,15 @@ test("globWithin: lease globs inside the contract scope", () => {
   assert.equal(W.globWithin("docs/*.md", "docs/a*.md"), false);
   assert.equal(W.globWithin("anything/**", "**"), true);
 });
+
+test("runner-managed agents cannot claim or release assignments through claim_task", async () => {
+  const run = await runWith();
+  const { token } = await registerWorker(run.store, "managed", "api");
+  const auth = { execution_id: run.store.id, agent_token: token };
+  for (const args of [{ task_id: "later" }, { release: true }]) {
+    const refused = await call("claim_task", { ...auth, ...args });
+    assert.equal(refused.isError, true);
+    assert.match(refused.text, /runner assigns your task/);
+  }
+  assert.equal((await run.store.state()).claims.api.agent, "managed");
+});

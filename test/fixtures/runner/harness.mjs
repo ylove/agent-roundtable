@@ -12,7 +12,7 @@
 //   content: text   what it writes
 //   sessionGone     a --resume launch fails as if the session were gone
 // Every launch is logged to <control>/calls.jsonl.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -21,7 +21,8 @@ import { fakeBin } from "../workers/run.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const CLI = resolve(here, "../../../dist/index.js");
-const HELP = resolve(here, "../workers/claude-help-2.1.300.txt");
+const preferredHelp = resolve(here, "../claude-help-2.1.300.txt");
+const HELP = existsSync(preferredHelp) ? preferredHelp : resolve(here, "../workers/claude-help-2.1.300.txt");
 const MCP_CLIENT = resolve(here, "../../mcp-client.mjs");
 
 export const TOOLS = [
@@ -152,4 +153,14 @@ export function killFakes(fake) {
       }
     }
   }
+}
+
+/** Probe the isolation primitive before running tests that need the local backend. */
+export function localSandboxSkip() {
+  if (process.platform === "win32") return "heads-down runs require macOS or Linux";
+  if (process.platform !== "darwin") return false;
+  const probe = spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", process.execPath, "-e", "process.exit(0)"], { encoding: "utf8", timeout: 5000 });
+  if (probe.status === 0) return false;
+  if (/sandbox_apply: Operation not permitted|Operation not permitted/.test(probe.stderr ?? "")) return "sandbox-exec cannot nest in this sandbox (sandbox_apply: Operation not permitted)";
+  throw new Error(`sandbox-exec probe failed: ${probe.stderr || probe.error || probe.status}`);
 }

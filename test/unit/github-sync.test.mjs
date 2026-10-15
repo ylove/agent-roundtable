@@ -534,3 +534,20 @@ test("gh runner: argv only, gh's env allowlist, bodies in 0600 temp files; check
     process.env.PATH = `${gh.dir}${delimiter}${originalPath}`;
   }
 });
+
+test("gh sync links a PR published after the completion event once", async () => {
+  const gh = fakeGh();
+  const { store } = await frozenRun(twoTasks());
+  const sync = new GitHubSync({ executionId: store.id, repo: REPO, store });
+  await sync.syncOnce();
+  await emit(store, "execution.completed", { integration_sha: "i2" });
+  await sync.syncOnce();
+  const before = gh.calls().length;
+  await emit(store, "note.posted", { topic: "pull_request", text: "Pull request", refs: ["https://github.com/acme/app/pull/77"] }, src("runner", "runner"));
+  const report = await sync.syncOnce();
+  assert.equal(report.ok, true, report.errors.join("; "));
+  assert.ok(gh.calls().slice(before).some((c) => c.body?.includes("Pull request: https://github.com/acme/app/pull/77")));
+  const after = gh.calls().length;
+  await sync.syncOnce();
+  assert.equal(gh.calls().length, after);
+});

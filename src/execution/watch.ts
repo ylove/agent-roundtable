@@ -178,13 +178,16 @@ const TERMINAL: ReadonlySet<string> = new Set(["completed", "failed", "aborted"]
 
 const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((r) => {
-    const t = setTimeout(r, ms);
-    signal?.addEventListener("abort", () => (clearTimeout(t), r()), { once: true });
+    const done = () => { clearTimeout(t); signal?.removeEventListener("abort", done); r(); };
+    const t = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+    if (signal?.aborted) done();
   });
 
 /** Watch until a wake condition or the timeout; returns the line to print. Throws on a bad execution or name. */
 export async function watchExecution(exe: string, opts: WatchOptions): Promise<WatchResult> {
   const orchestrator = opts.as;
+  if (opts.timeoutMin !== undefined && (!Number.isFinite(opts.timeoutMin) || opts.timeoutMin < 0)) throw new Error("timeoutMin must be finite and non-negative");
   const path = watchFilePath(exe, orchestrator);
   const store = await openExecutionStore(exe);
   const timeoutMs = Math.max(0, (opts.timeoutMin ?? WATCH_DEFAULT_TIMEOUT_MIN) * 60_000);

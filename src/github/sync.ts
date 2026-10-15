@@ -455,6 +455,12 @@ export class GitHubSync {
         if (!Object.values(f.flagged).includes(target)) f.outbox.push({ kind: "unlabel", target, label: NEEDS_HUMAN_LABEL, attempts: 0 });
         break;
       }
+      case "note.posted": {
+        if (ev.source.kind !== "runner" || ev.payload.topic !== "pull_request") break;
+        const url = ev.payload.refs?.find((ref) => /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(ref));
+        if (url) this.comment(PARENT, ev.seq, `Pull request: ${ghLine(url, 300)}`);
+        break;
+      }
       case "execution.completed": {
         f.completed = true;
         const pr = ev.payload.pr_url ? ghLine(ev.payload.pr_url, 300) : undefined;

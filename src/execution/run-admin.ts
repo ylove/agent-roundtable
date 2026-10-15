@@ -8,11 +8,13 @@
 // ============================================================================
 
 import { existsSync, rmSync } from "node:fs";
+import { pidAlive } from "../prototypes/sandbox.js";
 import { completion } from "../dashboard/render.js";
 import { appendAudit, verifyAudit, type AuditVerifyResult } from "../security/audit.js";
 import { scrub } from "../security/secrets.js";
 import { executionBudgetUsd } from "./budget.js";
 import { runnerLiveness, type RunnerLiveness } from "./runner-launch.js";
+import { acquireLock, LockTimeoutError } from "./lock.js";
 import { executionDir, openExecutionStore } from "./store.js";
 import type { BlackboardState, TaskState } from "./types.js";
 import { verifyExecution, type VerifyResult } from "./verify.js";
@@ -178,19 +180,31 @@ export async function purgeExecution(exe: string, opts: { confirm: boolean; acto
   const dir = executionDir(exe);
   if (!existsSync(dir)) throw new PurgeRefusal(`Execution ${exe} not found`);
   if (opts.confirm !== true) throw new PurgeRefusal("purge deletes the run's worktrees, branches and log: pass --confirm");
-  const store = await openExecutionStore(exe);
-  const state = await store.state();
-  if (!TERMINAL.has(state.status)) throw new PurgeRefusal(`Execution ${exe} is ${state.status}; only completed, failed or aborted runs can be purged`);
   const live = runnerLiveness(exe);
   if (live.state === "running" || live.state === "other_host") throw new PurgeRefusal(`A runner (pid ${live.pid}) still holds ${exe}; wait for it to stop`);
-  const pruned = await pruneWorktrees(store.header(), { remove: true, branches: true });
-  rmSync(dir, { recursive: true, force: true });
-  const result: PurgeResult = { execution: exe, status: state.status, worktrees: pruned.removed, branches: pruned.branches, removedDir: dir };
-  await appendAudit({
-    actor: opts.actor ?? "human",
-    action: "execution.purged",
-    target: exe,
-    details: { status: state.status, worktrees: pruned.removed.length, branches: pruned.branches, repo_root: store.header().repo_root },
-  });
-  return result;
+  let release;
+  try {
+    release = await acquireLock(`${dir}/runner.lock`, { staleMs: 30_000, timeoutMs: 0 });
+  } catch (e) {
+    if (e instanceof LockTimeoutError) throw new PurgeRefusal(`A runner still holds ${exe}; wait for it to stop`);
+    throw e;
+  }
+  try {
+    const store = await openExecutionStore(exe);
+    const state = await store.state();
+    if (!TERMINAL.has(state.status)) throw new PurgeRefusal(`Execution ${exe} is ${state.status}; only completed, failed or aborted runs can be purged`);
+    if (Object.values(state.agents).some((a) => !a.external && a.pid !== undefined && pidAlive(a.pid))) throw new PurgeRefusal(`Workers still run in ${exe}; stop them before purging their worktrees`);
+    const pruned = await pruneWorktrees(store.header(), { remove: true, branches: true });
+    const result: PurgeResult = { execution: exe, status: state.status, worktrees: pruned.removed, branches: pruned.branches, removedDir: dir };
+    await appendAudit({
+      actor: opts.actor ?? "human",
+      action: "execution.purged",
+      target: exe,
+      details: { status: state.status, worktrees: pruned.removed.length, branches: pruned.branches, repo_root: store.header().repo_root },
+    });
+    rmSync(dir, { recursive: true, force: true });
+    return result;
+  } finally {
+    release();
+  }
 }

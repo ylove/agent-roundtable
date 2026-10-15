@@ -11,6 +11,9 @@ export interface LLMCompletionResult {
   usage?: {
     inputTokens: number;
     outputTokens: number;
+    /** Prompt-cache reads and writes, when the provider reports them (Anthropic). */
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
   };
 }
 

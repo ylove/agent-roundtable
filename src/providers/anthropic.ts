@@ -10,7 +10,12 @@ interface MessagesResponse {
   content?: Array<{ type: string; text?: string }>;
   model?: string;
   stop_reason?: string;
-  usage?: { input_tokens: number; output_tokens: number };
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number | null;
+    cache_creation_input_tokens?: number | null;
+  };
 }
 
 export const callAnthropic: ProviderCall = async (messages, o) => {
@@ -58,12 +63,18 @@ export const callAnthropic: ProviderCall = async (messages, o) => {
     .map((b) => b.text ?? "")
     .join("");
 
+  const u = result.usage;
   return {
     content: assertNonEmpty("Anthropic", text, result.stop_reason),
     model: result.model || o.model,
     provider: "anthropic",
-    usage: result.usage
-      ? { inputTokens: result.usage.input_tokens, outputTokens: result.usage.output_tokens }
+    usage: u
+      ? {
+          inputTokens: u.input_tokens,
+          outputTokens: u.output_tokens,
+          ...(typeof u.cache_read_input_tokens === "number" && { cacheReadTokens: u.cache_read_input_tokens }),
+          ...(typeof u.cache_creation_input_tokens === "number" && { cacheWriteTokens: u.cache_creation_input_tokens }),
+        }
       : undefined,
   };
 };

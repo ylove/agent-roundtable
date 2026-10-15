@@ -15,9 +15,11 @@ import { callAnthropic } from "./anthropic.js";
 import { callOpenAI, callTogether, callOpenAICompatible } from "./openai-compatible.js";
 import { callReplicate } from "./replicate.js";
 import { callOllama, isOllamaAvailable } from "./ollama.js";
+import { reportUsage } from "./usage.js";
 
 export type { LLMMessage, LLMCompletionResult, ProviderCall, ProviderCallOptions } from "./shared.js";
 export { isOllamaAvailable };
+export { withUsageSink, reportUsage, type UsageReport, type UsageSink } from "./usage.js";
 
 export const PROVIDERS: Record<LLMProvider, ProviderCall> = {
   anthropic: callAnthropic,
@@ -89,14 +91,14 @@ export interface CallLLMOptions {
 }
 
 /**
- * Unified helper to call any LLM provider for meetings/collaborations.
- * Routes to chatCompletion() with the appropriate provider and model.
+ * Call any LLM provider for meetings/collaborations and return the whole result (content, model,
+ * usage). Routes to chatCompletion(); reports { provider, model, usage } to the active usage sink.
  */
-export async function callLLM(
+export async function callLLMDetailed(
   systemPrompt: string,
   messages: Array<{ role: "user" | "assistant"; content: string }>,
   { provider, model, maxTokens = MAX_TOKENS, baseUrl }: CallLLMOptions
-): Promise<string> {
+): Promise<LLMCompletionResult> {
   const llmMessages: LLMMessage[] = [
     { role: "system", content: systemPrompt },
     ...messages.map((m) => ({
@@ -112,5 +114,18 @@ export async function callLLM(
     baseUrl,
   });
 
-  return result.content;
+  reportUsage({ provider: result.provider, model: result.model, ...(result.usage && { usage: result.usage }) });
+  return result;
+}
+
+/**
+ * Unified helper to call any LLM provider for meetings/collaborations: callLLMDetailed's content.
+ * Usage still reaches the active sink.
+ */
+export async function callLLM(
+  systemPrompt: string,
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+  options: CallLLMOptions
+): Promise<string> {
+  return (await callLLMDetailed(systemPrompt, messages, options)).content;
 }

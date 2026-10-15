@@ -618,9 +618,9 @@ WS02 added the tool layer and session durability that later workstreams build on
 
 | Module | API |
 |---|---|
-| `src/validate.ts` | `findProblem(schema, args, phases?)`, `assertValid(label, schema, args, phases?)`, `publicSchema(schema)`. Phases are `values` then `required`. Extensions: `x-hint`, `x-advisory-enum` (both stripped before listing) |
+| `src/validate.ts` | `findProblem(schema, args, phases?)`, `assertValid(label, schema, args, phases?)`, `publicSchema(schema)`. Phases are `values` then `required`. Extensions: `x-hint`, `x-advisory-enum`, `x-nonblank` (all stripped before listing) |
 | `src/tools.ts` | `tools`, `toolsFor(mode)`, `handleToolCall(name, args, mode?)`, `checkArgs`. A new group is a `ToolGroup` (`definitions` + `handle`) added to its `groups` list |
 | `src/tools/shared.ts` | `ToolDefinition` (`modes`, `annotations`, optional `precheck`), `ToolGroup`, annotation presets, `PROVIDER_PROPS`, `validateProviderOptions` |
 | `src/tools/names.ts` | Tool-name constants, `AT_THE_TABLE`, `HEADS_DOWN`, `MODE_LABELS` |
 | `src/sessions/lock.ts` | `lockSession(id, message)`, `withSessionLock(id, message, fn)`, `isSessionBusy(id)`, `sessionBusyMessage`, `SessionBusyError`. Refuses at once, never queues |
-| `src/sessions/archive.ts` | `archiveSession(record)`, `readArchivedSession(id)`, `listArchivedSessions()`. Records are `roundtable.session/1`; ultraplans carry `document` (markdown, versions, entries, sign-offs, tally) |
+| `src/sessions/archive.ts` | `archiveSession(record)`, `readArchivedSession(id)`, `listArchivedSessions()`, `pruneArchivedSessions(retentionDays = 30)` (not wired in yet). Agent refs and ids are stored as passed; only content fields are scrubbed. Records are `roundtable.session/1`; ultraplans carry `document` (markdown, versions, entries, sign-offs, tally) |

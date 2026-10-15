@@ -391,8 +391,8 @@ export interface EventPayloads {
   "artifact.published": { name: string; kind: "interface" | "design" | "doc"; path?: string; blob?: string; task: string };
   "artifact.changed": { name: string; version: number; consumers: string[] };
 
-  "dependency.requested": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string } };
-  "dependency.satisfied": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string }; by_event: string };
+  "dependency.requested": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string; owner?: string } };
+  "dependency.satisfied": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string; owner?: string }; by_event: string };
 
   "check.started": { command_id: string; scope: "task" | "integration"; task?: string };
   "check.passed": { command_id: string; scope: "task" | "integration"; task?: string; duration_ms: number };
@@ -718,7 +718,7 @@ export interface WorkerDriver {
   parse(line: string, acc: RunAccumulator): void;
   stop(h: WorkerHandle, reason: string): Promise<void>;
   /** Read-only answer from a live worker's context (micro-huddles). */
-  answer?(rec: WorkerRecord, question: string, maxUsd: number): Promise<{ text: string; usage?: UsageRecord }>;
+  answer?(rec: WorkerRecord, question: string, maxUsd: number, signal?: AbortSignal): Promise<{ text: string; usage?: UsageRecord }>;
 }
 
 // ---------------------------------------------------------------------------

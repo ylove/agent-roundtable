@@ -59,7 +59,6 @@ export interface WorkerServerOptions {
 
 /** Start the stdio server of a mode. A worker server first consumes its token and refuses to start without a valid one. */
 export async function startStdio(mode: ToolMode = "orchestrator", worker?: WorkerServerOptions): Promise<void> {
-  process.umask(0o077);
   if (mode === "worker") return startWorker(worker);
   return startOrchestrator();
 }

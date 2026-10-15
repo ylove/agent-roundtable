@@ -13,6 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(here, "../../dist/index.js");
 const { prepareWorkerFiles } = await import("../../dist/workers/files.js");
 const { ensureTaskWorktree } = await import("../../dist/execution/worktrees.js");
+const childEnvironment = await import("../../dist/security/child-env.js");
 
 async function setup() {
   const run = await makeRun();
@@ -91,4 +92,32 @@ test("a wrong, misplaced, malformed or public token refuses to start", { skip: p
   assert.match(refuse(["mcp", "--worker", "--execution", run.store.id]).stderr, /needs --execution, --agent and --token-file/);
   assert.equal(refuse(["mcp", "--bogus"]).code, 2);
   assert.match(refuse(["mcp", "--execution", run.store.id]).stderr, /go with --worker/);
+});
+
+
+test("entrypoint preserves the orchestrator umask and confines private defaults to heads-down", () => {
+  const { childEnv } = childEnvironment;
+  const preload = 'data:text/javascript,' + encodeURIComponent(`
+    import { mkdirSync, mkdtempSync, statSync, writeFileSync, rmSync } from "node:fs";
+    import { tmpdir } from "node:os";
+    import { join } from "node:path";
+    process.umask(0o022);
+    process.on("exit", () => {
+      const root = mkdtempSync(join(tmpdir(), "rt-umask-"));
+      writeFileSync(join(root, "file"), "created");
+      mkdirSync(join(root, "dir"));
+      process.stderr.write("DEFAULT_MODES=" + JSON.stringify([statSync(join(root, "file")).mode & 0o777, statSync(join(root, "dir")).mode & 0o777]) + "\\n");
+      rmSync(root, { recursive: true });
+    });
+  `);
+  for (const args of [[], ["mcp"], ["mcp", "--worker"], ["hook", "pre-tool-use"], ["status"]]) {
+    const result = spawnSync(process.execPath, ["--import", preload, CLI, ...args], {
+      input: "", encoding: "utf8", timeout: 15_000, env: childEnv("runner", { ROUNDTABLE_DOTENV: "off" }),
+    });
+    assert.equal(result.error, undefined, result.stderr);
+    const modes = /DEFAULT_MODES=(\[[^\]]+\])/.exec(result.stderr)?.[1];
+    assert.ok(modes, result.stderr);
+    const privateDefaults = args.includes("--worker") || args[0] === "hook" || args[0] === "status";
+    assert.deepEqual(JSON.parse(modes), privateDefaults ? [0o600, 0o700] : [0o644, 0o755], args.join(" "));
+  }
 });

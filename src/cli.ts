@@ -77,7 +77,6 @@ async function hook(args: string[]): Promise<void> {
 
 /** Run one subcommand. Exit codes: 0 ok, 1 a refused start, 2 usage (and a denied hook). */
 export async function runCli(argv: string[]): Promise<void> {
-  process.umask(0o077);
   const [command, ...rest] = argv;
   switch (command) {
     case "mcp":

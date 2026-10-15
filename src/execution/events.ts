@@ -125,7 +125,7 @@ const ESCALATION: Shape = {
   "resolution?": { action: RESOLUTION, decision: "t", by: "s" },
   raised_seq: "int",
 };
-const NEED: Shape = { kind: "'task'|'interface'|'artifact'", ref: "s" };
+const NEED: Shape = { kind: "'task'|'interface'|'artifact'", ref: "s", "owner?": "id" };
 
 // ---------------------------------------------------------------------------
 // The catalog (docs/design/heads-down.md §5)

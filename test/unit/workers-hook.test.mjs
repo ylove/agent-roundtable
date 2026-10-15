@@ -130,7 +130,7 @@ test("symlinks: a link that leads out is denied, a link as the target is denied,
 });
 
 test("fails closed: other tools pass, bad input and a missing identity or leases file deny", () => {
-  allowed(hook({ ...call("Read", "/etc/passwd") }));
+  allowed(hook({ ...call("OtherTool", "/etc/passwd") }));
   denied(hook("not json"), /lease hook failed/);
   denied(hook({}), /could not read the tool call/);
   denied(hook(call("Write", join(wt, "src/api/a.js")), { ROUNDTABLE_AGENT_ID: "" }), /no ROUNDTABLE_EXECUTION_ID/);
@@ -143,4 +143,36 @@ test("the hook is fast", () => {
   for (let i = 0; i < 3; i++) allowed(hook(call("Edit", join(wt, "src/api/index.js"))));
   const each = (Date.now() - t0) / 3;
   assert.ok(each < 1500, `${each} ms per hook call`);
+});
+
+
+test("tilde, URI and foreign paths are refused even beneath a broad lease", () => {
+  for (const path of ["~/src/api/x.js", "~someone/x.js", "file:///etc/passwd", "C:\\outside.txt"]) {
+    denied(hook(call("Write", path)), /relative or absolute path inside your worktree/);
+  }
+});
+
+test("Read, Glob and Grep are confined and deny secrets without needing a lease", () => {
+  allowed(hook(call("Read", "README.md")));
+  for (const tool of ["Read", "Glob", "Grep"]) {
+    const input = (path) => ({ ...call(tool, path, tool === "Read" ? "file_path" : "path"), tool_input: { [tool === "Read" ? "file_path" : "path"]: path, pattern: "**/*.js" } });
+    denied(hook(input("/etc/passwd")), /outside your task worktree/);
+    denied(hook(input("~/x")), /relative or absolute/);
+    denied(hook(input("../x")), /contains "\.\."/);
+    denied(hook(input("src/api/links/out")), /outside your task worktree|is a symlink/);
+    for (const path of [".env", "src/api/tls.key", "src/api/id_ed25519.pub"]) denied(hook(input(path)), /secret file/);
+    allowed(hook(input("src/components/nav")));
+  }
+  for (const pattern of ["../**", "src/{..,..}/**", "{src,/etc}/**", "~/**", "/etc/**", "C:\\**"]) denied(hook({ tool_name: "Glob", tool_input: { pattern } }), /relative pattern/);
+  denied(hook({ tool_name: "Read", tool_input: {} }), /names no file path/);
+});
+
+test("recursive reads reject escaping symlinks and secret files in their subtree", () => {
+  mkdirSync(join(wt, "docs/search"), { recursive: true });
+  writeFileSync(join(wt, "docs/search/plain.txt"), "safe");
+  allowed(hook({ tool_name: "Glob", tool_input: { path: "docs/search", pattern: "**/*" } }));
+  allowed(hook({ tool_name: "Grep", tool_input: { path: "docs/search", pattern: "safe" } }));
+  writeFileSync(join(wt, "docs/search/.env.local"), "secret");
+  denied(hook({ tool_name: "Grep", tool_input: { path: "docs/search", pattern: ".*" } }), /secret file/);
+  denied(hook({ tool_name: "Glob", tool_input: { pattern: "**/*" } }), /outside your task worktree|secret file|symlink/);
 });

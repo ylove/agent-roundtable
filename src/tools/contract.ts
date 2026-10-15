@@ -79,8 +79,9 @@ export const contractTools: ToolDefinition[] = [
       "A draft gets a new proposal; a frozen contract is amended in force: removed tasks are cancelled and the agents of affected tasks get a directive to re-read it. " +
       "from_session (an archived replan or ultraplan) first replaces the structure with that session's roundtable-tasks block (pass patch: {}). " +
       "id, version, status, consent, frozen, the scope's orchestrator, repository, base commit and parent, and the goal's original_prompt cannot change. " +
-      "consent: true re-asks only the affected participants (personas of changed, added or removed tasks and of tasks touched through interfaces or checks, and new participants) plus anyone with an open objection; " +
-      "an objector who now agrees has the objection resolved by the amendment. patch: {} with consent: true just asks everyone without an agreement. " +
+      "Consent counts only for the version it was given on. A draft amendment needs every participant's consent again before a freeze: consent: true asks them all, and an objector who now agrees has the objection resolved by the amendment. " +
+      "On a frozen contract, a run-wide change (budget, scope, sandbox, authority, validation, workers, goal) needs consent: true (everyone is asked about it first, and it applies only if all agree) or override_consent: true (audited); " +
+      "other changes apply at once, and consent: true then asks the personas of affected tasks. patch: {} with consent: true just asks everyone without an agreement on the current version. " +
       "Returns the affected tasks, the consent outcome and the contract markdown.",
     inputSchema: {
       type: "object",
@@ -91,7 +92,8 @@ export const contractTools: ToolDefinition[] = [
         reason: { type: "string", description: "Why the contract changes; recorded and sent to affected agents.", "x-nonblank": true, "x-hint": "say why the contract changes" },
         orchestrator: ORCHESTRATOR,
         from_session: { type: "string", description: "Id of an archived replan or ultraplan whose roundtable-tasks block replaces the tasks, commands and interfaces." },
-        consent: { type: "boolean", description: "Default false. True: re-ask the affected participants and open objectors." },
+        consent: { type: "boolean", description: "Default false. True: ask participants about the new version: everyone for a draft or a run-wide change, the personas of affected tasks otherwise." },
+        override_consent: { type: "boolean", description: "Frozen contracts only, default false: apply a run-wide change (budget, scope, sandbox, authority, validation, workers, goal) without everyone's consent. Audited." },
         ...PROVIDER_PROPS,
       },
       required: ["contract_id", "patch", "reason", "orchestrator"],
@@ -102,8 +104,8 @@ export const contractTools: ToolDefinition[] = [
     modes: ORCHESTRATOR_ONLY,
     annotations: { title: "Freeze contract", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     description:
-      "Freeze a contract so it can be executed. Only its orchestrator can, and only once every participant has agreed. " +
-      "Refuses, listing every reason, while an objection or UNCLEAR answer is unresolved, a participant has not answered, a consent round is in flight, the source session is busy, " +
+      "Freeze a contract so it can be executed. Only its orchestrator can, and only once every participant has agreed to its current version. " +
+      "Refuses, listing every reason, while an objection or UNCLEAR answer is unresolved, a participant has not answered about the current version, a consent round is in flight (abandon_round declares a dead one abandoned), the source session is busy, " +
       "or, for a child contract, while the parent is not frozen or the caller is neither the parent task's persona nor the parent's orchestrator. " +
       "excuse sets objections aside, each with a reason; excusals and the frozen sha256 go to the audit log. Freezing starts nothing: the run starts with execute, when the human asks.",
     inputSchema: {
@@ -112,6 +114,10 @@ export const contractTools: ToolDefinition[] = [
       properties: {
         contract_id: CONTRACT_ID,
         orchestrator: ORCHESTRATOR,
+        abandon_round: {
+          type: "boolean",
+          description: "Default false. True: declare an unfinished consent round abandoned (its process died or hangs): its missing answers are recorded as unclear, which still need excusing, and the abandonment is audited.",
+        },
         excuse: {
           type: "array",
           maxItems: 50,
@@ -175,12 +181,14 @@ export async function handleContractTool(name: string, args: ToolArgs): Promise<
       result = await amendContract(await openContractStore(id), a.patch as Record<string, unknown>, {
         by: a.orchestrator as string, reason: a.reason as string, contractId: id,
         fromSession: a.from_session as string | undefined, consent: a.consent === true ? llmOf(a) : false,
+        overrideConsent: a.override_consent === true,
       });
       break;
     }
     case FREEZE_CONTRACT:
       result = await freezeContract(a.contract_id as string, {
         orchestrator: a.orchestrator as string, excuse: a.excuse as Array<{ agent: string; reason: string }> | undefined,
+        abandonRound: a.abandon_round === true,
       });
       break;
     default:

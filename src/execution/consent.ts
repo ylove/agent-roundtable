@@ -8,11 +8,13 @@
 // it is recorded as UNCLEAR, which counts as an objection.
 // ============================================================================
 
+import { hostname } from "node:os";
 import { DEFAULT_MODELS, type LLMProvider } from "../config.js";
 import { loadAgentPromptWithPath } from "../agents.js";
+import { newId } from "../ids.js";
 import type { CallLLMOptions } from "../providers/index.js";
 import { runVerdictRound, truncate } from "../sessions/workshop.js";
-import { renderContractMarkdown } from "./contract.js";
+import { consentHash, renderContractMarkdown } from "./contract.js";
 import {
   beginConsentRound,
   contractRecord,
@@ -107,10 +109,15 @@ export interface ConsentAnswer {
 
 export interface ConsentRoundResult {
   contract: string;
+  /** The version asked about (a candidate's version when one was given). */
   version: number;
+  /** The round's id (absent when nobody needed asking). */
+  round?: string;
   /** The participants asked in this round (empty when nobody needed asking). */
   asked: string[];
   answers: ConsentAnswer[];
+  /** Set when the answers were not recorded because the round stopped being current. */
+  dropped?: string;
   summary: ConsentSummary;
   record: ContractRecord;
 }
@@ -118,45 +125,60 @@ export interface ConsentRoundResult {
 export interface RequestConsentOptions {
   /** The orchestrator (or lead) recording the round. */
   by: string;
-  /** Participants to ask; default every participant of the latest version. */
+  /** Participants to ask; default every participant of the version asked about. */
   participants?: string[];
   llm?: ConsentLLMOptions;
+  /**
+   * Ask about this version before it is stored (an amendment of a frozen contract that needs
+   * everyone's consent first). It must be the next version, in its stored form; the answers are
+   * recorded only while the contract is still at the version before it.
+   */
+  candidate?: Contract;
 }
 
 const mode = (status: string) => (status === "created" ? "deliberation" : "execution");
 
 /**
- * Run one consent round on the latest version of `contractId`: record the request, ask outside any
- * transaction, then record every answer (and objection_resolved for an objector who now agrees).
+ * Run one consent round on the latest version of `contractId` (or on a candidate next version):
+ * record the request with a round id and the content hash, ask outside any transaction, then
+ * record the answers, but only while the round is still current and the version unchanged; a
+ * late answer is dropped. An objector who now agrees gets objection_resolved.
  */
 export async function requestConsent(store: ExecutionStore, contractId: string, opts: RequestConsentOptions): Promise<ConsentRoundResult> {
   const before = await contractRecord(store, contractId);
   if (before.superseded) throw new Error(`Contract ${contractId} was superseded by ${before.superseded}`);
-  const all = before.contract.participants.map((p) => p.agent);
+  const subject = opts.candidate ?? before.contract;
+  if (opts.candidate && opts.candidate.version !== before.version + 1) {
+    throw new Error(`A candidate for ${contractId} must be v${before.version + 1} (got v${opts.candidate.version})`);
+  }
+  const all = subject.participants.map((p) => p.agent);
   const asked = [...new Set(opts.participants ?? all)];
   const strangers = asked.filter((a) => !all.includes(a));
   if (strangers.length) throw new Error(`Not participants of ${contractId}: ${strangers.join(", ")}`);
-  if (asked.length === 0) return { contract: contractId, version: before.version, asked, answers: [], summary: summarizeConsent(before), record: before };
+  if (asked.length === 0) return { contract: contractId, version: subject.version, asked, answers: [], summary: summarizeConsent(before), record: before };
 
   const source = orchestratorSource(opts.by);
-  const { result: version } = await store.transact<number>(async ({ state }) => {
+  const round = newId("rnd");
+  const hash = consentHash(subject);
+  const baseVersion = before.version;
+  const roundVersion = subject.version;
+  await store.transact(async ({ state }) => {
     const rec = await contractRecord(store, contractId);
     if (rec.round?.inFlight) {
       throw new Error(`A consent round for ${contractId} is already in flight (${rec.round.pending.length} answers pending). Wait for it to finish.`);
     }
+    if (rec.version !== baseVersion) throw new Error(`Contract ${contractId} changed meanwhile (now v${rec.version}); ask about the latest version`);
     return {
       events: [{
-        type: "contract.consent_requested", source, mode: mode(state.status), contract: contractId, contract_version: rec.version,
-        payload: { contract: contractId, version: rec.version, participants: asked },
+        type: "contract.consent_requested", source, mode: mode(state.status), contract: contractId, contract_version: roundVersion,
+        payload: { contract: contractId, version: roundVersion, participants: asked, round, hash, host: hostname() },
       }],
-      result: rec.version,
     };
   });
-  const roundVersion = version ?? before.version;
   let answers: ConsentAnswer[] = [];
-  beginConsentRound(contractId);
+  let dropped: string | undefined;
+  beginConsentRound(round);
   try {
-    const contract = (await contractRecord(store, contractId)).contract;
     const loaded: Array<{ name: string; systemPrompt: string } | { name: string; error: string }> = [];
     for (const name of asked) {
       try {
@@ -167,7 +189,7 @@ export async function requestConsent(store: ExecutionStore, contractId: string, 
       }
     }
     const agents = loaded.filter((a): a is { name: string; systemPrompt: string } => "systemPrompt" in a);
-    const replies = await runVerdictRound(agents, (a) => buildConsentPrompt(contract, a.name), CONSENT_LABEL, {
+    const replies = await runVerdictRound(agents, (a) => buildConsentPrompt(subject, a.name), CONSENT_LABEL, {
       verdicts: CONSENT_VERDICTS, llm: resolveConsentLLM(opts.llm), reask: CONSENT_REASK, catchErrors: true,
     });
     const byName = new Map(replies.map((r) => [r.agent.name, r]));
@@ -183,12 +205,22 @@ export async function requestConsent(store: ExecutionStore, contractId: string, 
       }
       return { agent: a.name, verdict: r.verdict as "AGREE" | "OBJECT", reason: consentReason(r.content), reasked: r.reasked };
     });
-    await store.transact(({ state }) => {
+    await store.transact(async ({ state }) => {
+      const now = await contractRecord(store, contractId);
+      if (now.round?.id !== round) {
+        dropped = `the answers were not recorded: a newer consent round for ${contractId} started meanwhile`;
+        return { events: [] };
+      }
+      if (now.version !== baseVersion) {
+        dropped = `the answers were not recorded: ${contractId} moved on to v${now.version} meanwhile`;
+        return { events: [] };
+      }
       const events: AnyEventDraft[] = [];
       for (const a of answers) {
+        if (!now.round.pending.includes(a.agent)) continue; // the first answer per participant wins (an abandoned round's UNCLEAR included)
         events.push({
           type: "contract.consent_recorded", source, mode: mode(state.status), contract: contractId, contract_version: roundVersion,
-          payload: { contract: contractId, agent: a.agent, verdict: a.verdict, ...(a.reason && { reason: a.reason }) },
+          payload: { contract: contractId, agent: a.agent, verdict: a.verdict, ...(a.reason && { reason: a.reason }), round },
         });
         const prior = Object.hasOwn(before.verdicts, a.agent) ? before.verdicts[a.agent] : undefined;
         if (a.verdict === "AGREE" && prior && (prior.verdict === "OBJECT" || prior.verdict === "UNCLEAR") && !prior.resolved) {
@@ -202,13 +234,16 @@ export async function requestConsent(store: ExecutionStore, contractId: string, 
       return { events };
     });
   } finally {
-    endConsentRound(contractId);
+    endConsentRound(round);
   }
+  if (dropped) console.error(`[Contracts] ${dropped}`);
   const record = await contractRecord(store, contractId);
-  try {
-    writeContractFiles(store, presentContract(record));
-  } catch (e) {
-    console.error(`[Contracts] could not update the files of ${contractId}: ${e instanceof Error ? e.message : String(e)}`);
+  if (!opts.candidate) {
+    try {
+      writeContractFiles(store, presentContract(record));
+    } catch (e) {
+      console.error(`[Contracts] could not update the files of ${contractId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
-  return { contract: contractId, version: roundVersion, asked, answers, summary: summarizeConsent(record), record };
+  return { contract: contractId, version: roundVersion, round, asked, answers, ...(dropped && { dropped }), summary: summarizeConsent(record), record };
 }

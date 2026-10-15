@@ -34,7 +34,7 @@ export const TASK_BLOCK_FORMAT = `{
     { "name": "OrdersApi", "kind": "api", "owner": "orders-api", "consumers": ["orders-page"], "description": "GET /orders response shape" }
   ]
 }
-Rules: ids (tasks, commands, teams) use lowercase letters, digits, ".", "_" or "-". persona is the participant who does the task. depends_on lists tasks that must be accepted first, with no cycles. paths.write are repository-relative globs using only **, * and ?; tasks that can run at the same time must not write the same paths. acceptance criteria are concrete and checkable. checks name commands that prove the task works. A command's argv is the program and its arguments as an array, never a shell line such as "sh -c ...", and timeout_s is at most 900. interfaces are what one task produces for others: owner and consumers are task ids. Optional keys: "teams" [{"id", "lead", "members"}], "decisions" [{"id", "text", "rationale"}], "final" (command ids for the final validation; default all).`;
+Rules: ids (tasks, commands, teams) use lowercase letters, digits, ".", "_" or "-". persona is the participant who does the task. depends_on lists tasks that must be accepted first, with no cycles. paths.write are repository-relative globs using only **, * and ?; tasks that can run at the same time must not write the same paths. acceptance criteria are concrete and checkable. checks name commands that prove the task works. A command's argv is the program and its arguments as an array, never a shell line such as "sh -c ...", and timeout_s is at most 900. interfaces are what one task produces for others: owner and consumers are task ids. Optional keys: "teams" [{"id", "lead", "members"}], "decisions" [{"id", "text", "rationale"}], "final" (command ids for the final validation; default all), "participants" (agents who must consent; every task persona is added), "budget" {"usd", "per_task_usd", "wall_clock_min"} (without it a placeholder budget is used and flagged).`;
 
 /** For planner prompts: end the plan with the block. */
 export function buildTaskBlockInstructions(): string {
@@ -100,14 +100,29 @@ export function blockToContract(value: unknown): { contract: Record<string, unkn
 // Archived sessions
 // ---------------------------------------------------------------------------
 
+export interface BlockText {
+  /** Where the text came from, for messages ("ultraplan-x plan v2"). */
+  from: string;
+  text: string;
+  /** Set when a block found here deserves a warning (it came from a participant's turn). */
+  warn?: string;
+}
+
 export interface SessionSource {
-  /** Texts that may hold a block, most authoritative first (the final plan, then the document). */
-  blockTexts: string[];
-  /** The text a structuring call works from. */
+  /**
+   * Texts that may hold a block, most authoritative first. For an ultraplan these are its plan
+   * versions only, latest first: never the document or entries, whose blocks may come from a
+   * participant's input or sign-off.
+   */
+  blockTexts: BlockText[];
+  /** The text a structuring call works from: an ultraplan's final plan, else the summary and discussion. */
   planText: string;
   /** What the session was about: an ultraplan's task, a collaboration's topic. */
   topic: string;
   agents: string[];
+  kind: string;
+  /** Ultraplans only: whether the final plan was signed off. */
+  signedOff?: boolean;
 }
 
 const PLAN_TEXT_LIMIT = 40_000;
@@ -115,21 +130,31 @@ const PLAN_TEXT_LIMIT = 40_000;
 export function sessionSource(archived: ArchivedSession): SessionSource {
   const doc = archived.document;
   if (archived.kind === "ultraplan" && doc) {
-    const latest = doc.versions.at(-1)?.plan;
     return {
-      blockTexts: [latest, doc.markdown].filter((t): t is string => typeof t === "string" && t.length > 0),
-      planText: latest ?? doc.markdown,
+      blockTexts: [...doc.versions].reverse().filter((v) => typeof v.plan === "string" && v.plan.length > 0)
+        .map((v) => ({ from: `${archived.id} plan v${v.version}`, text: v.plan })),
+      planText: doc.versions.at(-1)?.plan ?? "",
       topic: archived.topic,
       agents: archived.agents,
+      kind: archived.kind,
+      signedOff: doc.signedOff,
     };
   }
-  const turns = [...archived.turns].reverse().map((t) => t.content);
+  // Other sessions: the summary and the orchestrator's turns first, then agents' turns (latest first), with a warning.
+  const texts: BlockText[] = [];
+  if (archived.summary) texts.push({ from: `${archived.id} summary`, text: archived.summary });
+  const turns = [...archived.turns].reverse();
+  for (const t of turns) if (t.role !== "agent") texts.push({ from: `${archived.id} ${t.role} turn`, text: t.content });
+  for (const t of turns) {
+    if (t.role === "agent") texts.push({ from: `${archived.id} ${t.speaker} turn`, text: t.content, warn: `the ${TASK_BLOCK_TAG} block came from ${t.speaker}'s turn in ${archived.id}, not from a plan: review it before freezing` });
+  }
   const transcript = archived.transcript.length > PLAN_TEXT_LIMIT ? "…[earlier discussion truncated]\n" + archived.transcript.slice(-PLAN_TEXT_LIMIT) : archived.transcript;
   return {
-    blockTexts: [archived.summary, ...turns].filter((t): t is string => typeof t === "string" && t.length > 0),
+    blockTexts: texts.filter((t) => t.text.length > 0),
     planText: (archived.summary ? `## Summary\n\n${archived.summary}\n\n## Discussion\n\n` : "") + transcript,
     topic: archived.topic,
     agents: archived.agents,
+    kind: archived.kind,
   };
 }
 

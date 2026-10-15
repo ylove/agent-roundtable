@@ -829,6 +829,15 @@ export function contractHash(c: Contract): string {
   return sha256Hex(canonicalJSON(rest));
 }
 
+/**
+ * What a consent verdict is tied to: contractHash without `status` either, so an AGREE given on a
+ * draft still matches the same version once it is frozen.
+ */
+export function consentHash(c: Contract): string {
+  const { frozen: _f, consent: _c, status: _s, ...rest } = c;
+  return sha256Hex(canonicalJSON(rest));
+}
+
 /** RFC 7396 JSON merge patch: objects merge recursively, null deletes, anything else replaces. */
 export function applyMergePatch<T = unknown>(target: unknown, patch: unknown): T {
   if (!isObj(patch)) return clone(patch) as T;

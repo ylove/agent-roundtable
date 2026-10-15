@@ -315,8 +315,13 @@ export interface EventPayloads {
    * before a contract is frozen an amendment proposes v(N+1), since contract.amended marks it frozen.
    */
   "contract.proposed": { contract: string; version: number; source: string; blob: string; reason?: string; patch_blob?: string };
-  "contract.consent_requested": { contract: string; version: number; participants: string[] };
-  "contract.consent_recorded": { contract: string; agent: string; verdict: ConsentVerdict; reason?: string };
+  /**
+   * Added in WS04 (optional): `round` identifies the round its answers name, `hash` is the
+   * contractHash of the version asked about, `host` (with source.pid) the process running it.
+   */
+  "contract.consent_requested": { contract: string; version: number; participants: string[]; round?: string; hash?: string; host?: string };
+  /** `round` (WS04, optional): the round this answers; an answer to any other round is ignored. */
+  "contract.consent_recorded": { contract: string; agent: string; verdict: ConsentVerdict; reason?: string; round?: string };
   "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused"; reason: string };
   /**
    * `blob` (added in WS03) is the full contract JSON at this version, stored with putBlob. The store

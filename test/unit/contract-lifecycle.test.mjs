@@ -1,19 +1,20 @@
 // Contract lifecycle (heads-down.md §8): structure sources, propose, consent, freeze, amend, and the tool layer.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { json, stubFetch } from "./helpers.mjs";
 
 const { proposeContract, freezeContract, amendContract, resolveRepo, AuthorityError, ContractRefusal, authorityNeeds } =
   await import("../../dist/execution/contract-lifecycle.js");
-const { contractRecord, openContractStore, summarizeConsent, consentRoundStaleMs } = await import("../../dist/execution/contract-state.js");
+const { contractRecord, openContractStore, summarizeConsent, consentRoundStaleMs, endConsentRound, CONSENT_ROUND_STALE_CAP_MS } = await import("../../dist/execution/contract-state.js");
+const { requestConsent } = await import("../../dist/execution/consent.js");
 const { buildConsentPrompt, CONSENT_REASK, consentReason } = await import("../../dist/execution/consent.js");
 const { findTaskBlock, blockToContract, sessionSource, TASK_BLOCK_TAG } = await import("../../dist/execution/contract-parse.js");
-const { contractHash, checkContract } = await import("../../dist/execution/contract.js");
+const { contractHash, consentHash, checkContract } = await import("../../dist/execution/contract.js");
 const { listExecutions } = await import("../../dist/execution/store.js");
 const { archiveSession } = await import("../../dist/sessions/archive.js");
 const { lockSession } = await import("../../dist/sessions/lock.js");
@@ -151,7 +152,7 @@ test("propose with an explicit contract creates the store, header, events and fi
   assert.ok(r.paths.json.endsWith("v1.json"));
   assert.match(readFileSync(r.paths.markdown, "utf8"), /^# Contract: Ship the orders page/);
   assert.deepEqual(r.consent.missing, [cfo, skeptic]);
-  assert.match(r.next, /No consent yet/);
+  assert.match(r.next, /Nobody has consented to v1 yet from/);
   assert.deepEqual(await store.verify(), { ok: true, seq: 2 });
   assert.equal(git("status", "--porcelain"), "", "nothing is written to the repository");
 });
@@ -261,8 +262,12 @@ test("consent: AGREE, OBJECT, and UNCLEAR re-asked once with a stricter prompt a
   const types = (await store.events()).map((e) => [e.type, e.batch?.n ?? 1]);
   assert.deepEqual(types.slice(2), [["contract.consent_requested", 1], ["contract.consent_recorded", 3], ["contract.consent_recorded", 3], ["contract.consent_recorded", 3]]);
   const requested = (await store.events({ types: ["contract.consent_requested"] }))[0].payload;
-  assert.deepEqual(requested, { contract: r.contractId, version: 1, participants: [cfo, skeptic, ops] });
-  assert.match(r.next, /Objections: .*Address them with amend_contract/);
+  assert.deepEqual([requested.contract, requested.version, requested.participants], [r.contractId, 1, [cfo, skeptic, ops]]);
+  assert.match(requested.round, /^rnd-[0-9a-z]{8}$/);
+  assert.equal(requested.hash, consentHash((await contractRecord(store)).contract));
+  assert.equal(typeof requested.host, "string");
+  for (const e of await store.events({ types: ["contract.consent_recorded"] })) assert.equal(e.payload.round, requested.round);
+  assert.match(r.next, /Objections to v1: .*Address them with amend_contract/);
 });
 
 test("consent reasons drop the verdict line; prompts mark only the participant's own tasks", () => {
@@ -301,7 +306,7 @@ test("freeze refuses unresolved objections and unclear answers; excusals must na
   provider(t, answers({ cfo: ["Consent: AGREE\nok"], skeptic: ["Consent: OBJECT\nno tests"] }));
   const r = await propose({ consent: true });
   await assert.rejects(freezeContract(r.contractId, { orchestrator: "main" }), /skeptic\.md objects: no tests/);
-  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main", excuse: [{ agent: cfo, reason: "x" }] }), /has no objection to excuse/);
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main", excuse: [{ agent: cfo, reason: "x" }] }), /already agreed to v1: there is nothing to excuse/);
   await assert.rejects(freezeContract(r.contractId, { orchestrator: "main", excuse: [{ agent: "stranger", reason: "x" }] }), /stranger is not a participant/);
   await assert.rejects(freezeContract(r.contractId, { orchestrator: "main", excuse: [{ agent: skeptic, reason: " " }] }), /needs a reason/);
   assert.equal((await contractRecord(await openContractStore(r.contractId))).status, "draft", "a refusal records nothing");
@@ -368,18 +373,19 @@ test("a child contract: proposed by the parent task's persona; frozen only once 
   assert.equal(child.contract.scope.repo_root, parent.contract.scope.repo_root);
   await assert.rejects(freezeContract(child.contractId, { orchestrator: cfo }), new RegExp(`its parent ${parent.contractId} is not frozen`));
   await assert.rejects(propose({ orchestrator: cfo, parentContract: parent.contractId, parentTask: "sub", contract: { ...childContract, budget: { usd: 9, per_task_usd: 1 } } }),
-    /budget\.usd \(\$9\) exceeds the parent task's budget \(\$4\)/);
+    /budget\.usd \(\$9\) exceeds what the parent task may spend \(\$4/);
 });
 
 // ---------------------------------------------------------------------------
 // Amend
 // ---------------------------------------------------------------------------
 
-test("amending a draft proposes v2; only affected participants and open objectors are re-asked", async (t) => {
+test("amending a draft proposes v2, which every participant must consent to again; an objector who agrees is resolved", async (t) => {
   const three = explicit({ tasks: [...baseTasks(), { id: "docs", title: "Docs", persona: ops, paths: { write: ["docs/**"] }, acceptance: ["written"], checks: [] }],
     scope: { paths: ["src/**", "docs/**"] } });
   const calls = provider(t, answers({
-    cfo: ["Consent: AGREE\nok"], skeptic: ["Consent: AGREE\nok", "Consent: AGREE\nstill fine"], ops: ["Consent: OBJECT\ndocs too vague", "Consent: AGREE\nclear now"],
+    cfo: ["Consent: AGREE\nok", "Consent: AGREE\nstill fine"], skeptic: ["Consent: AGREE\nok", "Consent: AGREE\nstill fine"],
+    ops: ["Consent: OBJECT\ndocs too vague", "Consent: AGREE\nclear now"],
   }));
   const r = await propose({ contract: three, consent: true });
   assert.deepEqual(r.consent.objections.map((o) => o.agent), [ops]);
@@ -389,9 +395,10 @@ test("amending a draft proposes v2; only affected participants and open objector
   assert.equal(a.version, 2);
   assert.equal(a.status, "draft");
   assert.deepEqual(a.affected.changed, ["docs"]);
-  assert.deepEqual(a.asked, [ops], "cfo and skeptic are not affected");
-  assert.equal(consentRequests(calls).length, 4);
+  assert.deepEqual(a.asked, [cfo, skeptic, ops], "everyone consented to v1, not to v2");
+  assert.equal(consentRequests(calls).length, 6);
   assert.equal(a.consent.ready, true);
+  assert.equal(a.consent.version, 2);
   const proposed = (await store.events({ types: ["contract.proposed"] })).at(-1);
   assert.equal(proposed.payload.version, 2);
   assert.equal(proposed.payload.source, "amendment");
@@ -401,9 +408,12 @@ test("amending a draft proposes v2; only affected participants and open objector
   const resolved = (await store.events({ types: ["contract.objection_resolved"] })).map((e) => e.payload);
   assert.deepEqual(resolved, [{ contract: r.contractId, agent: ops, how: "amended", reason: "agreed to v2" }]);
   assert.equal((await store.state()).contract, undefined, "a draft amendment does not reach the blackboard");
-  // The interface consumers of a changed interface are affected too.
+  // The interface consumers of a changed interface are affected too; without consent nobody has agreed to v3.
   const b = await amendContract(store, { interfaces: [{ ...three.interfaces[0], description: "GET /orders?page=" }] }, { by: "main", reason: "paging" });
   assert.deepEqual(b.affected.all, ["api", "ui"]);
+  assert.equal(b.consent.ready, false);
+  assert.deepEqual(b.consent.stale.map((x) => [x.agent, x.verdict, x.version]), [[cfo, "AGREE", 2], [skeptic, "AGREE", 2], [ops, "AGREE", 2]]);
+  assert.match(b.next, /Nobody has consented to v3 yet from: .*cfo\.md \(AGREE on v2\)/);
   await assert.rejects(amendContract(store, {}, { by: "main", reason: "nothing" }), /The patch changes nothing/);
   await assert.rejects(amendContract(store, { id: "x", scope: { repo_root: "/x" }, goal: { original_prompt: "y" } }, { by: "main" }),
     /patch may not change id\n- patch may not change scope\.repo_root\n- patch may not change goal\.original_prompt/);
@@ -411,6 +421,27 @@ test("amending a draft proposes v2; only affected participants and open objector
   await assert.rejects(amendContract(store, { tasks: [{ id: "solo" }] }, { by: "main" }), /The amended contract is not valid/);
 });
 
+test("freeze needs AGREE on the current version: an amendment after everyone agreed asks again (the review's repro)", async (t) => {
+  const calls = provider(t, () => "Consent: AGREE\nok");
+  const r = await propose({ consent: true });
+  assert.equal(r.consent.ready, true);
+  const store = await openContractStore(r.contractId);
+  const wider = baseTasks().map((x) => (x.id === "api" ? { ...x, acceptance: [...x.acceptance, "also rewrite auth"], paths: { write: ["src/**"] } } : x));
+  const a = await amendContract(store, { tasks: wider, budget: { usd: 200, per_task_usd: 100 } }, { by: "main", reason: "scope change" });
+  assert.equal(a.version, 2);
+  assert.equal(a.consent.ready, false);
+  assert.doesNotMatch(a.next, /Every participant agreed/);
+  assert.match(a.next, /Nobody has consented to v2 yet/);
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main" }), /answered AGREE on v1, not on v2/);
+  const before = calls.length;
+  const e = await amendContract(store, {}, { by: "main", reason: "consent", consent: llm });
+  assert.deepEqual(e.asked, [cfo, skeptic], "an empty patch asks everyone without an agreement on v2");
+  assert.equal(calls.length, before + 2);
+  const f = await freezeContract(r.contractId, { orchestrator: "main" });
+  assert.equal(f.version, 2);
+  const rec = await contractRecord(store);
+  assert.deepEqual(Object.values(rec.verdicts).map((v) => `${v.verdict}@v${v.version}`), ["AGREE@v2", "AGREE@v2"]);
+});
 test("amending a frozen contract: contract.amended v2, removed tasks cancelled, a directive to affected agents, audited", async (t) => {
   const three = explicit({ tasks: [...baseTasks(), { id: "docs", title: "Docs", persona: cfo, paths: { write: ["src/docs/**"] }, acceptance: ["written"], checks: [] }] });
   const r = await agreedContract(t, { contract: three });
@@ -447,17 +478,23 @@ test("amending a frozen contract: contract.amended v2, removed tasks cancelled, 
   assert.equal(contractHash(blob), secret.hash);
 });
 
-test("amendContract with an authority: add_task, reassign and extend_budget within the percentage; everything else refused", async (t) => {
-  const r = await agreedContract(t, { contract: explicit({ authority: { lead: cfo, may: ["retry", "add_task"], budget_extension_pct: 10 } }) });
+test("amendContract with an authority: only the lead, only within authority.may, default-deny over every field", async (t) => {
+  const may = ["retry", "add_task", "reassign", "extend_budget", "amend_interfaces"];
+  const r = await agreedContract(t, { contract: explicit({ authority: { lead: cfo, may, budget_extension_pct: 10 } }) });
   await freezeContract(r.contractId, { orchestrator: "main" });
   const store = await openContractStore(r.contractId);
   const extra = { id: "tests", title: "Tests", persona: cfo, paths: { write: ["src/tests/**"] }, acceptance: ["covers orders"], checks: ["test"] };
+  // Who: the lead only, and never beyond what the contract grants.
+  await assert.rejects(amendContract(store, { tasks: [...baseTasks(), extra] }, { by: "intruder", authority: ["add_task"] }), /only the lead \(.*cfo\.md\) amends within the authority; intruder cannot/);
+  await assert.rejects(amendContract(store, { tasks: [...baseTasks(), extra] }, { by: cfo, authority: ["add_task", "split_task"] }), /authority\.may \(retry, add_task, reassign, extend_budget, amend_interfaces\) does not grant split_task/);
+  await assert.rejects(amendContract(store, { title: "x" }, { by: cfo }), /only the contract's orchestrator \(main\) can amend it without an authority limit/);
   const added = await amendContract(store, { tasks: [...baseTasks(), extra] }, { by: cfo, reason: "goal review: missing tests", authority: ["retry", "add_task"] });
   assert.deepEqual(added.affected.added, ["tests"]);
   const ev = (await store.events({ types: ["contract.amended"] })).at(-1);
   assert.deepEqual([ev.source.kind, ev.source.id], ["agent", cfo]);
-  const refuse = async (patch, may, re) => {
-    await assert.rejects(amendContract(store, patch, { by: cfo, authority: may }), (e) => {
+  const current = () => contractRecord(store).then((x) => x.contract.tasks);
+  const refuse = async (patch, granted, re) => {
+    await assert.rejects(amendContract(store, patch, { by: cfo, authority: granted }), (e) => {
       assert.ok(e instanceof AuthorityError, String(e));
       assert.ok(e.needs.some((n) => re.test(n)), JSON.stringify(e.needs));
       return true;
@@ -465,20 +502,60 @@ test("amendContract with an authority: add_task, reassign and extend_budget with
   };
   await refuse({ budget: { usd: 11 } }, ["add_task"], /raising budget\.usd to 11 needs "extend_budget"/);
   await refuse({ budget: { usd: 12 } }, ["extend_budget"], /budget\.usd 12 is beyond the 10% extension limit \(11\)/);
-  await refuse({ tasks: [baseTasks()[0], extra], interfaces: [{ ...explicit().interfaces[0], consumers: [] }] }, ["add_task"], /removing ui is reserved to the orchestrator/);
-  await refuse({ tasks: [...baseTasks(), { ...extra, acceptance: ["other"] }] }, ["add_task"], /changing the spec of tests is reserved/);
+  await refuse({ tasks: [baseTasks()[0], extra], interfaces: [{ ...explicit().interfaces[0], consumers: [] }] }, may, /removing ui is reserved to the orchestrator/);
+  await refuse({ tasks: [...baseTasks(), { ...extra, acceptance: ["other"] }] }, may, /changing the spec of tests is reserved/);
+  await refuse({ tasks: [...(await current())].reverse() }, may, /reordering tasks is reserved/);
   await refuse({ interfaces: [] }, ["add_task"], /changing interfaces needs "amend_interfaces"/);
-  await refuse({ title: "Renamed" }, ["add_task"], /changing title is reserved to the orchestrator/);
+  await refuse({ title: "Renamed" }, may, /changing title is reserved to the orchestrator/);
+  await refuse({ scope: { paths: ["src/**"] } }, may, /changing scope is reserved/);
+  await refuse({ validation: { commands: [{ id: "test", argv: ["true"], timeout_s: 60 }] } }, may, /changing validation is reserved/);
+  await refuse({ authority: { may: ["retry"] } }, may, /changing authority is reserved/);
   await refuse({ budget: { max_parallel: 5 } }, ["extend_budget"], /changing budget\.max_parallel is reserved/);
+  // Decreases and new caps are the orchestrator's, even with no actions at all.
+  await refuse({ budget: { usd: 0.01, per_task_usd: 0.01 } }, [], /lowering budget\.usd to 0\.01 is reserved/);
+  await refuse({ budget: { wall_clock_min: 0.001 } }, [], /lowering budget\.wall_clock_min to 0\.001 is reserved/);
+  await refuse({ budget: { per_agent_usd: 0.001 } }, [], /adding budget\.per_agent_usd is reserved/);
+  // A task budget above per_task_usd is invalid, so a lead cannot hand one to a subcontract task.
+  await assert.rejects(amendContract(store, { tasks: [...(await current()), { ...extra, id: "big", kind: "subcontract", budget_usd: 1000 }] }, { by: cfo, authority: ["add_task"] }),
+    /tasks\[3\]\.budget_usd \(\$1000\) must not exceed budget\.per_task_usd/);
   const extended = await amendContract(store, { budget: { usd: 11 } }, { by: cfo, authority: ["extend_budget"] });
-  assert.equal(extended.contract.budget.usd, 11);
+  assert.equal(extended.contract.budget.usd, 11, "within authority: pre-consented, so no consent round is needed");
   // Raising again stays bounded by the budget first frozen (10 → at most 11), not by the latest.
   await refuse({ budget: { usd: 12 } }, ["extend_budget"], /beyond the 10% extension limit \(11\)/);
-  const reassigned = await amendContract(store, { tasks: [...baseTasks(), { ...extra, persona: skeptic }] }, { by: cfo, authority: ["reassign"] });
+  const reassigned = await amendContract(store, { tasks: (await current()).map((x) => (x.id === "tests" ? { ...x, persona: skeptic } : x)) }, { by: cfo, authority: ["reassign"] });
   assert.deepEqual(reassigned.affected.changed, ["tests"]);
+  // A new persona may join as a participant with add_task or reassign, if it resolves.
+  const withOps = await amendContract(store, { tasks: [...(await current()), { ...extra, id: "ops-task", persona: ops, paths: { write: ["src/ops/**"] } }] }, { by: cfo, authority: ["add_task"] });
+  assert.ok(withOps.contract.participants.some((p) => p.agent === ops));
+  await assert.rejects(amendContract(store, { tasks: [...(await current()), { ...extra, id: "ghost-task", persona: "/nonexistent/ghost.md", paths: { write: ["src/ghost/**"] } }] }, { by: cfo, authority: ["add_task"] }),
+    /ghost\.md/);
   assert.deepEqual(authorityNeeds(r.contract, r.contract, []), []);
 });
 
+test("a run-wide change to a frozen contract: refused without consent, applied only if everyone agrees, or overridden with an audit", async (t) => {
+  let skepticSays = "Consent: AGREE\nok";
+  provider(t, (agent) => (agent === "skeptic" ? skepticSays : "Consent: AGREE\nok"));
+  const r = await propose({ consent: true });
+  await freezeContract(r.contractId, { orchestrator: "main" });
+  const store = await openContractStore(r.contractId);
+  await assert.rejects(amendContract(store, { budget: { usd: 20 } }, { by: "main", reason: "more" }), /changing budget of a frozen contract touches every participant/);
+  skepticSays = "Consent: OBJECT\ntoo much";
+  await assert.rejects(amendContract(store, { budget: { usd: 20, per_task_usd: 5 } }, { by: "main", reason: "more", consent: llm }),
+    /skeptic\.md objects to v2: too much\n- the change to budget was not applied/);
+  assert.equal((await contractRecord(store)).version, 1, "nothing was applied");
+  skepticSays = "Consent: AGREE\nfine";
+  const ok = await amendContract(store, { budget: { usd: 20, per_task_usd: 5 } }, { by: "main", reason: "more", consent: llm });
+  assert.equal(ok.version, 2);
+  assert.deepEqual(ok.asked, [cfo, skeptic]);
+  assert.deepEqual(ok.consent.agree, [cfo, skeptic], "the candidate's verdicts are current once it is applied");
+  assert.equal((await store.state()).contract.budget.usd, 20);
+  const over = await amendContract(store, { sandbox: { backend: "docker", image: "node:24" } }, { by: "main", reason: "newer node", overrideConsent: true });
+  assert.equal(over.version, 3);
+  assert.ok(auditEntries().some((e) => e.target === r.contractId && e.action === "contract.consent_overridden" && e.details.fields.includes("sandbox")));
+  // A task-level change applies at once.
+  const tl = await amendContract(store, { tasks: baseTasks().map((x) => (x.id === "ui" ? { ...x, acceptance: ["renders", "empty state"] } : x)) }, { by: "main", reason: "empty state" });
+  assert.equal(tl.version, 4);
+});
 test("amend from_session: the session's roundtable-tasks block replaces the structure", async (t) => {
   const r = await propose();
   const id = "ultraplan-replan01";
@@ -536,7 +613,7 @@ test("tools: propose, amend and freeze through handleToolCall", async (t) => {
   });
   assert.equal(proposed.isError, undefined, proposed.content[0].text);
   const text = proposed.content[0].text;
-  assert.match(text, /^## Contract ctr-[0-9a-z]{6}-1 v1 \(draft\)\n\nConsent: 0 of 2 agreed; no answer yet from/);
+  assert.match(text, /^## Contract ctr-[0-9a-z]{6}-1 v1 \(draft\)\n\nConsent: 0 of 2 agreed to v1; no answer yet from/);
   assert.ok(text.includes("# Contract: Ship the orders page"));
   const summary = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(text)[1]);
   assert.equal(summary.status, "draft");
@@ -547,11 +624,171 @@ test("tools: propose, amend and freeze through handleToolCall", async (t) => {
   assert.match(await err("freeze_contract", { contract_id: id, orchestrator: "main" }), /^Error: Cannot freeze ctr-[0-9a-z]{6}-1:\n- .*has not consented/);
   provider(t, answers({ cfo: ["Consent: AGREE\nok"], skeptic: ["Consent: AGREE\nok"] }));
   const consent = await handleToolCall("amend_contract", { contract_id: id, patch: {}, reason: "consent", orchestrator: "main", consent: true, ...{ provider: "openai_compatible", model: "m", base_url: LLM } });
-  assert.match(consent.content[0].text, /Consent: 2 of 2 agreed/);
+  assert.match(consent.content[0].text, /Consent: 2 of 2 agreed to v1/);
   const frozen = await handleToolCall("freeze_contract", { contract_id: id, orchestrator: "main" });
-  assert.match(frozen.content[0].text, /^## Contract .* v1 \(frozen\)\n\nConsent: 2 of 2 agreed\nFrozen sha256: [0-9a-f]{64}/);
-  const amended = await handleToolCall("amend_contract", { contract_id: id, patch: { budget: { usd: 12 } }, reason: "more room", orchestrator: "main" });
+  assert.match(frozen.content[0].text, /^## Contract .* v1 \(frozen\)\n\nConsent: 2 of 2 agreed to v1\nFrozen sha256: [0-9a-f]{64}/);
+  // A run-wide change to a frozen contract needs everyone's consent first, or an audited override.
+  assert.match(await err("amend_contract", { contract_id: id, patch: { budget: { usd: 12 } }, reason: "more room", orchestrator: "main" }),
+    /changing budget of a frozen contract touches every participant: pass consent: true .* or override_consent: true/);
+  const amended = await handleToolCall("amend_contract", { contract_id: id, patch: { budget: { usd: 12 } }, reason: "more room", orchestrator: "main", override_consent: true });
   assert.match(amended.content[0].text, /v2 \(frozen\)/);
   assert.match(amended.content[0].text, /Affected tasks: none/);
+  assert.match(amended.content[0].text, /consent overridden for the change to budget \(audited\)/);
+  assert.match(amended.content[0].text, /Not asked about v2: /);
+  assert.ok(auditEntries().some((e) => e.target === id && e.action === "contract.consent_overridden" && e.details.fields[0] === "budget"));
   assert.match(await err("amend_contract", { contract_id: "ctr-zzzzzz-1", patch: {}, reason: "r", orchestrator: "main" }), /Contract ctr-zzzzzz-1 not found/);
+});
+
+// ---------------------------------------------------------------------------
+// Review findings: stale rounds, crashed rounds, sources, hashes, sibling budgets
+// ---------------------------------------------------------------------------
+
+test("a late answer from a superseded round is dropped, never credited to the newer version", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  provider(t, async (agent, body) => {
+    if (/` v1\)/.test(body.messages[1].content)) {
+      await gate;
+      return "Consent: AGREE\nv1 looked fine";
+    }
+    return "Consent: OBJECT\nv2 breaks my task";
+  });
+  const r = await propose();
+  const store = await openContractStore(r.contractId);
+  const late = requestConsent(store, r.contractId, { by: "main", llm }); // a round on v1 whose answers are held back
+  let first;
+  while (!(first = (await store.events({ types: ["contract.consent_requested"] }))[0])) await new Promise((resolve) => setTimeout(resolve, 5));
+  // Another process would see that round as stale: drop this process's marker and move the clock on.
+  endConsentRound(first.payload.round);
+  const realNow = Date.now;
+  t.mock.method(Date, "now", () => realNow() + 3 * 3600_000);
+  const changed = baseTasks().map((x) => ({ ...x, acceptance: [...x.acceptance, "and drop auth"] }));
+  const a = await amendContract(store, { tasks: changed }, { by: "main", reason: "change both", consent: llm });
+  assert.equal(a.version, 2);
+  assert.deepEqual(a.consent.objections.map((o) => o.verdict), ["OBJECT", "OBJECT"]);
+  release();
+  const stale = await late;
+  assert.match(stale.dropped, /a newer consent round .* started meanwhile/);
+  const rec = await contractRecord(store);
+  assert.deepEqual(Object.values(rec.verdicts).map((v) => `${v.verdict}@v${v.version}`), ["OBJECT@v2", "OBJECT@v2"]);
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main" }), /objects: v2 breaks my task/);
+  // Answers naming another round, or a second answer from the same participant, are ignored on replay too.
+  const second = (await store.events({ types: ["contract.consent_requested"] })).at(-1).payload.round;
+  await store.transact(() => ({ events: [
+    { type: "contract.consent_recorded", source: { kind: "orchestrator", id: "main", pid: 1 }, contract_version: 2, payload: { contract: r.contractId, agent: cfo, verdict: "AGREE", round: first.payload.round } },
+    { type: "contract.consent_recorded", source: { kind: "orchestrator", id: "main", pid: 1 }, contract_version: 2, payload: { contract: r.contractId, agent: cfo, verdict: "AGREE", round: second } },
+  ] }));
+  const after = await contractRecord(store);
+  assert.equal(after.verdicts[cfo].verdict, "OBJECT");
+  assert.equal(after.ignored, 2);
+});
+
+test("a crashed round: the stale window is capped, a dead owner on this host ends it at once, abandon_round is audited", async () => {
+  assert.ok(consentRoundStaleMs(50) <= CONSENT_ROUND_STALE_CAP_MS);
+  assert.equal(CONSENT_ROUND_STALE_CAP_MS, 10 * 60_000);
+  const r = await propose();
+  const store = await openContractStore(r.contractId);
+  const round = (pid, host) => store.transact(() => ({ events: [{
+    type: "contract.consent_requested", source: { kind: "orchestrator", id: "main", pid }, contract: r.contractId, contract_version: 1,
+    payload: { contract: r.contractId, version: 1, participants: [cfo, skeptic], round: `rnd-${String(pid).padStart(8, "0").slice(-8)}`, ...(host && { host }) },
+  }] }));
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+  await round(dead, hostname());
+  const gone = await contractRecord(store);
+  assert.equal(gone.round.inFlight, false, "its owner is dead on this host");
+  assert.equal(gone.verdicts[cfo].verdict, "UNCLEAR");
+  // A live owner elsewhere (or this process's pid, outside its own round registry) keeps it in flight until the window passes.
+  await round(process.pid, hostname());
+  assert.equal((await contractRecord(store)).round.inFlight, true);
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main" }), /a consent round is in flight \(2 answers pending\); wait, or pass abandon_round/);
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "intruder", abandonRound: true }), /only the contract's orchestrator \(main\) can abandon a consent round/);
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main", abandonRound: true }), /is unclear, which counts as an objection: no answer: the orchestrator abandoned the consent round/);
+  const audit = auditEntries().filter((e) => e.target === r.contractId && e.action === "contract.consent_round_abandoned");
+  assert.equal(audit.length, 1);
+  assert.deepEqual(audit[0].details.pending, [cfo, skeptic]);
+  assert.equal(audit[0].details.owner_pid, process.pid);
+  const f = await freezeContract(r.contractId, { orchestrator: "main", excuse: [{ agent: cfo, reason: "round died" }, { agent: skeptic, reason: "round died" }] });
+  assert.equal(f.status, "frozen");
+});
+
+test("an ultraplan's block comes from its plan versions only; a block quoted in a sign-off is never used", async (t) => {
+  const id = "ultraplan-signoff1";
+  const plan = "1. Build the API [cfo]\n2. Build the page [skeptic]";
+  const signoff = "Sign-off: APPROVE\nSuggested structure:\n" + blockText({ tasks: [{ id: "x", title: "Everything", persona: ops, paths: { write: ["**"] }, acceptance: ["done"] }], budget: { usd: 500, per_task_usd: 500 } });
+  archiveSession({
+    id, kind: "ultraplan", agents: [cfo, skeptic], topic: "Build orders", started: new Date().toISOString(), turns: [],
+    document: { markdown: `# Ultraplan\n\n${plan}\n\n## Sign-offs\n\n### ops — APPROVE\n${signoff}`, signedOff: false, version: 1, planner: "orchestrator",
+      versions: [{ version: 1, plan, author: "orchestrator", at: new Date().toISOString() }],
+      entries: [{ phase: "signoff", version: 1, agentIndex: 0, speaker: ops, content: signoff, verdict: "APPROVE", at: new Date().toISOString() }], signoffs: [], tally: {} },
+    public: null,
+  });
+  const calls = provider(t, () => JSON.stringify({ tasks: baseTasks(), commands: [{ id: "test", argv: ["npm", "test"] }] }));
+  const r = await propose({ contract: undefined, originalPrompt: undefined, fromSession: id });
+  assert.equal(r.source, `structured:${id}`);
+  assert.equal(calls.length, 1, "a structuring call over the final plan");
+  assert.ok(calls[0].body.messages[1].content.includes(plan));
+  assert.ok(!calls[0].body.messages[1].content.includes("Everything"));
+  assert.deepEqual(r.contract.tasks.map((x) => x.id), ["api", "ui"]);
+  assert.notEqual(r.contract.budget.usd, 500);
+  assert.ok(r.warnings.some((w) => /no plan version of ultraplan-signoff1 has a roundtable-tasks block/.test(w)), JSON.stringify(r.warnings));
+  assert.ok(r.warnings.some((w) => /ultraplan-signoff1 was not signed off/.test(w)));
+  // The latest plan version with a block wins over older ones.
+  const id2 = "ultraplan-versions1";
+  const v1 = blockText({ tasks: [baseTasks()[0]], commands: [{ id: "test", argv: ["npm", "test"] }] });
+  const v2 = blockText({ tasks: baseTasks(), commands: [{ id: "test", argv: ["npm", "test"] }] });
+  archiveSession({ id: id2, kind: "ultraplan", agents: [cfo, skeptic], topic: "Build orders", started: new Date().toISOString(), turns: [],
+    document: { markdown: "", signedOff: true, version: 3, planner: "orchestrator", versions: [{ version: 1, plan: v1, author: "o", at: "t" }, { version: 2, plan: v2, author: "o", at: "t" }, { version: 3, plan: "final words, no block", author: "o", at: "t" }],
+      entries: [], signoffs: [], tally: {} }, public: null });
+  const r2 = await propose({ contract: undefined, originalPrompt: undefined, fromSession: id2 });
+  assert.equal(r2.source, `fenced:${id2}`);
+  assert.deepEqual(r2.contract.tasks.map((x) => x.id), ["api", "ui"]);
+});
+
+test("freeze hashes the scrubbed contract: a secret this process knows is redacted and the hash still matches the blob", async (t) => {
+  const r = await agreedContract(t, { contract: explicit({ title: "Rotate Q7x9Lm2Pz8Rt4Vw6 handling" }) });
+  process.env.CONTRACT_TEST_DEPLOY_TOKEN = "Q7x9Lm2Pz8Rt4Vw6";
+  try {
+    const f = await freezeContract(r.contractId, { orchestrator: "main" });
+    const store = await openContractStore(r.contractId);
+    const ev = (await store.events({ types: ["contract.frozen"] }))[0];
+    const blob = JSON.parse((await store.getBlob(ev.payload.blob)).toString("utf8"));
+    assert.doesNotMatch(blob.title, /Q7x9Lm2Pz8Rt4Vw6/);
+    assert.equal(contractHash(blob), ev.payload.hash);
+    assert.equal(f.hash, ev.payload.hash);
+    assert.equal(blob.frozen.hash, ev.payload.hash);
+  } finally {
+    delete process.env.CONTRACT_TEST_DEPLOY_TOKEN;
+  }
+});
+
+test("sibling child contracts share their parent task's cap, which the parent's remaining budget also bounds", async (t) => {
+  const sub = { id: "sub", title: "Sub", persona: cfo, kind: "subcontract", paths: { write: ["src/sub/**"] }, acceptance: ["done"], checks: [], budget_usd: 4 };
+  const parent = await agreedContract(t, { contract: explicit({ tasks: [...baseTasks(), sub] }) });
+  const child = (usd, write = "src/sub/x/**") => propose({
+    orchestrator: cfo, parentContract: parent.contractId, parentTask: "sub",
+    contract: { tasks: [{ id: "x", title: "X", persona: cfo, paths: { write: [write] }, acceptance: ["ok"], checks: [] }], budget: { usd, per_task_usd: usd } },
+  });
+  const one = await child(3);
+  assert.equal(one.contract.budget.usd, 3);
+  await assert.rejects(child(2, "src/sub/y/**"), /budget\.usd \(\$2\) plus the task's other child contracts \(\$3\) exceeds what the parent task may spend \(\$4\)/);
+  const two = await child(1, "src/sub/y/**");
+  assert.equal(two.contract.budget.usd, 1);
+  await assert.rejects(child(0.5, "src/sub/z/**"), /plus the task's other child contracts \(\$4\)/);
+  // An amendment of a child is checked against its siblings, not against itself.
+  const store = await openContractStore(one.contractId);
+  await assert.rejects(amendContract(store, { budget: { usd: 3.5, per_task_usd: 3.5 } }, { by: cfo, reason: "more" }), /plus the task's other child contracts \(\$1\)/);
+});
+
+test("verdicts are stored as own properties, whatever the agent name", async () => {
+  const r = await propose();
+  const store = await openContractStore(r.contractId);
+  await store.transact(() => ({ events: [
+    { type: "contract.consent_recorded", source: { kind: "orchestrator", id: "main", pid: 1 }, contract_version: 1, payload: { contract: r.contractId, agent: "__proto__", verdict: "AGREE" } },
+    { type: "contract.objection_resolved", source: { kind: "orchestrator", id: "main", pid: 1 }, contract_version: 1, payload: { contract: r.contractId, agent: "constructor", how: "excused", reason: "x" } },
+  ] }));
+  const rec = await contractRecord(store);
+  assert.equal(Object.hasOwn(rec.verdicts, "__proto__"), true);
+  assert.equal(rec.verdicts["__proto__"].verdict, "AGREE");
+  assert.equal(Object.hasOwn(rec.verdicts, "constructor"), true);
+  assert.equal({}.verdict, undefined);
 });

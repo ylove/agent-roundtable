@@ -2,11 +2,13 @@
 // Contract lifecycle: propose, freeze and amend (heads-down.md §8)
 //
 // Proposing creates the execution store (contract ids carry the execution's tag), writes v1 and
-// CONTRACT.md, and records execution.created + contract.proposed. Freezing records the excusals
-// and contract.frozen in one batch and audits the hash. Amending a draft proposes v(N+1)
-// (contract.proposed with reason and patch_blob); amending a frozen contract records
-// contract.amended plus task.cancelled for removed tasks and a directive to affected agents.
-// Provider calls (structuring, consent) always run outside transact.
+// CONTRACT.md, and records execution.created + contract.proposed. Freezing needs every participant's
+// AGREE on the current version (or an audited excusal), records the excusals and contract.frozen in
+// one batch and audits the hash. Amending a draft proposes v(N+1) (contract.proposed with reason and
+// patch_blob), which every participant must consent to again; amending a frozen contract records
+// contract.amended plus task.cancelled for removed tasks and a directive to affected agents, and a
+// change to its budget, scope, sandbox, authority, validation, workers or goal first needs everyone's
+// consent (or an audited override). Provider calls (structuring, consent) always run outside transact.
 // ============================================================================
 
 import { execFile } from "node:child_process";
@@ -14,6 +16,7 @@ import { realpathSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { AGENTS_DIR, WORKSPACE_DIR } from "../config.js";
+import { loadAgent } from "../agents.js";
 import { newExecutionId, newId } from "../ids.js";
 import { appendAudit } from "../security/audit.js";
 import { childEnv } from "../security/child-env.js";
@@ -30,8 +33,9 @@ import {
   createMergePatch,
   validateContract,
   type AffectedTasks,
+  type CheckOptions,
 } from "./contract.js";
-import { blockToContract, findTaskBlock, sessionSource, structureContract, TASK_BLOCK_TAG, type SessionSource } from "./contract-parse.js";
+import { blockToContract, findTaskBlock, sessionSource, structureContract, TASK_BLOCK_TAG, type BlockText, type SessionSource } from "./contract-parse.js";
 import {
   contractRecord,
   describeConsent,
@@ -40,6 +44,8 @@ import {
   openContractStore,
   orchestratorSource,
   presentContract,
+  ownCopy,
+  standing,
   summarizeConsent,
   writeContractFiles,
   type ConsentSummary,
@@ -65,6 +71,8 @@ const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !
 const same = (a: unknown, b: unknown) => canonicalJSON(a ?? null) === canonicalJSON(b ?? null);
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const mode = (status: string) => (status === "created" ? "deliberation" as const : "execution" as const);
+const parentOpt = (p: ParentInfo | undefined): CheckOptions =>
+  p ? { parent: { contract: p.contract, depth: p.depth, remainingUsd: p.remainingUsd, siblingsUsd: p.siblingsUsd } } : {};
 
 // ---------------------------------------------------------------------------
 // Git: the repository top level and the base commit (a deliberately tiny helper)
@@ -151,21 +159,25 @@ export class AuthorityError extends Error {
 
 function nextStep(rec: ContractRecord, s: ConsentSummary): string {
   const id = rec.id;
+  const v = rec.version;
   const objections = s.objections.map((o) => `${o.agent} (${o.verdict}${o.reason ? `: ${o.reason.split(/\r?\n/)[0].slice(0, 160)}` : ""})`).join("; ");
+  const unasked = [...s.stale.map((x) => `${x.agent} (${x.verdict} on v${x.version})`), ...s.missing];
   if (rec.status === "frozen") {
-    return s.objections.length
-      ? `The contract is frozen at v${rec.version}, but ${objections}. Amend it again with amend_contract, or pause the run.`
-      : `Frozen at v${rec.version}. Show the contract to the human: the heads-down run starts only when they ask for it (execute).`;
+    const parts = [`Frozen at v${v}.`];
+    if (s.objections.length) parts.push(`On v${v}: ${objections}. Amend it again with amend_contract, or pause the run.`);
+    if (unasked.length) parts.push(`Not asked about v${v}: ${unasked.join(", ")}.`);
+    if (parts.length === 1) parts.push("Show the contract to the human: the heads-down run starts only when they ask for it (execute).");
+    return parts.join(" ");
   }
-  if (s.in_flight) return "A consent round is in flight: wait for it to finish, then freeze_contract.";
-  if (s.ready) return `Every participant agreed. Show the contract to the human, then freeze it: freeze_contract { "contract_id": "${id}", "orchestrator": "${rec.contract.scope.orchestrator}" }.`;
+  if (s.in_flight) return `A consent round on v${v} is in flight: wait for it to finish (or pass abandon_round to freeze_contract if its process died), then freeze_contract.`;
+  if (s.ready) return `Every participant agreed to v${v}. Show the contract to the human, then freeze it: freeze_contract { "contract_id": "${id}", "orchestrator": "${rec.contract.scope.orchestrator}" }.`;
   const parts: string[] = [];
   if (s.objections.length) {
-    parts.push(`Objections: ${objections}. Address them with amend_contract { "contract_id": "${id}", "patch": {…}, "reason": "…", "consent": true } ` +
-      "(it re-asks the objectors and the affected participants), or excuse them with a reason in freeze_contract { \"excuse\": [{ \"agent\", \"reason\" }] }.");
+    parts.push(`Objections to v${v}: ${objections}. Address them with amend_contract { "contract_id": "${id}", "patch": {…}, "reason": "…", "consent": true } ` +
+      "(every participant is asked about the new version), or excuse them with a reason in freeze_contract { \"excuse\": [{ \"agent\", \"reason\" }] }.");
   }
-  if (s.missing.length) {
-    parts.push(`No consent yet from ${s.missing.join(", ")}: ask with amend_contract { "contract_id": "${id}", "patch": {}, "reason": "consent", "consent": true }.`);
+  if (unasked.length) {
+    parts.push(`Nobody has consented to v${v} yet from: ${unasked.join(", ")}. Ask with amend_contract { "contract_id": "${id}", "patch": {}, "reason": "consent", "consent": true }.`);
   }
   return parts.join(" ");
 }
@@ -186,6 +198,22 @@ async function resultFor(store: ExecutionStore, contractId: string, extra: Parti
     ...(rec.frozen && { hash: contract.frozen?.hash ?? rec.frozen.hash }),
     ...extra, paths, next: nextStep(rec, summary),
   };
+}
+
+async function audit(warnings: string[], entry: Parameters<typeof appendAudit>[0]): Promise<void> {
+  try {
+    await appendAudit(entry);
+  } catch (e) {
+    warnings.push(`the audit log entry ${entry.action} could not be written: ${errText(e)}`);
+    console.error(`[Contracts] audit ${entry.action} failed: ${errText(e)}`);
+  }
+}
+
+/** The contract as it will be stored (strings scrubbed), with status set and without consent or freeze record: what the hash covers. */
+function storedBody(c: Contract, status: ContractStatus): Contract {
+  const body = JSON.parse(scrubbedJSON({ ...c, status, consent: [] })) as Contract;
+  delete body.frozen;
+  return body;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,16 +267,16 @@ function archived(id: string): ArchivedSession {
   return r;
 }
 
-/** The last roundtable-tasks block among the texts (the plan argument first), with where it came from. */
-function locateBlock(texts: Array<{ from: string; text?: string }>): { from: string; value: unknown } | undefined {
-  for (const { from, text } of texts) {
+/** The last roundtable-tasks block of the first text that has one, with where it came from. */
+function locateBlock(texts: Array<BlockText | { from: string; text?: string; warn?: string }>): { from: string; value: unknown; warn?: string } | undefined {
+  for (const { from, text, warn } of texts) {
     let value: unknown;
     try {
       value = findTaskBlock(text);
     } catch (e) {
       throw new Error(`${from}: ${errText(e)}`);
     }
-    if (value !== undefined) return { from, value };
+    if (value !== undefined) return { from, value, ...(warn && { warn }) };
   }
   return undefined;
 }
@@ -268,6 +296,9 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   const orchestrator = o.orchestrator.trim();
   const session = o.fromSession ? archived(o.fromSession) : undefined;
   const src: SessionSource | undefined = session && sessionSource(session);
+  if (src?.kind === "ultraplan" && src.signedOff === false) {
+    warnings.push(`${o.fromSession} was not signed off: an objection or unclear sign-off stands, or it was ended without sign-off`);
+  }
   const originalPrompt = o.originalPrompt?.trim() ? o.originalPrompt : src?.topic?.trim() ? src.topic : undefined;
   if (!originalPrompt) throw new Error("original_prompt is required: pass the human's request verbatim (or from_session, whose task is used)");
 
@@ -282,7 +313,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
 
   let parent: ParentInfo | undefined;
   if (o.parentContract && o.parentTask) {
-    parent = await loadParent(o.parentContract);
+    parent = await loadParent(o.parentContract, { task: o.parentTask });
     const task = parent.contract.tasks.find((t) => t.id === o.parentTask);
     if (!task) throw new Error(`parent_task ${o.parentTask} is not a task of ${o.parentContract}`);
     const allowed = [task.persona, parent.contract.scope.orchestrator];
@@ -314,7 +345,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
     }
     return c;
   };
-  const parentOpt = parent && { parent: { contract: parent.contract, depth: parent.depth } };
+  const checkOpts = parentOpt(parent);
 
   let source: string;
   let structure: Obj;
@@ -322,30 +353,31 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
     source = "explicit";
     structure = {};
   } else {
-    const block = locateBlock([
-      { from: "plan", text: o.plan },
-      ...(src?.blockTexts ?? []).map((text) => ({ from: o.fromSession!, text })),
-    ]);
+    const block = locateBlock([{ from: "plan", text: o.plan }, ...(src?.blockTexts ?? [])]);
     if (block) {
       const parsed = blockToContract(block.value);
       if (parsed.errors.length) throw new Error(`The ${TASK_BLOCK_TAG} block in ${block.from} is not usable:\n- ${listErrors(parsed.errors)}`);
-      source = `fenced:${block.from}`;
+      source = `fenced:${block.from.startsWith(o.fromSession ?? "\0") ? o.fromSession : block.from}`;
       structure = parsed.contract;
+      if (block.warn) warnings.push(block.warn);
     } else {
       const plan = o.plan?.trim() ? o.plan : src?.planText;
       if (!plan?.trim()) throw new Error("propose_contract needs a structure: pass contract (with tasks), a plan, or from_session");
+      if (!o.plan?.trim() && src?.kind === "ultraplan") {
+        warnings.push(`no plan version of ${o.fromSession} has a ${TASK_BLOCK_TAG} block: the structure comes from a structuring call over the final plan (start the ultraplan with execution_ready: true to get one)`);
+      }
       const draft = assemble({});
       const scopePaths = isObj(draft.scope) && Array.isArray(draft.scope.paths) ? draft.scope.paths.map(String) : parent?.contract.tasks.find((t) => t.id === o.parentTask)?.paths.write ?? ["**"];
       const structured = await structureContract({
         goal: o.goal.trim(), originalPrompt, plan,
         participants: o.participants ?? (Array.isArray(draft.participants) ? draft.participants.map(String) : src?.agents ?? []),
         scopePaths,
-      }, resolveConsentLLM(o.llm), async (s) => (await validateContract(assemble(s), parentOpt)).errors);
+      }, resolveConsentLLM(o.llm), async (s) => (await validateContract(assemble(s), checkOpts)).errors);
       source = `structured:${o.plan?.trim() ? "plan" : o.fromSession}`;
       structure = structured.structure;
     }
   }
-  const v = await validateContract(assemble(structure), parentOpt);
+  const v = await validateContract(assemble(structure), checkOpts);
   if (!v.ok) throw new Error(`The contract is not valid:\n- ${listErrors(v.errors)}`);
   warnings.push(...v.warnings);
 
@@ -369,7 +401,9 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   let asked: string[] | undefined;
   if (o.consent) {
     try {
-      asked = (await requestConsent(store, contractId, { by: orchestrator, llm: o.llm })).asked;
+      const round = await requestConsent(store, contractId, { by: orchestrator, llm: o.llm });
+      asked = round.asked;
+      if (round.dropped) warnings.push(round.dropped);
     } catch (e) {
       warnings.push(`the consent round failed: ${errText(e)}`);
     }
@@ -384,11 +418,14 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
 export interface FreezeOptions {
   /** The caller: must be the contract's scope.orchestrator. */
   orchestrator: string;
-  /** Objections (or missing answers) to set aside, each with a reason; every excusal is audited. */
+  /** Objections, stale or missing answers to set aside, each with a reason; every excusal is audited. */
   excuse?: Array<{ agent: string; reason: string }>;
+  /**
+   * Declare a consent round whose process died (or hangs) abandoned: its missing answers are
+   * recorded as UNCLEAR (so they still need excusing) and the abandonment is audited.
+   */
+  abandonRound?: boolean;
 }
-
-const unresolved = (v: VerdictState | undefined) => !v || ((v.verdict === "OBJECT" || v.verdict === "UNCLEAR") && !v.resolved);
 
 /** Every reason a freeze would be refused right now, given the excusals. */
 function freezeBlockers(rec: ContractRecord, excuse: Array<{ agent: string; reason: string }>, orchestrator: string): string[] {
@@ -396,23 +433,49 @@ function freezeBlockers(rec: ContractRecord, excuse: Array<{ agent: string; reas
   if (orchestrator !== rec.contract.scope.orchestrator) {
     reasons.push(`only the contract's orchestrator (${rec.contract.scope.orchestrator}) can freeze it; ${orchestrator} cannot`);
   }
-  if (rec.round?.inFlight) reasons.push(`a consent round is in flight (${rec.round.pending.length} answers pending)`);
+  if (rec.round?.inFlight) reasons.push(`a consent round is in flight (${rec.round.pending.length} answers pending); wait, or pass abandon_round if its process died`);
   const participants = rec.contract.participants.map((p) => p.agent);
-  const excused = new Map<string, string>();
+  const excused = new Set<string>();
+  const ok = (agent: string) => ["agree", "excused"].includes(standing(rec, agent).kind);
   for (const [i, x] of excuse.entries()) {
     if (!isObj(x) || typeof x.agent !== "string" || !x.agent.trim()) reasons.push(`excuse[${i}].agent is required`);
     else if (typeof x.reason !== "string" || !x.reason.trim()) reasons.push(`excuse[${i}] (${x.agent}) needs a reason`);
     else if (!participants.includes(x.agent)) reasons.push(`excuse[${i}]: ${x.agent} is not a participant`);
-    else if (!unresolved(rec.verdicts[x.agent])) reasons.push(`excuse[${i}]: ${x.agent} has no objection to excuse`);
-    else excused.set(x.agent, x.reason.trim());
+    else if (ok(x.agent)) reasons.push(`excuse[${i}]: ${x.agent} already agreed to v${rec.version}: there is nothing to excuse`);
+    else excused.add(x.agent);
   }
   for (const agent of participants) {
-    const v = Object.hasOwn(rec.verdicts, agent) ? rec.verdicts[agent] : undefined;
-    if (!unresolved(v) || excused.has(agent)) continue;
-    if (!v) reasons.push(`${agent} has not consented: run a consent round or excuse them`);
-    else reasons.push(`${agent} ${v.verdict === "OBJECT" ? "objects" : "is unclear, which counts as an objection"}${v.reason ? `: ${v.reason.split(/\r?\n/)[0].slice(0, 200)}` : ""}`);
+    if (ok(agent) || excused.has(agent)) continue;
+    const s = standing(rec, agent);
+    if (s.kind === "missing") reasons.push(`${agent} has not consented: run a consent round or excuse them`);
+    else if (s.kind === "stale") reasons.push(`${agent} answered ${s.verdict} on v${s.version}, not on v${rec.version}: ask again (amend_contract with patch {} and consent: true) or excuse them`);
+    else if (s.kind === "objection") reasons.push(`${agent} ${s.verdict === "OBJECT" ? "objects" : "is unclear, which counts as an objection"}${s.reason ? `: ${s.reason.split(/\r?\n/)[0].slice(0, 200)}` : ""}`);
   }
   return reasons;
+}
+
+/** Record UNCLEAR for the pending participants of the open round (only if it is still the same round). */
+async function abandonRound(store: ExecutionStore, rec: ContractRecord, orchestrator: string, warnings: string[]): Promise<void> {
+  const round = rec.round;
+  if (!round || round.pending.length === 0) {
+    warnings.push("abandon_round: there was no unfinished consent round");
+    return;
+  }
+  const source = orchestratorSource(orchestrator);
+  await store.transact(async ({ state }) => {
+    const now = await contractRecord(store, rec.id);
+    if (now.round?.id !== round.id) return { events: [] };
+    return {
+      events: now.round.pending.map((agent) => ({
+        type: "contract.consent_recorded" as const, source, mode: mode(state.status), contract: rec.id, contract_version: round.version,
+        payload: { contract: rec.id, agent, verdict: "UNCLEAR" as const, reason: "no answer: the orchestrator abandoned the consent round", round: round.id },
+      })),
+    };
+  });
+  await audit(warnings, {
+    actor: orchestrator, action: "contract.consent_round_abandoned", target: rec.id,
+    details: { execution: store.id, version: round.version, round: round.id, pending: round.pending, owner_pid: round.pid, ...(round.host && { owner_host: round.host }) },
+  });
 }
 
 /** freezeContract on an open store. */
@@ -420,16 +483,23 @@ export async function freezeContractIn(store: ExecutionStore, contractId: string
   const orchestrator = typeof opts.orchestrator === "string" ? opts.orchestrator.trim() : "";
   if (!orchestrator) throw new Error("orchestrator is required: only an orchestrator can freeze a contract");
   const excuse = opts.excuse ?? [];
-  const rec = await contractRecord(store, contractId);
+  const warnings: string[] = [];
+  let rec = await contractRecord(store, contractId);
   if (rec.superseded) throw new ContractRefusal("freeze", contractId, [`it was superseded by ${rec.superseded}`]);
   if (rec.frozen) throw new ContractRefusal("freeze", contractId, [`it is already frozen (v${rec.frozen.version} by ${rec.frozen.by}); change it with amend_contract`]);
+  if (opts.abandonRound) {
+    if (orchestrator !== rec.contract.scope.orchestrator) {
+      throw new ContractRefusal("freeze", contractId, [`only the contract's orchestrator (${rec.contract.scope.orchestrator}) can abandon a consent round`]);
+    }
+    await abandonRound(store, rec, orchestrator, warnings);
+    rec = await contractRecord(store, contractId);
+  }
   const reasons: string[] = [];
-  let parentOpt: { parent: { contract: Contract; depth: number } } | undefined;
+  let parent: ParentInfo | undefined;
   const parentRef = rec.contract.scope.parent;
   if (parentRef) {
     try {
-      const parent = await loadParent(parentRef.contract);
-      parentOpt = { parent: { contract: parent.contract, depth: parent.depth } };
+      parent = await loadParent(parentRef.contract, { task: parentRef.task, exclude: contractId });
       if (!parent.record.frozen) reasons.push(`its parent ${parentRef.contract} is not frozen`);
       const task = parent.contract.tasks.find((t) => t.id === parentRef.task);
       const allowed = [task?.persona, parent.contract.scope.orchestrator].filter(Boolean);
@@ -441,21 +511,27 @@ export async function freezeContractIn(store: ExecutionStore, contractId: string
   const sourceSession = rec.contract.goal.source_session;
   if (sourceSession && isSessionBusy(sourceSession)) reasons.push(`its source session ${sourceSession} is busy: wait for its turn to finish`);
   reasons.push(...freezeBlockers(rec, excuse, orchestrator));
-  const v = await validateContract(rec.contract, parentOpt);
+  const v = await validateContract(rec.contract, parentOpt(parent));
   if (!v.ok) reasons.push(...v.errors.map((e) => `invalid: ${e}`));
   if (reasons.length) throw new ContractRefusal("freeze", contractId, reasons);
 
   const excusals = excuse.map((x) => ({ agent: x.agent, reason: x.reason.trim() }));
-  const verdicts: Record<string, VerdictState> = structuredClone(rec.verdicts);
+  const verdicts: Record<string, VerdictState> = ownCopy(structuredClone(rec.verdicts));
   for (const x of excusals) {
-    const prior = verdicts[x.agent];
-    const resolved = { how: "excused" as const, reason: x.reason, seq: 0 };
-    verdicts[x.agent] = prior ? { ...prior, resolved } : { verdict: "EXCUSED", reason: x.reason, version: rec.version, seq: 0, resolved };
+    const prior = Object.hasOwn(verdicts, x.agent) ? verdicts[x.agent] : undefined;
+    const resolved = { how: "excused" as const, reason: x.reason, seq: 0, version: rec.version };
+    Object.defineProperty(verdicts, x.agent, {
+      value: prior ? { ...prior, resolved } : { verdict: "EXCUSED", reason: x.reason, version: rec.version, seq: 0, resolved },
+      writable: true, enumerable: true, configurable: true,
+    });
   }
-  const body: Contract = { ...rec.contract, status: "frozen", consent: [] };
-  delete body.frozen;
+  // The hash covers what is stored: the scrubbed contract (a secret this process knows is redacted first).
+  const body = storedBody(rec.contract, "frozen");
   const hash = contractHash(body);
-  const final: Contract = { ...body, consent: effectiveConsent({ contract: body, verdicts }), frozen: { by: orchestrator, at: new Date().toISOString(), hash } };
+  const final: Contract = {
+    ...body, consent: effectiveConsent({ contract: body, verdicts, version: rec.version, hash: rec.hash }),
+    frozen: { by: orchestrator, at: new Date().toISOString(), hash },
+  };
   const blob = await store.putBlob(scrubbedJSON(final), { redact: false });
   const source = orchestratorSource(orchestrator);
   await store.transact(async ({ state }) => {
@@ -474,7 +550,7 @@ export async function freezeContractIn(store: ExecutionStore, contractId: string
     });
     return { events };
   });
-  const warnings = [...v.warnings];
+  warnings.push(...v.warnings);
   for (const x of excusals) {
     await audit(warnings, { actor: orchestrator, action: "contract.objection_excused", target: contractId, details: { execution: store.id, version: rec.version, agent: x.agent, reason: x.reason } });
   }
@@ -487,41 +563,35 @@ export async function freezeContract(contractId: string, opts: FreezeOptions): P
   return freezeContractIn(await openContractStore(contractId), contractId, opts);
 }
 
-async function audit(warnings: string[], entry: Parameters<typeof appendAudit>[0]): Promise<void> {
-  try {
-    await appendAudit(entry);
-  } catch (e) {
-    warnings.push(`the audit log entry ${entry.action} could not be written: ${errText(e)}`);
-    console.error(`[Contracts] audit ${entry.action} failed: ${errText(e)}`);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Amend
 // ---------------------------------------------------------------------------
 
 export interface AmendOptions {
-  /** Who amends: the orchestrator, or the lead when `authority` is given. */
+  /** Who amends: the orchestrator (or a child's parent orchestrator), or the lead when `authority` is given. */
   by: string;
   reason?: string;
   /**
-   * The lead fallback: refuse any change these actions do not cover (add_task for new tasks,
-   * reassign for persona or team changes, amend_interfaces, extend_budget within
-   * authority.budget_extension_pct of the budget first frozen). Omit for the orchestrator.
+   * The lead fallback: `by` must be authority.lead, these actions must be within authority.may,
+   * and any change they do not cover is refused (see authorityNeeds). Omit for the orchestrator.
    */
   authority?: AuthorityAction[];
   /** Default: the execution's own contract. */
   contractId?: string;
   /** An archived session (a replan or ultraplan) whose roundtable-tasks block replaces the structure. */
   fromSession?: string;
-  /** Re-ask the affected participants (and open objectors); an object picks the provider. */
+  /** Ask participants (an object picks the provider): everyone for a draft or a run-wide change, the affected ones otherwise. */
   consent?: boolean | ConsentLLMOptions;
+  /** Orchestrator only: apply a run-wide change to a frozen contract without everyone's consent (audited). */
+  overrideConsent?: boolean;
   /** Event source; default the orchestrator, or an agent named `by` with authority. */
   source?: EventSource;
 }
 
 const PROTECTED_TOP = ["schema", "id", "version", "status", "consent", "frozen"];
 const PROTECTED_SCOPE = ["orchestrator", "repo_root", "base_ref", "parent"];
+/** Changes to these touch every participant: on a frozen contract they need everyone's consent first. */
+export const RUN_WIDE_FIELDS = ["budget", "scope", "sandbox", "authority", "validation", "workers", "goal"] as const;
 
 function protectedProblems(patch: Obj): string[] {
   const out = PROTECTED_TOP.filter((k) => Object.hasOwn(patch, k)).map((k) => `patch may not change ${k}`);
@@ -547,80 +617,115 @@ function withoutMeta(c: Contract): Obj {
 
 const BUDGET_KEYS = ["usd", "per_task_usd", "per_agent_usd", "wall_clock_min"] as const;
 
-/** What an amendment needs beyond `may` (empty when it is within the lead's authority). */
+/**
+ * What an amendment needs beyond `may`, default-deny over every field (empty when the lead may make
+ * it). Allowed: new tasks with add_task; persona or team changes with reassign (and adding their
+ * personas as participants); interface changes with amend_interfaces; budget and time increases
+ * with extend_budget, up to authority.budget_extension_pct above the budget first frozen. Everything
+ * else, decreases included, is reserved to the orchestrator.
+ */
 export function authorityNeeds(o: Contract, n: Contract, may: readonly AuthorityAction[], original: ContractBudget = o.budget): string[] {
   const needs: string[] = [];
   const need = (action: AuthorityAction, what: string) => {
     if (!may.includes(action)) needs.push(`${what} needs "${action}"`);
   };
+  const reserved = (what: string) => needs.push(`${what} is reserved to the orchestrator`);
+  const before = withoutMeta(o);
+  const after = withoutMeta(n);
   const a = affectedTasks(o, n);
-  if (a.added.length) need("add_task", `adding ${a.added.join(", ")}`);
-  if (a.removed.length) needs.push(`removing ${a.removed.join(", ")} is reserved to the orchestrator`);
-  for (const id of a.changed) {
-    const { persona: _p1, team: _t1, ...before } = o.tasks.find((t) => t.id === id)!;
-    const { persona: _p2, team: _t2, ...after } = n.tasks.find((t) => t.id === id)!;
-    if (same(before, after)) need("reassign", `reassigning ${id}`);
-    else needs.push(`changing the spec of ${id} is reserved to the orchestrator`);
-  }
-  if (!same(o.interfaces, n.interfaces)) need("amend_interfaces", "changing interfaces");
-  const pct = o.authority.budget_extension_pct;
-  for (const key of BUDGET_KEYS) {
-    const was = o.budget[key];
-    const now = n.budget[key];
-    if (now === was || (now !== undefined && was !== undefined && now < was) || (was === undefined && now !== undefined)) continue;
-    if (now === undefined) {
-      needs.push(`removing budget.${key} is reserved to the orchestrator`);
-      continue;
+  const bringable = new Set<string>(); // personas an added or reassigned task may bring in as participants
+  // Tasks first: they decide which new participants are allowed.
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort((x, y) => Number(y === "tasks") - Number(x === "tasks"));
+  for (const key of keys) {
+    if (same(before[key], after[key])) continue;
+    switch (key) {
+      case "tasks": {
+        if (a.added.length) {
+          need("add_task", `adding ${a.added.join(", ")}`);
+          for (const id of a.added) bringable.add(n.tasks.find((t) => t.id === id)!.persona);
+        }
+        if (a.removed.length) reserved(`removing ${a.removed.join(", ")}`);
+        for (const id of a.changed) {
+          const { persona: p1, team: _t1, ...rest1 } = o.tasks.find((t) => t.id === id)!;
+          const { persona: p2, team: _t2, ...rest2 } = n.tasks.find((t) => t.id === id)!;
+          if (!same(rest1, rest2)) reserved(`changing the spec of ${id}`);
+          else {
+            need("reassign", `reassigning ${id}`);
+            if (p1 !== p2) bringable.add(p2);
+          }
+        }
+        if (!a.added.length && !a.removed.length && !a.changed.length) reserved("reordering tasks");
+        break;
+      }
+      case "interfaces":
+        need("amend_interfaces", "changing interfaces");
+        break;
+      case "budget": {
+        const pct = o.authority.budget_extension_pct;
+        for (const k of BUDGET_KEYS) {
+          const was = o.budget[k];
+          const now = n.budget[k];
+          if (now === was) continue;
+          if (now === undefined) reserved(`removing budget.${k}`);
+          else if (was === undefined) reserved(`adding budget.${k}`);
+          else if (now < was) reserved(`lowering budget.${k} to ${now}`);
+          else {
+            need("extend_budget", `raising budget.${k} to ${now}`);
+            const limit = (original[k] ?? was) * (1 + pct / 100);
+            if (now > limit + 1e-9) needs.push(`budget.${k} ${now} is beyond the ${pct}% extension limit (${Math.round(limit * 100) / 100})`);
+          }
+        }
+        for (const k of ["max_parallel", "max_attempts"] as const) if (o.budget[k] !== n.budget[k]) reserved(`changing budget.${k}`);
+        break;
+      }
+      case "participants": {
+        const old = new Map(o.participants.map((p) => [p.agent, p]));
+        const removed = o.participants.filter((p) => !n.participants.some((x) => x.agent === p.agent));
+        const changed = n.participants.filter((p) => old.has(p.agent) && !same(old.get(p.agent), p));
+        const added = n.participants.filter((p) => !old.has(p.agent));
+        if (removed.length || changed.length) reserved("removing or changing participants");
+        for (const p of added) {
+          if (!bringable.has(p.agent)) reserved(`adding participant ${p.agent}, who is not the persona of an added or reassigned task`);
+          else if (!may.includes("add_task") && !may.includes("reassign")) needs.push(`adding participant ${p.agent} needs "add_task" or "reassign"`);
+        }
+        if (!removed.length && !changed.length && !added.length) reserved("reordering participants");
+        break;
+      }
+      default:
+        reserved(`changing ${key}`);
     }
-    need("extend_budget", `raising budget.${key} to ${now}`);
-    const base = original[key] ?? was!;
-    const limit = base * (1 + pct / 100);
-    if (now > limit + 1e-9) needs.push(`budget.${key} ${now} is beyond the ${pct}% extension limit (${Math.round(limit * 100) / 100})`);
-  }
-  for (const key of ["max_parallel", "max_attempts"] as const) {
-    if (o.budget[key] !== n.budget[key]) needs.push(`changing budget.${key} is reserved to the orchestrator`);
-  }
-  const rest = (c: Contract) => {
-    const { tasks: _t, interfaces: _i, budget: _b, ...r } = withoutMeta(c) as unknown as Contract;
-    return r;
-  };
-  const before = rest(o) as unknown as Obj;
-  const after = rest(n) as unknown as Obj;
-  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    if (!same(before[key], after[key])) needs.push(`changing ${key} is reserved to the orchestrator`);
   }
   return needs;
 }
 
-/** Who re-consents: personas of affected tasks (old and new), participants never asked, open objectors. */
-function participantsToAsk(rec: ContractRecord, next: Contract, affected: string[]): string[] {
-  const touched = new Set<string>();
-  for (const c of [rec.contract, next]) for (const t of c.tasks) if (affected.includes(t.id)) touched.add(t.persona);
-  for (const { agent } of next.participants) {
-    const v = Object.hasOwn(rec.verdicts, agent) ? rec.verdicts[agent] : undefined;
-    if (unresolved(v)) touched.add(agent);
-  }
-  return next.participants.map((p) => p.agent).filter((a) => touched.has(a));
+/** Participants without an agreement on the record's current version. */
+function notAgreed(rec: ContractRecord, participants = rec.contract.participants.map((p) => p.agent)): string[] {
+  return participants.filter((a) => !["agree", "excused"].includes(standing(rec, a).kind));
 }
 
 /** The structure in a session's roundtable-tasks block, as a merge patch over the contract. */
-function sessionPatch(id: string): Obj {
+function sessionPatch(id: string): { patch: Obj; warn?: string } {
   const src = sessionSource(archived(id));
-  const block = locateBlock(src.blockTexts.map((text) => ({ from: id, text })));
-  if (!block) throw new Error(`from_session ${id} has no ${TASK_BLOCK_TAG} block to amend the contract from`);
+  const block = locateBlock(src.blockTexts);
+  if (!block) throw new Error(`from_session ${id} has no ${TASK_BLOCK_TAG} block in ${src.kind === "ultraplan" ? "any plan version" : "its summary or turns"} to amend the contract from`);
   const parsed = blockToContract(block.value);
-  if (parsed.errors.length) throw new Error(`The ${TASK_BLOCK_TAG} block in ${id} is not usable:\n- ${listErrors(parsed.errors)}`);
+  if (parsed.errors.length) throw new Error(`The ${TASK_BLOCK_TAG} block in ${block.from} is not usable:\n- ${listErrors(parsed.errors)}`);
   const patch = parsed.contract;
   // Commands without a final list: the final validation defaults again to every command.
   if (isObj(patch.validation) && patch.validation.final === undefined) patch.validation = { ...patch.validation, final: null };
-  return patch;
+  return { patch, ...(block.warn && { warn: block.warn }) };
 }
 
 /**
- * Amend a contract with an RFC 7396 merge patch (and/or a session's roundtable-tasks block). A
- * draft gets v(N+1) as a new proposal; a frozen contract gets contract.amended v(N+1), with removed
- * tasks cancelled and a directive to the agents of affected tasks. An empty patch with consent only
- * re-asks the participants without an agreement.
+ * Amend a contract with an RFC 7396 merge patch (and/or a session's roundtable-tasks block).
+ *
+ * - A draft gets v(N+1) as a new proposal; every participant must consent to it again before a freeze.
+ * - A frozen contract gets contract.amended v(N+1), with removed tasks cancelled and a directive to
+ *   the agents of affected tasks. A run-wide change (RUN_WIDE_FIELDS) by the orchestrator needs
+ *   consent (asked about the candidate first, applied only if everyone agrees) or overrideConsent.
+ * - With `authority` (the lead): `by` must be authority.lead, `authority` within authority.may, and
+ *   the change within authorityNeeds; such a change was consented to as part of the authority.
+ * - An empty patch with consent only asks the participants without an agreement on this version.
  */
 export async function amendContract(store: ExecutionStore, patch: Record<string, unknown>, opts: AmendOptions): Promise<ContractResult> {
   const by = typeof opts.by === "string" ? opts.by.trim() : "";
@@ -628,52 +733,96 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
   if (!isObj(patch)) throw new Error("patch must be a JSON object (an RFC 7396 merge patch)");
   const rec = await contractRecord(store, opts.contractId);
   const contractId = rec.id;
+  const c = rec.contract;
   if (rec.superseded) throw new ContractRefusal("amend", contractId, [`it was superseded by ${rec.superseded}`]);
-  if (!opts.authority && by !== rec.contract.scope.orchestrator) {
-    throw new ContractRefusal("amend", contractId, [`only the contract's orchestrator (${rec.contract.scope.orchestrator}) can amend it without an authority limit; ${by} cannot`]);
+  let parent: ParentInfo | undefined;
+  if (c.scope.parent) parent = await loadParent(c.scope.parent.contract, { task: c.scope.parent.task, exclude: contractId });
+  if (opts.authority) {
+    const problems: string[] = [];
+    if (by !== c.authority.lead) problems.push(`only the lead (${c.authority.lead}) amends within the authority; ${by} cannot`);
+    const beyond = opts.authority.filter((x) => !c.authority.may.includes(x));
+    if (beyond.length) problems.push(`the contract's authority.may (${c.authority.may.join(", ") || "none"}) does not grant ${beyond.join(", ")}`);
+    if (opts.overrideConsent) problems.push("only the orchestrator can override consent");
+    if (problems.length) throw new ContractRefusal("amend", contractId, problems);
+  } else {
+    const allowed = [c.scope.orchestrator, ...(parent ? [parent.contract.scope.orchestrator] : [])];
+    if (!allowed.includes(by)) {
+      throw new ContractRefusal("amend", contractId, [`only the contract's orchestrator (${allowed.join(" or ")}) can amend it without an authority limit; ${by} cannot`]);
+    }
   }
   const problems = protectedProblems(patch);
   if (problems.length) throw new ContractRefusal("amend", contractId, problems);
   const reason = opts.reason?.trim() || `amended by ${by}`;
   const llm = typeof opts.consent === "object" ? opts.consent : undefined;
   const wantConsent = opts.consent === true || typeof opts.consent === "object";
+  const warnings: string[] = [];
 
-  let parentOpt: { parent: { contract: Contract; depth: number } } | undefined;
-  if (rec.contract.scope.parent) {
-    const parent = await loadParent(rec.contract.scope.parent.contract);
-    parentOpt = { parent: { contract: parent.contract, depth: parent.depth } };
-  }
   const fromSession = opts.fromSession ? sessionPatch(opts.fromSession) : undefined;
-  const merged = applyMergePatch<Obj>(fromSession ? applyMergePatch(rec.contract, fromSession) : rec.contract, patch);
+  if (fromSession?.warn) warnings.push(fromSession.warn);
+  const merged = applyMergePatch<Obj>(fromSession ? applyMergePatch(c, fromSession.patch) : c, patch);
   const version = rec.version + 1;
   const candidate: Obj = { ...merged, version, status: rec.frozen ? "frozen" : "draft", consent: [] };
   delete candidate.frozen;
-  const v = await validateContract(candidate, parentOpt);
+  const v = await validateContract(candidate, parentOpt(parent));
   if (!v.ok) throw new Error(`The amended contract is not valid:\n- ${listErrors(v.errors)}`);
-  const warnings = [...v.warnings];
-  const effective = createMergePatch(withoutMeta(rec.contract), withoutMeta(v.contract)) as Obj;
+  warnings.push(...v.warnings);
+  const effective = createMergePatch(withoutMeta(c), withoutMeta(v.contract)) as Obj;
 
   if (Object.keys(effective).length === 0) {
     if (!wantConsent) throw new Error(`The patch changes nothing in ${contractId} v${rec.version}`);
-    const asked = participantsToAsk(rec, rec.contract, []);
-    if (asked.length) await requestConsent(store, contractId, { by, participants: asked, llm });
-    else warnings.push("every participant has already agreed: nobody was asked");
+    const asked = notAgreed(rec);
+    if (asked.length) {
+      const round = await requestConsent(store, contractId, { by, participants: asked, llm });
+      if (round.dropped) warnings.push(round.dropped);
+    } else warnings.push(`every participant has already agreed to v${rec.version}: nobody was asked`);
     return resultFor(store, contractId, { warnings, asked });
   }
-  const affected = affectedTasks(rec.contract, v.contract);
+  const affected = affectedTasks(c, v.contract);
   if (opts.authority) {
-    const original = rec.frozen ? (JSON.parse((await store.getBlob(rec.frozen.blob)).toString("utf8")) as Contract).budget : rec.contract.budget;
-    const needs = authorityNeeds(rec.contract, v.contract, opts.authority, original);
+    const original = rec.frozen ? (JSON.parse((await store.getBlob(rec.frozen.blob)).toString("utf8")) as Contract).budget : c.budget;
+    const needs = authorityNeeds(c, v.contract, opts.authority, original);
     if (needs.length) throw new AuthorityError(contractId, needs);
+    // A participant the lead brings in must be a real persona, even where the agents directory is unavailable.
+    for (const p of v.contract.participants.filter((x) => !c.participants.some((y) => y.agent === x.agent))) {
+      try {
+        await loadAgent(p.agent);
+      } catch (e) {
+        throw new AuthorityError(contractId, [`the new participant ${p.agent} does not resolve: ${errText(e).split("\n")[0]}`]);
+      }
+    }
   }
+  const runWide = RUN_WIDE_FIELDS.filter((k) => Object.hasOwn(effective, k));
   const source = opts.source ?? (opts.authority ? { kind: "agent" as const, id: by, pid: process.pid } : orchestratorSource(by));
   const patchBlob = await store.putBlob(scrubbedJSON(effective), { redact: false });
   let hash: string | undefined;
+  let asked: string[] | undefined;
   if (rec.frozen) {
-    // Hash what is stored: the blob is scrubbed, so the hash is taken over the scrubbed contract.
-    const body = JSON.parse(scrubbedJSON({ ...v.contract, status: "frozen", consent: [] })) as Contract;
+    const body = storedBody(v.contract, "frozen");
     hash = contractHash(body);
-    const final: Contract = { ...body, consent: effectiveConsent({ contract: body, verdicts: rec.verdicts }), frozen: { by, at: new Date().toISOString(), hash } };
+    const final: Contract = { ...body, consent: effectiveConsent(rec), frozen: { by, at: new Date().toISOString(), hash } };
+    // A run-wide change by the orchestrator: everyone is asked about the candidate first, unless overridden.
+    if (runWide.length && !opts.authority) {
+      if (opts.overrideConsent) {
+        await audit(warnings, {
+          actor: by, action: "contract.consent_overridden", target: contractId,
+          details: { execution: store.id, version, fields: runWide, reason },
+        });
+        warnings.push(`consent overridden for the change to ${runWide.join(", ")} (audited)`);
+      } else if (wantConsent) {
+        const round = await requestConsent(store, contractId, { by, llm, candidate: final });
+        asked = round.asked;
+        if (round.dropped) throw new ContractRefusal("amend", contractId, [round.dropped]);
+        const against = round.answers.filter((x) => x.verdict !== "AGREE");
+        if (against.length) {
+          throw new ContractRefusal("amend", contractId, against.map((x) => `${x.agent} ${x.verdict === "OBJECT" ? "objects" : "is unclear"} to v${version}${x.reason ? `: ${x.reason.split(/\r?\n/)[0].slice(0, 200)}` : ""}`)
+            .concat(`the change to ${runWide.join(", ")} was not applied`));
+        }
+      } else {
+        throw new ContractRefusal("amend", contractId, [
+          `changing ${runWide.join(", ")} of a frozen contract touches every participant: pass consent: true (everyone is asked first, and it applies only if all agree) or override_consent: true (audited)`,
+        ]);
+      }
+    }
     const blob = await store.putBlob(scrubbedJSON(final), { redact: false });
     await store.transact(async ({ state }) => {
       const now = await contractRecord(store, contractId);
@@ -694,7 +843,7 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
           type: "directive.issued", source, mode: m, contract: contractId, contract_version: version,
           payload: {
             id: newId("dir"), to, requires_ack: true,
-            text: `Contract amended to v${version}: re-read the contract before you continue (${reason}). Affected tasks: ${affected.all.join(", ")}.`,
+            text: `Contract amended to v${version}: re-read the contract before you continue (${reason}). Affected tasks: ${affected.all.join(", ")}. Their checks run again on your next submission.`,
           },
         });
       }
@@ -702,8 +851,15 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
     });
     await audit(warnings, {
       actor: by, action: "contract.amended", target: contractId,
-      details: { execution: store.id, version, hash, affected_tasks: affected.all, ...(opts.authority && { within_authority: opts.authority }) },
+      details: { execution: store.id, version, hash, affected_tasks: affected.all, ...(runWide.length && { run_wide: runWide }), ...(opts.authority && { within_authority: opts.authority }) },
     });
+    // A task-level change: the personas of the affected tasks are asked afterwards, when wanted.
+    if (wantConsent && asked === undefined) {
+      const personas = new Set<string>();
+      for (const x of [c, v.contract]) for (const t of x.tasks) if (affected.all.includes(t.id)) personas.add(t.persona);
+      asked = v.contract.participants.map((p) => p.agent).filter((a) => personas.has(a));
+      if (asked.length) await consentAfter(store, contractId, by, asked, llm, warnings);
+    }
   } else {
     const blob = await store.putBlob(scrubbedJSON(v.contract), { redact: false });
     await store.transact(async () => {
@@ -718,19 +874,22 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
         }],
       };
     });
-  }
-  let asked: string[] | undefined;
-  if (wantConsent) {
-    asked = participantsToAsk(rec, v.contract, affected.all);
-    if (asked.length) {
-      try {
-        await requestConsent(store, contractId, { by, participants: asked, llm });
-      } catch (e) {
-        warnings.push(`the consent round failed: ${errText(e)}`);
-      }
+    // Every participant consented to the old draft, not this one: everyone is asked again.
+    if (wantConsent) {
+      asked = v.contract.participants.map((p) => p.agent);
+      await consentAfter(store, contractId, by, asked, llm, warnings);
     }
   }
   return resultFor(store, contractId, { warnings, affected, ...(hash && { hash }), ...(asked && { asked }) });
+}
+
+async function consentAfter(store: ExecutionStore, contractId: string, by: string, participants: string[], llm: ConsentLLMOptions | undefined, warnings: string[]): Promise<void> {
+  try {
+    const round = await requestConsent(store, contractId, { by, participants, llm });
+    if (round.dropped) warnings.push(round.dropped);
+  } catch (e) {
+    warnings.push(`the consent round failed: ${errText(e)}`);
+  }
 }
 
 /** One summary line for a result (consent outcome included). */

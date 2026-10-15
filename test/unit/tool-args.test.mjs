@@ -24,9 +24,9 @@ const fields = {
   },
   amend_contract: {
     string: ["contract_id", "reason", "orchestrator", "from_session", "provider", "model", "base_url"],
-    boolean: ["consent"], object: ["patch"],
+    boolean: ["consent", "override_consent"], object: ["patch"],
   },
-  freeze_contract: { string: ["contract_id", "orchestrator"], objects: ["excuse"] },
+  freeze_contract: { string: ["contract_id", "orchestrator"], boolean: ["abandon_round"], objects: ["excuse"] },
 };
 const rules = {
   string: { valid: ["text", "", " "], invalid: [5, false, [], {}], message: "a string" },

@@ -1,6 +1,9 @@
 // Generic webhook publisher: POSTs one JSON object per message. No history download.
 import type { Channel, OutgoingMessage, Publisher, RemoteHistory, SendResult } from "./types.js";
 import { REQUEST_TIMEOUT_MS, buildChannelId, errMessage, failFromStatus, parseRetryAfter } from "./shared.js";
+import { UrlGuardError, checkUrl, guardUrl, type UrlGuardOptions } from "../security/url-guard.js";
+
+const WEBHOOK_GUARD: UrlGuardOptions = { label: "ROUNDTABLE_WEBHOOK_URL", allowPrivate: true };
 
 export interface WebhookOptions {
   url: string;
@@ -25,6 +28,10 @@ export class WebhookPublisher implements Publisher {
     if (!/^https?:\/\/[^\s/]+/i.test(opts.url)) {
       throw new Error("ROUNDTABLE_WEBHOOK_URL is not a valid http(s) URL.");
     }
+    // The URL guard with private networks allowed, over plain http too (self-hosted LAN receivers), but
+    // metadata always blocked and http to a public host refused.
+    // Here the checks that need no DNS; send() resolves the host and checks every address.
+    checkUrl(opts.url, WEBHOOK_GUARD);
     if (opts.authHeader) {
       const i = opts.authHeader.indexOf(":");
       if (i <= 0) {
@@ -48,9 +55,17 @@ export class WebhookPublisher implements Publisher {
     if (this.authName && this.authValue !== undefined) headers[this.authName] = this.authValue;
     let res: Response;
     try {
+      await guardUrl(this.opts.url, WEBHOOK_GUARD);
+    } catch (e) {
+      if (e instanceof UrlGuardError) return { ok: false, retryable: e.retryable, error: e.message };
+      throw e;
+    }
+    try {
       res = await fetch(this.opts.url, {
         method: "POST",
         headers,
+        // The auth header must not follow a redirect to another host: a 3xx fails the send.
+        redirect: "manual",
         body: JSON.stringify({
           session: channel.sessionId,
           channel: channel.id,

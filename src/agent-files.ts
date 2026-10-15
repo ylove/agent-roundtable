@@ -11,6 +11,11 @@ import { SKILLS_DIR } from "./config.js";
 
 export const MODEL_CHOICES = ["opus", "sonnet", "haiku", "inherit"] as const;
 export const TOOL_ALLOWLIST = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"] as const;
+/** A new agent whose definition lists no tools gets these (read-only), never Claude Code's inherit-all default. */
+export const DEFAULT_AGENT_TOOLS = ["Read", "Grep", "Glob"] as const;
+export const DEFAULT_TOOLS_WARNING = `tools omitted: defaulting to ${DEFAULT_AGENT_TOOLS.join(", ")} (read-only)`;
+/** Improvement keeps a target's missing tools line (the user's choice), and says what that means. */
+export const IMPROVE_NO_TOOLS_WARNING = "tools omitted: the target has no tools line, so it still inherits every tool; list tools to restrict it";
 export const RESERVED_SKILL_NAMES = ["synced", "anthropic-skills"];
 
 /** A reusable procedure, either newly authored or attached by its existing name. */
@@ -121,7 +126,8 @@ export function validateAgentSpec(
   }
   const toolsError = (): Error => new Error(
     `tools must list tool names from: ${TOOL_ALLOWLIST.join(", ")} ` +
-      `(or be omitted to inherit all tools); got: ${typeof raw.tools === "string" ? raw.tools : inspect(raw.tools)}`,
+      `(or be omitted: a new agent then gets ${DEFAULT_AGENT_TOOLS.join(", ")}); ` +
+      `got: ${typeof raw.tools === "string" ? raw.tools : inspect(raw.tools)}`,
   );
   if (!omitted(raw.tools)) {
     if (typeof raw.tools !== "string" && !Array.isArray(raw.tools)) {
@@ -158,7 +164,9 @@ export function validateAgentSpec(
     }
   }
   if (!spec.tools && ctx.mode === "create") {
-    warnings.push("tools omitted: the agent inherits all tools");
+    // Claude Code gives an agent with no tools line every tool: a generated agent always gets one.
+    spec.tools = [...DEFAULT_AGENT_TOOLS];
+    warnings.push(DEFAULT_TOOLS_WARNING);
   }
   if (raw.skills !== undefined && !Array.isArray(raw.skills)) {
     warnings.push("skills must be an array; ignored.");
@@ -554,7 +562,7 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
     assertReadableFrontmatter(frontmatter, agentPath);
     const { data } = frontmatter;
     if (!spec.tools && data.tools == null) {
-      warnings.push("tools omitted: the agent inherits all tools");
+      warnings.push(IMPROVE_NO_TOOLS_WARNING);
     }
     agentName = (typeof data.name === "string" || typeof data.name === "number") && String(data.name).trim()
       ? String(data.name).trim() : agentKey(agentPath);

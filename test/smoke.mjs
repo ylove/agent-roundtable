@@ -3,7 +3,7 @@ import { startServer, assert } from "./mcp-client.mjs";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
@@ -28,11 +28,15 @@ const smokeEnv = {
   OPENAI_COMPATIBLE_API_KEY: "",
   REPLICATE_API_TOKEN: "r8_test",
   ROUNDTABLE_AGENTS_DIR: agentsDir,
+  // Path-like agent refs are contained; fixture paths live under test/fixtures.
+  ROUNDTABLE_AGENT_PATHS: fileURLToPath(new URL("./fixtures", import.meta.url)),
   ROUNDTABLE_SKILLS_DIR: join(root, "skills"),
   ROUNDTABLE_WORKSPACE_DIR: root,
   ROUNDTABLE_ACTIVITY_LOG: join(root, "activity.jsonl"),
   ROUNDTABLE_TRANSCRIPTS_DIR: join(root, "transcripts"),
   ROUNDTABLE_PARALLEL_TURNS: "2",
+  // Scripted provider failures must fail at once, not be retried.
+  ROUNDTABLE_PROVIDER_RETRIES: "0",
   // Prototype sandboxes stay under the temp root; never spawn a browser or headless Chrome.
   ROUNDTABLE_PROTOTYPE_DIR: join(root, "prototypes"),
   ROUNDTABLE_PROTOTYPE_SCREENSHOTS: "0",
@@ -67,7 +71,7 @@ const check = (name, fn) => {
 async function checkDispatch() {
   Object.assign(process.env, smokeEnv, {
     ROUNDTABLE_PUBLISHER: "webhook",
-    ROUNDTABLE_WEBHOOK_URL: "http://publisher.test/post",
+    ROUNDTABLE_WEBHOOK_URL: "http://127.0.0.1:4142/post",
     ROUNDTABLE_WEBHOOK_VIEW_URL: "http://publisher.test/{channel}",
     ROUNDTABLE_WEBHOOK_AUTH_HEADER: "",
   });
@@ -76,13 +80,13 @@ async function checkDispatch() {
   const { meetings } = await import("../dist/sessions/meetings.js");
   const { collaborations } = await import("../dist/sessions/collaborations.js");
   const realFetch = globalThis.fetch;
-  const providerArgs = { provider: "openai_compatible", model: "smoke-model", base_url: "http://llm.test/v1" };
+  const providerArgs = { provider: "openai_compatible", model: "smoke-model", base_url: "http://localhost:4141/v1" };
   let calls = [];
   let replies = [];
   const script = (...outputs) => { calls = []; replies = outputs; };
   globalThis.fetch = async (url, init = {}) => {
-    if (String(url) === "http://publisher.test/post") return json(200, {});
-    assert(String(url) === "http://llm.test/v1/chat/completions", `Unexpected fetch: ${url}`);
+    if (String(url) === "http://127.0.0.1:4142/post") return json(200, {});
+    assert(String(url) === "http://localhost:4141/v1/chat/completions", `Unexpected fetch: ${url}`);
     const body = JSON.parse(init.body);
     assert(body.model === "smoke-model", JSON.stringify(body));
     calls.push(body);

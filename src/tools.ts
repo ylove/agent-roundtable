@@ -6,6 +6,7 @@ import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { assertValid, publicSchema } from "./validate.js";
 import { deliberationTools, handleDeliberationTool } from "./tools/deliberation.js";
 import type { ToolArgs, ToolDefinition, ToolGroup, ToolMode } from "./tools/shared.js";
+import { scrub } from "./security/secrets.js";
 
 export { formatUltraplanResult, formatAgentWorkshopResult } from "./tools/shared.js";
 export type { ToolMode } from "./tools/shared.js";
@@ -69,7 +70,7 @@ export async function handleToolCall(
     validateToolArgs(route.definition, args);
     return await route.group.handle(name, args as ToolArgs);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = scrub(error instanceof Error ? error.message : String(error));
     return {
       content: [{ type: "text", text: `Error: ${message}` }],
       isError: true,

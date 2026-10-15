@@ -414,6 +414,29 @@ describe("poll loop", () => {
     await assert.rejects(createReplicateCall({ pollIntervalMs: 1 })(messages, opts()), /canceled.*meta\/llama.*no error detail/);
   });
 
+  test("a polling URL off https://api.replicate.com is refused and never receives the token", async (t) => {
+    for (const get of ["https://evil.example.test/predictions/p1", "http://api.replicate.com/v1/predictions/p1", "https://api.replicate.com.evil.example.test/p1", "https://api.replicate.com:8443/v1/predictions/p1"]) {
+      clearReplicateSchemaCache();
+      const calls = stubFetch(t, (url, init) => {
+        if (isSchemaGet(url, init)) return json(200, schemaBody(["prompt"]));
+        if (init.method === "POST") return json(201, { status: "processing", urls: { get } });
+        return json(200, { status: "succeeded", output: ["leaked"] });
+      });
+      await assert.rejects(createReplicateCall({ pollIntervalMs: 1 })(messages, opts()), /polling URL outside https:\/\/api\.replicate\.com.*refusing to send the token/, get);
+      assert.ok(!calls.some((c) => c.url === get), `${get} was fetched`);
+      t.mock.restoreAll();
+    }
+  });
+
+  test("redirects are never followed with the token", async (t) => {
+    const calls = stubFetch(t, (url, init) => {
+      if (isSchemaGet(url, init)) return json(200, schemaBody(["prompt"]));
+      return new Response("", { status: 302, headers: { location: "https://elsewhere.example.test/x" } });
+    });
+    await assert.rejects(createReplicateCall({ pollIntervalMs: 1 })(messages, opts()), /Replicate API error \(302\): refusing to follow a redirect to https:\/\/elsewhere\.example\.test/);
+    assert.ok(calls.every((c) => c.init.redirect === "manual"));
+  });
+
   test("missing polling URL and non-OK poll are reported", async (t) => {
     stubFetch(t, (url, init) => {
       if (isSchemaGet(url, init)) return json(200, schemaBody(["prompt"]));

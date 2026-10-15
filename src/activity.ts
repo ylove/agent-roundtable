@@ -6,6 +6,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path";
 import { agentKey } from "./agents.js";
 import { ACTIVITY_LOG_PATH, ACTIVITY_LOG_MAX_ENTRIES } from "./config.js";
+import { scrub } from "./security/secrets.js";
 
 export type ActivityKind = "meeting" | "local-meeting" | "collaboration" | "ultraplan" | "agent-creation" | "agent-refinement";
 
@@ -36,8 +37,9 @@ export function recordActivity(entry: Omit<ActivityEntry, "at"> & { at?: string 
       // Callers supply canonical keys. Only path arguments need conversion; a key may
       // itself start with "subagent-" when its source had that prefix twice.
       agents: entry.agents.map((key) => /[\\/]/.test(key) ? agentKey(key) : key.toLowerCase()),
-      topic: excerpt(entry.topic, 300),
-      ...(entry.outcome !== undefined && { outcome: excerpt(entry.outcome, 600) }),
+      // Topics and outcomes come from callers and agents: secrets never reach the log (or grounding).
+      topic: excerpt(scrub(entry.topic), 300),
+      ...(entry.outcome !== undefined && { outcome: excerpt(scrub(entry.outcome), 600) }),
       public: entry.public,
     };
     mkdirSync(dirname(path), { recursive: true });

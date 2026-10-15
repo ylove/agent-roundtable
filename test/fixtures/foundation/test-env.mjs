@@ -1,7 +1,8 @@
 // Import before test files so config defaults can never write into the real home directory.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const root = mkdtempSync(join(tmpdir(), "roundtable-test-env-"));
 process.env.ROUNDTABLE_HOME = join(root, "state");
@@ -17,4 +18,8 @@ delete process.env.ROUNDTABLE_PROTOTYPE_OPEN;
 if (process.env.ROUNDTABLE_TEST_CHROME !== "1") process.env.ROUNDTABLE_PROTOTYPE_SCREENSHOTS = "0";
 // Personal skills (~/.claude/skills) take precedence over project skills: never read the developer's.
 process.env.HOME = join(root, "home");
+// Scripted provider failures fail at once; test/unit/retry.test.mjs turns retries on where it tests them.
+process.env.ROUNDTABLE_PROVIDER_RETRIES = "0";
+// Path-like agent refs must stay inside allowed roots; tests pass fixture paths under test/fixtures.
+process.env.ROUNDTABLE_AGENT_PATHS = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));

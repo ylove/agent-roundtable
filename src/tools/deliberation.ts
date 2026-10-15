@@ -31,6 +31,8 @@ import {
 } from "../config.js";
 import type { LLMMessage } from "../providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "../providers/index.js";
+import { findExecutable } from "../executables.js";
+import { describeUrl } from "../security/url-guard.js";
 import {
   meetings,
   startMeeting,
@@ -107,21 +109,14 @@ function checkProviderArgs(args: Record<string, unknown>): void {
   validateProviderOptions(args.provider as LLMProvider | undefined, args.base_url as string | undefined);
 }
 
-/** Origin only: webhook URLs often carry the secret in the path or query. */
-function webhookOrigin(raw: string): string {
-  try {
-    return new URL(raw).origin;
-  } catch {
-    return "unparseable URL";
-  }
-}
-
 const SKILL_LOOKUP_DESCRIPTION =
   "Creation includes the destination project's .claude/skills in lookup even when the configured skills directory differs. Skill lookup follows Claude Code precedence: personal ~/.claude/skills, then .claude/skills beside the agent file when it is in .claude/agents, then ROUNDTABLE_SKILLS_DIR. Any skill found is reused, never overwritten or shadowed. ";
 const WORKSHOP_TOOLS_DESCRIPTION =
   "Tools fail closed: a list with no allowlisted matches or a value of the wrong type is rejected and the architect retries once. ";
 const CREATE_TOOLS_DEFAULT_DESCRIPTION = "Omitting tools gives the new agent tools: Read, Grep, Glob. ";
-const IMPROVE_TOOLS_DEFAULT_DESCRIPTION = "Omitting tools inherits all tools and warns: tools omitted: the agent inherits all tools. ";
+const IMPROVE_TOOLS_DEFAULT_DESCRIPTION =
+  "Omitting tools keeps the target's own tools line; a target without one keeps inheriting every tool, and the result warns: " +
+  "tools omitted: the target has no tools line, so it still inherits every tool; list tools to restrict it. ";
 const PUBLIC_WORKSHOP_DESCRIPTION =
   "Public workshops post contributions, reviews and a redacted summary of the final definition (name, description, model, tools, skill names and status, contribution credits, changes and open questions), without its system prompt, skill instructions or descriptions derived from instructions; copied private passages in summary fields are withheld. They never post context, personas, fleet listings or source-session transcripts. ";
 
@@ -168,7 +163,7 @@ export const deliberationTools: ToolDefinition[] = [
         base_url: {
           type: "string",
           description:
-            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent as the bearer token to whichever base URL is used.',
+            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address.',
         },
       },
       required: ["agent", "agenda"],
@@ -359,7 +354,7 @@ export const deliberationTools: ToolDefinition[] = [
         base_url: {
           type: "string",
           description:
-            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent as the bearer token to whichever base URL is used.',
+            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address.',
         },
       },
       required: ["messages"],
@@ -437,7 +432,7 @@ export const deliberationTools: ToolDefinition[] = [
         base_url: {
           type: "string",
           description:
-            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent as the bearer token to whichever base URL is used.',
+            'Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address.',
         },
       },
       required: ["agents"],
@@ -635,7 +630,7 @@ export const deliberationTools: ToolDefinition[] = [
     precheck: checkProviderArgs,
     annotations: { title: "Improve agent", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     description:
-      "Refine an existing Claude Code agent in one call, preserving its identity and useful instructions. By default the target reviews itself candidly; add specialists with with or inherit participants/discussion via from_session (the id of a live collaboration or meeting, or of any ended session in the archive). They suggest gaps, replacements, skills and cuts; an architect drafts the definition, participants review independently, and the architect revises if needed. The target may be any existing .md path, including outside the agents directory. write: false previews without writes. " +
+      "Refine an existing Claude Code agent in one call, preserving its identity and useful instructions. By default the target reviews itself candidly; add specialists with with or inherit participants/discussion via from_session (the id of a live collaboration or meeting, or of any ended session in the archive). They suggest gaps, replacements, skills and cuts; an architect drafts the definition, participants review independently, and the architect revises if needed. The target is an agent name or a .md path inside the agents directory, <workspace>/.claude/agents, ~/.claude/agents or a directory listed in ROUNDTABLE_AGENT_PATHS. write: false previews without writes. " +
       "Frontmatter is read the way Claude Code reads it, including one quoting and leading-tab recovery pass. Exactly the keys Claude Code sees are preserved; improve refuses files Claude Code cannot parse or whose frontmatter contains '---' inside a value, with an error asking you to fix the file first. Identity collision checks use the same metadata view. Model output only supplies name/description/model/tools/skills. " +
       "Only one improve run per target is allowed; a second fails fast: improve_agent is already running for <key>; wait for it to finish. Default write: true saves <target>.bak-<timestamp>, then atomically replaces via a temp file and rename, keeping the original mode. If the target changed, was renamed or was deleted during the run it is not overwritten: changes go to <target>.proposed-<timestamp>, which is not an agent file and keeps the original mode; next explains recovery. " +
       SKILL_LOOKUP_DESCRIPTION +
@@ -647,7 +642,7 @@ export const deliberationTools: ToolDefinition[] = [
       properties: {
         agent: {
           type: "string",
-          description: "Existing agent identifier or .md file path to improve, including paths outside ROUNDTABLE_AGENTS_DIR. Written targets are backed up first.",
+          description: "Existing agent name, or a .md file path inside an allowed agents directory (ROUNDTABLE_AGENTS_DIR, <workspace>/.claude/agents, ~/.claude/agents or ROUNDTABLE_AGENT_PATHS). Written targets are backed up first.",
           "x-nonblank": true,
           "x-hint": "pass the agent name or .md path to improve",
         },
@@ -1041,15 +1036,8 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
       const keyStatus = (name: string) => (process.env[name] ? "configured" : "NOT SET");
       const agentsDir = process.env.ROUNDTABLE_AGENTS_DIR;
 
-      // Check if claude CLI is available for local meetings
-      let claudeCliAvailable = false;
-      try {
-        const { execSync } = await import("child_process");
-        execSync("which claude", { stdio: "pipe" });
-        claudeCliAvailable = true;
-      } catch {
-        claudeCliAvailable = false;
-      }
+      // Check if claude CLI is available for local meetings (PATH scan, no shell)
+      const claudeCliAvailable = findExecutable("claude") !== null;
 
       const debugInfo = {
         version: VERSION,
@@ -1058,10 +1046,11 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         together_api_key: keyStatus("TOGETHER_API_KEY"),
         replicate_api_token: keyStatus("REPLICATE_API_TOKEN"),
         openai_compatible: {
-          base_url: process.env.OPENAI_COMPATIBLE_BASE_URL || "NOT SET",
+          base_url: process.env.OPENAI_COMPATIBLE_BASE_URL ? describeUrl(process.env.OPENAI_COMPATIBLE_BASE_URL) : "NOT SET",
           api_key: keyStatus("OPENAI_COMPATIBLE_API_KEY"),
         },
-        ollama: { url: OLLAMA_URL, reachable: await isOllamaAvailable() },
+        // Every URL as scheme://host[:port] only: userinfo may hold a password, a path or query a token.
+        ollama: { url: describeUrl(OLLAMA_URL), reachable: await isOllamaAvailable() },
         default_models: DEFAULT_MODELS,
         max_tokens: MAX_TOKENS,
         llm_timeout_ms: LLM_TIMEOUT_MS,
@@ -1075,12 +1064,12 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
           publisher: PUBLISHER_KIND,
           ...(PUBLISHER_KIND === "webhook"
             ? {
-                webhook_url: WEBHOOK_URL ? `configured (${webhookOrigin(WEBHOOK_URL)}, path/query hidden)` : "NOT SET",
-                webhook_view_url: WEBHOOK_VIEW_URL || "NOT SET",
+                webhook_url: WEBHOOK_URL ? `configured (${describeUrl(WEBHOOK_URL)}, path/query hidden)` : "NOT SET",
+                webhook_view_url: WEBHOOK_VIEW_URL ? `configured (${describeUrl(WEBHOOK_VIEW_URL)}, path/query hidden)` : "NOT SET",
                 webhook_auth_header: WEBHOOK_AUTH_HEADER ? "configured" : "not set",
               }
             : {
-                server_url: NTFY_URL,
+                server_url: describeUrl(NTFY_URL),
                 token: NTFY_TOKEN ? "configured" : "not set",
                 user: NTFY_USER ? "configured" : "not set",
                 password: NTFY_PASSWORD ? "configured" : "not set",

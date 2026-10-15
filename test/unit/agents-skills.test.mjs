@@ -2,7 +2,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { json, stubFetch } from "./helpers.mjs";
 
@@ -15,6 +15,8 @@ process.env.HOME = fakeHome;
 process.env.ROUNDTABLE_AGENTS_DIR = agentsDir;
 process.env.ROUNDTABLE_SKILLS_DIR = skillsDir;
 process.env.ROUNDTABLE_WORKSPACE_DIR = root;
+// One test loads a persona from another project's .claude/agents, which must be allowed explicitly.
+process.env.ROUNDTABLE_AGENT_PATHS = [process.env.ROUNDTABLE_AGENT_PATHS, join(root, "other", ".claude", "agents")].filter(Boolean).join(delimiter);
 process.env.ROUNDTABLE_ACTIVITY_LOG = join(root, "activity.jsonl");
 process.env.ROUNDTABLE_TRANSCRIPTS_DIR = join(root, "transcripts");
 delete process.env.OPENAI_COMPATIBLE_API_KEY;
@@ -178,7 +180,8 @@ test("listAgents and listSkills scan only the contracted depth and extract YAML 
 test("local meetings append skills on every CLI call with debate/public directives, and omit the flag without skills", async (t) => {
   const bin = join(root, "bin");
   const log = join(root, "cli-argv.jsonl");
-  const script = fixture(join(bin, "claude"), `#!${process.execPath}\nrequire("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nprocess.stdout.write("local reply");\n`);
+  // The prompt arrives on stdin; drain it before answering, as the real CLI does.
+  const script = fixture(join(bin, "claude"), `#!${process.execPath}\nif (process.argv.includes("--help")) { process.stdout.write("--permission-prompts\\n"); process.exit(0); }\nprocess.stdin.resume();\nprocess.stdin.on("end", () => {\n  require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n  process.stdout.write("local reply");\n});\n`);
   chmodSync(script, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${bin}:${previousPath}`;

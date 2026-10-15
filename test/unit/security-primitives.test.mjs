@@ -72,10 +72,13 @@ const FAKE_ENV = {
   SSH_AUTH_SOCK: "/tmp/agent.sock",
   DOCKER_HOST: "unix:///var/run/docker.sock",
   RANDOM_PASSWORD: "hunter2hunter2",
+  CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-cli-login",
 };
 
 test("no profile leaks secret-named variables unless it exists to carry them", () => {
-  const allowed = { gh: ["GH_TOKEN"], git: ["SSH_AUTH_SOCK"], runner: Object.keys(FAKE_ENV) };
+  // The claude CLI's own login (claude setup-token) is the one credential its profiles always carry.
+  const cliLogin = ["CLAUDE_CODE_OAUTH_TOKEN"];
+  const allowed = { gh: ["GH_TOKEN"], git: ["SSH_AUTH_SOCK"], "claude-worker": cliLogin, "local-meeting": cliLogin, runner: Object.keys(FAKE_ENV) };
   for (const profile of ["claude-worker", "codex-worker", "local-meeting", "git", "gh", "docker", "browser", "open", "sandbox-local", "cloud-cli"]) {
     const env = childEnv(profile, {}, FAKE_ENV);
     for (const name of Object.keys(env)) {
@@ -99,8 +102,40 @@ test("secret-name pattern matches credentials but not authors, bypasses or sessi
 test("CLI profiles pass the provider key only with ROUNDTABLE_WORKER_AUTH=api_key", () => {
   assert.equal(childEnv("claude-worker", {}, FAKE_ENV).ANTHROPIC_API_KEY, undefined);
   assert.equal(childEnv("claude-worker", {}, { ...FAKE_ENV, ROUNDTABLE_WORKER_AUTH: "api_key" }).ANTHROPIC_API_KEY, FAKE_ENV.ANTHROPIC_API_KEY);
+  for (const profile of ["claude-worker", "local-meeting"]) {
+    const login = { ...FAKE_ENV, CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-cli-login", ANTHROPIC_AUTH_TOKEN: "roundtable-bearer" };
+    // The CLI's own login always passes; the roundtable's bearer token only with api_key.
+    assert.equal(childEnv(profile, {}, login).CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat01-cli-login", profile);
+    assert.equal(childEnv(profile, {}, login).ANTHROPIC_AUTH_TOKEN, undefined, profile);
+    assert.equal(childEnv(profile, {}, { ...login, ROUNDTABLE_WORKER_AUTH: "api_key" }).ANTHROPIC_AUTH_TOKEN, "roundtable-bearer", profile);
+  }
   assert.equal(childEnv("codex-worker", {}, FAKE_ENV).OPENAI_API_KEY, undefined);
   assert.equal(childEnv("codex-worker", {}, { ...FAKE_ENV, ROUNDTABLE_WORKER_AUTH: "API_KEY" }).OPENAI_API_KEY, FAKE_ENV.OPENAI_API_KEY);
+});
+
+test("cloud platform credentials pass to the claude CLI only when it is set to use that platform", () => {
+  const platform = {
+    ...FAKE_ENV,
+    AWS_BEARER_TOKEN_BEDROCK: "bedrock-bearer",
+    ANTHROPIC_FOUNDRY_API_KEY: "foundry-key",
+    ANTHROPIC_FOUNDRY_RESOURCE: "my-resource",
+    GOOGLE_APPLICATION_CREDENTIALS: "/creds.json",
+  };
+  for (const profile of ["claude-worker", "local-meeting"]) {
+    const none = childEnv(profile, {}, platform);
+    for (const name of ["AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_RESOURCE", "GOOGLE_APPLICATION_CREDENTIALS"]) {
+      assert.equal(none[name], undefined, `${profile} ${name}`);
+    }
+    const bedrock = childEnv(profile, {}, { ...platform, CLAUDE_CODE_USE_BEDROCK: "1" });
+    assert.equal(bedrock.AWS_BEARER_TOKEN_BEDROCK, "bedrock-bearer");
+    assert.equal(bedrock.ANTHROPIC_FOUNDRY_API_KEY, undefined);
+    const foundry = childEnv(profile, {}, { ...platform, CLAUDE_CODE_USE_FOUNDRY: "1" });
+    assert.equal(foundry.CLAUDE_CODE_USE_FOUNDRY, "1");
+    assert.equal(foundry.ANTHROPIC_FOUNDRY_API_KEY, "foundry-key");
+    assert.equal(foundry.ANTHROPIC_FOUNDRY_RESOURCE, "my-resource");
+    assert.equal(foundry.AWS_BEARER_TOKEN_BEDROCK, undefined);
+    assert.equal(childEnv(profile, {}, { ...platform, CLAUDE_CODE_USE_VERTEX: "1" }).GOOGLE_APPLICATION_CREDENTIALS, "/creds.json");
+  }
 });
 
 test("childEnv applies fixed settings and extra values last", () => {

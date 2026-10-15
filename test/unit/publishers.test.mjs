@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { stubFetch, json } from "./helpers.mjs";
+import { dirname, join } from "node:path";
+import { stubDns, stubFetch, json } from "./helpers.mjs";
 import {
   createPublicChannel,
   createPublisher,
@@ -401,6 +401,39 @@ test("unwritable transcripts dir: savedPath null, warning, no throw", async (t) 
   assert.ok(res.warnings.some((w) => /Could not save the transcript/.test(w)));
 });
 
+test("transcripts are private: 0600 files in a 0700 directory, no temp files left", { skip: process.platform === "win32" }, async (t) => {
+  stubFetch(t, ok);
+  const { stat, readdir } = await import("node:fs/promises");
+  const dir = join(await tmp(), "nested", "transcripts");
+  const ch = createPublicChannel("s1", { participants: ["a"] }, { config: ntfyCfg, transcriptsDir: dir, postHeader: false });
+  ch.record({ turn: 1, speaker: "a", content: "private words" });
+  const res = await ch.finalize();
+  assert.equal((await stat(dir)).mode & 0o777, 0o700);
+  assert.equal((await stat(res.savedPath)).mode & 0o777, 0o600);
+  assert.deepEqual((await readdir(dir)).filter((n) => n.endsWith(".tmp")), []);
+  assert.ok((await readFile(res.savedPath, "utf8")).includes("private words"));
+});
+
+test("a configured transcripts dir that is a symlink is followed, and an existing dir is never chmodded", { skip: process.platform === "win32" }, async (t) => {
+  stubFetch(t, ok);
+  const { chmod, mkdir, stat, symlink, lstat, realpath } = await import("node:fs/promises");
+  const base = await tmp();
+  const real = join(base, "real-transcripts");
+  await mkdir(real);
+  await chmod(real, 0o755);
+  const link = join(base, "transcripts-link");
+  await symlink(real, link);
+  const warnings = t.mock.method(console, "error", () => {});
+  const ch = createPublicChannel("s1", { participants: ["a"] }, { config: ntfyCfg, transcriptsDir: link, postHeader: false });
+  ch.record({ turn: 1, speaker: "a", content: "via the link" });
+  const res = await ch.finalize();
+  assert.equal(dirname(res.savedPath), await realpath(real), "written at the real path");
+  assert.ok((await lstat(link)).isSymbolicLink(), "the user's symlink is left alone");
+  assert.equal((await stat(real)).mode & 0o777, 0o755, "the user's directory mode is untouched");
+  assert.equal((await stat(res.savedPath)).mode & 0o777, 0o600);
+  assert.ok(warnings.mock.calls.some((c) => /open to other users \(mode 755\)/.test(String(c.arguments[0]))));
+});
+
 test("Retry-After: HTTP-date is honored and a huge value is capped at maxWait", async (t) => {
   const sleeps = [];
   let n = 0;
@@ -510,6 +543,7 @@ test("duplicate (turn, speaker) labels are disambiguated", async (t) => {
 
 // ---- webhook ----
 test("webhook: body, auth header, view url, no history fetch", async (t) => {
+  const asked = stubDns(t);
   const calls = stubFetch(t, ok);
   const dir = await tmp();
   const ch = createPublicChannel("s1", { participants: ["a"] }, {
@@ -529,6 +563,8 @@ test("webhook: body, auth header, view url, no history fetch", async (t) => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "https://hook.example.test/in");
   assert.equal(calls[0].init.headers["X-Api-Key"], "abc:123");
+  assert.equal(calls[0].init.redirect, "manual", "the auth header never follows a redirect");
+  assert.deepEqual(asked, ["hook.example.test"], "the URL guard resolved the host");
   assert.deepEqual(Object.keys(calls[0].body).sort(), ["channel", "content", "kind", "part", "parts", "session", "speaker", "timestamp", "turn"]);
   assert.equal(calls[0].body.session, "s1");
   assert.equal(calls[0].body.channel, ch.topic);

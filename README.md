@@ -141,7 +141,7 @@ See the [Prototype tool calls](#prototype-tool-calls) below.
 
 New agents go to `ROUNDTABLE_AGENTS_DIR`; new skills from `create_agent` go to `ROUNDTABLE_SKILLS_DIR`. Skill lookup follows Claude Code's precedence: personal `~/.claude/skills`, then the `.claude/skills` beside an agent in `.claude/agents`, then `ROUNDTABLE_SKILLS_DIR`. A skill found anywhere in that order is reused, never overwritten or shadowed. Results report file realpaths. After creation in `.claude/agents`, delegate with Claude Code's Agent tool using the returned `agent.name` as `subagent_type`, or call `start_meeting` with the new agent. `perform_task: true` with writes starts a private roundtable meeting on the task; follow its `next` instructions with `say` and `end_meeting`. If the agents directory had to be created, restart Claude Code so it watches that directory.
 
-`improve_agent` includes the target as a candid self-reviewer by default; add specialists with `with`, focus with `focus`, or inherit discussion with `from_session`. With `include_self: false`, supply participants via `with` or `from_session`. It accepts **any existing `.md` path you name, including outside the agents directory**, and backs it up before replacement. New skills from refinement go to the target's project `.claude/skills` when it sits in `.claude/agents`, provided neither `.claude` nor `.claude/skills` is a symlink and the skills realpath stays inside the project. Otherwise they go to `ROUNDTABLE_SKILLS_DIR` with a symlink fallback warning; results report file realpaths. `write: false` on either tool returns `files` previews and writes nothing.
+`improve_agent` includes the target as a candid self-reviewer by default; add specialists with `with`, focus with `focus`, or inherit discussion with `from_session`. With `include_self: false`, supply participants via `with` or `from_session`. It accepts an agent name, or an existing `.md` path inside `ROUNDTABLE_AGENTS_DIR`, `<workspace>/.claude/agents`, `~/.claude/agents` or a directory listed in `ROUNDTABLE_AGENT_PATHS` (add another project's `.claude/agents` there to refine its agents), and backs it up before replacement. New skills from refinement go to the target's project `.claude/skills` when it sits in `.claude/agents`, provided neither `.claude` nor `.claude/skills` is a symlink and the skills realpath stays inside the project. Otherwise they go to `ROUNDTABLE_SKILLS_DIR` with a symlink fallback warning; results report file realpaths. `write: false` on either tool returns `files` previews and writes nothing.
 
 Agent-file safety rules:
 
@@ -149,7 +149,7 @@ Agent-file safety rules:
 - Refinement preserves the original identity and unmanaged frontmatter. Frontmatter is read the way Claude Code reads it, including its single recovery pass for generated descriptions and leading tabs. Refinement preserves exactly the keys Claude Code sees and refuses files Claude Code cannot parse or whose frontmatter contains `---` inside a value; fix those files first.
 - Only one improve run per target is allowed. A second fails fast with `improve_agent is already running for <key>; wait for it to finish`. If the file changes, is renamed or is deleted during the run, it is not overwritten: the proposal goes to `<target>.proposed-<timestamp>` (not an agent file), and `next` explains how to proceed.
 - Refinement saves `<target>.bak-YYYYMMDD-HHMMSS` before replacement, adding `-2`, `-3`, … on backup collisions; backups are not agent `.md` files. Replacement is atomic via a temp file and rename, keeping the original mode. Proposals also keep the captured original mode.
-- Only `name`, `description`, `model`, `tools` and `skills` from model output enter frontmatter. Models are limited to `opus`, `sonnet`, `haiku`, `inherit`; tools to `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebSearch`, `WebFetch`. Generated hooks, permission settings and other unmanaged fields are ignored. Generated descriptions replace runs of three or more hyphens with `—` and warn. YAML serialization rejects embedded `---` and verifies that Claude Code reads exactly the intended metadata. Tools fail closed: a tool list with no allowlist matches, or a value of the wrong type, is rejected and the architect retries once. Omitting tools inherits all tools and warns `tools omitted: the agent inherits all tools`.
+- Only `name`, `description`, `model`, `tools` and `skills` from model output enter frontmatter. Models are limited to `opus`, `sonnet`, `haiku`, `inherit`; tools to `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebSearch`, `WebFetch`. Generated hooks, permission settings and other unmanaged fields are ignored. Generated descriptions replace runs of three or more hyphens with `—` and warn. YAML serialization rejects embedded `---` and verifies that Claude Code reads exactly the intended metadata. Tools fail closed: a tool list with no allowlist matches, or a value of the wrong type, is rejected and the architect retries once. A created agent always gets an explicit `tools:` line, because Claude Code grants every tool when it is missing: when the definition omits tools, the agent gets `Read, Grep, Glob` and the warning `tools omitted: defaulting to Read, Grep, Glob (read-only)`. Refinement keeps the target's own tools line; a target without one keeps inheriting every tool, with the warning `tools omitted: the target has no tools line, so it still inherits every tool; list tools to restrict it`.
 - At most six skills are attached. Existing skills are reused and never overwritten; reserved names receive a `-skill` suffix. Reusable procedures live in skills rather than the persona body.
 
 Public workshops post contributions, reviews and a redacted summary of the final definition: name, description, model, tools, skill names and status, contribution credits, changes and open questions. The summary excludes its system prompt, skill instructions and skill descriptions derived from instructions. Exact passages copied from private instructions into summary fields are withheld. Workshops never post context, persona text, the fleet listing or the source-session transcript. Public improve contributors, reviewers and the architect are asked to point to passages rather than reproduce them; none of their prompts include the target's recent activity. Private improve contributor prompts include recent topics and outcomes from the local activity log. Local activity records use `agent-creation` / `agent-refinement` kinds.
@@ -173,7 +173,7 @@ The caller talks to one agent persona. Provider and model are fixed at `start_me
 
 ### Local meetings (no API spend)
 
-Spawns the local `claude` CLI with `--system-prompt-file`, so the conversation runs on your Claude subscription. The persona file is passed verbatim. The CLI is stateless, so the whole transcript is re-sent each turn — keep local meetings short.
+Spawns the local `claude` CLI with `--system-prompt-file`, so the conversation runs on your Claude subscription. The persona file is passed verbatim. The CLI is stateless, so the whole transcript is re-sent each turn — keep local meetings short. The transcript goes in on stdin; the agent gets read-only tools (`Read`, `Glob`, `Grep`), no MCP servers and no permission prompts, and the CLI gets no provider keys unless `ROUNDTABLE_WORKER_AUTH=api_key`. The CLI runs in `ROUNDTABLE_WORKSPACE_DIR`, so its tools see only that project; when the workspace is `/` or your home directory (an MCP host may start the server in `/`), it runs in an empty directory instead. Server shutdown stops any CLI still running.
 
 | Tool | Arguments |
 | --- | --- |
@@ -257,7 +257,7 @@ Pass `public: true` to `start_meeting`, `start_local_meeting`, `start_collaborat
 
 **ntfy (default).** Messages go to `ROUNDTABLE_NTFY_URL` (default `https://ntfy.sh`) as JSON with `Firebase: no`, so they are not forwarded to Google. Open `<server>/<topic>` in a browser to watch; the page renders Markdown. Limits on the anonymous `ntfy.sh` server: 250 messages per day, a burst of 60 requests then one every 5 seconds, and messages are cached for 12 hours. Replies longer than about 3.8 KB are split into ordered parts. The server retries on 429 (honoring `Retry-After`) and stops posting for the session if the daily limit is reached or auth is rejected, then marks the channel degraded. Self-host ntfy or set a token to lift the limits.
 
-**Webhook alternative.** Set `ROUNDTABLE_PUBLISHER=webhook` and `ROUNDTABLE_WEBHOOK_URL` to receive each entry as a JSON POST `{session, turn, part, parts, agent, content, timestamp}`, optionally with `ROUNDTABLE_WEBHOOK_AUTH_HEADER` and a `ROUNDTABLE_WEBHOOK_VIEW_URL` template containing `{channel}`. A webhook cannot return history, so the saved transcript is built from the local copy.
+**Webhook alternative.** Set `ROUNDTABLE_PUBLISHER=webhook` and `ROUNDTABLE_WEBHOOK_URL` to receive each entry as a JSON POST `{session, turn, part, parts, agent, content, timestamp}`, optionally with `ROUNDTABLE_WEBHOOK_AUTH_HEADER` and a `ROUNDTABLE_WEBHOOK_VIEW_URL` template containing `{channel}`. A webhook cannot return history, so the saved transcript is built from the local copy. The URL must be https, or plain http to loopback or a private (LAN) address; cloud metadata addresses are refused, every resolved address is checked on each post, and redirects are not followed.
 
 ## Providers
 
@@ -268,7 +268,7 @@ Pass `public: true` to `start_meeting`, `start_local_meeting`, `start_collaborat
 | `together` | Together AI | `zai-org/GLM-5.3` | Any Together model id, e.g. `Qwen/Qwen3.8-2.4T-A95B`. |
 | `replicate` | Replicate predictions API | `qwen/qwen3-235b-a22b-instruct-2507` | `model` accepts `owner/name`, `owner/name:version`, or a `https://replicate.com/owner/name` URL. The server reads the model's input schema once and only sends fields the model declares (`prompt`, `system_prompt`, `max_tokens` or `max_new_tokens`, `temperature`). Cold starts are covered by the request timeout. |
 | `ollama` | Local Ollama at `OLLAMA_URL` | `qwen3:14b` | Only usable when `GET $OLLAMA_URL/api/tags` answers within 1 s. |
-| `openai_compatible` | Any `/v1/chat/completions` server (LM Studio, vLLM, llama.cpp server, OpenRouter, Groq, Fireworks, …) | `OPENAI_COMPATIBLE_MODEL` | Base URL from `OPENAI_COMPATIBLE_BASE_URL` or the `base_url` argument. API key optional — the `Authorization` header is omitted when `OPENAI_COMPATIBLE_API_KEY` is unset; when it is set it is sent to whichever base URL is used, including a per-call `base_url`. |
+| `openai_compatible` | Any `/v1/chat/completions` server (LM Studio, vLLM, llama.cpp server, OpenRouter, Groq, Fireworks, …) | `OPENAI_COMPATIBLE_MODEL` | Base URL from `OPENAI_COMPATIBLE_BASE_URL` or the `base_url` argument. API key optional — the `Authorization` header is omitted when `OPENAI_COMPATIBLE_API_KEY` is unset; when it is set it is sent only to `OPENAI_COMPATIBLE_BASE_URL`'s origin (and `ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS`). A per-call `base_url` may not target cloud metadata or, unless `ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1`, private addresses, and must be https except to loopback (and, with that setting, to private addresses such as a LAN LM Studio or vLLM server). |
 
 Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 10 min). Empty replies are errors, never blank messages. Unknown provider ids are rejected. Missing keys fail per call with a message naming the variable — the server itself always starts.
 
@@ -300,7 +300,7 @@ Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 
 | `ROUNDTABLE_NTFY_URL` | ntfy server | `https://ntfy.sh` |
 | `ROUNDTABLE_NTFY_TOKEN` | ntfy access token (`tk_...`), if the server needs auth | — |
 | `ROUNDTABLE_NTFY_USER` / `ROUNDTABLE_NTFY_PASSWORD` | ntfy basic auth, alternative to the token | — |
-| `ROUNDTABLE_WEBHOOK_URL` | webhook publisher: URL that receives each entry as JSON | — |
+| `ROUNDTABLE_WEBHOOK_URL` | webhook publisher: URL that receives each entry as JSON; https, or http to loopback or a private (LAN) address; never a cloud metadata address | — |
 | `ROUNDTABLE_WEBHOOK_VIEW_URL` | webhook publisher: URL template for the viewing page, `{channel}` is replaced | — |
 | `ROUNDTABLE_WEBHOOK_AUTH_HEADER` | webhook publisher: value sent as the `Authorization` header | — |
 | `ROUNDTABLE_PUBLIC_TOPIC_PREFIX` | prefix of the generated public channel name | `roundtable` |
@@ -311,17 +311,25 @@ Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 
 | `ROUNDTABLE_PROTOTYPE_OPEN` | open the prototype board in a browser at session start | off (`1`, `true`, `yes` or `on` enables) |
 | `ROUNDTABLE_CHROME_PATH` | Chrome/Chromium binary for public-session screenshots | auto-detect: the Google Chrome or Chromium app (macOS) or Chrome install (Windows), then `google-chrome`, `google-chrome-stable`, `chromium` or `chromium-browser` on `PATH` |
 | `ROUNDTABLE_PROTOTYPE_SCREENSHOTS` | screenshots of web prototypes; only used by public prototype sessions | on (`0`, `false`, `no` or `off` disables) |
+| `ROUNDTABLE_LOCAL_TIMEOUT_MS` | local meetings: timeout for one `claude -p` call; the CLI's process group is killed after it | `300000` (5 min) |
+| `ROUNDTABLE_WORKER_AUTH` | `api_key` passes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` to the `claude` CLI (local meetings) and `OPENAI_API_KEY` to `codex`; otherwise they use their own login (including `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, and Bedrock, Vertex or Foundry credentials when the CLI is set to use them) and get no provider keys | CLI login |
+| `ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS` | a per-call `base_url` may reach private, CGNAT, link-local and ULA addresses, over plain http too (cloud metadata stays blocked; loopback is always allowed) | off (`1`, `true`, `yes` or `on` enables) |
+| `ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS` | comma-separated origins (`https://host:port`) besides `OPENAI_COMPATIBLE_BASE_URL`'s that receive `OPENAI_COMPATIBLE_API_KEY` when passed as `base_url` | — (the key goes only to the configured origin) |
+| `ROUNDTABLE_AGENT_PATHS` | extra directories (separated by `:`, or `;` on Windows) that path-like agent refs may point into | — (the agents directory, `<workspace>/.claude/agents` and `~/.claude/agents` are always allowed) |
+| `ROUNDTABLE_PROVIDER_RETRIES` | retries after a provider call fails with 408, 409, 429, 5xx or a network error (backoff with jitter, `Retry-After` honored up to 60 s, always within `ROUNDTABLE_LLM_TIMEOUT_MS`) | `2` (`0` disables, at most `5`) |
+| `ROUNDTABLE_DOTENV` | `off` skips loading `.env` entirely (worker MCP servers start keyless) | `.env` is loaded |
 
 `.env` is loaded from the package directory (next to `package.json`) with `override: true`, so values there win over anything the MCP host passes in its `env` block. `.env` is gitignored and is the single source of truth for secrets. See `.env.example`.
 
 ## Agent prompt resolution
 
-The `agent` argument is resolved, in order, as:
+An `agent` argument that contains `/` or `\`, or ends in `.md`, is a path: it must be a `.md` file whose real path is inside `ROUNDTABLE_AGENTS_DIR`, `<ROUNDTABLE_WORKSPACE_DIR>/.claude/agents`, `~/.claude/agents` or a directory listed in `ROUNDTABLE_AGENT_PATHS`. Any other `agent` is a name, resolved in order as:
 
-1. a literal path;
-2. `<ROUNDTABLE_AGENTS_DIR>/<agent>.md`;
-3. `<ROUNDTABLE_AGENTS_DIR>/subagent-<agent>.md`;
-4. `<ROUNDTABLE_AGENTS_DIR>/<agent>/AGENT.md`.
+1. `<ROUNDTABLE_AGENTS_DIR>/<agent>.md`;
+2. `<ROUNDTABLE_AGENTS_DIR>/subagent-<agent>.md`;
+3. `<ROUNDTABLE_AGENTS_DIR>/<agent>/AGENT.md`.
+
+Either way the file's real path must stay inside those directories: an agent file that is a symlink to somewhere else (dotfiles, say) needs that directory in `ROUNDTABLE_AGENT_PATHS`.
 
 A leading YAML frontmatter block (`--- ... ---` with at least one `key: value` line, as in Claude Code agent files) is stripped before the text becomes the system prompt; a body that merely opens with a markdown horizontal rule is left intact. Metadata is read the way Claude Code reads it: the first following `---` ends the block, even inside a line, and a failed YAML parse gets one quoting and leading-tab recovery pass. Refinement preserves exactly the keys Claude Code sees and refuses files Claude Code cannot parse or whose frontmatter contains `---` inside a value. Identity collision checks use this same metadata view.
 

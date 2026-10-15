@@ -332,8 +332,8 @@ test("validation uses exact errors, unknown ids list active ids, and all persona
   await assert.rejects(startUltraplan([cfo], " \n ", opts), { message: "task is required: describe what the plan is for" });
   await assert.rejects(startUltraplan(undefined, "Task", opts), { message: "Ultraplan requires at least 1 agent" });
   await assert.rejects(startUltraplan([cfo], undefined, opts), { message: "task is required: describe what the plan is for" });
-  for (const options of [{}, { planner: join(root, "missing.md") }]) {
-    const agents = options.planner ? [cfo] : [cfo, join(root, "missing.md")];
+  for (const options of [{}, { planner: join(root, "agents", "missing.md") }]) {
+    const agents = options.planner ? [cfo] : [cfo, join(root, "agents", "missing.md")];
     await assert.rejects(startUltraplan(agents, "Missing persona", { ...opts, ...options, public: true }), /Agent prompt not found/);
     assert.equal(calls.length, 0);
     assert.equal(ultraplans.size, 0);

@@ -7,7 +7,9 @@ const schema = {
   additionalProperties: false,
   required: ["goal", "visibility"],
   properties: {
-    goal: { type: "string", minLength: 3, maxLength: 10, "x-hint": "say what the run must achieve" },
+    goal: { type: "string", minLength: 3, maxLength: 10, "x-nonblank": true, "x-hint": "say what the run must achieve" },
+    one: { type: "array", items: { type: "string" }, maxItems: 1 },
+    initial: { type: "string", minLength: 1, maxLength: 1 },
     count: { type: "integer", minimum: 1, maximum: 5 },
     ratio: { type: "number", minimum: 0, maximum: 1 },
     level: { type: "string", enum: ["low", "high"] },
@@ -69,6 +71,9 @@ test("constraints name the path and append the field's hint", () => {
   assert.equal(findProblem(schema, { ...ok, tags: ["x", "y", "x"] }), '"tags" must have at most 2 items');
   assert.equal(findProblem(schema, { ...ok, tags: ["z"] }), '"tags[0]" must be one of: x, y');
   assert.equal(findProblem(schema, { ...ok, items: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }] }), '"items" must have at most 3 items');
+  assert.equal(findProblem(schema, { ...ok, one: ["a", "b"] }), '"one" must have at most 1 item');
+  assert.equal(findProblem(schema, { ...ok, initial: "" }), '"initial" must be at least 1 character');
+  assert.equal(findProblem(schema, { ...ok, initial: "ab" }), '"initial" must be at most 1 character');
   assert.equal(
     findProblem(schema, { ...ok, visibility: { github: { repo: "no-slash" } } }),
     '"visibility.github.repo" must match the pattern ^[^/]+/[^/]+$'
@@ -80,10 +85,16 @@ test("an advisory enum is listed but not enforced (the engine owns that message)
   assert.equal(findProblem(schema, { ...ok, advisory: 5 }), '"advisory" must be a string');
 });
 
-test("required: undefined, null and blank strings are missing; nested required runs with values", () => {
+test("required: undefined and null are missing, blank only with x-nonblank; nested required runs with values", () => {
   assert.equal(findProblem(schema, { visibility: {} }), '"goal" is required: say what the run must achieve');
   assert.equal(findProblem(schema, { goal: null, visibility: {} }), '"goal" is required: say what the run must achieve');
   assert.equal(findProblem(schema, { goal: " \n", visibility: {} }), '"goal" is required: say what the run must achieve');
+  // Without x-nonblank a string is present as soon as it is a string, at any depth.
+  assert.equal(findProblem(schema, { ...ok, items: [{ id: "" }] }), null);
+  assert.equal(findProblem(schema, { ...ok, visibility: { github: { repo: "" } } }), '"visibility.github.repo" must match the pattern ^[^/]+/[^/]+$');
+  const plain = { type: "object", required: ["message"], properties: { message: { type: "string" } } };
+  assert.equal(findProblem(plain, { message: "" }), null);
+  assert.equal(findProblem(plain, { message: "  " }), null);
   assert.equal(findProblem(schema, { goal: "ship it" }), '"visibility" is required');
   assert.equal(findProblem(schema, { ...ok, visibility: { github: {} } }, ["values"]), '"visibility.github.repo" is required');
   assert.equal(findProblem(schema, { ...ok, items: [{ n: 1 }] }, ["values"]), '"items[0].id" is required');
@@ -98,7 +109,7 @@ test("phases: values alone skip top-level required; required alone skips values;
 });
 
 test("additionalProperties: false rejects unknown keys at any depth and lists the known ones", () => {
-  assert.equal(findProblem(schema, { ...ok, extra: 1 }), '"extra" is not allowed (expected: goal, count, ratio, level, advisory, id, tags, visibility, items)');
+  assert.equal(findProblem(schema, { ...ok, extra: 1 }), '"extra" is not allowed (expected: goal, one, initial, count, ratio, level, advisory, id, tags, visibility, items)');
   assert.equal(findProblem(schema, { ...ok, visibility: { dashboard: true } }), '"visibility.dashboard" is not allowed (expected: chat_only, github)');
   // Without the keyword, unknown keys pass (the legacy tools never declare it).
   assert.equal(findProblem({ type: "object", properties: {} }, { anything: 1 }), null);

@@ -114,7 +114,8 @@ test("every tool's arguments are validated before routing, with nested paths for
     ["chat_completion", { messages: [{ role: "user", content: "hi" }], max_tokens: "8" }, 'chat_completion: "max_tokens" must be a finite number'],
     // Required fields are now enforced for the legacy tools too (after type and provider checks).
     ["say", {}, 'say: "meeting_id" is required'],
-    ["say", { meeting_id: "m", message: "  " }, 'say: "message" is required'],
+    ["improve_agent", { agent: " " }, 'improve_agent: "agent" is required: pass the agent name or .md path to improve'],
+    ["start_ultraplan", { agents: ["cfo"], task: " \n" }, 'start_ultraplan: "task" is required: describe what the plan is for'],
     ["end_local_meeting", {}, 'end_local_meeting: "meeting_id" is required'],
     ["nudge_collaboration", { collaboration_id: "c" }, 'nudge_collaboration: "message" is required'],
     ["end_collaboration", { collaboration_id: null }, 'end_collaboration: "collaboration_id" is required'],
@@ -144,6 +145,15 @@ test("legacy enums stay with the engines, so their messages (with the valid list
   assert.equal(ultra.content[0].text, "Error: Ultraplan requires at least 1 agent");
   const pair = await handleToolCall("start_collaboration", { agents: ["solo"], topic: "t" });
   assert.equal(pair.content[0].text, "Error: Collaboration requires at least 2 agents");
+});
+
+test("blank strings stay valid wherever the engines accepted them", async () => {
+  // Only improve_agent.agent and start_ultraplan.task (x-nonblank) treat a blank string as missing.
+  assert.doesNotThrow(() => checkArgs("chat_completion", { messages: [{ role: "assistant", content: "" }, { role: "user", content: "hi" }] }));
+  const nudge = await handleToolCall("nudge_collaboration", { collaboration_id: "collab-none", message: "" });
+  assert.equal(nudge.content[0].text, "Error: Collaboration not found: collab-none");
+  const say = await handleToolCall("say", { meeting_id: "meeting-none", message: "  " });
+  assert.equal(say.content[0].text, "Error: Meeting not found: meeting-none");
 });
 
 test("checkArgs checks given values only and never reports a missing field", () => {

@@ -17,6 +17,9 @@
 // - "x-hint": text appended to the field's required and constraint messages, never to type messages.
 // - "x-advisory-enum": true when the enum is listed for clients only, because the engine rejects
 //   unknown values with its own established message (provider, mode).
+// - "x-nonblank": true on a required string whose engine already refused whitespace-only values: such a
+//   value is reported as missing. Elsewhere a required string is present as soon as it is a string,
+//   so "" stays a valid message content or nudge.
 
 export type JsonSchemaType = "string" | "number" | "integer" | "boolean" | "array" | "object";
 
@@ -37,6 +40,7 @@ export interface JsonSchema {
   maxItems?: number;
   "x-hint"?: string;
   "x-advisory-enum"?: boolean;
+  "x-nonblank"?: boolean;
   [keyword: string]: unknown;
 }
 
@@ -75,8 +79,11 @@ function isStringArray(schema: JsonSchema): boolean {
 
 function isMissing(schema: JsonSchema | undefined, value: unknown): boolean {
   if (value === undefined || value === null) return true;
-  // A required string must have content, the way every engine already treats blank names and topics.
-  return schema?.type === "string" && typeof value === "string" && !value.trim();
+  return schema?.["x-nonblank"] === true && typeof value === "string" && !value.trim();
+}
+
+function count(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 function typeProblem(schema: JsonSchema, value: unknown, path: string): string | null {
@@ -110,10 +117,10 @@ function constraintProblem(schema: JsonSchema, value: unknown, path: string): st
   if (typeof value === "string") {
     const length = [...value].length;
     if (schema.minLength !== undefined && length < schema.minLength) {
-      return fail(path, `must be at least ${schema.minLength} characters`, hint);
+      return fail(path, `must be at least ${count(schema.minLength, "character")}`, hint);
     }
     if (schema.maxLength !== undefined && length > schema.maxLength) {
-      return fail(path, `must be at most ${schema.maxLength} characters`, hint);
+      return fail(path, `must be at most ${count(schema.maxLength, "character")}`, hint);
     }
     if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {
       return fail(path, `must match the pattern ${schema.pattern}`, hint);
@@ -124,7 +131,7 @@ function constraintProblem(schema: JsonSchema, value: unknown, path: string): st
     if (schema.maximum !== undefined && value > schema.maximum) return fail(path, `must be at most ${schema.maximum}`, hint);
   }
   if (Array.isArray(value) && schema.maxItems !== undefined && value.length > schema.maxItems) {
-    return fail(path, `must have at most ${schema.maxItems} items`, hint);
+    return fail(path, `must have at most ${count(schema.maxItems, "item")}`, hint);
   }
   return null;
 }
@@ -142,7 +149,7 @@ function objectProblem(schema: JsonSchema, obj: Bag, path: string, checkRequired
   for (const [key, sub] of Object.entries(properties)) {
     const value = own(obj, key);
     if (value === undefined || value === null) continue;
-    // A blank required string is reported as missing (by the required check), not as too short.
+    // An x-nonblank required string that is blank is reported as missing (by the required check), not as too short.
     if (schema.required?.includes(key) && isMissing(sub, value)) continue;
     const problem = valueProblem(sub, value, childPath(path, key));
     if (problem) return problem;

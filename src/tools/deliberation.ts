@@ -560,7 +560,7 @@ export const deliberationTools: ToolDefinition[] = [
       type: "object",
       properties: {
         agents: { type: "array", items: { type: "string" }, minItems: 1, description: "Specialists contributing input, independent reviews and sign-offs. A planner may also be a participant." },
-        task: { type: "string", description: "What the plan must accomplish; required and non-empty.", "x-hint": "describe what the plan is for" },
+        task: { type: "string", description: "What the plan must accomplish; required and non-empty.", "x-nonblank": true, "x-hint": "describe what the plan is for" },
         context: { type: "string", description: "Optional background shared with the agents; never posted publicly." },
         draft_plan: { type: "string", description: "Optional full draft: becomes v1 by orchestrator and skips the input phase. Whitespace-only counts as absent." },
         planner: { type: "string", description: "Optional persona that owns drafting and revision server-side; runs the whole loop in one call." },
@@ -646,6 +646,7 @@ export const deliberationTools: ToolDefinition[] = [
         agent: {
           type: "string",
           description: "Existing agent identifier or .md file path to improve, including paths outside ROUNDTABLE_AGENTS_DIR. Written targets are backed up first.",
+          "x-nonblank": true,
           "x-hint": "pass the agent name or .md path to improve",
         },
         with: { type: "array", items: { type: "string" }, description: "Additional specialists; combined with target (when include_self) and from_session participants." },

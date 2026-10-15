@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GitHubSync, statusFor, ghText } from "../../dist/github/sync.js";
-import { checkGhReady, classifyGhError, runGh, withBodyFile } from "../../dist/github/gh.js";
+import { GhError, checkGhReady, classifyGhError, runGh, withBodyFile } from "../../dist/github/gh.js";
 import { emit, frozenRun, makeContract, src, taskSpec } from "../fixtures/execution/run.mjs";
 
 const FAKE = fileURLToPath(new URL("../fixtures/github/fake-gh.mjs", import.meta.url));
@@ -58,6 +58,11 @@ function clock(start = Date.parse("2026-10-15T10:00:00Z")) {
   return now;
 }
 
+/** The recovery search: this run's marker, by the gh account itself, labelled roundtable. */
+const searchLine = (exe, key) =>
+  `issue list --repo ${REPO} --search "roundtable:${exe}${key ? `:${key}` : ""}" in:body author:@me label:roundtable ` +
+  "--state all --json number,url,id,body,state,author,labels --limit 1000";
+
 const twoTasks = () => makeContract({ tasks: [taskSpec("a", [], { team: "core" }), taskSpec("b", ["a"])] });
 const agent = (id) => src(id, "agent");
 
@@ -72,14 +77,14 @@ test("gh sync: a whole run, call by call (issues, sub-issues, project, coalesced
   assert.equal(r1.ok, true, r1.errors.join("; "));
   assert.equal(r1.created, 3);
   assert.equal(r1.pending, 0);
-  const marker = `"roundtable:${exe}" in:body`;
   assert.deepEqual(gh.lines(), [
     `label list --repo ${REPO} --json name --limit 500`,
     `label create roundtable --repo ${REPO} --color 5319e7 --description Mirrored from an agent-roundtable heads-down run`,
     `label create needs-human --repo ${REPO} --color d93f0b --description The roundtable run is waiting for a human decision`,
     "project view 5 --owner acme --format json",
     "project field-list 5 --owner acme --format json --limit 100",
-    `issue list --repo ${REPO} --search ${marker} --state all --json number,url,id,body,state --limit 1000`,
+    "api graphql -f query=query { viewer { login } }",
+    searchLine(exe),
     `issue create --repo ${REPO} --title Roundtable: Nav bar --body-file <body> --label roundtable`,
     `issue view 1 --repo ${REPO} --json id,number,url`,
     `project item-add 5 --owner acme --url https://github.com/${REPO}/issues/1 --format json`,
@@ -203,40 +208,113 @@ test("gh sync: idempotent across rounds, a lost github.json and a crash between 
   assert.equal(creates(), 3, "no duplicate issues");
   assert.equal(comments(), 1, "no duplicate comment");
   const after = gh.lines(mark);
-  assert.ok(after.includes(`issue list --repo ${REPO} --search "roundtable:${store.id}" in:body --state all --json number,url,id,body,state --limit 1000`));
+  assert.ok(after.includes(searchLine(store.id)));
   assert.ok(after.includes(`issue view 2 --repo ${REPO} --json comments`), "checks the posted comments before posting");
   assert.ok(after.includes(`issue edit 2 --repo ${REPO} --add-label needs-human`), "labels are idempotent: set again");
 
-  // A crash after the create went through but before it was recorded: the next round finds it.
+  // The node-id lookup after a create fails: the issue number is already recorded, so even with a
+  // search that sees nothing and the settle time long past, nothing is created twice.
   const { store: s2 } = await frozenRun(twoTasks());
   const o2 = { executionId: s2.id, repo: REPO, store: s2, now };
-  gh.failNext([{ match: `issue view 5 `, times: 1, stderr: "HTTP 502: Bad Gateway" }]);
+  gh.failNext([{ match: "issue view 5 ", times: 1, stderr: "HTTP 502: Bad Gateway" }]);
   const crashed = await new GitHubSync(o2).syncOnce();
   assert.equal(crashed.ok, false);
   assert.match(crashed.errors[0], /gh issue view failed \(exit 1\): HTTP 502/);
   const recorded = JSON.parse(readFileSync(join(s2.dir, "github.json"), "utf8"));
-  assert.deepEqual(Object.keys(recorded.creating), ["a"]);
+  assert.deepEqual(recorded.creating, {});
+  assert.deepEqual(recorded.issues.a, { number: 5, url: `https://github.com/${REPO}/issues/5` }, "number kept, node id still to fetch");
+  writeFileSync(join(gh.dir, "state.json"), JSON.stringify({ ...gh.state(), searchLag: true }));
+  now.advance(6 * 60_000);
   const before2 = creates();
   const healed = await new GitHubSync(o2).syncOnce();
   assert.equal(healed.ok, true, healed.errors.join("; "));
-  assert.equal(creates(), before2 + 1, "only b is created; a was found by its marker");
-  const issues = gh.state().issues.filter((i) => i.body.includes(`roundtable:${s2.id}:a -->`));
-  assert.equal(issues.length, 1);
+  assert.equal(creates(), before2 + 1, "only b is created");
+  assert.ok(gh.lines().includes(`issue view 5 --repo ${REPO} --json id,number,url`), "the node id is fetched later");
+  assert.equal(gh.state().issues.filter((i) => i.body.includes(`roundtable:${s2.id}:a -->`)).length, 1);
+  writeFileSync(join(gh.dir, "state.json"), JSON.stringify({ ...gh.state(), searchLag: false }));
 
-  // Search lags behind a create that may have happened: wait instead of creating a duplicate.
+  // A crash between a create and its record (github.json still says "creating"): the next round
+  // looks for it, waits while search may lag behind, and finds it instead of creating it again.
   const { store: s3 } = await frozenRun(twoTasks());
   const o3 = { executionId: s3.id, repo: REPO, store: s3, now };
-  gh.failNext([{ match: "issue view 8 ", times: 1, stderr: "HTTP 502" }]);
   await new GitHubSync(o3).syncOnce();
-  const st = gh.state();
-  writeFileSync(join(gh.dir, "state.json"), JSON.stringify({ ...st, searchLag: true }));
+  const file = JSON.parse(readFileSync(join(s3.dir, "github.json"), "utf8"));
+  delete file.issues.b;
+  file.creating = { b: now() };
+  writeFileSync(join(s3.dir, "github.json"), JSON.stringify(file));
+  writeFileSync(join(gh.dir, "state.json"), JSON.stringify({ ...gh.state(), searchLag: true }));
   const c0 = creates();
   const waiting = await new GitHubSync(o3).syncOnce();
   assert.equal(waiting.rateLimited, true, "deferred");
   assert.equal(creates(), c0, "nothing created while search may lag");
   writeFileSync(join(gh.dir, "state.json"), JSON.stringify({ ...gh.state(), searchLag: false }));
-  await new GitHubSync(o3).syncOnce();
-  assert.equal(creates(), c0 + 1, "then a was found and only b created");
+  const found = await new GitHubSync(o3).syncOnce();
+  assert.equal(found.ok, true, found.errors.join("; "));
+  assert.equal(creates(), c0, "found by its marker");
+  assert.equal(JSON.parse(readFileSync(join(s3.dir, "github.json"), "utf8")).issues.b.number, 9);
+});
+
+test("gh sync: a stranger's issue or comment carrying a copied marker is never trusted", async () => {
+  const gh = fakeGh();
+  const { store } = await frozenRun(twoTasks());
+  const exe = store.id;
+  // Filed by someone else, before the sync ran, with the parent's and a task's markers (and the label).
+  const spoof = (number, key, labels) => ({
+    number, title: "spoof", body: `hi <!-- roundtable:${exe}${key ? `:${key}` : ""} -->`, labels, comments: [], closed: false, author: "mallory",
+  });
+  writeFileSync(join(gh.dir, "state.json"), JSON.stringify({
+    ...gh.state(), next: 1, issues: [spoof(50, null, ["roundtable"]), spoof(51, "a", ["roundtable"]), { ...spoof(52, "b", []), author: "bot" }],
+  }));
+  const now = clock();
+  const opts = { executionId: exe, repo: REPO, store, now };
+  const r1 = await new GitHubSync(opts).syncOnce();
+  assert.equal(r1.ok, true, r1.errors.join("; "));
+  assert.equal(r1.created, 3, "its own three issues; the spoofs and an unlabelled issue are ignored");
+  let mine = JSON.parse(readFileSync(join(store.dir, "github.json"), "utf8")).issues;
+  assert.deepEqual(Object.values(mine).map((i) => i.number).sort(), [1, 2, 3]);
+
+  // A stranger pastes the comment marker of a coming needs-human comment onto our issue, then the
+  // mapping is lost: the real comment is still posted, and the spoofed issues stay untouched.
+  await emit(store, "escalation.raised", { escalation: { id: "E1", task: "a", agent: "w1", kind: "emergency", with: "orchestrator", summary: "s", blocking: true, status: "open", raised_seq: 0 } }, agent("w1"));
+  const ev = await emit(store, "escalation.awaiting_human", { id: "E1", class: "money", message: "Need a budget" });
+  const st = gh.state();
+  st.issues.find((i) => i.number === 2).comments.push({ body: `ok <!-- roundtable:${exe}:a:e${ev.seq} -->`, author: "mallory" });
+  writeFileSync(join(gh.dir, "state.json"), JSON.stringify(st));
+  rmSync(join(store.dir, "github.json"));
+  const mark = gh.calls().length;
+  const r2 = await new GitHubSync(opts).syncOnce();
+  assert.equal(r2.ok, true, r2.errors.join("; "));
+  assert.equal(r2.created, 0);
+  assert.equal(r2.comments, 1, "the forged marker did not suppress the real comment");
+  mine = JSON.parse(readFileSync(join(store.dir, "github.json"), "utf8")).issues;
+  assert.deepEqual(Object.fromEntries(Object.entries(mine).map(([k, v]) => [k, v.number])), { "@parent": 1, a: 2, b: 3 });
+  for (const n of [50, 51, 52]) {
+    assert.ok(!gh.lines(mark).some((l) => new RegExp(`^issue (?:edit|close|comment) ${n} `).test(l)), `issue ${n} untouched`);
+    assert.equal(gh.state().issues.find((i) => i.number === n).parent, undefined, `issue ${n} never linked`);
+  }
+  assert.ok(gh.lines(mark).includes(searchLine(exe)));
+});
+
+test("gh sync: a comment whose gh call timed out is checked for before it is posted again", async () => {
+  const fake = fakeGh();
+  const { store } = await frozenRun(twoTasks());
+  let timeouts = 1;
+  // Post through the real (fake) gh, then report a timeout once: the comment did go through.
+  const gh = async (args, o) => {
+    const res = await runGh(args, o);
+    if (args[0] === "issue" && args[1] === "comment" && timeouts-- > 0) throw new GhError("gh issue comment: timed out after 30 s", "timeout");
+    return res;
+  };
+  const sync = new GitHubSync({ executionId: store.id, repo: REPO, store, now: clock(), gh });
+  await sync.syncOnce();
+  await emit(store, "task.failed", { task: "a", why: "out of ideas" });
+  const r1 = await sync.syncOnce();
+  assert.equal(r1.ok, false);
+  const r2 = await sync.syncOnce();
+  assert.equal(r2.ok, true, r2.errors.join("; "));
+  assert.equal(fake.lines().filter((l) => l.startsWith("issue comment 2 ")).length, 1, "posted once");
+  assert.ok(fake.lines().includes(`issue view 2 --repo ${REPO} --json comments`), "looked first");
+  assert.equal(fake.state().issues.find((i) => i.number === 2).comments.length, 1);
 });
 
 test("gh sync: everything posted is redacted and escaped; diffs and output are never read", async () => {
@@ -278,7 +356,7 @@ test("gh sync: everything posted is redacted and escaped; diffs and output are n
     assert.ok(!/<(?:script|img)\b/i.test(b), b);
   }
   assert.ok(bodies[0].includes("&lt;!-- roundtable:exe-0000000000000000:x --&gt;"), "a forged marker is defused");
-  assert.ok(bodies[0].includes("@​octocat"), "mentions are defused");
+  assert.ok(bodies[0].includes("@\u200boctocat"), "mentions are defused");
   assert.ok(bodies.some((b) => b.startsWith(`**A human is needed** (scope): Call [redacted:email] &lt;img src=x onerror=alert(1)&gt;`)), "needs-human on the parent");
   assert.ok(bodies.some((b) => b.startsWith("**Task failed:** crashed for [redacted:email]")));
   assert.ok(gh.lines().includes(`issue edit 1 --repo ${REPO} --add-label needs-human`), "an escalation without a task flags the parent");
@@ -286,7 +364,13 @@ test("gh sync: everything posted is redacted and escaped; diffs and output are n
   assert.ok(gh.lines().some((l) => l.startsWith("project create --owner acme --title Roundtable: Billing for [redacted:email] --format json")));
   assert.ok(gh.lines().includes("project field-create 9 --owner acme --name Roundtable Status --data-type SINGLE_SELECT --single-select-options Todo,In Progress,Done --format json"));
   assert.ok(gh.lines().includes("project item-edit --id PVTI_2 --project-id PVT_new --field-id PVTSSF_rt --single-select-option-id rt_2"), "failed → Done");
-  assert.equal(ghText("a <b> & @x"), "a &lt;b&gt; &amp; @​x");
+  const Z = "\u200b";
+  // GitHub auto-links that would notify people or backlink other issues from the user's account.
+  assert.equal(
+    ghText("see #12, acme/app#3, GH-4 and https://github.com/acme/app/issues/9 (cc @bob)"),
+    `see #${Z}12, acme/app#${Z}3, GH-${Z}4 and https://github${Z}.com/acme/app/issues/9 (cc @${Z}bob)`
+  );
+  assert.equal(ghText("a <b> & @x"), `a &lt;b&gt; &amp; @${Z}x`);
 });
 
 test("gh sync: token buckets (20 creates, 60 others a minute) on a fake clock", async () => {
@@ -306,7 +390,11 @@ test("gh sync: token buckets (20 creates, 60 others a minute) on a fake clock", 
   assert.equal(creates(), 20, "no token, no create");
   assert.deepEqual(gh.lines(m2), []);
   assert.equal(r2.calls, 0);
-  now.advance(30_000);
+  // A clock that jumps back refills nothing and takes nothing away.
+  now.advance(-60_000);
+  await sync.syncOnce();
+  assert.equal(creates(), 20);
+  now.advance(60_000 + 30_000);
   await sync.syncOnce();
   assert.equal(creates(), 30, "half a minute refills 10");
   now.advance(60_000);
@@ -315,7 +403,7 @@ test("gh sync: token buckets (20 creates, 60 others a minute) on a fake clock", 
   assert.equal(r4.rateLimited, false);
   assert.equal(r4.pending, 0);
   // Other calls: a burst of 60 at most. 31 issue views and 30 sub-issue links ran over three rounds.
-  const linkTimes = gh.lines().filter((l) => l.startsWith("api graphql")).length;
+  const linkTimes = gh.lines().filter((l) => l.startsWith("api graphql") && l.includes("addSubIssue")).length;
   assert.equal(linkTimes, 30);
 });
 

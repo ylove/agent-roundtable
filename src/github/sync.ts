@@ -16,9 +16,12 @@
 //   execution.completed       a comment on the parent linking the PR, then every issue closed
 //
 // State lives in executions/<exe>/github.json (atomic): the cursor, issue numbers and node ids,
-// project ids and an outbox of comments, labels and closes. Idempotency: the mapping is saved after
-// every create, and a fresh or lost github.json is rebuilt from a search for the body markers before
-// anything is created. Comments carry an event marker, so a rebuilt sync does not repeat them.
+// project ids and an outbox of comments, labels and closes. Idempotency: an issue is recorded the
+// moment gh reports it created, and a fresh or lost github.json is rebuilt from a search for the
+// body markers before anything is created. Comments carry an event marker, so a rebuilt sync (or a
+// post that timed out) does not repeat them. Markers are public, so only issues and comments
+// authored by the gh account the sync runs as (GraphQL viewer), and issues labelled roundtable,
+// are trusted: a stranger's issue or comment carrying a copied marker is ignored.
 //
 // Limits: 20 creates and 60 other calls per minute (token buckets); a rate-limit answer backs
 // off 60 s plus jitter. syncOnce never throws: failures go into its report, which turns
@@ -85,8 +88,8 @@ type StatusKey = "todo" | "in_progress" | "done";
 interface IssueRef {
   number: number;
   url: string;
-  /** Node id (GraphQL). */
-  id: string;
+  /** Node id (GraphQL); fetched after the create, so missing until then. */
+  id?: string;
   /** Project item id, once added. */
   item?: string;
   /** Linked to the parent as a sub-issue. */
@@ -97,7 +100,7 @@ interface IssueRef {
 }
 
 type OutboxItem =
-  | { kind: "comment"; target: string; body: string; marker: string; seq: number; attempts: number }
+  | { kind: "comment"; target: string; body: string; marker: string; seq: number; attempts: number; check?: boolean }
   | { kind: "label" | "unlabel"; target: string; label: string; attempts: number }
   | { kind: "close_all"; pr_url?: string; attempts: number }
   | { kind: "close"; target: string; reason: "completed" | "not planned"; comment: string; attempts: number };
@@ -116,7 +119,7 @@ interface SyncFile {
   /** Keys whose create was started but not recorded (a crash in between): ms timestamps. */
   creating: Record<string, number>;
   outbox: OutboxItem[];
-  notes: Record<string, { last_at?: number; pending?: { text: string; seq: number } }>;
+  notes: Record<string, { last_at?: number; pending?: { text: string; seq: number; check?: boolean } }>;
   /** Escalation id → issue key flagged needs-human for it. */
   flagged: Record<string, string>;
   /** Comments from events up to this seq may already be on GitHub (the mapping was rebuilt). */
@@ -168,10 +171,23 @@ export function statusFor(state: TaskState): StatusKey {
 // Text for GitHub
 // ---------------------------------------------------------------------------
 
-/** Redacted markdown-safe text: no HTML (so no forged markers), no @mentions. */
+const ZWSP = "\u200b";
+
+/**
+ * Redacted markdown-safe text: no HTML (so no forged markers), and nothing GitHub turns into a
+ * reference that would notify someone or backlink another issue from the user's account: a zero-width
+ * space breaks @mentions, #123 and owner/repo#123, GH-123, and github.com URLs.
+ */
 export function ghText(s: unknown, max = 4000): string {
   let out = redact(String(s ?? "")).text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ");
-  out = out.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/@(?=[A-Za-z0-9_])/g, "@​");
+  out = out
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/@(?=[A-Za-z0-9_])/g, `@${ZWSP}`)
+    .replace(/#(?=\d)/g, `#${ZWSP}`)
+    .replace(/\bGH-(?=\d)/gi, (m) => `${m}${ZWSP}`)
+    .replace(/github\.com/gi, (m) => m.replace(".", `${ZWSP}.`));
   return out.length > max ? out.slice(0, max - 1) + "…" : out;
 }
 
@@ -210,7 +226,9 @@ class Bucket {
     this.last = now;
   }
   take(now: number): boolean {
-    this.tokens = Math.min(this.perMinute, this.tokens + ((now - this.last) * this.perMinute) / 60_000);
+    // A clock that goes backwards refills nothing (and takes nothing away).
+    const elapsed = Math.max(0, now - this.last);
+    this.tokens = Math.min(this.perMinute, this.tokens + (elapsed * this.perMinute) / 60_000);
     this.last = Math.max(this.last, now);
     if (this.tokens < 1) return false;
     this.tokens -= 1;
@@ -235,6 +253,7 @@ export class GitHubSync {
   /** Comment markers already on each issue (filled only while recovering). */
   private readonly seenMarkers = new Map<number, Set<string>>();
   private searched = false;
+  private login?: string;
 
   constructor(private readonly opts: GitHubSyncOptions) {
     this.executionId = opts.executionId;
@@ -514,20 +533,41 @@ export class GitHubSync {
       return;
     }
     const lost = Object.keys(f.issues).length === 0;
-    const found = await this.searchMarkers(`"roundtable:${this.executionId}" in:body`);
+    const found = await this.searchMarkers(`"roundtable:${this.executionId}"`);
     for (const [key, ref] of found) if (!Object.hasOwn(f.issues, key)) f.issues[key] = ref;
     if (lost && found.size > 0) f.recover_seq = Math.max(f.recover_seq, f.cursor);
     this.searched = true;
     this.save();
   }
 
-  /** Issues found by a search, by the key of the marker in their body (exact match only). */
-  private async searchMarkers(query: string): Promise<Map<string, IssueRef>> {
-    const list = await this.callJson<Array<{ number: number; url: string; id: string; body?: string; state?: string }>>([
-      "issue", "list", ...this.repoArgs(), "--search", query, "--state", "all", "--json", "number,url,id,body,state", "--limit", "1000",
+  /** The login gh acts as (GraphQL viewer), lowercased; asked once per instance. */
+  private async viewer(): Promise<string> {
+    if (!this.login) {
+      const data = await ghGraphql<{ viewer?: { login?: string } }>(this.callAsRunner(), "query { viewer { login } }", {});
+      const login = data.viewer?.login;
+      if (!login) throw new GhError("gh api graphql: no viewer login", "output");
+      this.login = login.toLowerCase();
+    }
+    return this.login;
+  }
+
+  /**
+   * Issues this sync created, found by a search, by the key of the marker in their body (exact
+   * match only). Anyone can file an issue carrying a marker, so only issues authored by the gh
+   * account this sync runs as and labelled roundtable are trusted, on the search side and again here.
+   */
+  private async searchMarkers(phrase: string): Promise<Map<string, IssueRef>> {
+    const me = await this.viewer();
+    const list = await this.callJson<
+      Array<{ number: number; url: string; id: string; body?: string; state?: string; author?: { login?: string }; labels?: Array<{ name?: string }> }>
+    >([
+      "issue", "list", ...this.repoArgs(), "--search", `${phrase} in:body author:@me label:${ROUNDTABLE_LABEL}`, "--state", "all",
+      "--json", "number,url,id,body,state,author,labels", "--limit", "1000",
     ]);
     const out = new Map<string, IssueRef>();
     for (const it of list) {
+      if ((it.author?.login ?? "").toLowerCase() !== me) continue;
+      if (!(it.labels ?? []).some((l) => l.name === ROUNDTABLE_LABEL)) continue;
       for (const m of (it.body ?? "").matchAll(MARKER_RE)) {
         if (m[1] !== this.executionId) continue;
         const key = m[2] ?? PARENT;
@@ -594,7 +634,7 @@ export class GitHubSync {
       if (key !== PARENT && (f.completed || state.tasks[key].state === "cancelled")) return;
       if (Object.hasOwn(f.creating, key)) {
         // A create may have gone through before a crash: look for it before creating again.
-        const found = (await this.searchMarkers(`"${issueMarker(this.executionId, key).slice(5, -4)}" in:body`)).get(key);
+        const found = (await this.searchMarkers(`"${issueMarker(this.executionId, key).slice(5, -4)}"`)).get(key);
         if (found) {
           f.issues[key] = ref = found;
           delete f.creating[key];
@@ -626,17 +666,24 @@ export class GitHubSync {
           }
           throw e;
         }
-        const m = /\/issues\/(\d+)\s*$/.exec(url);
+        const m = /^https:\/\/\S+\/issues\/(\d+)$/.exec(url);
         if (!m) throw new GhError("gh issue create: no issue URL in its output", "output");
-        this.report.created++;
-        const view = await this.callJson<{ id: string; number: number; url: string }>(["issue", "view", m[1], ...this.repoArgs(), "--json", "id,number,url"]);
-        f.issues[key] = ref = { number: view.number, url: view.url, id: view.id };
+        // Recorded at once: the node id comes from a later call, which may be deferred or fail.
+        f.issues[key] = ref = { number: Number(m[1]), url };
         delete f.creating[key];
+        this.report.created++;
         this.save();
       }
     }
+    if (!ref.id) {
+      const view = await this.callJson<{ id: string; number: number; url: string }>(["issue", "view", String(ref.number), ...this.repoArgs(), "--json", "id,number,url"]);
+      ref.id = view.id;
+      ref.url = view.url;
+      this.save();
+    }
     if (key !== PARENT && !ref.sub) {
       const parent = f.issues[PARENT];
+      if (!parent?.id) throw new Error("the parent issue has no node id yet");
       try {
         await ghGraphql(this.callAsRunner(), ADD_SUB_ISSUE, { parent: parent.id, child: ref.id }, [SUB_ISSUE_HEADER]);
       } catch (e) {
@@ -732,20 +779,37 @@ export class GitHubSync {
     return Object.hasOwn(f.issues, target) ? f.issues[target] : undefined;
   }
 
-  /** While recovering: has this marker already been posted on the issue? */
-  private async alreadyPosted(ref: IssueRef, marker: string): Promise<boolean> {
-    let seen = this.seenMarkers.get(ref.number);
+  /**
+   * Has this marker already been posted on the issue? Asked while recovering, and after a post
+   * whose outcome is unknown (`fresh` re-reads the comments). Only comments by the gh account this
+   * sync runs as count: anyone can paste a marker into a comment to suppress a real post.
+   */
+  private async alreadyPosted(ref: IssueRef, marker: string, fresh = false): Promise<boolean> {
+    let seen = fresh ? undefined : this.seenMarkers.get(ref.number);
     if (!seen) {
-      const view = await this.callJson<{ comments?: Array<{ body?: string }> }>(["issue", "view", String(ref.number), ...this.repoArgs(), "--json", "comments"]);
-      seen = new Set((view.comments ?? []).flatMap((c) => (c.body ?? "").match(/<!-- roundtable:[^>]* -->/g) ?? []));
+      const me = await this.viewer();
+      const view = await this.callJson<{ comments?: Array<{ body?: string; author?: { login?: string } }> }>([
+        "issue", "view", String(ref.number), ...this.repoArgs(), "--json", "comments",
+      ]);
+      seen = new Set(
+        (view.comments ?? [])
+          .filter((c) => (c.author?.login ?? "").toLowerCase() === me)
+          .flatMap((c) => (c.body ?? "").match(/<!-- roundtable:[^>]* -->/g) ?? [])
+      );
       this.seenMarkers.set(ref.number, seen);
     }
     return seen.has(marker);
   }
 
+  /** Post a comment (redacted body in a 0600 temp file). */
   private async postComment(ref: IssueRef, body: string): Promise<void> {
     await withBodyFile(body, (path) => this.call(["issue", "comment", String(ref.number), ...this.repoArgs(), "--body-file", path]));
     this.report.comments++;
+  }
+
+  /** After this failure, may the comment have been posted all the same? */
+  private static unsure(e: unknown): boolean {
+    return e instanceof GhError && (e.kind === "timeout" || e.kind === "other" || e.kind === "output");
   }
 
   /** Comments, labels and closes, in order. A failing item is retried on later rounds, then dropped. */
@@ -773,7 +837,15 @@ export class GitHubSync {
       }
       try {
         if (item.kind === "comment") {
-          if (!(item.seq <= f.recover_seq && (await this.alreadyPosted(ref, item.marker)))) await this.postComment(ref, item.body);
+          const check = item.seq <= f.recover_seq || item.check === true;
+          if (!(check && (await this.alreadyPosted(ref, item.marker, item.check === true)))) {
+            try {
+              await this.postComment(ref, item.body);
+            } catch (e) {
+              if (GitHubSync.unsure(e)) item.check = true; // look before posting it again
+              throw e;
+            }
+          }
         } else if (item.kind !== "close") {
           await this.call(["issue", "edit", String(ref.number), ...this.repoArgs(), item.kind === "label" ? "--add-label" : "--remove-label", item.label]);
         } else if (!ref.closed) {
@@ -806,9 +878,19 @@ export class GitHubSync {
         continue;
       }
       if (n.last_at !== undefined && this.now() - n.last_at < NOTE_INTERVAL_MS) continue;
-      const marker = commentMarker(this.executionId, task, n.pending.seq);
-      if (!(n.pending.seq <= f.recover_seq && (await this.alreadyPosted(ref, marker)))) {
-        await this.postComment(ref, `${n.pending.text}\n\n${marker}`);
+      const pending = n.pending;
+      const marker = commentMarker(this.executionId, task, pending.seq);
+      const check = pending.seq <= f.recover_seq || pending.check === true;
+      if (!(check && (await this.alreadyPosted(ref, marker, pending.check === true)))) {
+        try {
+          await this.postComment(ref, `${pending.text}\n\n${marker}`);
+        } catch (e) {
+          if (GitHubSync.unsure(e)) {
+            pending.check = true;
+            this.save();
+          }
+          throw e;
+        }
       }
       n.last_at = this.now();
       delete n.pending;

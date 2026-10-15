@@ -72,6 +72,8 @@ const repo = flag("--repo") ?? "acme/app";
 const issueUrl = (n) => `https://github.com/${repo}/issues/${n}`;
 const byNumber = (n) => state.issues.find((i) => i.number === Number(n));
 const [a0, a1, a2] = argv;
+/** The login gh acts as. */
+const me = state.login ?? "bot";
 
 if (a0 === "auth" && a1 === "status") {
   if (state.loggedOut) fail("You are not logged into any GitHub hosts. To log in, run: gh auth login");
@@ -86,28 +88,33 @@ if (a0 === "label" && a1 === "create") {
   save();
   out("");
 }
+// The phrase is matched; author:@me and label: qualifiers are deliberately ignored, so the sync's
+// own checks on author and labels are what the tests exercise.
 if (a0 === "issue" && a1 === "list") {
   const phrase = /"([^"]+)"/.exec(flag("--search") ?? "")?.[1] ?? "";
   out(
     state.issues
       .filter((i) => !state.searchLag && i.body.includes(phrase))
-      .map((i) => ({ number: i.number, url: issueUrl(i.number), id: `I_${i.number}`, body: i.body, state: i.closed ? "CLOSED" : "OPEN" }))
+      .map((i) => ({
+        number: i.number, url: issueUrl(i.number), id: `I_${i.number}`, body: i.body, state: i.closed ? "CLOSED" : "OPEN",
+        author: { login: i.author ?? me }, labels: i.labels.map((name) => ({ name })),
+      }))
   );
 }
 if (a0 === "issue" && a1 === "create") {
   const n = state.next++;
-  state.issues.push({ number: n, title: flag("--title"), body, labels: all("--label"), comments: [], closed: false });
+  state.issues.push({ number: n, title: flag("--title"), body, labels: all("--label"), comments: [], closed: false, author: me });
   save();
   out(issueUrl(n));
 }
 if (a0 === "issue" && a1 === "view") {
   const i = byNumber(a2);
   if (!i) fail("GraphQL: Could not resolve to an issue or pull request with the number of " + a2);
-  if (flag("--json") === "comments") out({ comments: i.comments.map((c) => ({ body: c })) });
+  if (flag("--json") === "comments") out({ comments: i.comments.map((c) => ({ body: c.body ?? c, author: { login: c.author ?? me } })) });
   out({ id: `I_${i.number}`, number: i.number, url: issueUrl(i.number) });
 }
 if (a0 === "issue" && a1 === "comment") {
-  byNumber(a2).comments.push(body);
+  byNumber(a2).comments.push({ body, author: me });
   save();
   out(`${issueUrl(a2)}#issuecomment-1`);
 }
@@ -125,6 +132,7 @@ if (a0 === "issue" && a1 === "close") {
 }
 if (a0 === "api" && a1 === "graphql") {
   const vars = Object.fromEntries(all("-f").map((kv) => [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)]));
+  if (/^query \{ viewer \{ login \} \}$/.test(vars.query ?? "")) out({ data: { viewer: { login: me } } });
   if (!/addSubIssue/.test(vars.query ?? "")) fail("unexpected query");
   const child = byNumber(Number(vars.child.slice(2)));
   child.parent = vars.parent;

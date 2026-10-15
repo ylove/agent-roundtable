@@ -282,7 +282,15 @@ test("stop: SIGTERM to the group, then SIGKILL after the grace period kills the 
   assert.equal(groupAlive(h.pgid), false);
   const exit = await workerExit(h.pid);
   assert.equal(exit?.signal, "SIGKILL");
-  assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" }, "the child in the group is gone too");
+  // The child in the group is gone too (once reaped: an orphaned zombie lingers until init collects it).
+  await waitFor(() => {
+    try {
+      process.kill(childPid, 0);
+      return false;
+    } catch (e) {
+      return e.code === "ESRCH";
+    }
+  }, 5000);
 });
 
 test("answer: a forked session with --tools \"\" in the worker's worktree; text and huddle usage", { skip: process.platform === "win32" }, async (t) => {

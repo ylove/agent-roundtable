@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const { createExecutionStore, openExecutionStore, listExecutions, executionDir, REDUCER_VERSION } = await import("../../dist/execution/store.js");
 const { verifyExecution } = await import("../../dist/execution/verify.js");
-const { hashEvent } = await import("../../dist/execution/chain.js");
+const { hashEvent, canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");
 const { EXECUTIONS_DIR } = await import("../../dist/config.js");
 const { newExecutionId } = await import("../../dist/ids.js");
 const { GENESIS_HASH } = await import("../../dist/execution/types.js");
@@ -19,7 +19,12 @@ const opts = { repoRoot: "/srv/repo", baseSha: "abc123", agentsDir: "/srv/agents
 const newStore = (extra = {}) => createExecutionStore({ ...opts, ...extra });
 const src = { kind: "agent", id: "w1", pid: process.pid };
 const note = (text) => ({ type: "note.posted", source: src, payload: { topic: "t", text, refs: [] } });
+/** One transaction holding all the notes (one batch). */
 const notes = (store, ...texts) => store.transact(() => ({ events: texts.map(note) }));
+/** One transaction per note. */
+async function notesEach(store, ...texts) {
+  for (const t of texts) await store.transact(() => ({ events: [note(t)] }));
+}
 const eventsFile = (store) => join(store.dir, "events.jsonl");
 const lines = (store) => readFileSync(eventsFile(store), "utf8").split("\n").filter(Boolean);
 
@@ -118,13 +123,13 @@ test("a throwing fn writes nothing and releases the lock", async () => {
 test("state() returns a copy and events() filters", async () => {
   const store = await newStore();
   await notes(store, "a", "b");
-  await store.transact(() => ({ events: [{ type: "task.ready", source: src, payload: { task: "t" } }, note("c")] }));
+  await store.transact(() => ({ events: [{ type: "watchdog.stall_detected", source: src, payload: { agent: "w1" } }, note("c")] }));
   const s = await store.state();
   s.notes.length = 0;
   assert.equal((await store.state()).notes.length, 3);
   assert.deepEqual((await store.events()).map((e) => e.seq), [1, 2, 3, 4]);
   assert.deepEqual((await store.events({ sinceSeq: 2 })).map((e) => e.seq), [3, 4]);
-  assert.deepEqual((await store.events({ types: ["task.ready"] })).map((e) => e.seq), [3]);
+  assert.deepEqual((await store.events({ types: ["watchdog.stall_detected"] })).map((e) => e.seq), [3]);
   assert.deepEqual((await store.events({ limit: 3, sinceSeq: 1 })).map((e) => e.seq), [2, 3, 4].slice(0, 3));
   assert.deepEqual((await store.events({ sinceSeq: 4 })), []);
   assert.deepEqual((await store.events({ limit: 0 })), []);
@@ -194,9 +199,11 @@ test("4 processes x 200 transactions: gap-free seqs, a valid chain, no torn line
 
 const snapshotPath = (store) => join(store.dir, "snapshot.json");
 const marker = { seq: 0, agent: "snapshot-marker", topic: "m", text: "m", refs: [] };
-function editSnapshot(store, edit) {
+/** Edit snapshot.json; with rehash, keep its state digest consistent (as a careful forger would). */
+function editSnapshot(store, edit, rehash = true) {
   const snap = JSON.parse(readFileSync(snapshotPath(store), "utf8"));
   edit(snap);
+  if (rehash) snap.state_sha256 = sha256Hex(canonicalJSON(snap.state));
   writeFileSync(snapshotPath(store), JSON.stringify(snap));
 }
 const hasMarker = (s) => s.notes.some((n) => n.agent === "snapshot-marker");
@@ -208,7 +215,8 @@ test("snapshot plus tail replay equals a full replay", async () => {
   assert.equal(written.seq, 12);
   assert.equal(statSync(snapshotPath(store)).mode & 0o777, 0o600);
   const snap = JSON.parse(readFileSync(snapshotPath(store), "utf8"));
-  assert.deepEqual(Object.keys(snap).sort(), ["hash", "offset", "reducer_version", "seq", "state"]);
+  assert.deepEqual(Object.keys(snap).sort(), ["hash", "offset", "reducer_version", "seq", "state", "state_sha256"]);
+  assert.equal(snap.state_sha256, sha256Hex(canonicalJSON(snap.state)));
   assert.equal(snap.reducer_version, REDUCER_VERSION);
   assert.equal(snap.offset, statSync(eventsFile(store)).size);
   await runScript(store, { from: 12 });
@@ -224,12 +232,18 @@ test("snapshot plus tail replay equals a full replay", async () => {
 
 test("a valid snapshot is used; a wrong reducer_version or a mismatched hash is ignored", async () => {
   const store = await newStore();
-  await notes(store, "1", "2", "3");
+  await notesEach(store, "1", "2", "3");
   await store.writeSnapshot();
-  await notes(store, "4");
+  await notesEach(store, "4");
 
-  editSnapshot(store, (s) => s.state.notes.push(marker));
+  editSnapshot(store, (s) => s.state.notes.push(marker), false);
   let s = await (await openExecutionStore(store.id)).state();
+  assert.ok(!hasMarker(s), "a state that does not match its digest is not used");
+  assert.equal(s.seq, 4);
+
+  editSnapshot(store, () => {});
+  editSnapshot(store, (s) => s.state.notes.push(marker));
+  s = await (await openExecutionStore(store.id)).state();
   assert.ok(hasMarker(s), "the snapshot was loaded");
   assert.equal(s.seq, 4, "and the tail replayed on top of it");
 
@@ -263,7 +277,7 @@ test("a valid snapshot is used; a wrong reducer_version or a mismatched hash is 
 
 test("editing one payload makes verify fail at that seq", async () => {
   const store = await newStore();
-  await notes(store, "one", "two", "three", "four", "five");
+  await notesEach(store, "one", "two", "three", "four", "five");
   assert.deepEqual(await store.verify(), { ok: true, seq: 5 });
   const file = eventsFile(store);
   writeFileSync(file, readFileSync(file, "utf8").replace('"text":"three"', '"text":"THREE"'));
@@ -282,7 +296,7 @@ test("editing one payload makes verify fail at that seq", async () => {
 
 test("a deleted line is a gap for readers and for verify", async () => {
   const store = await newStore();
-  await notes(store, "1", "2", "3");
+  await notesEach(store, "1", "2", "3");
   const ls = lines(store);
   writeFileSync(eventsFile(store), [ls[0], ls[2]].join("\n") + "\n");
   const r = await verifyExecution(store.id);
@@ -292,7 +306,7 @@ test("a deleted line is a gap for readers and for verify", async () => {
 
 test("a torn trailing line is ignored until it completes, and a writer discards a dead one", async () => {
   const store = await newStore();
-  await notes(store, "1", "2", "3", "4", "5", "6");
+  await notesEach(store, "1", "2", "3", "4", "5", "6");
   const ls = lines(store);
   const last = ls[5] + "\n";
   truncateSync(eventsFile(store), Buffer.byteLength(ls.slice(0, 5).join("\n") + "\n"));
@@ -342,4 +356,61 @@ test("contract.frozen must reference a stored contract blob", async () => {
   const notContract = await store.putBlob(JSON.stringify({ hello: 1 }));
   await assert.rejects(store.transact(() => ({ events: [frozen(notContract)] })), /not a roundtable\.contract\/1 contract/);
   assert.equal((await store.state()).seq, 0, "nothing was written");
+});
+
+// ---------------------------------------------------------------------------
+// Batch framing
+// ---------------------------------------------------------------------------
+
+test("a multi-event transaction is framed as one batch", async () => {
+  const store = await newStore();
+  const { events } = await notes(store, "a", "b", "c");
+  assert.deepEqual(events.map((e) => e.batch), [{ n: 3, i: 0 }, { n: 3, i: 1 }, { n: 3, i: 2 }]);
+  const { events: single } = await notes(store, "d");
+  assert.equal("batch" in single[0], false, "a single event is not framed");
+  assert.deepEqual(await store.verify(), { ok: true, seq: 4 });
+});
+
+test("a batch cut short by a crash is invisible to readers and cut off by the next writer", async () => {
+  const store = await newStore();
+  await notesEach(store, "1");
+  await notes(store, "a", "b", "c");
+  const ls = lines(store);
+  // The writer died after two of its three lines reached the disk.
+  writeFileSync(eventsFile(store), ls.slice(0, 3).join("\n") + "\n");
+  const reader = await openExecutionStore(store.id);
+  assert.equal((await reader.state()).seq, 1, "half a batch is not applied");
+  assert.deepEqual((await reader.events()).map((e) => e.seq), [1]);
+  assert.deepEqual(await reader.verify(), { ok: true, seq: 1 });
+  const { events } = await reader.transact(({ state }) => ({ events: [note(`after ${state.seq}`)] }));
+  assert.equal(events[0].seq, 2, "the incomplete batch was discarded under the lock");
+  assert.deepEqual(await reader.verify(), { ok: true, seq: 2 });
+  assert.equal(lines(store).length, 2);
+});
+
+test("an incomplete batch followed by another event fails verify and replay", async () => {
+  const store = await newStore();
+  await notes(store, "a", "b", "c");
+  const [l1, l2] = lines(store);
+  const second = JSON.parse(l2);
+  const intruder = { ...JSON.parse(l1), seq: 3, id: "evt-intruder", prev: second.hash };
+  delete intruder.batch;
+  delete intruder.hash;
+  intruder.hash = hashEvent(intruder.prev, intruder);
+  writeFileSync(eventsFile(store), [l1, l2, JSON.stringify(intruder)].join("\n") + "\n");
+  const r = await verifyExecution(store.id);
+  assert.deepEqual([r.ok, r.seq, r.badSeq], [false, 0, 1]);
+  assert.match(r.reason, /batch that starts at seq 1 is incomplete/);
+  await assert.rejects(openExecutionStore(store.id), /incomplete/);
+});
+
+test("events() serves any sinceSeq correctly, including mid-batch", async () => {
+  const store = await newStore();
+  for (let i = 0; i < 10; i++) await notes(store, `x${i}`, `y${i}`);
+  const reader = await openExecutionStore(store.id);
+  for (const since of [0, 1, 2, 7, 13, 19, 20]) {
+    const got = (await reader.events({ sinceSeq: since })).map((e) => e.seq);
+    assert.deepEqual(got, Array.from({ length: 20 - since }, (_, i) => since + i + 1), `since ${since}`);
+  }
+  assert.deepEqual((await reader.events({ sinceSeq: 5, limit: 2 })).map((e) => e.seq), [6, 7]);
 });

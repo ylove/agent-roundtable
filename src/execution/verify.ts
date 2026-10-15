@@ -1,5 +1,5 @@
 // ============================================================================
-// Event-log verification: gap-free seqs, prev links and recomputed hashes
+// Event-log verification: gap-free seqs, prev links, recomputed hashes and whole batches
 // ============================================================================
 
 import { readFileSync } from "node:fs";
@@ -7,12 +7,13 @@ import { join } from "node:path";
 import { EXECUTIONS_DIR } from "../config.js";
 import { EXECUTION_ID_RE } from "../ids.js";
 import { hashEvent } from "./chain.js";
+import { BatchFramer, preview } from "./events.js";
 import { readLines } from "./jsonl.js";
-import { GENESIS_HASH, type EventEnvelope } from "./types.js";
+import { GENESIS_HASH, type AnyEvent, type EventEnvelope } from "./types.js";
 
 export interface VerifyResult {
   ok: boolean;
-  /** The last seq that verified. */
+  /** The last seq that verified (the end of the last complete batch). */
   seq: number;
   /** The first seq that did not. */
   badSeq?: number;
@@ -29,8 +30,9 @@ function rehash(e: EventEnvelope): string | null {
 }
 
 /**
- * Verify the whole chain of an execution, given its id or its directory. A torn last line (no
- * newline yet) is not part of the log and is ignored; any complete line must verify.
+ * Verify the whole chain of an execution, given its id or its directory. What readers do not
+ * read yet is not part of the log and is ignored: a torn last line, or an incomplete batch at
+ * the end. Any other line must verify, and a batch may only be incomplete at the end.
  */
 export async function verifyExecution(idOrDir: string): Promise<VerifyResult> {
   const dir = EXECUTION_ID_RE.test(idOrDir) ? join(EXECUTIONS_DIR, idOrDir) : idOrDir;
@@ -40,26 +42,38 @@ export async function verifyExecution(idOrDir: string): Promise<VerifyResult> {
   } catch {
     return { ok: false, seq: 0, badSeq: 1, reason: `cannot read ${join(dir, "execution.json")}` };
   }
-  let seq = 0;
+  let seq = 0; // last line checked
+  let committed = 0; // end of the last complete batch
   let prev = GENESIS_HASH;
-  let failure: string | undefined;
+  let failure: { badSeq: number; reason: string } | undefined;
+  const framer = new BatchFramer();
   readLines(join(dir, "events.jsonl"), 0, (line) => {
-    const at = `seq ${seq + 1}`;
+    const next = seq + 1;
+    const fail = (reason: string, badSeq = framer.openSeq ?? next) => {
+      failure = { badSeq, reason };
+      return false;
+    };
     let e: EventEnvelope;
     try {
       e = JSON.parse(line) as EventEnvelope;
     } catch {
-      failure = `the line after seq ${seq} is not valid JSON`;
-      return false;
+      return fail(`the line after seq ${seq} is not valid JSON`, next);
     }
-    if (!e || typeof e !== "object" || e.v !== 1) failure = `${at}: not a version 1 event`;
-    else if (e.seq !== seq + 1) failure = `expected seq ${seq + 1}, found ${JSON.stringify(e.seq)}`;
-    else if (e.execution !== executionId) failure = `${at}: belongs to execution ${JSON.stringify(e.execution)}`;
-    else if (e.prev !== prev) failure = `${at}: prev does not match the hash of seq ${seq}`;
-    else if (rehash(e) !== e.hash) failure = `${at}: hash does not match its content`;
-    if (failure) return false;
+    if (!e || typeof e !== "object" || e.v !== 1) return fail(`seq ${next}: not a version 1 event`, next);
+    if (e.seq !== next) return fail(`expected seq ${next}, found ${preview(e.seq)}`, next);
+    if (e.execution !== executionId) return fail(`seq ${next}: belongs to execution ${preview(e.execution)}`, next);
+    if (e.prev !== prev) return fail(`seq ${next}: prev does not match the hash of seq ${seq}`, next);
+    if (rehash(e) !== e.hash) return fail(`seq ${next}: hash does not match its content`, next);
+    let batch: AnyEvent[] | null;
+    try {
+      batch = framer.push(e as AnyEvent);
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err));
+    }
     seq = e.seq;
     prev = e.hash;
+    if (batch) committed = seq;
   });
-  return failure ? { ok: false, seq, badSeq: seq + 1, reason: failure } : { ok: true, seq };
+  if (failure) return { ok: false, seq: committed, badSeq: failure.badSeq, reason: failure.reason };
+  return { ok: true, seq: committed };
 }

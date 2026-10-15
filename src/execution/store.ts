@@ -4,23 +4,25 @@
 //   execution.json   immutable header, written once
 //   events.jsonl     append-only, one event per line, seq gap-free from 1, hash-chained
 //   events.lock/     mkdir lock that serializes writers across processes
-//   snapshot.json    {reducer_version, seq, offset, hash, state}; replay starts there when it checks out
+//   snapshot.json    {reducer_version, seq, offset, hash, state_sha256, state}; replay starts there when it checks out
 //   contracts/       contracts/<ctr>/v<N>.json and CONTRACT.md (the contract tools write them)
 //   blobs/           content-addressed blobs (blobs.ts)
 //
-// Writes go through transact(). Reads take no lock: they tail from a byte offset, and a line
-// without its final newline is still being written (or was torn by a crash), so it is not read.
+// Writes go through transact(). A transaction's events are one batch: they are appended with a
+// single write and framed ({n, i}), and readers apply a batch only once all of it is on disk.
+// Reads take no lock: they tail from a byte offset, so a torn line or an incomplete batch at the
+// end of the log is simply not read yet.
 // ============================================================================
 
 import { closeSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EXECUTIONS_DIR } from "../config.js";
 import { EXECUTION_ID_RE, newExecutionId, newId } from "../ids.js";
-import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
+import { fsyncDir, mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { applyInPlace, assertResolved, contractBlobRef, initialState, REDUCER_VERSION, type Resolved } from "./blackboard.js";
 import { getBlob, putBlob } from "./blobs.js";
-import { hashEvent } from "./chain.js";
-import { validateDraft } from "./events.js";
+import { canonicalJSON, hashEvent, sha256Hex } from "./chain.js";
+import { BatchFramer, preview, validateDraft } from "./events.js";
 import { readLineEndingAt, readLines } from "./jsonl.js";
 import { acquireLock, type LockOptions, type LockRelease } from "./lock.js";
 import {
@@ -38,7 +40,10 @@ import { verifyExecution, type VerifyResult } from "./verify.js";
 
 export { REDUCER_VERSION } from "./blackboard.js";
 
-/** Stale after 10 s (heads-down.md §3): a transaction must finish well within that. */
+/**
+ * A live holder is never displaced (lock.ts), so a stalled transaction makes the others wait and
+ * then time out. staleMs is the grace period for a lock directory without an owner.
+ */
 const EVENTS_LOCK: LockOptions = { staleMs: 10_000, timeoutMs: 30_000 };
 
 export interface CreateExecutionOptions {
@@ -52,9 +57,11 @@ export interface CreateExecutionOptions {
 export interface SnapshotFile {
   reducer_version: number;
   seq: number;
-  /** Byte offset in events.jsonl just past the event at `seq`. */
+  /** Byte offset in events.jsonl just past the batch that ends at `seq`. */
   offset: number;
   hash: string;
+  /** sha256 of canonicalJSON(state): a snapshot whose state was altered is not used. */
+  state_sha256: string;
   state: BlackboardState;
 }
 
@@ -72,7 +79,7 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** The directory of an execution; throws unless `id` is a well-formed execution id. */
 export function executionDir(id: string): string {
-  if (typeof id !== "string" || !EXECUTION_ID_RE.test(id)) throw new Error(`Not an execution id: ${JSON.stringify(id)}`);
+  if (typeof id !== "string" || !EXECUTION_ID_RE.test(id)) throw new Error(`Not an execution id: ${preview(id)}`);
   return join(EXECUTIONS_DIR, id);
 }
 
@@ -89,8 +96,11 @@ class Store implements FileExecutionStore {
   private readonly blobsDir: string;
   private readonly snapshotPath: string;
   private st: BlackboardState;
-  /** Bytes of events.jsonl already applied to `st` (always the end of a complete line). */
+  /** Bytes of events.jsonl already applied to `st` (always the end of a complete batch). */
   private offset = 0;
+  /** First seq and start offset of every batch applied since open, for events({sinceSeq}). */
+  private readonly idxSeq: number[] = [];
+  private readonly idxOff: number[] = [];
   /** Transactions of this process run one at a time, so they never poll the lock against each other. */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -124,8 +134,9 @@ class Store implements FileExecutionStore {
   }
 
   /**
-   * A snapshot is used only when its reducer_version is ours, it is internally consistent, and the
-   * line ending at its offset is the event at its seq with its hash. Anything else means a full replay.
+   * A snapshot is used only when its reducer_version is ours, its state matches its state_sha256
+   * and its own fields, and the line ending at its offset is the event at its seq with its hash.
+   * Anything else means a full replay.
    */
   private readSnapshot(): SnapshotFile | null {
     let raw: string;
@@ -143,10 +154,17 @@ class Store implements FileExecutionStore {
     }
     if (!snap || snap.reducer_version !== REDUCER_VERSION) return null; // another reducer: replay with this one
     const st = snap.state;
+    let digest: string | null = null;
+    try {
+      digest = sha256Hex(canonicalJSON(st));
+    } catch {
+      digest = null;
+    }
     if (
       !Number.isSafeInteger(snap.seq) || snap.seq < 0 ||
       !Number.isSafeInteger(snap.offset) || snap.offset < 0 ||
-      !st || typeof st !== "object" || st.execution !== this.id || st.seq !== snap.seq || st.hash !== snap.hash
+      !st || typeof st !== "object" || st.execution !== this.id || st.seq !== snap.seq || st.hash !== snap.hash ||
+      digest === null || digest !== snap.state_sha256
     ) {
       this.warn("snapshot.json is inconsistent; replaying the full log");
       return null;
@@ -166,22 +184,30 @@ class Store implements FileExecutionStore {
     return snap;
   }
 
-  /** Parse one complete line and check it extends the chain we hold. A bad line throws. */
-  private parse(line: string, at: number): AnyEvent {
+  /** Parse one complete line and check it extends the chain at (seq, hash). A bad line throws. */
+  private parse(line: string, at: number, seq: number, hash: string): AnyEvent {
     const where = `${this.eventsPath} at byte ${at}`;
     let ev: AnyEvent;
     try {
       ev = JSON.parse(line) as AnyEvent;
     } catch {
-      throw new Error(`Corrupt event line in ${where} (after seq ${this.st.seq})`);
+      throw new Error(`Corrupt event line in ${where} (after seq ${seq})`);
     }
     if (!ev || typeof ev !== "object" || ev.v !== 1 || typeof ev.type !== "string" || typeof ev.hash !== "string") {
-      throw new Error(`Corrupt event line in ${where} (after seq ${this.st.seq}): not a version 1 event`);
+      throw new Error(`Corrupt event line in ${where} (after seq ${seq}): not a version 1 event`);
     }
-    if (ev.seq !== this.st.seq + 1) throw new Error(`Event log gap in ${where}: expected seq ${this.st.seq + 1}, found ${ev.seq}`);
-    if (ev.prev !== this.st.hash) throw new Error(`Event chain broken in ${where}: seq ${ev.seq} does not link to seq ${this.st.seq}`);
-    if (ev.execution !== this.id) throw new Error(`Event in ${where} belongs to execution ${ev.execution}`);
+    if (ev.seq !== seq + 1) throw new Error(`Event log gap in ${where}: expected seq ${seq + 1}, found ${preview(ev.seq)}`);
+    if (ev.prev !== hash) throw new Error(`Event chain broken in ${where}: seq ${ev.seq} does not link to seq ${seq}`);
+    if (ev.execution !== this.id) throw new Error(`Event in ${where} belongs to execution ${preview(ev.execution)}`);
     return ev;
+  }
+
+  private frame(framer: BatchFramer, ev: AnyEvent, at: number): AnyEvent[] | null {
+    try {
+      return framer.push(ev);
+    } catch (e) {
+      throw new Error(`Corrupt event log ${this.eventsPath} at byte ${at}: ${errText(e)}`);
+    }
   }
 
   /** Fetch what apply needs beyond the event: the contract behind contract.frozen/amended. */
@@ -199,17 +225,56 @@ class Store implements FileExecutionStore {
     return resolved;
   }
 
-  /** Apply every complete line after our offset. Returns the count of trailing bytes with no newline. */
-  private tail(): number {
-    return readLines(this.eventsPath, this.offset, (line, start, end) => {
-      const ev = this.parse(line, start);
-      applyInPlace(this.st, ev, this.resolve(ev));
-      this.offset = end;
-    }).torn;
+  private index(firstSeq: number, startOffset: number): void {
+    this.idxSeq.push(firstSeq);
+    this.idxOff.push(startOffset);
   }
 
-  /** Under the lock no append is in flight, so bytes after the last newline are a dead writer's torn line. */
-  private discardTorn(torn: number): void {
+  /** Where events({sinceSeq}) can start reading: the start of the batch holding since + 1, else 0. */
+  private startFor(since: number): number {
+    if (since >= this.st.seq) return this.offset;
+    let lo = 0;
+    let hi = this.idxSeq.length - 1;
+    let best = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.idxSeq[mid] <= since + 1) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return best >= 0 ? this.idxOff[best] : 0;
+  }
+
+  /** Apply every complete batch after our offset. Returns the bytes after it not applied yet. */
+  private tail(): number {
+    const framer = new BatchFramer();
+    let seq = this.st.seq;
+    let hash = this.st.hash;
+    let batchStart = this.offset;
+    const r = readLines(this.eventsPath, this.offset, (line, start, end) => {
+      if (!framer.open) batchStart = start;
+      const ev = this.parse(line, start, seq, hash);
+      seq = ev.seq;
+      hash = ev.hash;
+      const batch = this.frame(framer, ev, start);
+      if (!batch) return;
+      const resolved = batch.map((b) => this.resolve(b));
+      batch.forEach((b, i) => applyInPlace(this.st, b, resolved[i]));
+      this.index(batch[0].seq, batchStart);
+      this.offset = end;
+    });
+    return r.size - this.offset;
+  }
+
+  /**
+   * Cut off a torn line or an incomplete batch. This runs only under the lock, and a lock is never
+   * taken from a live holder, who checks held() right before writing: so no live writer can be
+   * mid-append, and these bytes are a dead writer's (or one that failed and could not undo them).
+   */
+  private discardTail(bytes: number): void {
     const fd = openSync(this.eventsPath, "r+");
     try {
       ftruncateSync(fd, this.offset);
@@ -217,10 +282,10 @@ class Store implements FileExecutionStore {
     } finally {
       closeSync(fd);
     }
-    this.warn(`discarded a torn ${torn}-byte line after seq ${this.st.seq}`);
+    this.warn(`discarded ${bytes} bytes of an unfinished append after seq ${this.st.seq}`);
   }
 
-  private envelope(d: AnyEventDraft, seq: number, ts: string, prev: string): AnyEvent {
+  private envelope(d: AnyEventDraft, seq: number, ts: string, prev: string, batch?: { n: number; i: number }): AnyEvent {
     const env: Record<string, unknown> = { v: 1, id: newId("evt"), seq, ts, execution: this.id };
     if (d.contract !== undefined) env.contract = d.contract;
     if (d.contract_version !== undefined) env.contract_version = d.contract_version;
@@ -230,25 +295,37 @@ class Store implements FileExecutionStore {
     env.payload = d.payload;
     if (d.causation !== undefined) env.causation = d.causation;
     if (d.correlation !== undefined) env.correlation = d.correlation;
+    if (batch) env.batch = batch;
     env.prev = prev;
     env.hash = hashEvent(prev, env as unknown as AnyEvent);
     return env as unknown as AnyEvent;
   }
 
-  /** One write on an O_APPEND fd, then fsync; refuses if the lock was lost or the log moved meanwhile. */
+  /**
+   * One write on an O_APPEND fd, then fsync. Refuses if the lock was lost or the log moved; on a
+   * failed or partial write, truncates back so no part of the batch stays behind.
+   */
   private append(buf: Buffer, lock: LockRelease, expectedSize: number): void {
     const fd = openSync(this.eventsPath, "a", 0o600);
     try {
-      if (!lock.held()) {
-        throw new Error(`transact lost ${this.lockDir} (held longer than ${EVENTS_LOCK.staleMs} ms?); nothing was written`);
-      }
+      if (!lock.held()) throw new Error(`transact lost ${this.lockDir}; nothing was written`);
       const size = fstatSync(fd).size;
       if (size !== expectedSize || this.offset !== expectedSize) {
         throw new Error(`events.jsonl changed during the transaction (${size} bytes, expected ${expectedSize}); nothing was written`);
       }
-      let off = 0;
-      while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
-      fsyncSync(fd);
+      try {
+        let off = 0;
+        while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
+        fsyncSync(fd);
+      } catch (e) {
+        try {
+          ftruncateSync(fd, expectedSize);
+          fsyncSync(fd);
+        } catch {
+          /* the batch framing hides the partial batch; the next writer cuts it off */
+        }
+        throw e;
+      }
     } finally {
       closeSync(fd);
     }
@@ -257,26 +334,31 @@ class Store implements FileExecutionStore {
   private async runTransaction<R>(fn: TransactFn<R>): Promise<{ events: AnyEvent[]; result?: R }> {
     const lock = await acquireLock(this.lockDir, EVENTS_LOCK);
     try {
-      const torn = this.tail();
-      if (torn > 0) this.discardTorn(torn);
+      const unapplied = this.tail();
+      if (unapplied > 0) this.discardTail(unapplied);
       const base = { seq: this.st.seq, hash: this.st.hash, offset: this.offset };
       const out = await fn({ state: clone(this.st), header: this.header() });
       if (!out || !Array.isArray(out.events)) throw new Error("transact: fn must return { events: [...] }");
       const drafts = out.events.map((d) => validateDraft(d));
       if (drafts.length === 0) return { events: [], result: out.result };
       const ts = new Date().toISOString();
+      const n = drafts.length;
       const events: AnyEvent[] = [];
       const resolved: Resolved[] = [];
       let prev = base.hash;
       for (const [i, d] of drafts.entries()) {
-        const ev = this.envelope(d, base.seq + i + 1, ts, prev);
-        resolved.push(this.resolve(ev)); // a contract blob must exist and match before anything is written
+        const ev = this.envelope(d, base.seq + i + 1, ts, prev, n > 1 ? { n, i } : undefined);
+        resolved.push(this.resolve(ev)); // a contract blob must exist and be well formed
         events.push(ev);
         prev = ev.hash;
       }
+      // Dry run on a copy, strictly: a batch that does not reduce cleanly is never written.
+      const next = clone(this.st);
+      events.forEach((ev, i) => applyInPlace(next, ev, resolved[i], { strict: true }));
       const buf = Buffer.from(events.map((e) => JSON.stringify(e) + "\n").join(""), "utf8");
       this.append(buf, lock, base.offset);
-      events.forEach((ev, i) => applyInPlace(this.st, ev, resolved[i]));
+      this.st = next;
+      this.index(base.seq + 1, base.offset);
       this.offset = base.offset + buf.length;
       return { events, result: out.result };
     } finally {
@@ -301,20 +383,20 @@ class Store implements FileExecutionStore {
     const limit = opts.limit ?? Infinity;
     const out: AnyEvent[] = [];
     if (limit <= 0) return out;
-    // Pollers ask for what is new: everything after our offset has seq > st.seq >= since.
-    const from = since >= this.st.seq ? this.offset : 0;
-    readLines(this.eventsPath, from, (line, start) => {
+    const framer = new BatchFramer();
+    readLines(this.eventsPath, this.startFor(since), (line, start) => {
       let ev: AnyEvent;
       try {
         ev = JSON.parse(line) as AnyEvent;
       } catch {
         throw new Error(`Corrupt event line in ${this.eventsPath} at byte ${start}`);
       }
-      if (ev.seq <= since || (types && !types.has(ev.type))) return;
-      out.push(ev);
+      const batch = this.frame(framer, ev, start);
+      if (!batch) return;
+      for (const b of batch) if (b.seq > since && (!types || types.has(b.type))) out.push(b);
       if (out.length >= limit) return false;
     });
-    return out;
+    return out.length > limit ? out.slice(0, limit) : out;
   }
 
   async putBlob(content: string | Buffer, opts?: { redact?: boolean }): Promise<string> {
@@ -336,6 +418,7 @@ class Store implements FileExecutionStore {
       seq: this.st.seq,
       offset: this.offset,
       hash: this.st.hash,
+      state_sha256: sha256Hex(canonicalJSON(this.st)),
       state: this.st,
     };
     writeFileAtomic(this.snapshotPath, JSON.stringify(snap));
@@ -373,8 +456,9 @@ export async function createExecutionStore(opts: CreateExecutionOptions): Promis
     agents_dir: resolve(opts.agentsDir),
     created: new Date().toISOString(),
   };
-  // Written last: a directory without execution.json is an interrupted create, not an execution.
+  // Written last (and the directory fsynced with it): without execution.json it is an interrupted create.
   writeFileAtomic(join(dir, "execution.json"), JSON.stringify(header, null, 2) + "\n");
+  fsyncDir(EXECUTIONS_DIR);
   const store = new Store(dir, header);
   store.load();
   return store;

@@ -78,7 +78,7 @@ test("contract.frozen needs the resolved contract, matching its id and version",
   assert.equal(contractBlobRef(frozen), "sha256:x");
   assert.equal(contractBlobRef(ev("contract.proposed", { blob: "sha256:y" })), undefined);
   assert.throws(() => apply(s, frozen), /was not resolved/);
-  assert.throws(() => apply(s, frozen, { contract: makeContract({ version: 2 }) }), /holds ctr-abc123-1 v2/);
+  assert.throws(() => apply(s, frozen, { contract: makeContract({ version: 2 }) }), /holds "ctr-abc123-1" v2/);
   assert.throws(() => apply(s, frozen, { contract: { ...makeContract(), schema: "other" } }), /not a roundtable\.contract\/1 contract/);
   const ok = apply(s, frozen, { contract: makeContract() });
   assert.equal(ok.contract.status, "frozen");
@@ -275,14 +275,133 @@ test("escalations, huddles, circuits and deadlocks", () => {
   assert.deepEqual(s.escalations.E3.resolution, { action: "decide", decision: "dead_leaseholder", by: "runner" });
 });
 
-test("ids such as constructor and __proto__ are stored as plain keys", () => {
-  const c = makeContract({ tasks: [taskSpec("constructor"), taskSpec("__proto__", ["constructor"])] });
-  let s = reduce([["contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob: "b" }, { contract: c }]]);
+test("ids such as constructor are stored as plain keys; __proto__ is not a task id", () => {
+  const frozen = (c) => ["contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob: "b" }, { contract: c }];
+  assert.throws(() => reduce([frozen(makeContract({ tasks: [taskSpec("__proto__")] }))]), /tasks\[0\]\.id is not a valid task id/);
+  const c = makeContract({ tasks: [taskSpec("constructor"), taskSpec("prototype", ["constructor"])] });
+  let s = reduce([frozen(c)]);
   assert.equal(s.tasks.constructor.state, "ready");
   assert.equal(Object.getPrototypeOf(s.tasks), Object.prototype);
-  assert.equal(Object.hasOwn(s.tasks, "__proto__"), true);
-  s = reduce([["task.accepted", { task: "constructor" }], ["task.claimed", { task: "toString", agent: "w", attempt: 1, ttl_s: 0 }]], s);
-  assert.equal(s.tasks["__proto__"].state, "ready");
-  assert.equal(Object.hasOwn(s.claims, "toString"), false, "unknown tasks are ignored, even inherited names");
-  assert.equal({}.state, undefined, "Object.prototype is untouched");
+  s = reduce([["task.accepted", { task: "constructor" }], ["task.claimed", { task: "tostring", agent: "w", attempt: 1, ttl_s: 0 }]], s);
+  assert.equal(s.tasks.prototype.state, "ready");
+  s = reduce([["agent.registered", { agent: "__proto__", persona: "p", driver: "external", token_sha256: "t", external: true }]], s);
+  assert.equal(Object.hasOwn(s.agents, "__proto__"), true, "agent ids are stored as own keys");
+  assert.equal(Object.getPrototypeOf(s.agents), Object.prototype);
+  assert.equal({}.persona, undefined, "Object.prototype is untouched");
+});
+
+// ---------------------------------------------------------------------------
+// Review regressions
+// ---------------------------------------------------------------------------
+
+const frozenEvent = (blob = "b") => ["contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob }];
+
+test("a contract adoptContract cannot reduce is rejected, with the field named", () => {
+  const bad = [
+    [{ teams: {} }, /teams is not an array/],
+    [{ interfaces: [null] }, /interfaces\[0\] has no name/],
+    [{ decisions: [{ id: "d" }] }, /decisions\[0\] has no id or text/],
+    [{ teams: [{ lead: "w1", members: [] }] }, /teams\[0\] has no id/],
+    [{ teams: [{ id: "t", members: "w1" }] }, /teams\[0\]\.members/],
+    [{ tasks: [taskSpec("a"), taskSpec("a")] }, /task id a appears twice/],
+    [{ tasks: [{ ...taskSpec("a"), depends_on: "b" }] }, /tasks\[0\]\.depends_on/],
+    [{ goal: null }, /goal is not an object/],
+    [{ frozen: "yes" }, /frozen is not/],
+  ];
+  for (const [over, re] of bad) {
+    const [type, payload] = frozenEvent();
+    assert.throws(() => apply(initialState("exe-test"), ev(type, payload), { contract: makeContract(over) }), re, JSON.stringify(over));
+  }
+});
+
+test("a malformed contract blob is refused before anything is written", async () => {
+  const { scrubbedJSON } = await import("../../dist/execution/blobs.js");
+  for (const over of [{ teams: {} }, { interfaces: [null] }, { teams: [{ lead: "w1", members: [] }] }]) {
+    const store = await newStore();
+    const blob = await store.putBlob(scrubbedJSON(makeContract(over)), { redact: false });
+    const [type, payload] = frozenEvent(blob);
+    await assert.rejects(store.transact(() => ({ events: [{ type, payload, source: { kind: "orchestrator", id: "main", pid: 1 } }] })));
+    assert.equal((await store.state()).seq, 0, JSON.stringify(over));
+    assert.deepEqual(await store.verify(), { ok: true, seq: 0 });
+    assert.equal((await (await openExecutionStore(store.id)).state()).seq, 0, "the log still replays");
+  }
+});
+
+test("finished tasks are not resurrected: refused at write time, ignored on replay", async () => {
+  const c = makeContract();
+  const base = reduce([[...frozenEvent(), { contract: c }], ["task.cancelled", { task: "a", why: "dropped" }], ["task.failed", { task: "b", why: "broken" }]]);
+  const late = [
+    ["task.submitted", { task: "a", commit: "c", diff_blob: "d", stat: "s", files: ["x"], rewrites: [] }],
+    ["task.merged", { task: "a", integration_sha: "i" }],
+    ["task.accepted", { task: "a" }],
+    ["task.merged", { task: "b", integration_sha: "i" }],
+    ["task.accepted", { task: "b" }],
+    ["task.claimed", { task: "a", agent: "w1", attempt: 2, ttl_s: 0 }],
+    ["task.progress", { task: "zzz", note: "unknown task" }],
+  ];
+  for (const [type, payload] of late) {
+    seq = base.seq;
+    const e = ev(type, payload);
+    assert.throws(() => apply(base, e, {}, { strict: true }), /already (cancelled|failed)|unknown task/, type);
+    const after = apply(base, e);
+    assert.deepEqual([after.tasks.a.state, after.tasks.b.state], ["cancelled", "failed"], `${type} is ignored on replay`);
+  }
+  // A failed task may still be retried or cancelled.
+  seq = base.seq;
+  assert.equal(apply(base, ev("task.retried", { task: "b", attempt: 2, why: "again" }), {}, { strict: true }).tasks.b.state, "ready");
+  assert.equal(apply(base, ev("task.cancelled", { task: "b", why: "give up" }), {}, { strict: true }).tasks.b.state, "cancelled");
+
+  // Through the store: the refusal happens before append.
+  const store = await newStore();
+  const { scrubbedJSON } = await import("../../dist/execution/blobs.js");
+  const blob = await store.putBlob(scrubbedJSON(c), { redact: false });
+  const src = { kind: "runner", id: "runner", pid: 1 };
+  await store.transact(() => ({ events: [{ type: "contract.frozen", payload: { ...frozenEvent()[1], blob }, source: src }, { type: "task.cancelled", payload: { task: "a", why: "x" }, source: src }] }));
+  await assert.rejects(store.transact(() => ({ events: [{ type: "task.merged", payload: { task: "a", integration_sha: "i" }, source: src }] })), /task a is already cancelled/);
+  const s = await store.state();
+  assert.deepEqual([s.seq, s.tasks.a.state, s.tasks.b.state], [2, "cancelled", "pending"]);
+});
+
+test("a split survives later amendments: dependents keep depending on the parts", () => {
+  const v1 = makeContract({ tasks: [taskSpec("a"), taskSpec("b", ["a"])] });
+  const v2 = makeContract({ version: 2, tasks: [taskSpec("a"), taskSpec("b", ["a"]), taskSpec("c")] });
+  let s = reduce([
+    [...frozenEvent(), { contract: v1 }],
+    ["task.split", { task: "a", into: [taskSpec("a1"), taskSpec("a2")] }],
+    ["contract.amended", { contract: CONTRACT_ID, version: 2, patch_blob: "p", reason: "add c", affected_tasks: ["c"], blob: "b2" }, { contract: v2 }],
+  ]);
+  assert.deepEqual(s.splits, { a: ["a1", "a2"] });
+  assert.deepEqual(s.tasks.b.spec.depends_on, ["a1", "a2"]);
+  assert.equal(s.tasks.a.state, "cancelled", "the split task stays cancelled");
+  s = reduce([["task.accepted", { task: "a1" }], ["task.accepted", { task: "a2" }]], s);
+  assert.equal(s.tasks.b.state, "ready");
+  // Nested splits expand all the way down.
+  s = reduce([["task.split", { task: "c", into: [taskSpec("c1"), taskSpec("c2")] }], ["task.split", { task: "c1", into: [taskSpec("c1x")] }]], s);
+  const v3 = makeContract({ version: 3, tasks: [taskSpec("d", ["a", "c"])] });
+  s = reduce([["contract.amended", { contract: CONTRACT_ID, version: 3, patch_blob: "p", reason: "add d", affected_tasks: ["d"], blob: "b3" }, { contract: v3 }]], s);
+  assert.deepEqual(s.tasks.d.spec.depends_on, ["a1", "a2", "c1x", "c2"]);
+  assert.throws(() => apply(s, ev("task.split", { task: "d", into: [taskSpec("a1")] }), {}, { strict: true }), /part a1 is already a task/);
+});
+
+test("an amended contract is marked frozen, keeping the freeze record", () => {
+  const v2 = makeContract({ version: 2, status: "consenting" });
+  const s = reduce([
+    [...frozenEvent(), { contract: makeContract() }],
+    ["contract.amended", { contract: CONTRACT_ID, version: 2, patch_blob: "p", reason: "r", affected_tasks: [], blob: "b2" }, { contract: v2 }],
+  ]);
+  assert.equal(s.contract.version, 2);
+  assert.equal(s.contract.status, "frozen");
+  assert.equal(s.contract.frozen.by, "main");
+});
+
+test("a submit resets only its own task's check streaks", () => {
+  const c = makeContract({ tasks: [taskSpec("a"), taskSpec("a.b")] });
+  const fail = (task) => ["check.failed", { command_id: "test", scope: "task", task, exit: 1, signature: "S" }];
+  const s = reduce([
+    [...frozenEvent(), { contract: c }],
+    fail("a"), fail("a"), fail("a.b"), fail("a.b"),
+    ["task.submitted", { task: "a", commit: "c", diff_blob: "d", stat: "s", files: [], rewrites: [] }],
+  ]);
+  assert.equal(s.checks.task["a/test"].streak, 0);
+  assert.equal(s.checks.task["a.b/test"].streak, 2);
 });

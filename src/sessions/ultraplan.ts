@@ -6,6 +6,7 @@ import { DEFAULT_MODELS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
 import { agentKey, loadAgentPromptWithPath } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
+import { SessionBusyError, isSessionBusy, lockSession, sessionBusyMessage } from "./lock.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
@@ -73,7 +74,10 @@ export interface UltraplanFinalResult {
 }
 
 export const ultraplans = new Map<string, Ultraplan>();
-const busy = new Set<string>();
+
+function ultraplanBusy(id: string): string {
+  return sessionBusyMessage("Ultraplan", id, "a phase");
+}
 
 export const NEXT_AFTER_INPUT = "Write plan v1 that incorporates this input. Tag each step with the agents whose input shaped it, e.g. [cfo]. Then call submit_plan; pass final: true to go straight to sign-off.";
 export const NEXT_AFTER_REVIEW = "Revise the plan to address the amendments (say which you rejected and why), then call submit_plan again, or submit_plan with final: true to collect sign-offs and close.";
@@ -340,7 +344,7 @@ async function finalize(u: Ultraplan, signoffs: Verdict[], signedOff: boolean): 
 function available(id: string): Ultraplan {
   const u = ultraplans.get(id);
   if (!u) throw notFoundError("Ultraplan", id, [...ultraplans.keys()]);
-  if (busy.has(id)) throw new Error(`Ultraplan ${id} is busy: a phase is still running. Wait for it to finish, then retry.`);
+  if (isSessionBusy(id)) throw new SessionBusyError(id, ultraplanBusy(id));
   return u;
 }
 
@@ -375,7 +379,7 @@ export async function startUltraplan(
     versions: [], entries: [], startedAt: new Date(), ...(publicChannel && { publicChannel }),
   };
   ultraplans.set(id, u);
-  busy.add(id);
+  const release = lockSession(id, ultraplanBusy(id));
   let step = "input";
   try {
     const draft = opts.draftPlan?.trim();
@@ -420,7 +424,7 @@ export async function startUltraplan(
       error: buildPlannerStoppedError(step, e instanceof Error ? e.message : String(e)),
     };
   } finally {
-    busy.delete(id);
+    release();
   }
 }
 
@@ -432,24 +436,24 @@ export async function submitPlan(id: string, plan?: string, final = false): Prom
   const supplied = typeof plan === "string" && !!plan.trim();
   const v = supplied ? nextVersion(u, plan!, "orchestrator") : u.versions.at(-1);
   if (!v) throw new Error("No plan version exists yet; pass plan.");
-  busy.add(id);
+  const release = lockSession(id, ultraplanBusy(id));
   try {
     const entries = await computePhase(u, final ? "signoff" : "review", v);
     if (supplied) commitPlan(u, v);
     commitPhase(u, entries);
     return final ? await finalize(u, verdictsFor(u, entries), true) : stepResult(u);
   } finally {
-    busy.delete(id);
+    release();
   }
 }
 
 export async function endUltraplan(id: string): Promise<UltraplanFinalResult> {
   const u = available(id);
-  busy.add(id);
+  const release = lockSession(id, ultraplanBusy(id));
   try {
     return await finalize(u, [], false);
   } finally {
-    busy.delete(id);
+    release();
   }
 }
 

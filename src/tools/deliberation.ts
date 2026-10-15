@@ -45,6 +45,7 @@ import {
   listLocalMeetings,
 } from "../sessions/local-meetings.js";
 import {
+  MAX_COLLABORATION_ROUNDS,
   collaborations,
   startCollaboration,
   continueCollaboration,
@@ -393,6 +394,7 @@ export const deliberationTools: ToolDefinition[] = [
         },
         max_rounds: {
           type: "number",
+          maximum: MAX_COLLABORATION_ROUNDS,
           description:
             "Maximum rounds of discussion (each round = each agent speaks once). Default: 5",
         },
@@ -453,6 +455,7 @@ export const deliberationTools: ToolDefinition[] = [
         },
         rounds: {
           type: "number",
+          maximum: MAX_COLLABORATION_ROUNDS,
           description: "Number of additional rounds to run. Default: 1",
         },
       },

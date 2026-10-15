@@ -196,6 +196,10 @@ Two or more personas take turns on a topic. One provider/model is used for the w
 | `get_collaboration_transcript` | `{ collaboration_id }` |
 | `list_collaborations` | — |
 
+`max_rounds` and `rounds` are capped at 20.
+
+One turn runs per session at a time. While a turn is in flight, `continue_collaboration`, `nudge_collaboration`, `end_collaboration`, `say`, `end_meeting`, `say_local` and `end_local_meeting` on that session fail at once with `<Session> <id> is busy: a turn is still running. Wait for it to finish, then retry.`, without queueing. `pause_collaboration` and the list and transcript tools still work.
+
 ### Ultraplan tools
 
 | Tool | Arguments |

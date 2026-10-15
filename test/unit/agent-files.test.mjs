@@ -37,6 +37,8 @@ const raw = (extra = {}) => ({
 const validate = (extra = {}, ctx = {}) =>
   f.validateAgentSpec(raw(extra), { mode: "create", existingSkills: [], ...ctx });
 const spec = (extra = {}) => validate(extra).spec;
+// Improvement validates in improve mode: an omitted tools line keeps the target's own.
+const improveSpec = (extra = {}) => validate(extra, { mode: "improve" }).spec;
 const skill = (name, extra = {}) => ({
   name,
   description: "Check budgets.",
@@ -115,7 +117,7 @@ test("model canonicalization accepts all choices and drops invalid types", () =>
   for (const model of [null, "", " \t "]) {
     const r = validate({ model });
     assert.ok(!("model" in r.spec));
-    assert.deepEqual(r.warnings, ["tools omitted: the agent inherits all tools"]);
+    assert.deepEqual(r.warnings, [f.DEFAULT_TOOLS_WARNING]);
   }
 });
 
@@ -126,13 +128,13 @@ test("tools accept arrays and comma strings, canonicalize, dedupe and drop unkno
   assert.deepEqual(validate({ tools: " bash, websearch, WebFetch " }).spec.tools, ["Bash", "WebSearch", "WebFetch"]);
   assert.deepEqual(validate({ tools: f.TOOL_ALLOWLIST }).spec.tools, [...f.TOOL_ALLOWLIST]);
   for (const tools of [[], "", null]) {
-    assert.ok(!("tools" in validate({ tools }).spec));
+    assert.deepEqual(validate({ tools }).spec.tools, ["Read", "Grep", "Glob"]);
   }
   assert.throws(() => validate({ tools: ["unknown"] }), /tools must list tool names from/);
   for (const tools of [null, "", " \t ", ",, ,"]) {
     const r = validate({ tools });
-    assert.ok(!("tools" in r.spec));
-    assert.deepEqual(r.warnings, ["tools omitted: the agent inherits all tools"]);
+    assert.deepEqual(r.spec.tools, ["Read", "Grep", "Glob"]);
+    assert.deepEqual(r.warnings, ["tools omitted: defaulting to Read, Grep, Glob (read-only)"]);
   }
   const commaTools = validate({ tools: "Read,,Grep, ," });
   assert.deepEqual(commaTools.spec.tools, ["Read", "Grep"]);
@@ -181,7 +183,7 @@ test("existing skills reuse exact spelling and ignore instructions", () => {
   assert.equal(r.spec.skills[0].description, "");
   assert.equal(r.spec.skills[0].instructions, undefined);
   assert.match(r.warnings.join(" "), /instructions ignored; existing skills are never overwritten/);
-  assert.deepEqual(validate({ skills: [{ name: "checking" }] }, { existingSkills: ["checking"] }).warnings, ["tools omitted: the agent inherits all tools"]);
+  assert.deepEqual(validate({ skills: [{ name: "checking" }] }, { existingSkills: ["checking"] }).warnings, [f.DEFAULT_TOOLS_WARNING]);
 });
 
 test("existing skill names are resolved before slugification without conflating names", () => {
@@ -334,7 +336,7 @@ test("rendering removes old creation comments, sanitizes credits, and labels reu
   const markdown = f.renderSpecMarkdown({ ...s, changes: ["Clearer instructions"] });
   for (const text of [
     "inherit (not set)",
-    "all tools (inherited)",
+    "**Tools:** Read, Grep, Glob",
     "check (new)",
     "existing (existing skill, reused)",
     "## Open questions",
@@ -433,7 +435,7 @@ test("improve backs up exact bytes, preserves identity and unmanaged keys, and u
     date,
     timestamp: "20261008-120000"
   };
-  const r = f.writeImprovedAgent(spec({ name: "different", skills: [skill("check"), skill("new")] }), opts);
+  const r = f.writeImprovedAgent(improveSpec({ name: "different", skills: [skill("check"), skill("new")] }), opts);
   assert.equal(r.backupPath, targetPath + ".bak-20261008-120000");
   assert.equal(fs.readFileSync(r.backupPath, "utf8"), original);
   const data = readFrontmatter(fs.readFileSync(targetPath, "utf8")).data;
@@ -560,9 +562,9 @@ test("Claude-compatible improve preserves visible keys and collisions see the id
   const o = dirs();
   const targetPath = fixture(join(o.agentsDir, "old-filename.md"), generatorFrontmatter);
   const options = { ...o, mode: "improve", targetPath, timestamp: "now" };
-  const plan = f.planAgentFiles(spec(), options);
+  const plan = f.planAgentFiles(improveSpec(), options);
   assert.deepEqual(plan.warnings, []);
-  const r = f.writeImprovedAgent(spec(), options);
+  const r = f.writeImprovedAgent(improveSpec(), options);
   assert.equal(r.agentName, "code-reviewer");
   assert.deepEqual(r.warnings, []);
   const data = readFrontmatter(fs.readFileSync(targetPath, "utf8")).data;
@@ -575,9 +577,9 @@ test("Claude-compatible improve preserves visible keys and collisions see the id
   fs.writeFileSync(targetPath, generatorFrontmatter);
   assert.equal(f.writeNewAgent(spec({ name: "code-reviewer" }), o).agentName, "code-reviewer-2");
   fs.writeFileSync(targetPath, unreadableFrontmatter);
-  assert.throws(() => f.planAgentFiles(spec(), options), /Claude Code cannot parse the frontmatter.*fix the frontmatter first/s);
-  assert.throws(() => f.previewFiles(spec(), options), /Claude Code cannot parse the frontmatter/);
-  assert.throws(() => f.writeImprovedAgent(spec(), options), /Claude Code cannot parse the frontmatter/);
+  assert.throws(() => f.planAgentFiles(improveSpec(), options), /Claude Code cannot parse the frontmatter.*fix the frontmatter first/s);
+  assert.throws(() => f.previewFiles(improveSpec(), options), /Claude Code cannot parse the frontmatter/);
+  assert.throws(() => f.writeImprovedAgent(improveSpec(), options), /Claude Code cannot parse the frontmatter/);
   assert.equal(fs.readFileSync(targetPath, "utf8"), unreadableFrontmatter);
 });
 
@@ -587,16 +589,21 @@ test("tools fail closed on malformed or entirely unknown restrictions", () => {
   }
   for (const tools of [undefined, [], null, "", " \t "]) {
     const created = validate({ tools });
-    assert.equal(created.spec.tools, undefined);
-    assert.ok(created.warnings.includes("tools omitted: the agent inherits all tools"));
-    assert.deepEqual(validate({ tools }, { mode: "improve" }).warnings, []);
+    assert.deepEqual(created.spec.tools, ["Read", "Grep", "Glob"], "a new agent never inherits every tool");
+    assert.ok(created.warnings.includes(f.DEFAULT_TOOLS_WARNING));
+    // Improving keeps the target's own tools line (or its absence): see planAgentFiles below.
+    const improved = validate({ tools }, { mode: "improve" });
+    assert.equal(improved.spec.tools, undefined);
+    assert.deepEqual(improved.warnings, []);
   }
+  // The rendered file carries the explicit line.
+  assert.match(f.renderAgentFile(validate({}).spec, { createdFrom: [], date }), /^tools: Read, Grep, Glob$/m);
   const o = dirs();
   const targetPath = fixture(join(o.agentsDir, "inherit.md"), "Body");
   const options = { ...o, mode: "improve", targetPath, timestamp: "now" };
-  assert.ok(f.planAgentFiles(spec(), options).warnings.includes("tools omitted: the agent inherits all tools"));
+  assert.ok(f.planAgentFiles(improveSpec(), options).warnings.includes("tools omitted: the agent inherits all tools"));
   fs.writeFileSync(targetPath, "---\ntools: Read\n---\nBody");
-  assert.ok(!f.planAgentFiles(spec(), options).warnings.includes("tools omitted: the agent inherits all tools"));
+  assert.ok(!f.planAgentFiles(improveSpec(), options).warnings.includes("tools omitted: the agent inherits all tools"));
 });
 
 test("concurrent edits preserve the original and save an exclusive proposal plus skills", () => {
@@ -607,7 +614,7 @@ test("concurrent edits preserve the original and save an exclusive proposal plus
   fs.writeFileSync(targetPath, edited);
   const options = { ...o, targetPath, timestamp: "now", originalContent };
   fixture(targetPath + ".proposed-now", "Previous proposal");
-  const r = f.writeImprovedAgent(spec({ system_prompt: "Proposed body", skills: [skill("preserved-work")] }), options);
+  const r = f.writeImprovedAgent(improveSpec({ system_prompt: "Proposed body", skills: [skill("preserved-work")] }), options);
   assert.equal(fs.readFileSync(targetPath, "utf8"), edited);
   assert.equal(r.proposedPath, targetPath + ".proposed-now-2");
   assert.equal(r.backupPath, undefined);

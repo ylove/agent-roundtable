@@ -790,6 +790,15 @@ test("mid-run edits produce a proposal result and preserve workshop metadata", a
   assert.equal(readActivity().find(e => e.session === r.sessionId).outcome, "proposed changes to edited-during-run (target changed during the run)");
 });
 
+test("a created agent whose definition omits tools gets an explicit read-only tools line", async (t) => {
+  const h = harness(t, { architect: () => JSON.stringify(definition({ name: "no-tools-given", tools: undefined, skills: [] })) });
+  const r = await createAgent({ ...opts, agents: ["cfo"], task: "Review budgets" });
+  assert.match(h.requests.architect[0].messages.at(-1).content, /omit for read-only Read, Grep, Glob/);
+  assert.deepEqual(r.agent.tools, ["Read", "Grep", "Glob"]);
+  assert.equal(readFrontmatter(readFileSync(r.agent.path, "utf8")).data.tools, "Read, Grep, Glob");
+  assert.ok(r.warnings.includes("tools omitted: defaulting to Read, Grep, Glob (read-only)"), r.warnings.join("; "));
+});
+
 test("workshops list and reuse personal skills by name without recreating them", async (t) => {
   const personal = fixture(join(process.env.HOME, ".claude", "skills", "personal-ledger", "SKILL.md"), "---\ndescription: Personal ledger procedure\n---\nPERSONAL PROCEDURE");
   const h = harness(t, { spec: { name: "personal-consumer", skills: [{ name: "personal-ledger" }] } });

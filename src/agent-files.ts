@@ -11,6 +11,9 @@ import { SKILLS_DIR } from "./config.js";
 
 export const MODEL_CHOICES = ["opus", "sonnet", "haiku", "inherit"] as const;
 export const TOOL_ALLOWLIST = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"] as const;
+/** A new agent whose definition lists no tools gets these (read-only), never Claude Code's inherit-all default. */
+export const DEFAULT_AGENT_TOOLS = ["Read", "Grep", "Glob"] as const;
+export const DEFAULT_TOOLS_WARNING = `tools omitted: defaulting to ${DEFAULT_AGENT_TOOLS.join(", ")} (read-only)`;
 export const RESERVED_SKILL_NAMES = ["synced", "anthropic-skills"];
 
 /** A reusable procedure, either newly authored or attached by its existing name. */
@@ -121,7 +124,8 @@ export function validateAgentSpec(
   }
   const toolsError = (): Error => new Error(
     `tools must list tool names from: ${TOOL_ALLOWLIST.join(", ")} ` +
-      `(or be omitted to inherit all tools); got: ${typeof raw.tools === "string" ? raw.tools : inspect(raw.tools)}`,
+      `(or be omitted: a new agent then gets ${DEFAULT_AGENT_TOOLS.join(", ")}); ` +
+      `got: ${typeof raw.tools === "string" ? raw.tools : inspect(raw.tools)}`,
   );
   if (!omitted(raw.tools)) {
     if (typeof raw.tools !== "string" && !Array.isArray(raw.tools)) {
@@ -158,7 +162,9 @@ export function validateAgentSpec(
     }
   }
   if (!spec.tools && ctx.mode === "create") {
-    warnings.push("tools omitted: the agent inherits all tools");
+    // Claude Code gives an agent with no tools line every tool: a generated agent always gets one.
+    spec.tools = [...DEFAULT_AGENT_TOOLS];
+    warnings.push(DEFAULT_TOOLS_WARNING);
   }
   if (raw.skills !== undefined && !Array.isArray(raw.skills)) {
     warnings.push("skills must be an array; ignored.");

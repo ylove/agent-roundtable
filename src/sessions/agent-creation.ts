@@ -12,6 +12,7 @@ import { publicLabel } from "../publishers/index.js";
 import {
   MODEL_CHOICES,
   TOOL_ALLOWLIST,
+  DEFAULT_AGENT_TOOLS,
   slugify,
   validateAgentSpec,
   renderSpecMarkdown,
@@ -373,7 +374,9 @@ export function buildArchitectPrompt(o: ArchitectPromptOptions): string {
       "Use opus for strategic or cognitively complex work, sonnet for execution, " +
       "haiku for simple high-volume work; omit to inherit.",
     `- tools: optional array from ${TOOL_ALLOWLIST.join(", ")}. ` +
-      "Only what the agent needs; omit to inherit all.",
+      (o.mode === "improve"
+        ? "Only what the agent needs; omit to keep the current tools."
+        : `Only what the agent needs; omit for read-only ${DEFAULT_AGENT_TOOLS.join(", ")}.`),
     "- system_prompt: second person, <= 40000 characters.",
     "- skills: <= 6; each { name, description, instructions, contributed_by }. " +
       "Names are slugs <= 64; descriptions one line <= 1000; new instructions non-empty <= 20000; " +

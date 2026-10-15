@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.0
+<!-- Draft: WS13's final release step completes this section. -->
+
+- Security and supply chain: add production dependency auditing, a CycloneDX SBOM artifact, CodeQL, Dependabot and npm release provenance; document the security policy, STRIDE threat model and SOC 2 controls mapping; make screenshot process cleanup tests wait for process termination.
+
 ## 0.4.0
 
 - Prototype mode: `prototype: true` on `start_meeting`, `start_local_meeting` and `start_collaboration` lets agents show proposals. Works with standard and debate meetings and collaborate, debate and waffle-house collaborations; rejected with `mode: "conversation"`. With the flag unset nothing changes. Agents emit at most one `<prototype>` block per turn (1-10 files, hard cap 100 KB; the directive asks for under about 20 KB because a block cut off by the reply length cap is rejected) of kind `web` (a scaled-down page of just the proposed element), `code` (the artifact that would produce the proposal, such as SQL or Terraform; never executed), `diagram` (Mermaid) or `text` (draft 1). Agents are told to include `<demo>` walkthroughs for at least three user types or modalities when the proposal involves interaction; the parser does not enforce it. Assessors give `Verdict on Pn: APPROVE|REVISE|REJECT`; only the proposer decides `Decision on Pn: REVISE|SCRAP|SHORTLIST`; `revises="Pn"` creates `Pn v2`. A block that is not accepted (invalid, extra, cut off or unclosed, or arriving after close) is never shown raw: agents and the public see `[Prototype block not accepted: …]`.

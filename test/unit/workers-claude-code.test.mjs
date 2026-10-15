@@ -42,7 +42,7 @@ test("buildWorkerArgs: the exact argv (snapshot)", () => {
     "--settings", "/state/agents/builder-1/settings.json",
     "--restricted", "--tools", "Read,Edit,Write,Glob,Grep",
     "--allowedTools", "Read Edit Write Glob Grep mcp__roundtable",
-    "--disallowedTools", "Bash WebFetch WebSearch Task",
+    "--disallowedTools", "Bash WebFetch WebSearch Task Agent",
     "--permission-mode", "dontAsk", "--permission-prompts", "none",
     "--max-budget-usd", "2.5",
     "--disable-slash-commands", "--no-chrome",
@@ -54,7 +54,7 @@ test("buildWorkerArgs: no prompt and no positional argument, never --bare, resum
   assert.ok(!args.some((a) => a.includes("TASK CARD")), "the prompt never reaches argv");
   assert.ok(!args.includes("--bare"), "--bare skips hooks");
   assert.ok(args.includes("--strict-mcp-config") && args.includes("--restricted"));
-  assert.equal(args[args.indexOf("--disallowedTools") + 1], "Bash WebFetch WebSearch Task");
+  assert.equal(args[args.indexOf("--disallowedTools") + 1], "Bash WebFetch WebSearch Task Agent");
   // Every value follows a flag: nothing positional.
   const flagsWithValue = new Set(["--output-format", "--session-id", "--resume", "--append-system-prompt-file", "--mcp-config", "--settings", "--tools", "--allowedTools", "--disallowedTools", "--permission-mode", "--permission-prompts", "--max-budget-usd", "--model", "--fallback-model", "--effort"]);
   for (let i = 0; i < args.length; i++) {
@@ -187,6 +187,8 @@ process.stdin.on("data", (d) => (input += d));
 process.stdin.on("end", () => {
   fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv, cwd: process.cwd(), env: process.env, input, pid: process.pid, pgid: process.pid }) + "\\n");
   if (argv.includes("--fork-session")) {
+    if (input.includes("HANG")) { setInterval(() => {}, 1000); return; }
+    if (input.includes("LARGE")) process.stdout.write("x".repeat(5 * 1024 * 1024) + "\\n");
     process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "the fork's answer", session_id: "99999999-2222-4333-8444-555555555555",
       total_cost_usd: 0.012, usage: { input_tokens: 3, output_tokens: 7, cache_read_input_tokens: 50 }, modelUsage: { "claude-sonnet-5": { costUSD: 0.012 } } }) + "\\n");
     return;
@@ -308,4 +310,37 @@ test("answer: a forked session with --tools \"\" in the worker's worktree; text 
   assert.equal(call.argv[call.argv.indexOf("--tools") + 1], "");
   assert.equal(call.argv[call.argv.indexOf("--resume") + 1], SESSION);
   assert.ok(!call.argv.includes("--mcp-config"));
+});
+
+
+test("detect: failed preflights are cached for 60 seconds, then retried", async (t) => {
+  const { writeFileSync } = await import("node:fs");
+  const cli = fakeBin(t, "claude", 'process.stdout.write("old CLI")');
+  cc.resetClaudeDetection();
+  t.after(() => cc.resetClaudeDetection());
+  const driver = new cc.ClaudeCodeDriver({ cli });
+  assert.equal((await driver.detect()).ok, false);
+  writeFileSync(cli, `#!${process.execPath}\nprocess.stdout.write(require("node:fs").readFileSync(${JSON.stringify(HELP)}, "utf8"));`);
+  assert.equal((await driver.detect()).ok, false, "failure is briefly cached");
+  const now = Date.now;
+  Date.now = () => now() + 61_000;
+  try { assert.equal((await driver.detect()).ok, true, "retry discovers the repaired CLI"); }
+  finally { Date.now = now; }
+});
+
+test("answer: keeps the result after more than 4 MB and aborts a running fork", async (t) => {
+  const { dir, calls } = fakeClaude(t);
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(join(dir, "wt"));
+  const rec = { agent: "builder-1", task: "api", sessionId: SESSION, cwd: join(dir, "wt") };
+  const driver = new cc.ClaudeCodeDriver();
+  assert.equal((await driver.answer(rec, "LARGE", 0.5)).text, "the fork's answer");
+  const controller = new AbortController();
+  const pending = driver.answer(rec, "HANG", 0.5, controller.signal);
+  const rejected = assert.rejects(pending, { name: "AbortError" });
+  const call = await waitFor(() => calls().find((c) => c.input === "HANG"));
+  controller.abort();
+  await rejected;
+  await waitFor(() => !groupAlive(call.pid));
+  await assert.rejects(driver.answer(rec, "unused", 0.5, controller.signal), { name: "AbortError" });
 });

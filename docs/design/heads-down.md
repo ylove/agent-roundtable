@@ -39,7 +39,7 @@ All three processes run from `dist/index.js`. `src/cli.ts` dispatches the subcom
 - Takeover renames the lock, removes it, takes a new lock, and emits `runner.takeover`.
 - Every orchestrator tool that touches a live run calls `ensureRunner(id)`.
 
-**Permissions.** Every entry point calls `process.umask(0o077)`.
+**Permissions.** Heads-down subcommands (including `mcp --worker` and `hook`) call `process.umask(0o077)`. The orchestrator keeps the host umask; private state uses explicit modes from `fs-safe.ts`.
 
 ## 3. Store
 
@@ -161,7 +161,7 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `task.released` | task, note |
 | `task.progress` | task, percent?, note |
 | `task.submitted` | task, commit, diff_blob, stat, files, rewrites |
-| `task.checks_passed` | task, commands |
+| `task.checks_passed` | task, commands, commit?, submitted_seq? |
 | `task.rejected` | task, reasons, violations? |
 | `task.merged` | task, integration_sha |
 | `task.accepted` | task |
@@ -181,10 +181,10 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `artifact.changed` | name, version, consumers |
 | `dependency.requested` | task, need: {kind, ref} |
 | `dependency.satisfied` | task, need, by_event |
-| `check.started` | command_id, scope: task / integration, task? |
-| `check.passed` | command_id, scope, task?, duration_ms |
-| `check.failed` | command_id, scope, task?, exit, signature, output_blob |
-| `check.timed_out` | command_id, scope, task? |
+| `check.started` | command_id, scope: task / integration, task?, commit?, submitted_seq? |
+| `check.passed` | command_id, scope, task?, duration_ms, commit?, submitted_seq? |
+| `check.failed` | command_id, scope, task?, exit, signature, output_blob, commit?, submitted_seq? |
+| `check.timed_out` | command_id, scope, task?, commit?, submitted_seq? |
 | `command.completed` | task, argv, exit, duration_ms, signature, output_blob |
 | `merge.succeeded` | task, sha |
 | `merge.conflicted` | task, files |
@@ -245,11 +245,13 @@ The human's chat is never stored on the blackboard.
 - `task.merged` (and `task.accepted`) accepts the task, drops its claim and promotes dependents. Pausing never changes task states; it only fills `paused_tasks`.
 - `checks.task` is keyed `<task>/<command_id>` and `checks.integration` by command id. `task.submitted` resets that task's streaks only when its `diff_blob` differs from the task's previous submission (resubmitting the same diff is no patch), and `task.merged` resets the integration streaks. `budget.threshold_crossed` for a new `budget_usd` starts a new list.
 - `raised_seq`, `granted_seq` and `requested_seq` are set from the event's seq, whatever the payload says.
+- `blocked_by.needs` lists a task's open interface and artifact needs: `dependency.requested` adds one and `dependency.satisfied` removes it (task needs are `deps`). `task.blocked` on a task that is already blocked keeps its other reasons: a new escalation replaces the old one, deps are added, and open needs are always kept. `task.unblocked` clears them all.
+- A task check that carries `submitted_seq` counts only while that is the task's latest `task.submitted`; a stale one changes nothing. A `task.checks_passed` that carries `submitted_seq` is refused unless it names the latest submission and commit and the task is still `submitted` or `checking`.
 - Task events are checked against the task's state. On the write path, which uses strict mode, an event that names an unknown task, or that would move a task out of `accepted`, `failed` or `cancelled`, is refused before append. The exceptions are a retry or cancel of a failed task, and a merge or accept of an accepted one, which does nothing. Replay ignores such events, so an old log never breaks.
 - `task.split` records `splits[task] = parts`. Whenever a contract version is adopted, dependencies on a split task are rewritten to its parts, recursively.
 - Task and command ids match `^[a-z0-9][a-z0-9._-]{0,63}$` in payloads and contracts, so the `/` in a check key is unambiguous.
 - `contract.amended` marks the contract `frozen` and keeps the earlier freeze record unless the blob carries one.
-- Snapshots record `REDUCER_VERSION` (now 3) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
+- Snapshots record `REDUCER_VERSION` (now 4) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
 
 ## 7. Contract
 
@@ -352,7 +354,7 @@ export interface WorkerDriver {
   resume(rec: WorkerRecord, l: WorkerLaunch): Promise<WorkerHandle>; // l: fresh files, budget, card, output path
   parse(line: string, acc: RunAccumulator): void;
   stop(h: WorkerHandle, reason: string): Promise<void>;
-  answer?(rec: WorkerRecord, question: string, maxUsd: number): Promise<{ text: string; usage?: UsageRecord }>;
+  answer?(rec: WorkerRecord, question: string, maxUsd: number, signal?: AbortSignal): Promise<{ text: string; usage?: UsageRecord }>;
 }
 ```
 
@@ -371,7 +373,7 @@ claude -p --output-format stream-json --verbose
   --settings agents/<id>/settings.json
   --restricted --tools Read,Edit,Write,Glob,Grep
   --allowedTools "Read Edit Write Glob Grep mcp__roundtable"
-  --disallowedTools "Bash WebFetch WebSearch Task"
+  --disallowedTools "Bash WebFetch WebSearch Task Agent"
   --permission-mode dontAsk --permission-prompts none
   --max-budget-usd <min(task remaining, execution remaining)>
   --disable-slash-commands --no-chrome
@@ -381,7 +383,7 @@ Flags deliberately left out:
 - `--bare`, because it skips hooks, and the lease hook depends on them.
 - `--max-turns`, because it is not listed in the CLI help.
 
-Preflight (`detect()`) parses `claude --help` once per binary and refuses to run when a required flag is missing. CLI 2.1.300 lists `--append-system-prompt-file` only as `--append-system-prompt[-file]`, and preflight accepts either spelling. `--model`, `--fallback-model` and `--effort` are optional capabilities: a CLI without one runs without it, with a warning.
+Preflight (`detect()`) parses `claude --help` once per binary (failures expire after 60 seconds) and refuses to run when a required flag is missing. CLI 2.1.300 lists `--append-system-prompt-file` only as `--append-system-prompt[-file]`, and preflight accepts either spelling. `--model`, `--fallback-model` and `--effort` are optional capabilities: a CLI without one runs without it, with a warning.
 
 Checked against a live 2.1.300 run:
 - `--restricted` drops the user's and the project's settings, hooks, plugins and agents, while `--settings` still applies, so the lease hook fires.
@@ -396,15 +398,15 @@ claude -p --resume <session> --fork-session --output-format json --restricted --
   --max-budget-usd <maxUsd> --disable-slash-commands --no-chrome
 ```
 
-The question goes in on stdin. The fork gets a new session id and leaves the original transcript byte-identical, which was checked live. The usage is recorded as `source: "huddle"`.
+The question goes in on stdin. The fork gets a new session id and leaves the original transcript byte-identical, which was checked live. The usage is recorded as `source: "huddle"`. Answers accept an `AbortSignal` and retain the tail of stdout so large output cannot displace the final result.
 
 ### Generated files
 
 - `mcp.json` defines one server, `roundtable`, with command `process.execPath`. Its args are `[cli, "mcp", "--worker", "--execution", X, "--agent", Y, "--token-file", P]` and its env is `{ROUNDTABLE_DOTENV: "off", ROUNDTABLE_HOME}`.
 - `settings.json`:
-  - `permissions.deny`: `Read(./.env*)`, `Read(./**/.env*)`, `Edit(./.git/**)`, `Write(./.git/**)`, `Edit(./**/.git/**)`, `Write(./**/.git/**)`, `Edit(./.gitmodules)`, `Edit(./**/.gitmodules)`, `Bash`. A `.git` directory is denied at any depth, because a nested repository's config can define filter drivers that host git would run. Claude Code consults `Edit(...)` path rules for every file-writing tool; it accepts `Write(...)` rules but never consults them.
-  - `hooks.PreToolUse` with matcher `Edit|Write|NotebookEdit|MultiEdit`, which runs `"<execPath>" "<cli>" hook pre-tool-use` through `sh -c`. Both paths are double-quoted. A path with a character a shell would interpret inside double quotes is refused when the files are generated.
-  - The hook reads only `agents/<id>/leases.json`, never the event log or the network. It resolves the target through the realpath of its deepest existing ancestor, and refuses a path that contains `..`. It denies when the path:
+  - `permissions.deny`: `Read(./.env*)`, `Read(./**/.env*)`, `Edit(./.git)`, `Write(./.git)`, `Edit(./**/.git)`, `Write(./**/.git)`, `Edit(./.git/**)`, `Write(./.git/**)`, `Edit(./**/.git/**)`, `Write(./**/.git/**)`, `Edit(./.gitmodules)`, `Edit(./**/.gitmodules)`, `Bash`. A `.git` directory is denied at any depth, because a nested repository's config can define filter drivers that host git would run. Claude Code consults `Edit(...)` path rules for every file-writing tool; it accepts `Write(...)` rules but never consults them.
+  - `hooks.PreToolUse` with matchers `Edit|Write|NotebookEdit|MultiEdit` and `Read|Glob|Grep`, which runs `"<execPath>" "<cli>" hook pre-tool-use` through `sh -c`. Both paths are double-quoted. A path with a character a shell would interpret inside double quotes is refused when the files are generated.
+  - The hook reads `agents/<id>/leases.json`, never the event log or the network. Reads need no lease; recursive searches inspect their subtree for escaping symlinks and secret files and refuse unsafe searches, so workers should scope them to safe directories. It resolves the target through the realpath of its deepest existing ancestor, and refuses a path that contains `..`. It refuses paths starting with `~`, URI or foreign path syntax, and denies when the path:
     - leaves the task worktree, or is itself a symlink;
     - has a `.git` segment at any depth, or names `.gitmodules`;
     - looks like a secret (`.env*`, `*.pem`, `*.key`, SSH keys such as `id_rsa` or `id_ed25519.pub`, `.npmrc`, `.netrc`);
@@ -427,7 +429,7 @@ The question goes in on stdin. The fork gets a new session id and leaves the ori
 Workers use whatever account the CLI is logged into. `ANTHROPIC_API_KEY` is passed only when `ROUNDTABLE_WORKER_AUTH=api_key`.
 
 **Identity.**
-- The runner writes a 32-byte token to a single-use file (`prepareWorkerFiles`) and records its sha256 in `agent.registered`.
+- The runner generates each agent's token immediately before its launch, rather than preparing tokens for all agents ahead of time. It writes a 32-byte token to a single-use file (`prepareWorkerFiles`) and records its sha256 in `agent.registered`.
 - The worker server accepts `--token-file` only at `agents/<agent>/token`, so it can never be pointed at another file to read or unlink. The file must be a private regular file of this user.
 - The server claims the file with an atomic rename, reads it, unlinks it, and compares the sha256 in constant time with `agents[agent].token_sha256`.
 - `token.used` keeps the hash of the last consumed token, so a copy of the token put back cannot start a second server.
@@ -442,18 +444,21 @@ Workers use whatever account the CLI is logged into. `ANTHROPIC_API_KEY` is pass
 
 ### Other drivers
 
-**Codex** (optional). Invocation:
+**Codex** is opt-in with `ROUNDTABLE_ALLOW_CODEX_DRIVER=1`; otherwise `detect()` returns `ok: false` with that reason. Its permissions profile denies the user's home, `ROUNDTABLE_HOME` and the repository checkout, reopens the task worktree for writes and the toolchain and git directory for reads, and disables network access. Codex workers can still read anything outside the denied roots; this is not complete read isolation. Launch refuses while another agent has an unconsumed token file. Invocation:
 
 ```
-codex exec --json -C <wt> -s workspace-write --ignore-user-config
+codex exec --json -C <wt> --ignore-user-config --ignore-rules
+  -c default_permissions="roundtable"
+  -c permissions.roundtable.filesystem={":minimal"="read", …}
   -c shell_environment_policy.inherit=core
-  -c sandbox_workspace_write.network_access=false
+  -c shell_environment_policy.set={GIT_CONFIG_GLOBAL="/dev/null",GIT_CONFIG_NOSYSTEM="1"}
   -c approval_policy="never"
   -c mcp_servers.roundtable.command=… -c mcp_servers.roundtable.args=[…] -c mcp_servers.roundtable.env={…}
+  -c mcp_servers.roundtable.default_tools_approval_mode="approve"
   [-m <model>] -
 ```
 
-- Resume uses `codex exec resume --json --ignore-user-config -c sandbox_mode="workspace-write" -c … <thread> -`. `exec resume` takes neither `-C` nor `-s`, so the spawn's cwd is the worktree.
+- Resume uses `codex exec resume --json --ignore-user-config --ignore-rules -c … <thread> -`. `exec resume` takes neither `-C` nor `-s`, so the spawn's cwd is the worktree.
 - `prompt.md` goes in front of the task card on stdin, because codex takes no system prompt file.
 - The thread id comes from `thread.started`, and usage is summed over `turn.completed`.
 - Codex reports no cost and has no budget flag, so its usage is priced from the table and the watchdog enforces its budget.
@@ -517,6 +522,11 @@ Every host-side git call goes through `src/execution/git.ts`:
 **Submodules are not supported in heads-down runs in 1.0.** A `base_sha` whose tree holds a gitlink is refused before any worktree is created. So is any worktree whose index or HEAD holds one, and any branch that would bring one into a merge. Commits never stage a gitlink.
 
 **`submit_work`.** Commits, checks leases, then runs the task's checks in the sandbox. It is capped at 15 minutes and sends progress notifications. With `ready: false` it only makes a checkpoint commit.
+- One submission per task at a time: a worker server refuses a second `submit_work` for the task while one is in progress.
+- A submission is one commit. Lease coverage, the diff, `task.submitted` and every check are taken at the commit `submit_work` made, never at a `HEAD` that may move.
+- Checks run in a fresh detached checkout of that commit (`withCommitCheckout`, under `executions/<exe>/checks/`), which no worker tool reaches, and which is removed afterwards. Whatever the worker does to its worktree during the checks, they see the committed bytes and nothing uncommitted. The checkout's `.git` is a gitfile, which the docker backend mounts read-only.
+- Every check event, and `task.checks_passed`, carries the submission's `submitted_seq` and `commit`. The outcome (`task.checks_passed` or `task.rejected`) is recorded only if, in the same transaction, the submission is still the task's latest `task.submitted`, the task is still `submitted` or `checking`, and the same agent holds the claim in the same attempt under the same token. Otherwise nothing is recorded and the worker is told its submission is out of date.
+- **The runner merges exactly `task.checks_passed.commit`**, the commit the checks passed on, never the task branch's current head.
 
 **Merge queue.** The runner merges serially, under `git.lock`, with `git merge --no-ff` into `_integration`.
 - If the conflicted files are inside the task's leases, the runner merges the integration branch into the task worktree, leaving the conflict markers, and resumes the worker.
@@ -685,37 +695,38 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | Worker | `read_blackboard` | section, query, task_id, ref, since_seq, limit |
 | | `claim_task` | task_id, release, note |
 | | `lease` | action\*, paths[]\*, mode, reason |
-| | `post_update` | kind\*, text\*, percent, topic, name, path, refs[], directive_id |
+| | `post_update` | kind\*, text\*, percent, topic, name, owner, path, refs[], directive_id |
 | | `run_command` | command_id or argv[], timeout_s |
 | | `submit_work` | summary\*, ready\* |
 | | `escalate` | kind\*, with\*, summary\*, target, question, options[], diagnostics{}, blocking, emergency |
 
-On the worker server, the worker tools are bound to the token. On the orchestrator server, they require `agent_token` and `execution_id`: the tool definition carries a second schema for that mode (`inputSchemaByMode`). Subcontract tasks additionally get scoped `propose_contract` and `freeze_contract`. WS07 lands `join_execution` and the seven worker tools, so the orchestrator lists 30 tools until WS04 and WS08 land theirs.
+On the worker server, the worker tools are bound to the token. On the orchestrator server, they require `agent_token` and `execution_id`: the tool definition carries a second schema for that mode (`inputSchemaByMode`). Subcontract tasks additionally get scoped `propose_contract` and `freeze_contract`. With WS04's contract tools and WS07's `join_execution` and seven worker tools, the orchestrator lists 33 tools until WS08 lands the other four run tools.
 
-**Worker tool semantics** (`src/tools/worker.ts`). Every response is JSON and carries `inbox`: the agent's new directives and decisions since `agents/<id>/inbox.cursor`, which then advances, plus `awaiting_ack` for directives not yet acknowledged. Errors carry it too.
+**Worker tool semantics** (`src/tools/worker.ts`). Every response is JSON and carries `inbox`: the agent's new directives and decisions since `agents/<id>/inbox.cursor`, which advances only after a response containing those items is built, plus `awaiting_ack` (directive ids and text) for directives not yet acknowledged. Inbox is the first response key and is never truncated: oversized inboxes deliver the oldest fitting page and advance only to its last item. Pending acknowledgements also page oldest first, retaining each directive's text, with `more_awaiting_ack` when more remain. Other sections are capped as valid JSON; errors carry the inbox too.
 - `read_blackboard`: `section` is summary (the default), goal, contract, tasks, task, interfaces, decisions, leases, claims, files, diffs, checks, escalations, notes, inbox, budget, agents, teams, events, blob or query.
   - `events` filters on `since_seq`, `limit`, `task_id`, and a type prefix in `query`.
   - `blob` is scrubbed and capped at 16 KB.
   - `query` fuzzy-matches tasks, teams, paths and interfaces, and answers questions such as "is the nav done?".
-- `claim_task`: claims a ready task whose dependencies are accepted and that nobody holds; the run must be running. It ensures the worktree and returns the task card. External claims get `ttl_s: 900`. `release` emits `task.released` and releases the task's leases.
+- `claim_task`: external agents only, with at most one held task (including the agent-record fallback); runner assignments cannot be claimed or released by the worker. Claims a ready task whose dependencies are accepted and that nobody holds; the run must be running. It ensures the worktree and returns the task card. External claims get `ttl_s: 900`. `release` emits `task.released` and releases the task's leases.
 - `lease`: `action` is `request` or `release`.
   - A request must lie within `contract.scope.paths`, or it is refused. One outside the task's write scope is granted with a warning.
   - A queued request names its holders and suggests `escalate(with: "path_owner")`.
   - `release` takes lease ids or globs; `**` releases all of the agent's leases on the task.
   - `leases.json` is rewritten for the agent and for every agent a release grants a lease to.
 - `post_update`:
+  - progress, note, interface and need require an active run and, when assigned, an active task; paused and terminal runs refuse them.
   - progress → `task.progress`
   - note → `note.posted`
-  - interface → `artifact.published` (the text as a blob; refused when another task owns the interface), then `dependency.satisfied` for every open `dependency.requested` on it
-  - need → `dependency.requested` + `task.blocked`. `topic` gives the kind (task, interface or artifact), else it is inferred; a need that is already met is reported, not recorded.
+  - interface → `artifact.published` (the text as a blob; refused when another task owns the interface or artifact; undeclared names belong to their first publisher), then `dependency.satisfied` for every open `dependency.requested` on it. In the same transaction, a blocked task whose last open need that was, with no deps or blocking escalation, gets `task.unblocked`. A task that also waits on deps is left to the watchdog, which unblocks it once those are met and no needs are open.
+  - need → `dependency.requested` + `task.blocked`. `topic` gives the kind (task, interface or artifact), else it is inferred; optional `owner` names the expected publishing task. A need is met only by its declared owner or first publisher, matching the expected owner when supplied; an already met need is reported, not recorded.
   - ack → `directive.acknowledged`
 - `run_command`: one sandbox backend per execution and process. `execution.started.sandbox: "local"` counts as the opt-in, because the keyless worker server has no `.env`. A named command emits `check.*` with scope `task`; an argv emits `command.completed`. Full output goes to a blob, and the response has `tailForTool`, the exit code and the signature.
 - `submit_work`:
   1. `commitLeasedPaths` with the integration branch as `summaryBase`.
   2. Uncovered or refused paths emit `lease.violation` + `task.rejected`, and the submission is refused.
-  3. `checkLeaseCoverage` against the integration branch.
-  4. `task.submitted` with the diff blob.
-  5. The task's checks, within 15 minutes, with progress notifications. The result is `task.checks_passed` (state merging), or `check.failed` + `task.rejected` (back to in_progress).
+  3. `checkLeaseCoverage` of the new commit against the integration branch.
+  4. `task.submitted` with the commit and the diff blob, while the agent still holds the claim under its token.
+  5. The task's checks in a checkout of that commit, within 15 minutes, with progress notifications. The result is `task.checks_passed` with the commit (state merging), or `check.failed` + `task.rejected` (back to in_progress), recorded only while the submission is still live (§10).
 
   `ready: false` makes a checkpoint commit and emits `task.progress`. Nothing here merges.
 - `escalate`: `escalation.raised`, plus `task.blocked` when blocking, with the instruction to end the turn. Diagnostics go to a scrubbed blob.

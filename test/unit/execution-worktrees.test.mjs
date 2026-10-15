@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 const W = await import("../../dist/execution/worktrees.js");
@@ -9,7 +9,7 @@ const { mergeTask } = await import("../../dist/execution/merge.js");
 const { initialState } = await import("../../dist/execution/blackboard.js");
 const { WORKTREES_DIR } = await import("../../dist/config.js");
 const { executionTag } = await import("../../dist/ids.js");
-const { git, lines, makeExecution, write } = await import("../fixtures/execution/git-fixture.mjs");
+const { git, gitTry, lines, makeExecution, write } = await import("../fixtures/execution/git-fixture.mjs");
 
 const trailers = (ex, task, agent = "w1") => ({ execution: ex.header.id, task, agent });
 const mode = (p) => statSync(p).mode & 0o777;
@@ -186,10 +186,96 @@ test("enforcement: .gitattributes needs an explicit lease; escaping symlinks are
   const explicit = await W.checkLeaseCoverage(t.path, base, [{ paths: ["src/**", ".gitattributes"] }]);
   assert.equal(explicit.ok, true);
 
-  assert.equal(W.symlinkEscapes("src/link", "../../etc/passwd"), true);
-  assert.equal(W.symlinkEscapes("src/link", "/etc/passwd"), true);
-  assert.equal(W.symlinkEscapes("src/link", "../lib/x.ts"), false);
-  assert.equal(W.symlinkEscapes("src/link", "x.ts"), false);
+});
+
+const linkCases = [
+  { name: "two-link escape through ..", links: { "dir/up": "..", escape: "dir/up/../outside" }, unsafe: ["escape"] },
+  { name: "cycle", links: { a: "b", b: "a" }, unsafe: ["a", "b"] },
+  { name: "dangling link inside the tree", links: { dangling: "missing" }, unsafe: ["dangling"] },
+  { name: "safe relative chain inside the tree", links: { "dir/up": "..", safe: "dir/up/outside" }, unsafe: [] },
+  { name: "absolute target", links: { absolute: "/etc/passwd" }, unsafe: ["absolute"] },
+  { name: "temporary escape then return", links: { escape: "../root/outside" }, unsafe: ["escape"] },
+  { name: "missing component before ..", links: { dangling: "missing/../outside" }, unsafe: ["dangling"] },
+  { name: "file component before ..", links: { invalid: "outside/../outside" }, unsafe: ["invalid"] },
+];
+
+for (const { name, links, unsafe } of linkCases) {
+  test(`commit symlink resolution: ${name}`, async () => {
+    const ex = await makeExecution({ "dir/keep": "keep\n", outside: "inside root\n" });
+    const t = await W.ensureTaskWorktree(ex.header, "links");
+    for (const [path, target] of Object.entries(links)) symlinkSync(target, join(t.path, path));
+    const r = await W.commitLeasedPaths(t.path, [{ paths: ["**"] }], { message: "links", trailers: trailers(ex, "links") });
+    assert.deepEqual(r.rejected.map((v) => v.path).sort(), [...unsafe].sort());
+    const allowed = Object.keys(links).filter((path) => !unsafe.includes(path)).sort();
+    assert.deepEqual(r.files.sort(), allowed);
+    assert.equal(r.created, allowed.length > 0);
+    assert.equal((await W.checkLeaseCoverage(t.path, ex.sha, [{ paths: ["**"] }])).ok, true);
+  });
+
+  test(`range symlink resolution uses committed blobs: ${name}`, async () => {
+    const ex = await makeExecution({ "dir/keep": "keep\n", outside: "inside root\n" });
+    const t = await W.ensureTaskWorktree(ex.header, "links");
+    for (const [path, target] of Object.entries(links)) symlinkSync(target, join(t.path, path));
+    // Bypass the API in this temporary fixture to simulate a hostile submitted branch.
+    git(t.path, "add", "-A");
+    git(t.path, "commit", "-q", "--no-verify", "-m", "submitted links");
+    const tip = git(t.path, "rev-parse", "HEAD");
+    // The checkout must have no influence on tree-based coverage checks.
+    for (const path of Object.keys(links)) rmSync(join(t.path, path));
+    const cov = await W.checkLeaseCoverage(t.path, ex.sha, [{ paths: ["**"] }]);
+    assert.equal(cov.ok, unsafe.length === 0);
+    assert.deepEqual(cov.details, [...unsafe].sort().map((path) => ({ path, reason: "symlink leaves the worktree" })));
+    // An arbitrary tip must be checked even when HEAD now contains a different tree.
+    git(t.path, "add", "-A");
+    git(t.path, "commit", "-q", "--no-verify", "-m", "remove links");
+    const { target } = await W.openWorktree(t.path);
+    const range = await W.checkRangeCoverage(target, ex.sha, tip, [{ paths: ["**"] }]);
+    assert.deepEqual(range.details, cov.details);
+  });
+}
+
+test("symlink resolution allows 40 hops and refuses longer chains", async () => {
+  for (const count of [40, 41]) {
+    const ex = await makeExecution({ target: "inside\n" });
+    const t = await W.ensureTaskWorktree(ex.header, "hops");
+    for (let i = 0; i < count; i++) symlinkSync(i + 1 === count ? "target" : `link${i + 1}`, join(t.path, `link${i}`));
+    const r = await W.commitLeasedPaths(t.path, [{ paths: ["**"] }], { message: "chain", trailers: trailers(ex, "hops") });
+    assert.deepEqual(r.rejected.map((v) => v.path), count === 40 ? [] : ["link0"]);
+    git(t.path, "add", "-A");
+    if (count === 41) git(t.path, "commit", "-q", "--no-verify", "-m", "long chain");
+    const cov = await W.checkLeaseCoverage(t.path, ex.sha, [{ paths: ["**"] }]);
+    assert.deepEqual(cov.violations, count === 40 ? [] : ["link0"]);
+  }
+});
+
+test("commit checks the proposed tree when a link target is outside the leases", async () => {
+  const ex = await makeExecution();
+  const t = await W.ensureTaskWorktree(ex.header, "links");
+  write(t.path, "unleased", "exists only on disk\n");
+  symlinkSync("unleased", join(t.path, "link"));
+  await assert.rejects(
+    W.commitLeasedPaths(t.path, [{ paths: ["link"] }], { message: "link", trailers: trailers(ex, "links") }),
+    (e) => e instanceof W.CommitRefusedError && e.paths.includes("link")
+  );
+  assert.equal(git(t.path, "rev-parse", "HEAD"), ex.sha);
+  assert.equal(git(t.path, "diff", "--cached", "--name-only"), "");
+});
+
+test("commit and range checks revalidate unchanged links when their target is deleted", async () => {
+  const ex = await makeExecution({ target: "inside\n" });
+  const t = await W.ensureTaskWorktree(ex.header, "links");
+  symlinkSync("target", join(t.path, "link"));
+  const safe = await W.commitLeasedPaths(t.path, [{ paths: ["**"] }], { message: "safe", trailers: trailers(ex, "links") });
+  rmSync(join(t.path, "target"));
+  await assert.rejects(
+    W.commitLeasedPaths(t.path, [{ paths: ["target"] }], { message: "delete", trailers: trailers(ex, "links") }),
+    (e) => e instanceof W.CommitRefusedError && e.paths.includes("link")
+  );
+  assert.equal(git(t.path, "rev-parse", "HEAD"), safe.commit);
+  git(t.path, "add", "-A");
+  git(t.path, "commit", "-q", "--no-verify", "-m", "delete target");
+  const cov = await W.checkLeaseCoverage(t.path, safe.commit, [{ paths: ["target"] }]);
+  assert.deepEqual(cov.violations, ["link"]);
 });
 
 // ============================================================================
@@ -291,4 +377,40 @@ test("snapshotWip commits all WIP, or only leased paths; diffForTask is capped; 
   const capped = await W.diffForTask(t.path, integrationBranch(ex.header.id), 500);
   assert.ok(Buffer.byteLength(capped) < 600);
   assert.match(capped, /\[diff truncated at 500 bytes\]\n$/);
+});
+
+test("withCommitCheckout: a private detached checkout of one commit, removed afterwards (also on a throw and by prune)", async () => {
+  const ex = await makeExecution({ "README.md": "base\n" });
+  const t = await W.ensureTaskWorktree(ex.header, "build-nav");
+  write(t.path, "README.md", "committed\n");
+  git(t.path, "-c", "user.name=x", "-c", "user.email=x@y", "commit", "-qam", "change");
+  const sha = git(t.path, "rev-parse", "HEAD");
+  write(t.path, "README.md", "uncommitted\n");
+  let checks;
+  const seen = await W.withCommitCheckout(ex.header, "build-nav", sha, async (dir) => {
+    checks = realpathSync(W.executionChecksDir(ex.header.id));
+    assert.ok(dir.startsWith(`${checks}/build-nav-`), dir);
+    assert.equal(mode(dir), 0o700);
+    assert.ok(statSync(join(dir, ".git")).isFile(), "a gitfile, mounted read-only by the docker backend");
+    assert.equal(git(dir, "rev-parse", "HEAD"), sha);
+    assert.equal(gitTry(dir, "symbolic-ref", "-q", "HEAD").status, 1, "detached");
+    return readFileSync(join(dir, "README.md"), "utf8");
+  });
+  assert.equal(seen, "committed\n");
+  assert.deepEqual(readdirSync(checks), []);
+  assert.doesNotMatch(git(ex.root, "worktree", "list", "--porcelain"), /\/checks\//);
+
+  await assert.rejects(W.withCommitCheckout(ex.header, "build-nav", sha, async () => { throw new Error("check crashed"); }), /check crashed/);
+  assert.deepEqual(readdirSync(checks), []);
+  await assert.rejects(W.withCommitCheckout(ex.header, "build-nav", "HEAD", async () => 1), /full commit id/);
+  await assert.rejects(W.withCommitCheckout(ex.header, "build-nav", "0".repeat(40), async () => 1), /does not name a commit/);
+
+  // A crash mid-check leaves the checkout behind: prune with remove takes it and its record.
+  const left = join(checks, "build-nav-dead");
+  git(ex.root, "worktree", "add", "-q", "--detach", left, sha);
+  assert.match(git(ex.root, "worktree", "list", "--porcelain"), /\/checks\//);
+  const pruned = await W.pruneWorktrees(ex.header, { remove: true });
+  assert.ok(pruned.removed.includes(left), JSON.stringify(pruned));
+  assert.equal(existsSync(checks), false);
+  assert.doesNotMatch(git(ex.root, "worktree", "list", "--porcelain"), /\/checks\//);
 });

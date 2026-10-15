@@ -255,6 +255,6 @@ test("runGit caps output and times out", async () => {
   const capped = await G.runGit(repo, ["show", "HEAD:big.txt"], { maxOutputBytes: 1000, truncate: true });
   assert.equal(capped.truncated, true);
   assert.equal(capped.stdout.length, 1000);
-  // A 1 ms budget is spent before git has even started.
-  await assert.rejects(G.runGit(repo, ["log", "--all"], { timeoutMs: 1 }), /timed out after 1 ms/);
+  // Hashing 64 MiB from stdin takes far longer than 10 ms, on any machine.
+  await assert.rejects(G.runGit(repo, ["hash-object", "--stdin"], { timeoutMs: 10, input: "x".repeat(64 * 1024 * 1024) }), /timed out after 10 ms/);
 });

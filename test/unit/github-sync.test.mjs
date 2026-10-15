@@ -366,6 +366,26 @@ test("gh sync: a secondary rate limit backs off 60 s plus jitter; repeated failu
   assert.equal(unknown.degraded, true);
 });
 
+test("gh sync: a label deleted on GitHub is created again, without a duplicate issue", async () => {
+  const gh = fakeGh({ issues: [], labels: ["roundtable", "needs-human"], scopes: "repo", permission: "WRITE", next: 1 });
+  const { store } = await frozenRun(twoTasks());
+  const sync = new GitHubSync({ executionId: store.id, repo: REPO, store, now: clock() });
+  gh.failNext([{ match: "issue create", times: 1, stderr: "could not add label: 'roundtable' not found" }]);
+  const r1 = await sync.syncOnce();
+  assert.equal(r1.ok, false);
+  // Someone deleted it after the sync had checked its labels.
+  writeFileSync(join(gh.dir, "state.json"), JSON.stringify({ ...gh.state(), labels: ["needs-human"] }));
+  const mark = gh.calls().length;
+  const r2 = await sync.syncOnce();
+  assert.equal(r2.ok, true, r2.errors.join("; "));
+  assert.deepEqual(gh.lines(mark).slice(0, 3), [
+    `label list --repo ${REPO} --json name --limit 500`,
+    `label create roundtable --repo ${REPO} --color 5319e7 --description Mirrored from an agent-roundtable heads-down run`,
+    `issue create --repo ${REPO} --title Roundtable: Nav bar --body-file <body> --label roundtable`,
+  ]);
+  assert.equal(gh.state().issues.length, 3);
+});
+
 test("gh sync: nothing happens before execution.started, and statuses map as designed", async () => {
   const gh = fakeGh();
   const { store } = await frozenRun(twoTasks(), { start: false });

@@ -613,7 +613,9 @@ export class GitHubSync {
         } catch (e) {
           // GitHub said no (rate limit, auth, not found): nothing was created. A timeout or an
           // unknown failure may have created it, so the mark stays and the next round searches.
-          if (e instanceof GhError && ["rate_limit", "auth", "not_found", "missing"].includes(e.kind)) {
+          const labelGone = e instanceof GhError && /could not add label|label.*not found/i.test(e.message);
+          if (labelGone) f.labels_ready = false; // deleted on GitHub: create it again next round
+          if (e instanceof GhError && (labelGone || ["rate_limit", "auth", "not_found", "missing"].includes(e.kind))) {
             delete f.creating[key];
             this.save();
           }

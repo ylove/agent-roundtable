@@ -1049,15 +1049,22 @@ async function postUpdate(a: Actor, args: Record<string, unknown>): Promise<Json
     const satisfied = waiting.length
       ? await a.store.transact(({ state: s }) => {
           requireActive(s, task);
-          return {
-            events: waiting
-              .filter((w) => {
-                const rt = own(s.tasks, w.task);
-                return rt && !["accepted", "failed", "cancelled"].includes(rt.state) && !s.paused_tasks.includes(w.task)
-                  && publicationAvailable(s, name, w.need.owner) && own(s.interfaces, name)?.task === task;
-              })
-              .map((w) => ({ type: "dependency.satisfied" as const, source: sourceOf(s, a, task), payload: { task: w.task, need: w.need, by_event: by.id } })),
-          };
+          const met = waiting.filter((w) => {
+            const rt = own(s.tasks, w.task);
+            return rt && !["accepted", "failed", "cancelled"].includes(rt.state) && !s.paused_tasks.includes(w.task)
+              && publicationAvailable(s, name, w.need.owner) && own(s.interfaces, name)?.task === task;
+          });
+          const source = sourceOf(s, a, task);
+          const events: AnyEventDraft[] = met.map((w) => ({ type: "dependency.satisfied" as const, source, payload: { task: w.task, need: w.need, by_event: by.id } }));
+          // A blocked task whose last open need this was, with no deps or blocking escalation, resumes now.
+          for (const waiter of new Set(met.map((w) => w.task))) {
+            const rt = s.tasks[waiter];
+            const why = rt.blocked_by;
+            if (rt.state !== "blocked" || why?.escalation !== undefined || why?.deps?.length) continue;
+            const open = (why?.needs ?? []).filter((n) => !met.some((w) => w.task === waiter && w.need.kind === n.kind && w.need.ref === n.ref));
+            if (!open.length) events.push({ type: "task.unblocked", source, payload: { task: waiter } });
+          }
+          return { events };
         })
       : { events: [] };
     const after = await a.store.state();
@@ -1065,7 +1072,10 @@ async function postUpdate(a: Actor, args: Record<string, unknown>): Promise<Json
       published: name,
       version: own(after.interfaces, name)?.version,
       blob,
-      satisfied: satisfied.events.map((e) => (e as AnyEvent & { type: "dependency.satisfied" }).payload.task),
+      satisfied: satisfied.events.flatMap((e) => (e.type === "dependency.satisfied" ? [e.payload.task] : [])),
+      ...(satisfied.events.some((e) => e.type === "task.unblocked") && {
+        unblocked: satisfied.events.flatMap((e) => (e.type === "task.unblocked" ? [e.payload.task] : [])),
+      }),
     };
   }
 

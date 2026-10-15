@@ -38,8 +38,9 @@ import {
  * Bump whenever apply's output for an existing log changes; snapshots of other versions are ignored.
  * 2: split map, terminal-state guards, amended contracts marked frozen.
  * 3: an identical resubmitted diff is no patch; threshold epochs; circuit open counts.
+ * 4: blocked_by.needs; task.blocked keeps the other reasons.
  */
-export const REDUCER_VERSION = 3;
+export const REDUCER_VERSION = 4;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -493,14 +494,19 @@ const HANDLERS: Handlers = {
     const rt = liveTask(s, e, x, ["accepted"]);
     if (rt) accept(s, e.payload.task, rt, e);
   },
+  /** A task already blocked keeps its other reasons (a new escalation replaces the old one; deps are added); open needs are always kept. */
   "task.blocked": (s, e, x) => {
     const p = e.payload;
     const rt = liveTask(s, e, x);
     if (!rt) return;
+    const prev = rt.state === "blocked" ? rt.blocked_by : undefined;
     rt.state = "blocked";
     const by: NonNullable<TaskRuntime["blocked_by"]> = {};
-    if (p.escalation !== undefined) by.escalation = p.escalation;
-    if (p.deps !== undefined) by.deps = [...p.deps];
+    const escalation = p.escalation ?? prev?.escalation;
+    if (escalation !== undefined) by.escalation = escalation;
+    const deps = [...new Set([...(prev?.deps ?? []), ...(p.deps ?? [])])];
+    if (deps.length || p.deps !== undefined) by.deps = deps;
+    if (rt.blocked_by?.needs?.length) by.needs = rt.blocked_by.needs;
     rt.blocked_by = by;
   },
   /** in_progress while claimed, else ready or pending by its dependencies; a task that is not blocked is unchanged. */
@@ -590,9 +596,25 @@ const HANDLERS: Handlers = {
     put(s.interfaces, p.name, { ...own(s.interfaces, p.name), version: p.version });
   },
 
-  // --- dependencies (the watchdog's task.blocked / task.unblocked carry the effect) ---
-  "dependency.requested": none,
-  "dependency.satisfied": none,
+  // --- dependencies (task.blocked / task.unblocked carry the state change) ---
+  /** An interface or artifact need joins the task's blocked_by.needs (task needs are deps). */
+  "dependency.requested": (s, { payload: p }) => {
+    const rt = own(s.tasks, p.task);
+    if (!rt || TERMINAL.has(rt.state) || p.need.kind === "task") return;
+    const needs = rt.blocked_by?.needs ?? [];
+    if (needs.some((n) => n.kind === p.need.kind && n.ref === p.need.ref)) return;
+    rt.blocked_by = { ...rt.blocked_by, needs: [...needs, { kind: p.need.kind, ref: p.need.ref }] };
+  },
+  /** The need leaves blocked_by.needs; the other reasons stay. */
+  "dependency.satisfied": (s, { payload: p }) => {
+    const rt = own(s.tasks, p.task);
+    const needs = rt?.blocked_by?.needs;
+    if (!rt?.blocked_by || !needs) return;
+    const left = needs.filter((n) => !(n.kind === p.need.kind && n.ref === p.need.ref));
+    if (left.length) rt.blocked_by.needs = left;
+    else delete rt.blocked_by.needs;
+    if (rt.state !== "blocked" && !Object.keys(rt.blocked_by).length) delete rt.blocked_by;
+  },
 
   // --- checks: [scope][checkKey] -------------------------------------------
   /** status running; a submitted task moves to checking. */

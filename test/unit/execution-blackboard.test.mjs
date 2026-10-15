@@ -427,3 +427,26 @@ test("threshold crossings are recorded per budget total; circuits keep their ope
   s = reduce([["watchdog.circuit_opened", { driver: "codex", reason: "429", until: "2026-10-15T01:00:00Z", opens: 2 }]], s);
   assert.deepEqual(s.watchdog.circuits.codex, { open: true, until: "2026-10-15T01:00:00Z", reason: "429", opens: 2 });
 });
+
+test("blocked_by.needs follows dependency.requested and dependency.satisfied; task.blocked keeps the other reasons", () => {
+  const c = makeContract();
+  const need = (ref, kind = "interface") => ({ task: "a", need: { kind, ref } });
+  let s = reduce([
+    ["contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob: "b" }, { contract: c }],
+    ["task.claimed", { task: "a", agent: "w1", attempt: 1, ttl_s: 900 }],
+    ["dependency.requested", need("NavProps")],
+    ["task.blocked", { task: "a" }],
+    ["dependency.requested", need("Theme", "artifact")],
+    ["task.blocked", { task: "a" }],
+    ["dependency.requested", { task: "a", need: { kind: "task", ref: "b" } }],
+    ["task.blocked", { task: "a", deps: ["b"] }],
+  ]);
+  assert.deepEqual(s.tasks.a.blocked_by, { deps: ["b"], needs: [{ kind: "interface", ref: "NavProps" }, { kind: "artifact", ref: "Theme" }] }, "task needs are deps");
+  s = reduce([["task.blocked", { task: "a", escalation: "E1" }], ["dependency.requested", need("NavProps")]], s);
+  assert.deepEqual(s.tasks.a.blocked_by, { escalation: "E1", deps: ["b"], needs: [{ kind: "interface", ref: "NavProps" }, { kind: "artifact", ref: "Theme" }] }, "kept, and no duplicate need");
+  s = reduce([["dependency.satisfied", { ...need("NavProps"), by_event: "evt-x" }], ["dependency.satisfied", { ...need("Theme", "artifact"), by_event: "evt-y" }]], s);
+  assert.deepEqual([s.tasks.a.state, s.tasks.a.blocked_by], ["blocked", { escalation: "E1", deps: ["b"] }], "satisfying needs never unblocks by itself");
+  s = reduce([["task.unblocked", { task: "a" }], ["dependency.requested", need("NavProps")], ["dependency.satisfied", { ...need("NavProps"), by_event: "evt-z" }]], s);
+  assert.equal(s.tasks.a.state, "in_progress");
+  assert.equal("blocked_by" in s.tasks.a, false, "an unblocked task drops an emptied blocked_by");
+});

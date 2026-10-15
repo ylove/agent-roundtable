@@ -558,8 +558,8 @@ function depSatisfied(state: BlackboardState, dep: string): boolean {
 }
 
 /**
- * A task blocked only on deps (task ids, split tasks through their parts, or interface names) is
- * unblocked once all are accepted or published. A dep that failed or was cancelled will never
+ * A task blocked only on deps (task ids, split tasks through their parts, or interface names), with
+ * no open needs, is unblocked once all are accepted or published. A dep that failed or was cancelled will never
  * finish: that escalates to the orchestrator instead (the task stays blocked on its deps).
  */
 function dependencyRules(state: BlackboardState): WatchdogAction[] {
@@ -567,7 +567,8 @@ function dependencyRules(state: BlackboardState): WatchdogAction[] {
   for (const task of sortedKeys(state.tasks)) {
     const rt = state.tasks[task];
     const raw = rt.blocked_by?.deps;
-    if (rt.state !== "blocked" || !raw?.length || rt.blocked_by?.escalation !== undefined) continue;
+    // Open interface/artifact needs are unblocked by the publisher (post_update), not here.
+    if (rt.state !== "blocked" || !raw?.length || rt.blocked_by?.escalation !== undefined || rt.blocked_by?.needs?.length) continue;
     const deps = expandDeps(state, raw);
     const dead = deps.filter((d) => {
       const st = own(state.tasks, d)?.state;

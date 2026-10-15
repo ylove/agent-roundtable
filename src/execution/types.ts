@@ -236,7 +236,11 @@ export interface TaskRuntime {
   last_commit?: string;
   submitted_seq?: number;
   accepted_seq?: number;
-  blocked_by?: { escalation?: string; deps?: string[] };
+  /**
+   * Why a blocked task waits. needs (added in WS07) are its open interface and artifact needs:
+   * dependency.requested adds one, dependency.satisfied removes it. Task needs are in deps.
+   */
+  blocked_by?: { escalation?: string; deps?: string[]; needs?: Array<{ kind: "interface" | "artifact"; ref: string }> };
   started_at?: string;
   finished_at?: string;
 }

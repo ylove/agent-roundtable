@@ -245,11 +245,12 @@ The human's chat is never stored on the blackboard.
 - `task.merged` (and `task.accepted`) accepts the task, drops its claim and promotes dependents. Pausing never changes task states; it only fills `paused_tasks`.
 - `checks.task` is keyed `<task>/<command_id>` and `checks.integration` by command id. `task.submitted` resets that task's streaks only when its `diff_blob` differs from the task's previous submission (resubmitting the same diff is no patch), and `task.merged` resets the integration streaks. `budget.threshold_crossed` for a new `budget_usd` starts a new list.
 - `raised_seq`, `granted_seq` and `requested_seq` are set from the event's seq, whatever the payload says.
+- `blocked_by.needs` lists a task's open interface and artifact needs: `dependency.requested` adds one and `dependency.satisfied` removes it (task needs are `deps`). `task.blocked` on a task that is already blocked keeps its other reasons: a new escalation replaces the old one, deps are added, and open needs are always kept. `task.unblocked` clears them all.
 - Task events are checked against the task's state. On the write path, which uses strict mode, an event that names an unknown task, or that would move a task out of `accepted`, `failed` or `cancelled`, is refused before append. The exceptions are a retry or cancel of a failed task, and a merge or accept of an accepted one, which does nothing. Replay ignores such events, so an old log never breaks.
 - `task.split` records `splits[task] = parts`. Whenever a contract version is adopted, dependencies on a split task are rewritten to its parts, recursively.
 - Task and command ids match `^[a-z0-9][a-z0-9._-]{0,63}$` in payloads and contracts, so the `/` in a check key is unambiguous.
 - `contract.amended` marks the contract `frozen` and keeps the earlier freeze record unless the blob carries one.
-- Snapshots record `REDUCER_VERSION` (now 3) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
+- Snapshots record `REDUCER_VERSION` (now 4) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
 
 ## 7. Contract
 
@@ -704,7 +705,7 @@ On the worker server, the worker tools are bound to the token. On the orchestrat
   - progress, note, interface and need require an active run and, when assigned, an active task; paused and terminal runs refuse them.
   - progress → `task.progress`
   - note → `note.posted`
-  - interface → `artifact.published` (the text as a blob; refused when another task owns the interface or artifact; undeclared names belong to their first publisher), then `dependency.satisfied` for every open `dependency.requested` on it
+  - interface → `artifact.published` (the text as a blob; refused when another task owns the interface or artifact; undeclared names belong to their first publisher), then `dependency.satisfied` for every open `dependency.requested` on it. In the same transaction, a blocked task whose last open need that was, with no deps or blocking escalation, gets `task.unblocked`. A task that also waits on deps is left to the watchdog, which unblocks it once those are met and no needs are open.
   - need → `dependency.requested` + `task.blocked`. `topic` gives the kind (task, interface or artifact), else it is inferred; optional `owner` names the expected publishing task. A need is met only by its declared owner or first publisher, matching the expected owner when supplied; an already met need is reported, not recorded.
   - ack → `directive.acknowledged`
 - `run_command`: one sandbox backend per execution and process. `execution.started.sandbox: "local"` counts as the opt-in, because the keyless worker server has no `.env`. A named command emits `check.*` with scope `task`; an argv emits `command.completed`. Full output goes to a blob, and the response has `tailForTool`, the exit code and the signature.

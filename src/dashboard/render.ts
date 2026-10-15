@@ -248,7 +248,7 @@ export function renderOverview(c: PageContext): string {
   return frame(c, "overview", "Overview", body);
 }
 
-/** What a task waits on: its blocking escalation, blocking dependencies, or unaccepted dependencies. */
+/** What a task waits on: its blocking escalation, blocking dependencies, open needs, or unaccepted dependencies. */
 function blockers(c: PageContext, rt: TaskRuntime): string {
   const parts: string[] = [];
   if (rt.blocked_by?.escalation) parts.push(`escalation ${t(rt.blocked_by.escalation)}`);
@@ -256,6 +256,7 @@ function blockers(c: PageContext, rt: TaskRuntime): string {
     rt.blocked_by?.deps ??
     (rt.state === "pending" ? rt.spec.depends_on.filter((d) => !Object.hasOwn(c.state.tasks, d) || c.state.tasks[d].state !== "accepted") : []);
   if (deps.length) parts.push(`waits on ${deps.map((d) => taskLink(c.base, d)).join(", ")}`);
+  if (rt.blocked_by?.needs?.length) parts.push(`needs ${rt.blocked_by.needs.map((n) => t(n.ref)).join(", ")}`);
   if (c.state.paused_tasks.includes(rt.spec.id)) parts.push("paused");
   return parts.join("; ");
 }

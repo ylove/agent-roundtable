@@ -565,3 +565,50 @@ test("post_update refuses paused and terminal progress, notes and publications",
     for (const kind of ["progress", "note", "interface"]) assert.match((await call("post_update", { ...at, kind, name: "ApiClient", text: "late" })).text, new RegExp(status));
   }
 });
+
+test("post_update: publishing a task's last open need unblocks it; other needs and a blocking escalation keep it blocked", async () => {
+  const run = await makeRun({
+    contract: {
+      tasks: [task("api"), task("ui"), task("build-nav-bar", { team: "web", paths: { write: ["src/components/nav/**"] } })],
+      interfaces: [
+        { name: "ApiClient", kind: "api", owner: "api", description: "HTTP client", consumers: ["build-nav-bar"] },
+        { name: "Theme", kind: "type", owner: "ui", description: "colours", consumers: ["build-nav-bar"] },
+        { name: "Icons", kind: "type", owner: "ui", description: "icon set", consumers: ["build-nav-bar"] },
+      ],
+    },
+  });
+  const tokenB = await registerWorker(run.store, "builder-1", "build-nav-bar", { team: "web" });
+  const api = await join_(run, "ext-api", { task_id: "api" });
+  const ui = await join_(run, "ext-ui", { task_id: "ui" });
+  delete api.j;
+  delete ui.j;
+  await ok("claim_task", { ...api, task_id: "api" });
+  await ok("claim_task", { ...ui, task_id: "ui" });
+  W.bindWorkerIdentity({ store: await openExecutionStore(run.store.id), execution: run.store.id, agent: "builder-1", tokenSha256: tokenB.sha256 });
+  const nav = async () => (await run.store.state()).tasks["build-nav-bar"];
+
+  await ok("post_update", { kind: "need", name: "ApiClient", text: "need the client" }, "worker");
+  await ok("post_update", { kind: "need", name: "Theme", text: "need the theme" }, "worker");
+  assert.deepEqual((await nav()).blocked_by, { needs: [{ kind: "interface", ref: "ApiClient" }, { kind: "interface", ref: "Theme" }] });
+
+  const first = await ok("post_update", { ...api, kind: "interface", name: "ApiClient", text: "export function get() {}" });
+  assert.deepEqual([first.satisfied, first.unblocked], [["build-nav-bar"], undefined]);
+  assert.deepEqual([(await nav()).state, (await nav()).blocked_by], ["blocked", { needs: [{ kind: "interface", ref: "Theme" }] }]);
+
+  const seq = (await run.store.state()).seq;
+  const last = await ok("post_update", { ...ui, kind: "interface", name: "Theme", text: "export const theme = {}" });
+  assert.deepEqual([last.satisfied, last.unblocked], [["build-nav-bar"], ["build-nav-bar"]]);
+  const evs = await eventsSince(run.store, seq, ["dependency.satisfied", "task.unblocked"]);
+  assert.deepEqual(evs.map((e) => e.type), ["dependency.satisfied", "task.unblocked"]);
+  assert.equal(evs[1].seq, evs[0].seq + 1, "in the same transaction");
+  assert.equal((await nav()).state, "in_progress");
+  assert.equal("blocked_by" in (await nav()), false);
+
+  await ok("escalate", { kind: "blocker", with: "orchestrator", summary: "Which icon set?", blocking: true }, "worker");
+  await ok("post_update", { kind: "need", name: "Icons", text: "need the icons" }, "worker");
+  const escalation = (await nav()).blocked_by.escalation;
+  assert.match(escalation, /^esc-/);
+  const icons = await ok("post_update", { ...ui, kind: "interface", name: "Icons", text: "export const icons = []" });
+  assert.deepEqual([icons.satisfied, icons.unblocked], [["build-nav-bar"], undefined]);
+  assert.deepEqual([(await nav()).state, (await nav()).blocked_by], ["blocked", { escalation }], "the escalation still blocks it");
+});

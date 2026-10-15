@@ -1,8 +1,11 @@
 // ============================================================================
 // Pricing: USD per million tokens by model id, overridable with ROUNDTABLE_PRICING_FILE
 //
-// The built-in table holds Anthropic first-party API list prices (platform.claude.com pricing
-// page, checked 2026-10-15): base input, output, cache hits, and 5-minute cache writes. 1-hour
+// The built-in table holds Anthropic first-party API list prices from the claude-api skill's model
+// table (2026-10-06), cross-checked against the platform pricing page (2026-10-15): base input,
+// output, cache hits, and 5-minute cache writes. Where the two differ the skill's figure stands
+// (Sonnet 5.5 cache hits: $0.20 in the skill, $0.10 on the page); it is the higher, so budgets err
+// on the safe side. 1-hour
 // cache writes (2x input) are not distinguished, because TokenUsage has one cacheWriteTokens
 // count. A null price is unknown: tokens of that class make the estimate `estimated: true`.
 // Partner platforms (Bedrock, Vertex AI) price separately; override the table for them.
@@ -56,7 +59,7 @@ export const BUILTIN_PRICING: PricingTable = Object.freeze({
   "claude-opus-4-1": OPUS_4_LEGACY,
   "claude-opus-4-0": OPUS_4_LEGACY,
   "claude-opus-4": OPUS_4_LEGACY,
-  "claude-sonnet-5-5": rates(2, 10, 0.1, 2.5),
+  "claude-sonnet-5-5": rates(2, 10, 0.2, 2.5),
   "claude-sonnet-5": rates(2, 10, 0.2, 2.5),
   "claude-sonnet-4-6": SONNET_4X,
   "claude-sonnet-4-5": SONNET_4X,

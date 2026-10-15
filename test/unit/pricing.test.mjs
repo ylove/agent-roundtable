@@ -11,7 +11,9 @@ test("estimateUsd prices input, output and cache tokens per million", () => {
   const cases = [
     ["claude-opus-5-5", { inputTokens: 1_000_000, outputTokens: 1_000_000 }, 24],
     ["claude-opus-5", { inputTokens: 1000, outputTokens: 0, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000 }, 6.755],
-    ["claude-sonnet-5-5", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1_000_000 }, 0.1],
+    ["claude-sonnet-5-5", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1_000_000 }, 0.2],
+    ["claude-opus-5-5", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000 }, 5.2],
+    ["claude-haiku-5-5", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 10_000, cacheWriteTokens: 10_000 }, 0.00135],
     ["claude-sonnet-4-5-20250929", { inputTokens: 1_000_000, outputTokens: 0 }, 3],
     ["anthropic/claude-opus-4-8", { inputTokens: 0, outputTokens: 1_000_000 }, 25],
     ["us.anthropic.claude-haiku-4-5-20251001-v1:0", { inputTokens: 1_000_000, outputTokens: 0 }, 1],

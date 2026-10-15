@@ -36,6 +36,7 @@ const { listLocalMeetings, localMeetings } = await import("../../dist/sessions/l
 const { createAgent } = await import("../../dist/sessions/agent-creation.js");
 const { serializeTurn } = await import("../../dist/sessions/prototype-mode.js");
 const { handleToolCall, tools } = await import("../../dist/tools.js");
+const { deliberationTools } = await import("../../dist/tools/deliberation.js");
 const prototypes = await import("../../dist/prototypes/index.js");
 const { PublicChannel, publicLabel } = await import("../../dist/publishers/index.js");
 
@@ -113,7 +114,7 @@ after(() => prototypes.destroyAllPrototypes("shutdown"));
 
 describe("schemas", () => {
   test("the three start tools expose a boolean prototype flag; tool count unchanged", () => {
-    assert.equal(tools.length, 25, "22 at-the-table tools plus the 3 contract tools");
+    assert.equal(deliberationTools.length, 22, "prototype mode adds no tool");
     for (const name of ["start_meeting", "start_local_meeting", "start_collaboration"]) {
       const p = tools.find((x) => x.name === name).inputSchema.properties.prototype;
       assert.equal(p?.type, "boolean", name);

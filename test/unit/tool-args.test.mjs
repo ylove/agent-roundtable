@@ -178,3 +178,24 @@ test("checkArgs checks given values only and never reports a missing field", () 
   assert.throws(() => checkArgs("chat_completion", { messages: [{ role: "user" }] }), { message: 'chat_completion: "messages[0].content" is required' });
   assert.doesNotThrow(() => checkArgs("no_such_tool", { anything: 1 }));
 });
+
+test("worker tools validate their arguments in both modes; the worker copy takes no token", async () => {
+  const token = "a".repeat(64);
+  assert.throws(() => checkArgs("read_blackboard", { agent_token: "short" }), { message: 'read_blackboard: "agent_token" must match the pattern ^[0-9a-f]{64}$' });
+  assert.throws(() => checkArgs("read_blackboard", { execution_id: "exe-1" }), /"execution_id" must match the pattern/);
+  assert.throws(() => checkArgs("read_blackboard", { agent_token: token }, "worker"), /"agent_token" is not allowed/);
+  assert.doesNotThrow(() => checkArgs("read_blackboard", { section: "query", query: "nav" }, "worker"));
+  assert.throws(() => checkArgs("read_blackboard", { section: "everything" }, "worker"), /"section" must be one of: summary, goal/);
+  assert.throws(() => checkArgs("lease", { action: "grab" }), /"action" must be one of: request, release/);
+  assert.throws(() => checkArgs("lease", { paths: [""] }), /"paths" must be an array of non-empty strings/);
+  assert.throws(() => checkArgs("post_update", { percent: 101 }), /"percent" must be at most 100/);
+  assert.throws(() => checkArgs("escalate", { diagnostics: { secret: "x" } }), /"diagnostics.secret" is not allowed/);
+  assert.throws(() => checkArgs("escalate", { emergency: "panic" }), /"emergency" must be one of: money, credentials, scope, human_action/);
+  assert.throws(() => checkArgs("submit_work", { ready: "yes" }), /"ready" must be a boolean/);
+  assert.throws(() => checkArgs("run_command", { timeout_s: 901 }), /"timeout_s" must be at most 900/);
+  assert.throws(() => checkArgs("join_execution", { agent: "Not An Id" }), /"agent" must match the pattern/);
+  const r = await handleToolCall("submit_work", { summary: "x" }, "worker");
+  assert.equal(r.content[0].text, 'Error: submit_work: "ready" is required');
+  const r2 = await handleToolCall("post_update", { kind: "ack", text: "ok" }, "worker");
+  assert.equal(r2.content[0].text, 'Error: post_update: kind ack needs "directive_id"');
+});

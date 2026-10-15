@@ -615,12 +615,22 @@ Resolvers serialize through a separate per-escalation lock, leaving the event lo
 
 **`execute`** requires a frozen contract and `confirmation`, which is the human's verbatim words; it is recorded in the event log and the audit log. It returns `{status: "needs_input", questions}` when any of these is true:
 - no visibility channel was chosen (dashboard, GitHub, or an explicit `chat_only`) and `ROUNDTABLE_DEFAULT_VISIBILITY` is not set;
-- no budget was given, either as an argument or in the environment;
+- no budget was given, either as an argument, in the contract or in the environment (`ROUNDTABLE_DEFAULT_BUDGET_USD`);
 - Docker is unreachable and the local sandbox was not opted into;
 - a required CLI flag is missing;
 - GitHub was requested but the `gh` scopes are missing.
 
 It warns when the main worktree is dirty. Otherwise it returns `{execution_id, runner_pid, dashboard_url?, watch: {argv, instructions}}`.
+
+**Implementation (WS11).** `src/execution/orchestrator.ts` holds execute, control and resolve; `status-report.ts` the status; `retention.ts` the sweep; `src/tools/execution.ts` the four tool definitions.
+- Each question is `{topic, question, answer_with?}`: plain words for the human, plus how the answer goes back into `execute`. Topics: visibility, budget, sandbox, workers, github, repository. Nothing is written while questions remain.
+- Two more questions than the list above: Codex workers need an explicit `worker_driver: "codex"` (a contract asking for Codex alone is not the opt-in), and a repository with submodules is refused (`ensureIntegrationWorktree` throws `SubmodulesUnsupportedError`).
+- `ROUNDTABLE_DEFAULT_VISIBILITY` is a comma list of `dashboard`, `chat_only` and `github:<owner/name>`.
+- A contract budget that is still `BUDGET_FALLBACK` (proposed without one) counts as unset. A child contract's budget always counts as set.
+- Settings given to `execute` that differ from the contract (`budget_usd`, `max_parallel`, `lead`, `sandbox`, `worker_driver`, `worker_model`) are applied before the start as one `amend_contract` with `override_consent`, because the runner reads the contract. The amendment is audited, and its reason lists the settings.
+- `execution.started.sandbox` is the backend the preflight selected, so `"local"` there records the opt-in for the keyless worker servers.
+- A second `execute` for a run that has already started returns `status: "already_started"` with the current info.
+- `watch.argv` runs `node <dist/index.js> watch <exe> --as <orchestrator>`, which needs no `agent-roundtable` on PATH. `watch.command` is the same argv quoted for a shell.
 
 **`agent-roundtable watch <exe> --as main [--timeout-min 50]`** is a background command the orchestrator runs.
 - It tails from its cursor and writes its liveness every 10 s.
@@ -632,6 +642,10 @@ It warns when the main worktree is dirty. Otherwise it returns `{execution_id, r
 - Completion is weighted: accepted tasks count 1, submitted 0.8, in progress the reported percent or 0.4.
 - The status also reports blockers, the latest checks, an ETA, the budget, runner health and sync health.
 - Views: `summary`, `tasks`, `escalations`, `events`, `budget`, `context`.
+- Without `execution_id` it lists every run, newest first. It calls `ensureRunner` for a running or paused run.
+- Focus scoring, per focus word: 3 for an exact word, 2 for a shared prefix of 3 or more characters, 1 for containment. Interfaces count for the task that owns them and for the tasks that consume them. The tasks shown are those scoring at least half the best score. An escalation id as `focus` picks that escalation for `view: "context"`.
+- ETA: the median duration of the accepted tasks × the remaining work (the sum of 1 − weight over unfinished tasks) ÷ min(`max_parallel`, unfinished tasks). There is no estimate until a task has been accepted.
+- `context` is built from the blackboard only: WS10's bundle for an escalation, otherwise the contract summary, the tasks, the interfaces, the decisions, the open escalations, the failing checks and recent notes. It never includes the confirmation or `original_prompt`, and it is scrubbed and capped at `BUNDLE_LIMIT`.
 
 **`control_execution`** has these actions:
 - `pause` and `resume`, for the whole run or for specific tasks;
@@ -639,7 +653,19 @@ It warns when the main worktree is dirty. Otherwise it returns `{execution_id, r
 - `abort`, which kills the process groups but keeps the worktrees and the log;
 - `purge`, which works on terminal runs only and needs `confirm: true`.
 
-**Back to the table.** Pause the run, run any format with the `context` from `execution_status(view: "context")`, call `amend_contract(from_session)`, then resume. Both switches emit `execution.mode_changed`.
+Details:
+- `steer` records `execution.steered` and a `directive.issued` with `requires_ack`. Its targets may be agents, teams, or tasks (meaning the agent working on each task); without targets it goes to every registered agent.
+- `abort` emits `execution.aborted`, then stops the process groups of the live non-external workers itself (`stopGroup`), in case the runner is gone. It audits the abort.
+- `purge` is run-admin's `purgeExecution`, audited under the orchestrator's name.
+- `resume` calls `ensureRunner`. The other actions do too, while the run is live.
+
+**Back to the table.** Pause the run, run any format with the `context` from `execution_status(view: "context")`, call `amend_contract(from_session)`, then resume. Both switches emit `execution.mode_changed`. The switch is the flag `to_table: true`: on `pause` it records execution → deliberation, and on `resume` it records deliberation → execution. It is not inferred from `reason`. `session` names the session at the table, if there is one.
+
+**`resolve_escalation`** runs WS10's `resolveEscalation` in the orchestrator server.
+- Its `HookCtx` holds the store, a `ClaudeCodeDriver`, live worker records read from `run.json`, and the `provider`, `model` and `base_url` arguments (default anthropic and its default model).
+- Only the runner may start or stop workers. The returned process operations (`resume_worker` with its card, `spawn_retry`, `kill_worker`) are therefore written to `executions/<exe>/handoff/<key>.json` (`src/execution/handoff.ts`).
+- The runner takes them on its next tick, before the watchdog pass, and applies each once by its key: stops first, then starts. A file that does not parse is renamed `.bad`.
+- The tool then calls `ensureRunner`.
 
 ## 14. Visibility
 
@@ -682,8 +708,8 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | | `freeze_contract` | contract_id\*, orchestrator\*, excuse[{agent, reason}], abandon_round |
 | Run | `execute` | contract_id\*, confirmation\*, visibility{dashboard, chat_only, github{repo, project_owner, project_number, create_project, pr}}, budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model |
 | | `execution_status` | execution_id, focus, view, since_seq, limit |
-| | `control_execution` | execution_id\*, action\*, reason, message, task_ids[], targets[], confirm |
-| | `resolve_escalation` | execution_id\*, escalation_id\*, action\*, decision, format, participants[], amendment{}, resolved_by |
+| | `control_execution` | execution_id\*, action\*, reason, message, task_ids[], targets[], confirm, to_table, session |
+| | `resolve_escalation` | execution_id\*, escalation_id\*, action\*, decision, format, participants[], amendment{}, resolved_by, provider, model, base_url |
 | | `join_execution` | execution_id\*, agent\*, team, task_id (orchestrator server only) |
 | Worker | `read_blackboard` | section, query, task_id, ref, since_seq, limit |
 | | `claim_task` | task_id, release, note |
@@ -693,7 +719,7 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | | `submit_work` | summary\*, ready\* |
 | | `escalate` | kind\*, with\*, summary\*, target, question, options[], diagnostics{}, blocking, emergency |
 
-On the worker server, the worker tools are bound to the token. On the orchestrator server, they require `agent_token` and `execution_id`: the tool definition carries a second schema for that mode (`inputSchemaByMode`). Subcontract tasks additionally get scoped `propose_contract` and `freeze_contract`. WS07 lands `join_execution` and the seven worker tools and WS04 the three contract tools, so the orchestrator lists 33 tools until the run tools land.
+On the worker server, the worker tools are bound to the token. On the orchestrator server, they require `agent_token` and `execution_id`: the tool definition carries a second schema for that mode (`inputSchemaByMode`). Subcontract tasks additionally get scoped `propose_contract` and `freeze_contract`. WS07 lands `join_execution` and the seven worker tools and WS04 the three contract tools, WS11 lands the four run tools, which brings the orchestrator to 37.
 
 **Worker tool semantics** (`src/tools/worker.ts`). Every response is JSON and carries `inbox`: the agent's new directives and decisions since `agents/<id>/inbox.cursor`, which then advances, plus `awaiting_ack` for directives not yet acknowledged. Errors carry it too.
 - `read_blackboard`: `section` is summary (the default), goal, contract, tasks, task, interfaces, decisions, leases, claims, files, diffs, checks, escalations, notes, inbox, budget, agents, teams, events, blob or query.
@@ -743,6 +769,9 @@ On the worker server, the worker tools are bound to the token. On the orchestrat
 - **Retries.** Provider calls retry with backoff inside the original timeout.
 - **Sandbox.** Docker runs with no network, as non-root, with a read-only root, all capabilities dropped and `no-new-privileges`. Resources are limited, the env is empty, and output is capped. Dependency installs reach only allowlisted hosts through the egress proxy. The local backend requires an explicit opt-in and reports `sandbox.degraded` when it falls back.
 - **Audit.** The audit log is hash-chained, checked by `verify`, and swept for retention: runs are kept 30 days after they end, and the audit log 365 days.
+  - The orchestrator server runs the sweep once at startup, best effort, and logs it to stderr (`src/execution/retention.ts`). It covers terminal runs (`ROUNDTABLE_EXECUTION_RETENTION_DAYS`, through the audited purge), archived sessions (`ROUNDTABLE_SESSION_RETENTION_DAYS`, 30) and audit month files (`ROUNDTABLE_AUDIT_RETENTION_DAYS`).
+  - For each setting, `0` or `off` keeps everything of that kind.
+  - When a run's repository is gone, only its directories are removed. That removal is audited too, with `repo_missing`.
   - A prune writes `audit-anchor.json {hash, previous, files, at}` before deleting whole month files, and records an `audit.pruned` entry.
   - `verifyAudit` requires the first remaining entry to link to the anchor, or to the genesis hash when nothing was ever pruned. Deleting the oldest entries without a prune is therefore detected.
 - **CI.** Least-privilege permissions, actions pinned by SHA, an `npm audit` gate, CodeQL, Dependabot, an SBOM, and npm provenance on release.
@@ -831,3 +860,14 @@ WS12 adds the visibility modules the runner hosts:
 | `src/dashboard/render.ts` | `completion(state)` and `taskWeight(rt)` (the §13 weights), `publicState(state, runner)`, `markdownToHtml(md)` |
 | `src/github/sync.ts` | `new GitHubSync({executionId, repo, projectOwner?, projectNumber?, createProject?, pr?})`, `syncOnce(): Promise<SyncReport>`, `statusFor(taskState)` |
 | `src/github/gh.ts` | `runGh(args, {input?, timeoutMs?})`, `ghJson`, `ghGraphql`, `withBodyFile`, `checkGhReady({repo, project})` returns `{ok, missing[]}` |
+
+WS11 adds the orchestrator's run tools and the retention sweep:
+
+| Module | API |
+|---|---|
+| `src/execution/orchestrator.ts` | `execute(input)`, `controlExecution(input)`, `resolveFromOrchestrator(input)`, `watchSpec(exe, orchestrator)`, `dashboardUrl(exe)`, `parseVisibility(raw)`, `contractBudgetSet(contract)`; `setOrchestratorDeps(over)` replaces the runner launch, `ensureRunner`, the sandbox probe, CLI detection, gh and `stopGroup` (tests) |
+| `src/execution/status-report.ts` | `executionStatusReport(input, now?)`, `listExecutionStatus(limit?)`, `matchFocus(state, focus)`, `focusTokens`, `focusScore`, `taskVocabulary`, `weightedCompletion(tasks)`, `estimateEta(state, tasks?, now?)`, `runContext(store, state, focus?)`, `STATUS_VIEWS` |
+| `src/execution/handoff.ts` | `writeHandoff(exe, ops, from)`, `takeHandoffs(exe)` (the runner only), `handoffDir(exe)` |
+| `src/execution/retention.ts` | `sweepRetention({now?, executionDays?, sessionDays?, auditDays?})` returns `{executions, sessions, audit, errors}`; `pruneExecutions(days, now?)`, `describeRetention(report)` |
+| `src/tools/execution.ts` | `executionTools`, `handleExecutionTool`, `CONTROL_ACTIONS`, `RESOLUTION_ACTIONS`, `HUDDLE_FORMATS` |
+| `src/config.ts` | `defaultVisibility()`, `defaultBudgetUsd()`, `executionRetentionDays()`, `sessionRetentionDays()`, `auditRetentionDays()` (null keeps everything) |

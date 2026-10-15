@@ -86,6 +86,16 @@ test("no profile leaks secret-named variables unless it exists to carry them", (
   }
 });
 
+test("secret-name pattern matches credentials but not authors, bypasses or session ids", () => {
+  for (const name of ["ANTHROPIC_API_KEY", "GH_TOKEN", "AWS_SESSION_TOKEN", "CLIENT_SECRET", "ROUNDTABLE_NTFY_PASSWORD",
+    "ROUNDTABLE_WEBHOOK_AUTH_HEADER", "DB_PASS", "AUTH", "GOOGLE_APPLICATION_CREDENTIALS", "SESSION_COOKIE", "ssh_auth_sock"]) {
+    assert.ok(SECRET_NAME_RE.test(name), name);
+  }
+  for (const name of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "BYPASS_CACHE", "CLAUDE_CODE_SESSION_ID", "TERM_SESSION_ID", "PWD", "OLDPWD", "COMPASS_HOME"]) {
+    assert.ok(!SECRET_NAME_RE.test(name), name);
+  }
+});
+
 test("CLI profiles pass the provider key only with ROUNDTABLE_WORKER_AUTH=api_key", () => {
   assert.equal(childEnv("claude-worker", {}, FAKE_ENV).ANTHROPIC_API_KEY, undefined);
   assert.equal(childEnv("claude-worker", {}, { ...FAKE_ENV, ROUNDTABLE_WORKER_AUTH: "api_key" }).ANTHROPIC_API_KEY, FAKE_ENV.ANTHROPIC_API_KEY);

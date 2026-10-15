@@ -242,6 +242,36 @@ describe("display", () => {
     assert.equal(JSON.parse(text).openai_compatible.base_url, "https://llm.example.test:8443");
     for (const part of ["T0K3N", "key=q", "user:pw"]) assert.ok(!text.includes(part), part);
   });
+
+  test("debug_env shows the Ollama, ntfy and webhook URLs as origins only", async (t) => {
+    const { spawnSync } = await import("node:child_process");
+    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "rt-debug-env-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const offline = join(dir, "offline.mjs");
+    writeFileSync(offline, 'globalThis.fetch = async () => { throw new Error("offline"); };\n');
+    const run = (env) => {
+      const r = spawnSync(process.execPath, ["--import", offline, "--input-type=module", "-e",
+        `const { handleToolCall } = await import(${JSON.stringify(new URL("../../dist/tools.js", import.meta.url).href)});\n` +
+          `process.stdout.write((await handleToolCall("debug_env", {})).content[0].text);`,
+      ], { env: { ...process.env, ROUNDTABLE_DOTENV: "off", ...env }, encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      return r.stdout;
+    };
+    const ntfy = run({ OLLAMA_URL: "https://admin:hunter2pass@ollama.example.test:11434/x?token=olla", ROUNDTABLE_PUBLISHER: "ntfy", ROUNDTABLE_NTFY_URL: "https://user:ntfypass@ntfy.example.test/base?k=v" });
+    const n = JSON.parse(ntfy);
+    assert.equal(n.ollama.url, "https://ollama.example.test:11434");
+    assert.equal(n.public_sessions.server_url, "https://ntfy.example.test");
+    const webhook = run({ ROUNDTABLE_PUBLISHER: "webhook", ROUNDTABLE_WEBHOOK_URL: "https://hook:hookpass@hooks.example.test/T0K3N", ROUNDTABLE_WEBHOOK_VIEW_URL: "https://viewer:viewpass@view.example.test/c/{channel}?sig=abc" });
+    const w = JSON.parse(webhook);
+    assert.equal(w.public_sessions.webhook_url, "configured (https://hooks.example.test, path/query hidden)");
+    assert.equal(w.public_sessions.webhook_view_url, "configured (https://view.example.test, path/query hidden)");
+    for (const secret of ["hunter2pass", "token=olla", "ntfypass", "k=v", "hookpass", "T0K3N", "viewpass", "sig=abc"]) {
+      assert.ok(!ntfy.includes(secret) && !webhook.includes(secret), secret);
+    }
+  });
 });
 
 describe("webhook publisher URL", () => {

@@ -109,15 +109,6 @@ function checkProviderArgs(args: Record<string, unknown>): void {
   validateProviderOptions(args.provider as LLMProvider | undefined, args.base_url as string | undefined);
 }
 
-/** Origin only: webhook URLs often carry the secret in the path or query. */
-function webhookOrigin(raw: string): string {
-  try {
-    return new URL(raw).origin;
-  } catch {
-    return "unparseable URL";
-  }
-}
-
 const SKILL_LOOKUP_DESCRIPTION =
   "Creation includes the destination project's .claude/skills in lookup even when the configured skills directory differs. Skill lookup follows Claude Code precedence: personal ~/.claude/skills, then .claude/skills beside the agent file when it is in .claude/agents, then ROUNDTABLE_SKILLS_DIR. Any skill found is reused, never overwritten or shadowed. ";
 const WORKSHOP_TOOLS_DESCRIPTION =
@@ -1056,7 +1047,8 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
           base_url: process.env.OPENAI_COMPATIBLE_BASE_URL ? describeUrl(process.env.OPENAI_COMPATIBLE_BASE_URL) : "NOT SET",
           api_key: keyStatus("OPENAI_COMPATIBLE_API_KEY"),
         },
-        ollama: { url: OLLAMA_URL, reachable: await isOllamaAvailable() },
+        // Every URL as scheme://host[:port] only: userinfo may hold a password, a path or query a token.
+        ollama: { url: describeUrl(OLLAMA_URL), reachable: await isOllamaAvailable() },
         default_models: DEFAULT_MODELS,
         max_tokens: MAX_TOKENS,
         llm_timeout_ms: LLM_TIMEOUT_MS,
@@ -1070,12 +1062,12 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
           publisher: PUBLISHER_KIND,
           ...(PUBLISHER_KIND === "webhook"
             ? {
-                webhook_url: WEBHOOK_URL ? `configured (${webhookOrigin(WEBHOOK_URL)}, path/query hidden)` : "NOT SET",
-                webhook_view_url: WEBHOOK_VIEW_URL || "NOT SET",
+                webhook_url: WEBHOOK_URL ? `configured (${describeUrl(WEBHOOK_URL)}, path/query hidden)` : "NOT SET",
+                webhook_view_url: WEBHOOK_VIEW_URL ? `configured (${describeUrl(WEBHOOK_VIEW_URL)}, path/query hidden)` : "NOT SET",
                 webhook_auth_header: WEBHOOK_AUTH_HEADER ? "configured" : "not set",
               }
             : {
-                server_url: NTFY_URL,
+                server_url: describeUrl(NTFY_URL),
                 token: NTFY_TOKEN ? "configured" : "not set",
                 user: NTFY_USER ? "configured" : "not set",
                 password: NTFY_PASSWORD ? "configured" : "not set",

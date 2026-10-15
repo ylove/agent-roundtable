@@ -6,7 +6,10 @@ import { rmSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PrototypeBoard, APP_CSP, BOARD_CSP, VIEWER_CSP, escapeHtml } from "../../dist/prototypes/board.js";
+import {
+  PrototypeBoard, APP_CSP, BOARD_CSP, VIEWER_CSP, DIAGRAM_VIEWER_CSP, MERMAID_SCRIPT_URL, MERMAID_SRI, MERMAID_VERSION, escapeHtml,
+} from "../../dist/prototypes/board.js";
+import { inlineProblems } from "./helpers.mjs";
 
 const XSS = `<script>alert("x")</script>`;
 
@@ -112,7 +115,13 @@ test("board: binds 127.0.0.1 under a capability token, serves board, state.json 
   assert.ok(!home.body.includes(XSS), "board escapes agent content");
   assert.ok(home.body.includes(escapeHtml(XSS)));
   assert.ok(home.body.includes(`data-base="${base}"`));
-  assert.match(home.body, /fetch\(base\+"state\.json"/);
+  // The refresh script is a static route under the token; the page itself carries no inline script.
+  assert.ok(home.body.includes(`<script src="${base}static/board.js"></script>`));
+  assert.ok(home.body.includes(`<link rel="stylesheet" href="${base}static/board.css">`));
+  const js = await get(`${board.url}static/board.js`);
+  assert.equal(js.status, 200);
+  assert.match(js.headers["content-type"], /^text\/javascript/);
+  assert.match(js.body, /fetch\(base\+"state\.json"/);
   assert.ok(home.body.includes(`href="${base}p/P1v1/"`), "links stay under the token");
 
   const st = await get(`${board.url}state.json`);
@@ -294,7 +303,7 @@ test("board: destroyed prototypes answer 410 on every route, with verdicts and d
   assert.equal(st.prototypes[0].files, undefined);
 });
 
-test("board: diagram viewer renders Mermaid client-side from the pinned module only", async (t) => {
+test("board: diagram viewer renders Mermaid client-side from the pinned, integrity-checked file only", async (t) => {
   const board = await PrototypeBoard.start({ sessionId: "s", mode: "collaborate", participants: ["a", "b"] });
   t.after(() => board.close());
   board.update({
@@ -306,13 +315,28 @@ test("board: diagram viewer renders Mermaid client-side from the pinned module o
   });
   const v = await get(`${board.url}p/P1v1/`);
   assert.equal(v.status, 200);
-  assert.match(v.body, /<script type="module">import mermaid from "https:\/\/cdn\.jsdelivr\.net\/npm\/mermaid@11\.4\.1\/dist\/mermaid\.esm\.min\.mjs"/);
-  assert.match(v.body, /securityLevel:"strict"/);
+  // The pinned single-file build, with Subresource Integrity, then the board's own init script.
+  assert.equal(MERMAID_VERSION, "11.17.2");
+  assert.match(MERMAID_SRI, /^sha384-[A-Za-z0-9+/]{64}$/);
+  const tag = `<script src="https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js" integrity="${MERMAID_SRI}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>`;
+  assert.ok(v.body.includes(tag), "pinned Mermaid with SRI");
+  assert.equal(MERMAID_SCRIPT_URL, `https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js`);
+  const base = new URL(board.url).pathname;
+  assert.ok(v.body.indexOf(tag) < v.body.indexOf(`<script src="${base}static/mermaid-init.js"></script>`), "init runs after the library");
+  const init = await get(`${board.url}static/mermaid-init.js`);
+  assert.equal(init.status, 200);
+  assert.match(init.body, /securityLevel:"strict"/);
   assert.ok(!v.body.includes(XSS));
   assert.match(v.body, /<pre class="mermaid">flowchart TD/);
-  // Scripts may come from the pinned mermaid package only, never anywhere else on the CDN.
-  assert.match(VIEWER_CSP, /script-src 'self' 'unsafe-inline' https:\/\/cdn\.jsdelivr\.net\/npm\/mermaid@11\.4\.1\/;/);
-  assert.match(VIEWER_CSP, /frame-ancestors 'none'/);
+  // Scripts may come from the board and the pinned Mermaid file only; never inline, never elsewhere on the CDN.
+  assert.equal(v.headers["content-security-policy"], DIAGRAM_VIEWER_CSP);
+  for (const csp of [VIEWER_CSP, DIAGRAM_VIEWER_CSP]) {
+    assert.match(csp, new RegExp(`script-src 'self' ${MERMAID_SCRIPT_URL.replace(/[.]/g, "\\.")};`));
+    assert.match(csp, /frame-ancestors 'none'/);
+  }
+  // Mermaid's SVG carries inline styles: only the diagram viewer allows them.
+  assert.match(DIAGRAM_VIEWER_CSP, /style-src 'self' 'unsafe-inline';/);
+  assert.match(VIEWER_CSP, /style-src 'self';/);
   // No bare render page any more (diagram screenshots were dropped).
   assert.equal((await get(`${board.url}p/P1v1/render`)).status, 404);
 });
@@ -322,4 +346,47 @@ test("board: close() stops the server and is idempotent", async () => {
   await board.close();
   await board.close();
   await assert.rejects(() => get(board.url));
+});
+
+test("board: no inline script, style or handler on any page; the CSPs allow none", async (t) => {
+  const dir = await tmp();
+  const board = await PrototypeBoard.start({ sessionId: "s", mode: "collaborate", participants: ["a", "b"] });
+  t.after(() => board.close());
+  const diagram = {
+    key: "P3v1", id: "P3", version: 1, label: "P3 v1", title: "Flow", kind: "diagram", proposer: "a", fileCount: 1,
+    demo: "", status: "live", verdicts: [], awaiting: ["b"], createdAt: new Date().toISOString(),
+    live: { dir: "/nonexistent", files: [{ path: "flow.mmd", content: "flowchart TD\nA-->B" }] },
+  };
+  const { live: _l, ...gone } = codeProto();
+  board.update({ prototypes: [await liveWeb(dir), { ...gone, key: "P2v1", status: "scrapped", awaiting: [] }, diagram] });
+  for (const path of ["", "p/P1v1/", "p/P2v1/", "p/P3v1/"]) {
+    const r = await get(board.url + path);
+    assert.ok([200, 410].includes(r.status), path);
+    assert.deepEqual(inlineProblems(r.body), [], path);
+    assert.match(r.body, /<link rel="stylesheet" href="\/[A-Za-z0-9_-]+\/static\/board\.css">/, path);
+  }
+  // 'unsafe-inline' is gone from every script-src but the sandboxed prototype's own (an accepted risk:
+  // agent-written pages in an opaque origin), and from the board's and viewer's style-src.
+  for (const csp of [BOARD_CSP, VIEWER_CSP, DIAGRAM_VIEWER_CSP]) {
+    assert.doesNotMatch(/script-src ([^;]*)/.exec(csp)[1], /unsafe-inline/);
+    assert.doesNotMatch(csp, /unsafe-eval/);
+  }
+  for (const csp of [BOARD_CSP, VIEWER_CSP]) assert.doesNotMatch(csp, /unsafe-inline/);
+  assert.match(APP_CSP, /script-src 'self' 'unsafe-inline'/);
+
+  // The shared server's headers, and the app route's own framing rule (the viewer frames it).
+  const home = await get(board.url);
+  assert.equal(home.headers["cross-origin-opener-policy"], "same-origin");
+  assert.equal(home.headers["x-frame-options"], "DENY");
+  assert.match(home.headers["permissions-policy"], /camera=\(\).*geolocation=\(\).*microphone=\(\)/);
+  const app = await get(`${board.url}p/P1v1/app/index.html`);
+  assert.equal(app.headers["x-frame-options"], "SAMEORIGIN");
+  // Static files: only the known ones, never through the proxy.
+  for (const f of ["board.css", "board.js", "viewer.js", "mermaid-init.js"]) {
+    assert.equal((await get(`${board.url}static/${f}`)).status, 200, f);
+    assert.equal((await get(board.url, { target: `${board.url}static/${f}` })).status, 403, f);
+  }
+  for (const f of ["nope.js", "board.css.map", "../board.js", "constructor.js"]) {
+    assert.equal((await get(board.url, { target: `${new URL(board.url).pathname}static/${f}` })).status, 404, f);
+  }
 });

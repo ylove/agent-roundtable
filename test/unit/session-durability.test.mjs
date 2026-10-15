@@ -2,14 +2,18 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { json, stubFetch } from "./helpers.mjs";
 
 delete process.env.ROUNDTABLE_PUBLISHER;
 delete process.env.OPENAI_COMPATIBLE_BASE_URL;
 delete process.env.OPENAI_COMPATIBLE_API_KEY;
-// A secret-named variable: its exact value must never reach an archive file.
+// Scrubbing replaces the values of secret-named environment variables, so pin the environment: drop
+// every secret-named variable the developer or CI happens to have (this file runs in its own process),
+// then set one known secret whose exact value must never reach archived content.
+const { SECRET_NAME_RE } = await import("../../dist/security/child-env.js");
+for (const name of Object.keys(process.env)) if (SECRET_NAME_RE.test(name)) delete process.env[name];
 const ENV_SECRET = "archive-test-value-8f3k2q";
 process.env.ROUNDTABLE_ARCHIVE_TEST_TOKEN = ENV_SECRET;
 
@@ -214,31 +218,36 @@ const scripted = (t, ...outputs) => {
 };
 
 describe("session archive", () => {
-  test("archiveSession writes a private, scrubbed record that reads and lists back", (t) => {
+  test("archiveSession writes a private record: content is scrubbed, ids and agent refs are kept exactly", (t) => {
     const id = "collab-arch0001";
+    // A ref that happens to contain the secret value must survive: from_session loads it again.
+    const ref = `/agents/${ENV_SECRET}/cfo.md`;
     const path = archive.archiveSession({
-      id, kind: "collaboration", mode: "collaborate", agents: ["cfo", "skeptic"], topic: "Budget",
+      id, kind: "collaboration", mode: "collaborate", agents: [ref, "skeptic"], topic: `Budget ${ENV_SECRET}`,
       started: "2026-10-01T10:00:00.000Z", ended: "2026-10-01T11:00:00.000Z",
       turns: [
-        { role: "agent", agent: "cfo", speaker: "cfo", content: `Key is ${ENV_SECRET} and sk-ant-abcdefghijklmnop` },
+        { role: "agent", agent: ref, speaker: "cfo", content: `Key is ${ENV_SECRET} and sk-ant-abcdefghijklmnop` },
         { role: "orchestrator", speaker: "orchestrator", content: "focus" },
       ],
-      summary: "Agreed", public: null,
+      summary: `Agreed on ${ENV_SECRET}`, public: null,
     });
     assert.equal(path, archivedFile(id));
     assert.equal(statSync(SESSIONS_DIR).mode & 0o777, 0o700);
     assert.equal(statSync(path).mode & 0o777, 0o600);
     const raw = readFileSync(path, "utf8");
-    assert.ok(!raw.includes(ENV_SECRET) && !raw.includes("sk-ant-abcdefghijklmnop"), raw);
-    assert.match(raw, /\[redacted:env:ROUNDTABLE_ARCHIVE_TEST_TOKEN\]/);
+    assert.ok(!raw.includes("sk-ant-abcdefghijklmnop"), raw);
     const record = archive.readArchivedSession(id);
     assert.equal(record.schema, "roundtable.session/1");
+    assert.equal(record.topic, "Budget [redacted:env:ROUNDTABLE_ARCHIVE_TEST_TOKEN]");
+    assert.equal(record.summary, "Agreed on [redacted:env:ROUNDTABLE_ARCHIVE_TEST_TOKEN]");
     assert.ok(record.transcript.startsWith("**cfo:** Key is [redacted:env:ROUNDTABLE_ARCHIVE_TEST_TOKEN] and "), record.transcript);
     assert.ok(record.transcript.endsWith("\n\n---\n\n**orchestrator:** focus"), record.transcript);
-    assert.equal(record.turns[0].content.startsWith("Key is [redacted:env:"), true);
-    assert.deepEqual(record.agents, ["cfo", "skeptic"]);
+    assert.ok(record.turns[0].content.startsWith("Key is [redacted:env:ROUNDTABLE_ARCHIVE_TEST_TOKEN] and ") && !record.turns[0].content.includes("sk-ant-"));
+    assert.deepEqual(record.agents, [ref, "skeptic"]);
+    assert.equal(record.turns[0].agent, ref);
     const listed = archive.listArchivedSessions().find((s) => s.id === id);
-    assert.deepEqual(listed, { id, kind: "collaboration", mode: "collaborate", agents: ["cfo", "skeptic"], topic: "Budget",
+    assert.deepEqual(listed, { id, kind: "collaboration", mode: "collaborate", agents: [ref, "skeptic"],
+      topic: "Budget [redacted:env:ROUNDTABLE_ARCHIVE_TEST_TOKEN]",
       started: "2026-10-01T10:00:00.000Z", ended: "2026-10-01T11:00:00.000Z", public: false });
     assert.ok(!readdirSync(SESSIONS_DIR).some((n) => n.endsWith(".tmp")), "no temp files left behind");
   });
@@ -362,8 +371,28 @@ describe("session archive", () => {
     assert.equal(r.result.publicBlock, undefined);
     assert.match(r.summary, /^preview: drafted launch-owner/);
     assert.deepEqual(r.turns.map((x) => x.phase), ["contribution", "contribution", "review", "review"]);
+    assert.deepEqual(r.agents, [sample, plain], "participants are stored as the refs that were passed");
+    assert.deepEqual(r.turns.map((x) => x.agent), [sample, plain, sample, plain]);
     await assert.rejects(createAgent({ ...opts, fromSession: "collab-nowhere1", write: false }),
       /from_session not found: collab-nowhere1\..*or of any archived session/);
+  });
+
+  test("from_session on a workshop archive reloads the participants' own files, not a same-key agent in AGENTS_DIR", async (t) => {
+    const agentsDir = process.env.ROUNDTABLE_AGENTS_DIR;
+    mkdirSync(agentsDir, { recursive: true });
+    const impostor = join(agentsDir, "sample.md");
+    writeFileSync(impostor, "---\nname: sample\ndescription: Not the fixture\n---\n\nIMPOSTOR-PROMPT-6612\n");
+    t.after(() => rmSync(impostor, { force: true }));
+    const spec = JSON.stringify({ name: "path-owner", description: "Owns paths", system_prompt: "You own paths.", skills: [] });
+    scripted(t, "Sample idea", spec, "Verdict: READY");
+    const first = await createAgent({ ...opts, agents: [sample], task: "Own paths", write: false });
+    assert.deepEqual(archive.readArchivedSession(first.sessionId).agents, [sample]);
+
+    const calls = scripted(t, "Again", spec, "Verdict: READY");
+    await createAgent({ ...opts, fromSession: first.sessionId, write: false });
+    const systems = calls.map((c) => c.body.messages[0].content);
+    assert.ok(systems[0].includes("You are Sample."), systems[0]);
+    assert.ok(systems.every((sys) => !sys.includes("IMPOSTOR-PROMPT-6612")), "the impostor's prompt reached the provider");
   });
 
   test("archiving is best effort: a broken sessions directory is logged and never fails the session", async (t) => {

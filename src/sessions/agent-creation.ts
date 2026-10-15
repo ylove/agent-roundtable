@@ -173,6 +173,8 @@ export interface ArchitectRevisePromptOptions extends ArchitectPromptOptions {
 }
 
 interface Participant {
+  /** The reference as the caller passed it (a name or a path); what the archive stores. */
+  ref: string;
   key: string;
   label: string;
   system: string;
@@ -591,7 +593,7 @@ async function loadParticipants(refs: string[], isPublic: boolean): Promise<Part
     if (isPublic) {
       system += publicDirectiveSuffix();
     }
-    participants.push({ key: agentKey(ref), label: display(ref, isPublic), system });
+    participants.push({ ref, key: agentKey(ref), label: display(ref, isPublic), system });
   }
   return participants;
 }
@@ -938,18 +940,28 @@ function recordWorkshopActivity(workshop: PreparedWorkshop, spec: AgentSpec, sav
   return summary;
 }
 
-/** Archive a finished workshop: contributions and reviews as turns, the tool result as the record's result. */
+/**
+ * Archive a finished workshop: contributions and reviews as turns, the tool result as the record's result.
+ * Participants are stored as the refs the caller passed, like every other archived session, so a later
+ * from_session loads the same files (a key could resolve to a different agent in ROUNDTABLE_AGENTS_DIR).
+ */
 function archiveWorkshop(workshop: PreparedWorkshop, result: AgentWorkshopResult, outcome: string): void {
   const { publicBlock: _publicBlock, ...stored } = result;
   const channel = workshop.run.channel;
+  // Transcript entries carry display labels; map each back to its participant's ref.
+  const refByLabel = new Map<string, string>();
+  for (const participant of workshop.participants) {
+    if (!refByLabel.has(participant.label)) refByLabel.set(participant.label, participant.ref);
+  }
   archiveSession({
     id: workshop.sessionId,
     kind: workshop.target ? "agent-refinement" : "agent-creation",
-    agents: workshop.participants.map(participant => participant.key),
+    agents: workshop.participants.map(participant => participant.ref),
     topic: workshop.task,
     started: workshop.startedAt.toISOString(),
     turns: workshop.run.transcript.map((entry): ArchivedTurn => ({
-      role: "agent", agent: entry.agent, phase: entry.phase, speaker: `${entry.agent} · ${entry.phase}`, content: entry.content,
+      role: "agent", agent: refByLabel.get(entry.agent) ?? entry.agent, phase: entry.phase,
+      speaker: `${entry.agent} · ${entry.phase}`, content: entry.content,
     })),
     summary: outcome,
     result: stored,

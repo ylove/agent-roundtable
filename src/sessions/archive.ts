@@ -1,8 +1,8 @@
 // ============================================================================
 // Session archive: every finished at-the-table session as a private JSON file
 // ============================================================================
-// SESSIONS_DIR/<id>.json (directory 0700, file 0600, atomic write), secrets scrubbed from every string
-// first. Written when a session ends, before it leaves its live map, so a session is always either live
+// SESSIONS_DIR/<id>.json (directory 0700, file 0600, atomic write), secrets scrubbed from every
+// content-bearing field first. Written when a session ends, before it leaves its live map, so a session is always either live
 // or archived. Best effort: a failed write is logged to stderr and never fails the session.
 // Readers: from_session (agent workshops) and, later, contract proposals built from an ultraplan.
 
@@ -91,13 +91,44 @@ export type ArchivedSessionSummary = Pick<ArchivedSession, "id" | "kind" | "mode
 // Writing
 // ----------------------------------------------------------------------------
 
+function scrub(text: string): string {
+  return scrubSecrets(text).text;
+}
+
 function scrubDeep<T>(value: T): T {
-  if (typeof value === "string") return scrubSecrets(value).text as T;
+  if (typeof value === "string") return scrub(value) as T;
   if (Array.isArray(value)) return value.map((item) => scrubDeep(item)) as T;
   if (value && typeof value === "object" && !(value instanceof Date)) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubDeep(v)])) as T;
   }
   return value;
+}
+
+/**
+ * Scrub the content-bearing fields: topic, transcript, turn content, summary, the ultraplan document's
+ * text, the workshop result and the public URL. Ids, agent refs, speakers, roles, phases and times are
+ * kept exactly: refs are loaded again by from_session, and a redacted path would load nothing (or
+ * something else).
+ */
+function scrubRecord(r: ArchivedSession): ArchivedSession {
+  return {
+    ...r,
+    topic: scrub(r.topic),
+    transcript: scrub(r.transcript),
+    turns: r.turns.map((turn) => ({ ...turn, content: scrub(turn.content) })),
+    ...(r.summary !== undefined && { summary: scrub(r.summary) }),
+    ...(r.document && {
+      document: {
+        ...r.document,
+        markdown: scrub(r.document.markdown),
+        versions: r.document.versions.map((v) => ({ ...v, plan: scrub(v.plan) })),
+        entries: r.document.entries.map((e) => ({ ...e, content: scrub(e.content) })),
+        signoffs: r.document.signoffs.map((s) => ({ ...s, content: scrub(s.content) })),
+      },
+    }),
+    ...(r.result !== undefined && { result: scrubDeep(r.result) }),
+    public: r.public && { ...r.public, url: r.public.url === null ? null : scrub(r.public.url) },
+  };
 }
 
 /** `**speaker:** content` blocks separated by rules, the format end_collaboration already returns. */
@@ -114,7 +145,7 @@ function attempt(id: string, build: () => ArchiveInput): string | null {
   try {
     if (!ARCHIVE_ID_RE.test(id)) throw new Error("not an archivable session id");
     const input = build();
-    const record: ArchivedSession = scrubDeep({
+    const record = scrubRecord({
       schema: SESSION_ARCHIVE_SCHEMA,
       ...input,
       ended: input.ended ?? new Date().toISOString(),

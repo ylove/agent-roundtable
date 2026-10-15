@@ -24,7 +24,7 @@ Provider keys are loaded by the orchestrator from local configuration; the trust
 
 Commands and checks use the Docker sandbox by default: no command network access, non-root execution, read-only root and `.git`, dropped capabilities, resource limits and a validated environment. Dependency installation may use an explicit host allowlist through an egress proxy. The local backend requires opt-in and is weaker; isolation may degrade to network-only or no isolation and must be surfaced to the operator. Worker CLIs themselves are distinct from these command containers. Claude workers are specified to have no Bash and use sandboxed `run_command`; Codex is an opt-in driver with broader read access and submission-time lease checks. External workers are unsandboxed and trusted like the host chat.
 
-The [threat model](docs/THREAT_MODEL.md) records implementation references and residual risks. The [controls mapping](docs/SECURITY_CONTROLS.md) identifies evidence and integration work still required. In this worktree, worker drivers, runner/CLI wiring and escalation handling are still in flight: their safeguards describe the approved 1.0 design, not completed end-to-end enforcement.
+The [threat model](docs/THREAT_MODEL.md) records implementation references and residual risks. The [controls mapping](docs/SECURITY_CONTROLS.md) identifies evidence and integration work still required. Worker drivers, runner/CLI wiring, escalation handling and retention are implemented in this release tree. Offline integration tests cover their behavior; platform sandbox, real-browser and live-service checks still require the appropriate environment.
 
 ## Deployment limits and operator responsibilities
 

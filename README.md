@@ -1,575 +1,120 @@
 # agent-roundtable
 
-An MCP server (stdio) that lets Claude Code — or any MCP client — convene meetings and collaborations between AI agent personas and LLMs from six providers, run local meetings on your own `claude` CLI, and call any provider directly.
+**Agents talk it out at the table, then go heads-down.**
+An MCP server for multi-agent collaboration across six LLM providers: discuss, challenge and agree on a plan, then execute a contract with parallel workers, budgets and human oversight.
+Runs locally over stdio with Claude Code or any MCP client. Requires Node 22+.
 
-## Why
+## Install and register with Claude Code
 
-Agents that can convene other agents. A persona is a markdown file; a meeting is a conversation between the caller and one persona on a chosen model; a collaboration is two or more personas taking turns on a topic. All of it runs over a plain MCP server, provider-agnostic: the same persona can sit on Anthropic today, a Together-hosted open model tomorrow, and a local Ollama model when you are offline. Debates and other multi-agent formats are natural extensions of the same primitives. State is in memory; there is no database and nothing to host.
-
-## Using it from a chat session
-
-Once the server is registered you do not call the tools yourself: you ask for what you want in plain language and the model calls them. Claude Code lists them as `mcp__agent-roundtable__<tool>`, so naming the server ("via agent-roundtable", "using the roundtable") is enough to steer the model to it when several MCP servers are connected. Persona names are file names in `ROUNDTABLE_AGENTS_DIR` — the shipped `examples/` give you `cfo`, `product-lead` and `skeptic` — and a file path works too.
-
-**Meetings** — one persona, back and forth. Each prompt is one message in the chat:
-
-> Start a meeting via agent-roundtable with the cfo agent. Agenda: Q3 budget review. Use Anthropic Sonnet.
-
-> Tell the CFO that runway is 14 months at current burn and ask what they would cut first.
-
-> End the meeting and give me the summary.
-
-**Local meetings** — the same conversation on your own `claude` CLI, no API spend:
-
-> Start a local meeting with the product-lead agent about the onboarding redesign. Context: the spec in docs/onboarding.md.
-
-> Ask them what they would cut to ship two weeks earlier, then end the meeting with a summary.
-
-**Collaborations** — two or more personas take turns on a topic:
-
-> Run a collaboration on agent-roundtable between cfo and skeptic on "Should we raise now?", three rounds max, and run the first round immediately.
-
-> Continue the collaboration for two more rounds.
-
-> Nudge the collaboration: assume the round closes at a flat valuation. Then run one more round.
-
-> Give me the full transcript of that collaboration.
-
-**Direct completions** — any provider, no persona:
-
-> Using the together provider on agent-roundtable, summarize the tradeoffs of a four-day work week in three bullets.
-
-> Send this to the replicate provider with model https://replicate.com/qwen/qwen3-235b-a22b-instruct-2507: "Explain CRDTs to a product manager."
-
-> Use the openai_compatible provider with base URL http://localhost:1234/v1 and model local-model to answer: what is the capital of Australia?
-
-**Debate, waffle-house and public sessions:**
-
-> Have a waffle-house on the roundtable with the skeptic defending "pineapple belongs on pizza" against the cfo and product-lead. Two rounds, make it public.
-
-> Start a debate meeting with the cfo about our pricing agenda.
-
-**Prototype mode** — agents show their proposals instead of only describing them:
-
-> Run a prototype collaboration on agent-roundtable between product-lead and skeptic on the checkout redesign; have them prototype their proposals.
-
-> Start a meeting with the product-lead about the pricing page, with prototypes on. Ask them to show me the page.
-
-> Run a public prototype waffle-house on the roundtable: the skeptic defends "one-click checkout" against the cfo and product-lead, with prototypes.
-
-**Diagnostics:**
-
-> Run debug_env on agent-roundtable and tell me which providers are configured.
-
-What to expect: meetings and collaborations return a session id together with the first reply, and the model keeps that id for the follow-ups, so "tell the CFO…" and "end the meeting" need nothing from you. Sessions live in the server's memory and end when it restarts. Claude Code asks before each tool call unless you allow the server in its permission settings: the rule `mcp__agent-roundtable` allows every tool on it, `mcp__agent-roundtable__start_meeting` allows one.
-
-## Ultraplan
-
-> Use agent-roundtable to ultraplan our onboarding launch with product-lead, cfo and skeptic. Collect their input, write the plan yourself, revise it from their reviews, then get sign-offs. Show me the final document verbatim.
-
-> Have product-lead act as planner with cfo and skeptic contributing. Plan a launch within our current budget, with two review/revision rounds, and show me everyone's input and sign-off.
-
-The orchestrator owns and writes the plan. `start_ultraplan` collects independent input; write v1 with contributor tags such as `[cfo]` on each step. `submit_plan` with `plan` submits a complete next version for review and leaves the session open for revision. Omit `plan` to review the latest version as-is without creating a new version, or omit it with `final: true` to sign off that version as-is. If no version exists yet, the call fails with `No plan version exists yet; pass plan.` Address amendments and explain any you reject. `submit_plan` with `final: true` collects sign-offs and closes; passing a plan allows sign-off straight after input. Show the final Markdown document verbatim: it includes the plan, every agent's input and sign-off, and revision history. A sign-off may include reservations or objections: the result's `signedOff` is true only when no sign-off is `OBJECT` or unclear, and the document otherwise says **not signed off**. The final result ends with a fenced JSON trailer `{ultraplan_id, archived, tally}`. With `execution_ready: true` every plan must end with a fenced `roundtable-tasks` JSON block (tasks, commands, interfaces) and sign-offs check it, so `propose_contract { from_session: <ultraplan_id> }` can turn the plan into a contract.
-
-Pass `draft_plan` to skip input and review it as v1. Pass a `planner` persona for the whole draft/review/revise/sign-off loop in one call; `revision_rounds` applies only to that variant (default 1, clamped to 1–3). If a planner run returns a step with an `error`, it remains open at the last committed phase. A step with `phase: "plan"` contains the unreviewed latest version, with `previousReviews` when an earlier version was reviewed. Continue with `submit_plan`: omit `plan` to review or sign off the latest version as-is, or pass a full revised plan. You can also close with `end_ultraplan`. Closing with `end_ultraplan` collects no sign-offs and marks the document **not signed off**. Participants work independently within each phase; concurrent calls are bounded by `ROUNDTABLE_PARALLEL_TURNS`.
-
-See the [Ultraplan tool calls](#ultraplan-tool-calls) below.
-
-## Conversation mode
-
-> Have cfo and product-lead have a conversation on agent-roundtable. No agenda. They just shipped the onboarding redesign; the CFO last reviewed the launch budget. Put that situation in their context and let them talk for two rounds.
-
-> Let product-lead and skeptic chat loosely about where the product is heading. Use conversation mode with grounding disabled.
-
-`start_collaboration` with `mode: "conversation"` produces informal colleague chat, usually 2–6 sentences per turn, with no agenda or deliverable. `topic` is an optional loose theme; every other collaboration mode requires it. Put what you know about the agents' current situation in `context`: what was just built, what each agent last did, and current problems. Agents are told to use facts established by their personas/context, mark guesses, and avoid invented events or metrics. Continue, nudge, inspect and end with the usual collaboration tools; an optional summary recaps threads, concerns and anything the founder should hear. Public conversations never open on the founder angle, and their directive does not ask agents to talk about the founder or whoever they report to.
-
-Private conversations default to grounding: workspace excerpts (package metadata, project instructions, README and recent git history), agent-memory notes, and recent roundtable activity are sent to the session's provider. Set `grounding: false` to disable this. **Public conversations never receive grounding.** The activity log is stored locally. Private conversation grounding and private `improve_agent` contributor prompts send recent topics and outcomes from it to the session's provider. Public improve runs never include the target's recent activity in any prompt. `list_collaborations` reports the opening angle and grounding sources.
-
-See the [Conversation tool calls](#conversation-tool-calls) below.
-
-## Prototype mode
-
-> Run a prototype collaboration on agent-roundtable between product-lead and skeptic on the checkout redesign; have them prototype their proposals.
-
-`prototype: true` on `start_meeting`, `start_local_meeting` or `start_collaboration` lets agents show a proposal as well as describe it. It is orthogonal to `mode`: it works with standard and debate meetings and with collaborate, debate and waffle-house collaborations, and is rejected with `mode: "conversation"`, which has no deliverable. The default is `false`, and with it unset nothing changes.
-
-**What agents produce.** An agent attaches one `<prototype>` block to a turn (at most one per turn, 1-10 files, relative paths only). The hard cap is 100 KB per block, but agents are told to keep blocks compact (aim for under about 20 KB): replies have a length cap, and a block cut off mid-reply is rejected.
-
-```
-<prototype title="Inline coupon field" kind="web" entry="index.html" revises="P1">
-<file path="index.html">...</file>
-<demo>walkthroughs: impatient user, screen-reader user, expert on mobile with the network dropping</demo>
-</prototype>
+```sh
+npm install -g agent-roundtable
+claude mcp add agent-roundtable \
+  -e ROUNDTABLE_AGENTS_DIR="$HOME/my-project/.claude/agents" \
+  -- agent-roundtable
 ```
 
-- `web`: the proposal can be shown in a page. A scaled-down page with just the proposed page or element. It runs in a sandboxed frame (see Safety below), so it must use classic `<script>` tags (no ES modules), inline its data (no fetch or XHR of other files), and use no localStorage, sessionStorage or cookies.
-- `code`: otherwise, the artifact that would produce the proposal, such as SQL or Terraform. It is never executed.
-- `diagram`: abstract proposals, as Mermaid source.
-- `text`: text proposals, as draft 1.
-
-When the proposal involves user interaction, agents are told to include a `<demo>` walkthrough covering at least three user types or modalities: for example impatient, impaired, expert or non-technical users; mobile, desktop or an interrupted network. The directive asks for it; the parser does not enforce it. The server assigns ids (`P1`, `P2`, ...). `revises="P1"` creates a new version, `P1 v2`. Assessors reply with `Verdict on P1: APPROVE | REVISE | REJECT — reason`; the proposer then answers with `Decision on P1: REVISE | SCRAP | SHORTLIST — reason`. Only the proposer decides on a prototype; a decision line from anyone else is ignored. A block the server does not accept (invalid, an extra block in the same turn, cut off or unclosed, or arriving after the session closed) is never shown raw: agents and the public channel see `[Prototype block not accepted: …]`, and an agent whose block was rejected is told why in its next prompt.
-
-**Lifecycle.** A prototype is materialized into a sandbox, shown on the board, and assessed by every other participant. In collaborations that is every other agent; in meetings it is you, the caller, through `say` or `say_local`. It is **destroyed as soon as assessment completes**: the sandbox directory is removed and the board shows the prototype as destroyed (HTTP 410) with the verdicts. The proposer then revises (a new version), scraps, or shortlists. In a collaboration a proposal needs a turn from each other agent and then one from its proposer, so once fewer turns than that remain, agents are told not to start a new prototype or revision. A TTL cap (`ROUNDTABLE_PROTOTYPE_TTL_MS`, default 30 minutes, never less than 60000 ms) destroys anything abandoned. Everything is destroyed, and any headless Chrome is killed, when the session completes or ends or the server stops. A sweep at server start (and when a sandbox root is first used) removes leftover session directories: one whose `owner.json` names this host and a process that is no longer running, or one older than 24 hours; a directory without `owner.json` is removed once it is older than 1 hour.
-
-**The board.** Results include `prototypes.board_url`, `http://127.0.0.1:<port>/<token>/`, available from the first result. The random token is a capability: every board route lives under it, so use the `board_url` and the per-prototype `url` exactly as returned. The page refreshes itself. Web prototypes appear in desktop and mobile frames, diagrams are rendered in the browser (Mermaid 11.17.2 is loaded from the jsDelivr CDN with a Subresource Integrity hash), and code and drafts are shown as text, alongside the demos and the verdicts so far. The board is read-only: you can watch, but give feedback only after the session ends. Set `ROUNDTABLE_PROTOTYPE_OPEN=1` to open it automatically at session start. A collaboration runs several turns per call, so a prototype may be proposed and destroyed within a single `continue_collaboration`; keep the board open to watch.
-
-**What results carry.** The JSON results of `start_meeting`, `start_local_meeting`, `start_collaboration` and `continue_collaboration` carry a `prototypes` block (board URL, live prototypes, those destroyed since the last result, and a notice); `say` and `say_local` end with a trailing `Prototypes:` block of the same shape. `end_*` returns **Prototype outcomes** (per id and version: proposer, kind, verdicts, decision, status) and a **Shortlist for the human** with the final source, the diagram (with a mermaid.live link) or the draft. `list_*` rows report `prototype` and, while the board is up, `board_url`. `pause_collaboration`, `nudge_collaboration` and `get_collaboration_transcript` carry no prototype block. When the same persona takes part twice, prototype output names them `name` and `name #2`.
-
-**Feedback hold.** The notice tells the orchestrator to show you the board URL and not to relay your feedback on prototypes into the session until it ends. `nudge_collaboration` is refused while a prototype is under assessment; `continue_collaboration` resumes a paused prototype session in that state (and otherwise behaves as usual).
-
-**Agent history.** Once a prototype is resolved, its source is replaced in what agents see by a one-line stub (title, kind, file count, verdicts, decision), which keeps token use bounded. An open prototype is shown in full. Each turn prompt lists the prototypes awaiting that agent's verdict or decision; in meetings that status is added to the outgoing request only, so the stored history and the end summary hold the caller's own words. Transcripts and `get_collaboration_transcript` show the stubs, and `create_agent` or `improve_agent` with `from_session` read the same stubbed history, so destroyed source never re-enters a prompt.
-
-**Safety.**
-
-- Files live in a sandbox under the OS temp directory (`ROUNDTABLE_PROTOTYPE_DIR`). The server refuses a root inside a git work tree, a root that is a symlink, or one owned by another user; it creates the root with mode 0700 and a `.gitignore`, and nothing is committed or pushed.
-- SQL, IaC and other `code` prototypes are never executed. A `web` prototype's JavaScript runs only in a sandboxed, opaque-origin frame (CSP `sandbox`) in your browser and, in public sessions, in a headless Chrome whose only network route is a deny-all proxy (the board), so it can reach nothing but the prototype's own files.
-- The board binds to `127.0.0.1`, serves only under its capability token, checks the `Host` header, sends a restrictive Content-Security-Policy (the board and viewer run no inline script; only the sandboxed prototype pages may), refuses to be framed, and accepts only GET and HEAD.
-- Agents assess the source and the demos. Screenshots are not sent to providers.
-
-**Public prototype sessions.** The localhost board is never posted. The public channel gets a Markdown reference for each prototype: title, kind, files, demo, code capped at about 8 KB, a mermaid.live link for diagrams, and the draft for text proposals. When Chrome is available, desktop and mobile screenshots of **web** prototypes are posted as ntfy attachments (diagrams get the mermaid.live link instead); a webhook receives a text reference with attachment metadata and no bytes. Files are redacted before they are materialized, so the board, the screenshots and the posted code all come from redacted source, and the end-of-session summary is posted with any board URL removed. Public prototype agents are told they may write fresh prototype code but never reproduce existing or private source. ntfy servers limit attachments (on `ntfy.sh` they expire after a few hours and count toward anonymous visitor limits); check your ntfy server's attachment settings.
-
-See the [Prototype tool calls](#prototype-tool-calls) below.
-
-## Agent creation and refinement
-
-> Have cfo and product-lead create a marketing-budget agent via agent-roundtable, bringing their expertise and useful skills. Then delegate the budget task to the new agent.
-
-> Turn our current roundtable discussion into a new agent that owns the launch checklist. Preview the files before writing them.
-
-> Have skeptic help cfo improve its own instructions, focusing on assumptions and escalation rules. Back up the old definition first.
-
-`create_agent` combines specialists' sequential contributions into an architect's draft, collects independent reviews, and revises when needed. Pass `agents` plus `task`, or `from_session` with a live collaboration or meeting id (`collab-…`, `meeting-…`), or the id of any ended session in the archive, to inherit participants, topic and discussion. Explicit participants are combined with inherited ones. Contribution `rounds` default to 1 and are clamped to 1–3; concurrent reviews are bounded by `ROUNDTABLE_PARALLEL_TURNS`.
-
-New agents go to `ROUNDTABLE_AGENTS_DIR`; new skills from `create_agent` go to `ROUNDTABLE_SKILLS_DIR`. Skill lookup follows Claude Code's precedence: personal `~/.claude/skills`, then the `.claude/skills` beside an agent in `.claude/agents`, then `ROUNDTABLE_SKILLS_DIR`. A skill found anywhere in that order is reused, never overwritten or shadowed. Results report file realpaths. After creation in `.claude/agents`, delegate with Claude Code's Agent tool using the returned `agent.name` as `subagent_type`, or call `start_meeting` with the new agent. `perform_task: true` with writes starts a private roundtable meeting on the task; follow its `next` instructions with `say` and `end_meeting`. If the agents directory had to be created, restart Claude Code so it watches that directory.
-
-`improve_agent` includes the target as a candid self-reviewer by default; add specialists with `with`, focus with `focus`, or inherit discussion with `from_session`. With `include_self: false`, supply participants via `with` or `from_session`. It accepts an agent name, or an existing `.md` path inside `ROUNDTABLE_AGENTS_DIR`, `<workspace>/.claude/agents`, `~/.claude/agents` or a directory listed in `ROUNDTABLE_AGENT_PATHS` (add another project's `.claude/agents` there to refine its agents), and backs it up before replacement. New skills from refinement go to the target's project `.claude/skills` when it sits in `.claude/agents`, provided neither `.claude` nor `.claude/skills` is a symlink and the skills realpath stays inside the project. Otherwise they go to `ROUNDTABLE_SKILLS_DIR` with a symlink fallback warning; results report file realpaths. `write: false` on either tool returns `files` previews and writes nothing.
-
-Agent-file safety rules:
-
-- Creation never overwrites an agent. Identity collision checks use names from frontmatter read the way Claude Code reads it. Name or identity collisions receive `-2`, `-3`, … suffixes. The `subagent-` filename prefix is used only when most existing top-level `.md` files have it.
-- Refinement preserves the original identity and unmanaged frontmatter. Frontmatter is read the way Claude Code reads it, including its single recovery pass for generated descriptions and leading tabs. Refinement preserves exactly the keys Claude Code sees and refuses files Claude Code cannot parse or whose frontmatter contains `---` inside a value; fix those files first.
-- Only one improve run per target is allowed. A second fails fast with `improve_agent is already running for <key>; wait for it to finish`. If the file changes, is renamed or is deleted during the run, it is not overwritten: the proposal goes to `<target>.proposed-<timestamp>` (not an agent file), and `next` explains how to proceed.
-- Refinement saves `<target>.bak-YYYYMMDD-HHMMSS` before replacement, adding `-2`, `-3`, … on backup collisions; backups are not agent `.md` files. Replacement is atomic via a temp file and rename, keeping the original mode. Proposals also keep the captured original mode.
-- Only `name`, `description`, `model`, `tools` and `skills` from model output enter frontmatter. Models are limited to `opus`, `sonnet`, `haiku`, `inherit`; tools to `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebSearch`, `WebFetch`. Generated hooks, permission settings and other unmanaged fields are ignored. Generated descriptions replace runs of three or more hyphens with `—` and warn. YAML serialization rejects embedded `---` and verifies that Claude Code reads exactly the intended metadata. Tools fail closed: a tool list with no allowlist matches, or a value of the wrong type, is rejected and the architect retries once. A created agent always gets an explicit `tools:` line, because Claude Code grants every tool when it is missing: when the definition omits tools, the agent gets `Read, Grep, Glob` and the warning `tools omitted: defaulting to Read, Grep, Glob (read-only)`. Refinement keeps the target's own tools line; a target without one keeps inheriting every tool, with the warning `tools omitted: the target has no tools line, so it still inherits every tool; list tools to restrict it`.
-- At most six skills are attached. Existing skills are reused and never overwritten; reserved names receive a `-skill` suffix. Reusable procedures live in skills rather than the persona body.
-
-Public workshops post contributions, reviews and a redacted summary of the final definition: name, description, model, tools, skill names and status, contribution credits, changes and open questions. The summary excludes its system prompt, skill instructions and skill descriptions derived from instructions. Exact passages copied from private instructions into summary fields are withheld. Workshops never post context, persona text, the fleet listing or the source-session transcript. Public improve contributors, reviewers and the architect are asked to point to passages rather than reproduce them; none of their prompts include the target's recent activity. Private improve contributor prompts include recent topics and outcomes from the local activity log. Local activity records use `agent-creation` / `agent-refinement` kinds.
-
-The five new tools validate argument types before any engine call: strings, arrays of non-empty agent names, finite numbers and booleans. Missing required values keep the engine's actionable errors.
-
-See the [Agent workshop tool calls](#agent-workshop-tool-calls) below.
-
-## Tools (25)
-
-### Meetings (API-backed)
-
-The caller talks to one agent persona. Provider and model are fixed at `start_meeting` (default provider `anthropic`).
-
-| Tool | Arguments |
-| --- | --- |
-| `start_meeting` | `{ agent, agenda, context?, mode?, debate_focus?, prototype?, public?, provider?, model?, base_url? }` |
-| `say` | `{ meeting_id, message }` |
-| `end_meeting` | `{ meeting_id, request_summary? }` |
-| `list_meetings` | — |
-
-### Local meetings (no API spend)
-
-Spawns the local `claude` CLI with `--system-prompt-file`, so the conversation runs on your Claude subscription. The persona file is passed verbatim. The CLI is stateless, so the whole transcript is re-sent each turn — keep local meetings short. The transcript goes in on stdin; the agent gets read-only tools (`Read`, `Glob`, `Grep`), no MCP servers and no permission prompts, and the CLI gets no provider keys unless `ROUNDTABLE_WORKER_AUTH=api_key`. The CLI runs in `ROUNDTABLE_WORKSPACE_DIR`, so its tools see only that project; when the workspace is `/` or your home directory (an MCP host may start the server in `/`), it runs in an empty directory instead. Server shutdown stops any CLI still running.
-
-| Tool | Arguments |
-| --- | --- |
-| `start_local_meeting` | `{ agent, agenda, context?, mode?, debate_focus?, prototype?, public? }` |
-| `say_local` | `{ meeting_id, message }` |
-| `end_local_meeting` | `{ meeting_id, request_summary? }` |
-| `list_local_meetings` | — |
-
-### Collaborations (agent-to-agent)
-
-Two or more personas take turns on a topic. One provider/model is used for the whole session.
-
-| Tool | Arguments |
-| --- | --- |
-| `start_collaboration` | `{ agents[], topic?, context?, grounding?, max_rounds?, auto_run_rounds?, mode?, debate_focus?, prototype?, public?, provider?, model?, base_url? }` |
-| `continue_collaboration` | `{ collaboration_id, rounds? }` |
-| `nudge_collaboration` | `{ collaboration_id, message }` |
-| `pause_collaboration` | `{ collaboration_id }` |
-| `end_collaboration` | `{ collaboration_id, request_summary? }` |
-| `get_collaboration_transcript` | `{ collaboration_id }` |
-| `list_collaborations` | — |
-
-`max_rounds` and `rounds` are capped at 20.
-
-One turn runs per session at a time. While a turn is in flight, `continue_collaboration`, `nudge_collaboration`, `end_collaboration`, `say`, `end_meeting`, `say_local` and `end_local_meeting` on that session fail at once with `<Session> <id> is busy: a turn is still running. Wait for it to finish, then retry.`, without queueing. `pause_collaboration` and the list and transcript tools still work.
-
-### Ultraplan tools
-
-| Tool | Arguments |
-| --- | --- |
-| `start_ultraplan` | `{ agents[], task, context?, draft_plan?, planner?, revision_rounds?, execution_ready?, public?, provider?, model?, base_url? }` |
-| `submit_plan` | `{ ultraplan_id, plan?, final? }` |
-| `end_ultraplan` | `{ ultraplan_id }` |
-
-### Agent workshop tools
-
-| Tool | Arguments |
-| --- | --- |
-| `create_agent` | `{ agents[]?, task?, context?, from_session?, name?, rounds?, write?, perform_task?, public?, provider?, model?, base_url? }` |
-| `improve_agent` | `{ agent, with[]?, include_self?, focus?, context?, from_session?, rounds?, write?, public?, provider?, model?, base_url? }` |
-
-### Contracts (heads-down)
-
-A contract is what a heads-down run builds: the goal and the human's request verbatim, tasks (persona, dependencies, write paths, acceptance criteria, checks), interfaces, decisions, validation commands (structured argv), budget and the lead's authority. Every participant must answer `Consent: AGREE` or `Consent: OBJECT` on its current version before the orchestrator that proposed it can freeze it: an agreement to an earlier version does not count. Contracts live under `ROUNDTABLE_HOME/executions/<exe>/contracts/<ctr>/` (`v<N>.json` and `CONTRACT.md`); nothing is written to the repository. These tools take no unknown arguments.
-
-| Tool | Arguments |
-| --- | --- |
-| `propose_contract` | `{ goal, orchestrator, title?, original_prompt?, artifacts[]?, from_session?, plan?, contract?, parent_contract?, parent_task?, participants[]?, repo_dir?, base_ref?, consent?, provider?, model?, base_url? }` |
-| `amend_contract` | `{ contract_id, patch, reason, orchestrator, from_session?, consent?, override_consent?, provider?, model?, base_url? }` |
-| `freeze_contract` | `{ contract_id, orchestrator, excuse[]?, abandon_round? }` (`excuse` items are `{ agent, reason }`) |
-
-- `propose_contract` takes the structure from an explicit `contract` object with tasks, then from the last `roundtable-tasks` block in `plan` or in the archived `from_session`, then from a structuring call on the plan (one retry quoting the errors). It resolves `repo_dir` to its git top level and `base_ref` (default `HEAD`) to a commit. `consent: true` asks every participant right away; an unclear answer is re-asked once, then counts as an objection.
-- `amend_contract` applies an RFC 7396 merge patch and makes v(N+1). Amending a draft makes a new proposal that everyone must consent to again (`consent: true` asks them all). Amending a frozen contract cancels the tasks it removes and tells the agents of affected tasks to re-read the contract; a change to its budget, scope, sandbox, authority, validation, workers or goal needs `consent: true` (everyone is asked first, and it applies only if all agree) or `override_consent: true` (audited). `patch: {}` with `consent: true` asks everyone who has not agreed to the current version.
-- `freeze_contract` lists every reason it refuses: an unresolved objection or unclear answer, a participant who has not answered about the current version, a consent round in flight, a busy source session, or, for a child contract, a parent that is not frozen. `excuse` sets these aside with a reason, and `abandon_round` ends a consent round whose process died. Excusals, abandoned rounds and the frozen sha256 are written to the audit log. Freezing starts nothing.
-
-### Heads-down runs
-
-- `execute` starts a frozen contract when the human asks; it returns `needs_input` questions until visibility, budget, sandbox and the worker CLI are settled, then the runner and the `watch` command to run in the background.
-- `execution_status` reports progress (`focus: "nav"` answers "how close is the nav?") with the views summary, tasks, escalations, events, budget and context.
-- `control_execution` pauses, resumes, steers, aborts or purges a run; `to_table: true` marks a trip back to the table.
-- `resolve_escalation` answers an escalation: decide, huddle, retry, reassign, amend, dismiss or await_human.
-
-Arguments and behaviour: [heads-down design, §13 and §15](docs/design/heads-down.md#13-orchestrator-experience).
-
-### LLM
-
-| Tool | Arguments |
-| --- | --- |
-| `chat_completion` | `{ messages[], provider?, model?, max_tokens?, temperature?, base_url? }` (default provider `openai`) |
-
-### Diagnostics
-
-| Tool | Returns |
-| --- | --- |
-| `debug_env` | version, whether each key is configured (presence only, never any part of the value), Ollama reachability, default models, agents/skills/workspace dirs, activity log path or `off`, `sessions_dir` (the session archive), parallel turn limit, active sessions including ultraplans, public-session publisher settings, a `prototypes` block: `dir`, `chrome` (the detected binary or `null`), `screenshots`, `open_browser`, `ttl_ms`, `active_boards` |
+Create personas in that directory or copy the [examples](examples/). Set keys for the [providers](docs/providers.md) you use; local meetings use your Claude CLI login. For source installs, `.env`, `add-json` and project `.mcp.json` registration, see [getting started](docs/getting-started.md) and [configuration](docs/configuration.md). After a rebuild, reconnect with `/mcp`.
 
 ## Modes
 
-- **debate** (meetings, local meetings, collaborations): the agent, or every agent after `agents[0]`, acts as a challenger that stress-tests a position instead of helping build it. `agents[0]` is the proponent. `debate_focus` optionally narrows the challenge.
-- **waffle-house** (collaborations only): an adversarial gauntlet. `agents[0]` defends an idea, every other agent attacks it. Each round every attacker attacks, then the defender answers the whole volley (rebut, concede or revise) and restates its "Current position (vN)". A session runs `1 + max_rounds x N` agent turns and always ends on the defender's rebuttal; the defender writes the summary (final form of the idea, what changed and which attack forced it, unanswered attacks, confidence). Needs 2+ agents. Attackers may be blunt about the idea; identity attacks, threats and slurs are out of bounds.
+### At the table
 
-- **prototype** (a flag, not a mode): agents show proposals as prototypes; combines with the modes above except conversation. See [Prototype mode](#prototype-mode).
+Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
-- **conversation** (collaborations only): informal chat from the agents' own situation; optional topic and private grounding. See [Conversation mode](#conversation-mode).
-
-Nudges from the caller never count as agent turns, so they do not shorten a session or change whose turn it is.
-
-## Public sessions
-
-Pass `public: true` to `start_meeting`, `start_local_meeting`, `start_collaboration`, `start_ultraplan`, `create_agent` or `improve_agent` (default `false`) and the session is mirrored live to a public channel. Meeting/collaboration start results and ultraplan steps include `public: { url, topic }` so you can watch while they run. Ultraplan and workshop final results include a public transcript block. When you end the session, the server flushes pending posts, downloads the public record, and saves a Markdown transcript under `ROUNDTABLE_TRANSCRIPTS_DIR`. `end_*` results then end with a line such as `Public transcript: <url> (live ~12h on the public server) · Saved: <path> · Published 9/9`, followed by warnings if anything was not delivered, the channel was rate limited, or the history was truncated. `list_*` results include `public` and `mode`.
-
-**Privacy rules.** A public channel is readable by anyone who has the link.
-
-- Posted: a header (mode, participants, topic or agenda), agent replies, your `say` and `nudge` messages, submitted plans, and summaries/final documents. Agent workshops post contributions, reviews and a redacted summary of the final definition (name, description, model, tools, skill names and status, contribution credits, changes and open questions), without its system prompt or skill instructions.
-- Never posted: the `context` argument, system prompts, persona files, grounding packets, fleet listings, or source-session transcripts in workshops. Public sessions use agent labels rather than private file paths. Agents may still paraphrase context in their replies, so keep `context` generic in public sessions. The tool description tells the calling model to set `public` only when you ask for it.
-- Public improve prompts exclude the target's recent activity and ask contributors and reviewers to point to passages rather than reproduce them.
-- Every agent's system prompt gets a notice that the session is public, telling it to work at the level of ideas and never reproduce private context, code, credentials or personal information.
-- Outgoing text passes through a mechanical redaction filter (emails, phone numbers, API-key and token patterns, home-directory paths, private IP addresses, card numbers that pass a Luhn check, US SSNs). It is a backstop only and cannot catch personal names or unusual secrets.
-- Channel names are random (`<prefix>-<session id>-<22 random characters>`) and never derived from the topic. Unlisted is not private: anyone with the link can read it. Do not put anything in a public session that you would not put on a billboard.
-- Publishing never fails or blocks a session. If posting fails, the session continues and the failure shows up in the end-of-session block; the local transcript marks undelivered entries.
-- If a server exits before a public session is ended, the transcript is not saved; the public channel just expires.
-
-**Prototype sessions.** With `prototype: true`, public channels get a Markdown reference per prototype and, when Chrome is available, screenshots of web prototypes as attachments; the localhost board is never posted. See [Prototype mode](#prototype-mode).
-
-**ntfy (default).** Messages go to `ROUNDTABLE_NTFY_URL` (default `https://ntfy.sh`) as JSON with `Firebase: no`, so they are not forwarded to Google. Open `<server>/<topic>` in a browser to watch; the page renders Markdown. Limits on the anonymous `ntfy.sh` server: 250 messages per day, a burst of 60 requests then one every 5 seconds, and messages are cached for 12 hours. Replies longer than about 3.8 KB are split into ordered parts. The server retries on 429 (honoring `Retry-After`) and stops posting for the session if the daily limit is reached or auth is rejected, then marks the channel degraded. Self-host ntfy or set a token to lift the limits.
-
-**Webhook alternative.** Set `ROUNDTABLE_PUBLISHER=webhook` and `ROUNDTABLE_WEBHOOK_URL` to receive each entry as a JSON POST `{session, turn, part, parts, agent, content, timestamp}`, optionally with `ROUNDTABLE_WEBHOOK_AUTH_HEADER` and a `ROUNDTABLE_WEBHOOK_VIEW_URL` template containing `{channel}`. A webhook cannot return history, so the saved transcript is built from the local copy. The URL must be https, or plain http to loopback or a private (LAN) address; cloud metadata addresses are refused, every resolved address is checked on each post, and redirects are not followed.
-
-## Providers
-
-| Provider id | Backend | Default model | Notes |
-| --- | --- | --- | --- |
-| `anthropic` | Anthropic Messages API | `claude-opus-5` | Aliases `opus` / `sonnet` resolve to `claude-opus-5` / `claude-sonnet-5`. `temperature` is never sent. |
-| `openai` | OpenAI Chat Completions | `gpt-5.6-luna` | Uses `max_completion_tokens`. |
-| `together` | Together AI | `zai-org/GLM-5.3` | Any Together model id, e.g. `Qwen/Qwen3.8-2.4T-A95B`. |
-| `replicate` | Replicate predictions API | `qwen/qwen3-235b-a22b-instruct-2507` | `model` accepts `owner/name`, `owner/name:version`, or a `https://replicate.com/owner/name` URL. The server reads the model's input schema once and only sends fields the model declares (`prompt`, `system_prompt`, `max_tokens` or `max_new_tokens`, `temperature`). Cold starts are covered by the request timeout. |
-| `ollama` | Local Ollama at `OLLAMA_URL` | `qwen3:14b` | Only usable when `GET $OLLAMA_URL/api/tags` answers within 1 s. |
-| `openai_compatible` | Any `/v1/chat/completions` server (LM Studio, vLLM, llama.cpp server, OpenRouter, Groq, Fireworks, …) | `OPENAI_COMPATIBLE_MODEL` | Base URL from `OPENAI_COMPATIBLE_BASE_URL` or the `base_url` argument. API key optional — the `Authorization` header is omitted when `OPENAI_COMPATIBLE_API_KEY` is unset; when it is set it is sent only to `OPENAI_COMPATIBLE_BASE_URL`'s origin (and `ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS`). A per-call `base_url` may not target cloud metadata or, unless `ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1`, private addresses, and must be https except to loopback (and, with that setting, to private addresses such as a LAN LM Studio or vLLM server). |
-
-Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 10 min). Empty replies are errors, never blank messages. Unknown provider ids are rejected. Missing keys fail per call with a message naming the variable — the server itself always starts.
-
-## Environment variables
-
-| Variable | Required for | Default |
+| Format | What it does | Example prompt |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | `anthropic` | — |
-| `OPENAI_API_KEY` | `openai` | — |
-| `TOGETHER_API_KEY` | `together` | — |
-| `REPLICATE_API_TOKEN` | `replicate` | — |
-| `OPENAI_COMPATIBLE_BASE_URL` | `openai_compatible` (unless `base_url` is passed) | — |
-| `OPENAI_COMPATIBLE_API_KEY` | optional | — |
-| `OPENAI_COMPATIBLE_MODEL` | `openai_compatible` | `default` |
-| `OLLAMA_URL` | `ollama` | `http://localhost:11434` |
-| `ROUNDTABLE_AGENTS_DIR` | agent prompt lookup | `.claude/agents` (relative to the server's working directory — use an absolute path) |
-| `ROUNDTABLE_SKILLS_DIR` | last skill lookup location after personal/project skills; new create skills and improve skills outside `.claude/agents` | `skills` beside the agents directory (normally `.claude/skills`) |
-| `ROUNDTABLE_WORKSPACE_DIR` | conversation grounding | project containing `.claude/agents`, otherwise server working directory |
-| `ROUNDTABLE_ACTIVITY_LOG` | stored session activity; excerpts in private conversation grounding and private improve prompts | `~/.agent-roundtable/activity.jsonl`; `off`, `false`, `0` or `no` disables it |
-| `ROUNDTABLE_PARALLEL_TURNS` | concurrent ultraplan phases and workshop reviews | `4` (minimum 1) |
-| `ROUNDTABLE_ANTHROPIC_MODEL` | default Anthropic model (id or alias) | `claude-opus-5` |
-| `ROUNDTABLE_OPENAI_MODEL` | default OpenAI model | `gpt-5.6-luna` |
-| `ROUNDTABLE_TOGETHER_MODEL` | default Together model | `zai-org/GLM-5.3` |
-| `ROUNDTABLE_REPLICATE_MODEL` | default Replicate model | `qwen/qwen3-235b-a22b-instruct-2507` |
-| `ROUNDTABLE_OLLAMA_MODEL` | default Ollama model | `qwen3:14b` |
-| `ROUNDTABLE_MAX_TOKENS` | max output tokens (thinking tokens count) | `8192` |
-| `ROUNDTABLE_LLM_TIMEOUT_MS` | per-request timeout | `600000` |
-| `ROUNDTABLE_PUBLISHER` | public sessions: `ntfy` or `webhook` | `ntfy` |
-| `ROUNDTABLE_NTFY_URL` | ntfy server | `https://ntfy.sh` |
-| `ROUNDTABLE_NTFY_TOKEN` | ntfy access token (`tk_...`), if the server needs auth | — |
-| `ROUNDTABLE_NTFY_USER` / `ROUNDTABLE_NTFY_PASSWORD` | ntfy basic auth, alternative to the token | — |
-| `ROUNDTABLE_WEBHOOK_URL` | webhook publisher: URL that receives each entry as JSON; https, or http to loopback or a private (LAN) address; never a cloud metadata address | — |
-| `ROUNDTABLE_WEBHOOK_VIEW_URL` | webhook publisher: URL template for the viewing page, `{channel}` is replaced | — |
-| `ROUNDTABLE_WEBHOOK_AUTH_HEADER` | webhook publisher: value sent as the `Authorization` header | — |
-| `ROUNDTABLE_PUBLIC_TOPIC_PREFIX` | prefix of the generated public channel name | `roundtable` |
-| `ROUNDTABLE_TRANSCRIPTS_DIR` | where public-session transcripts are saved | `~/.agent-roundtable/transcripts` |
-| `ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS` | max wait for pending posts when a public session ends | `30000` |
-| `ROUNDTABLE_PROTOTYPE_DIR` | prototype sandbox root; refused inside a git work tree, as a symlink, or when owned by another user; created with mode 0700 | `<os temp dir>/agent-roundtable-prototypes` |
-| `ROUNDTABLE_PROTOTYPE_TTL_MS` | prototype safety cap: a prototype still under assessment after this long is destroyed; values below `60000` are raised to `60000` | `1800000` (30 min) |
-| `ROUNDTABLE_PROTOTYPE_OPEN` | open the prototype board in a browser at session start | off (`1`, `true`, `yes` or `on` enables) |
-| `ROUNDTABLE_CHROME_PATH` | Chrome/Chromium binary for public-session screenshots | auto-detect: the Google Chrome or Chromium app (macOS) or Chrome install (Windows), then `google-chrome`, `google-chrome-stable`, `chromium` or `chromium-browser` on `PATH` |
-| `ROUNDTABLE_PROTOTYPE_SCREENSHOTS` | screenshots of web prototypes; only used by public prototype sessions | on (`0`, `false`, `no` or `off` disables) |
-| `ROUNDTABLE_LOCAL_TIMEOUT_MS` | local meetings: timeout for one `claude -p` call; the CLI's process group is killed after it | `300000` (5 min) |
-| `ROUNDTABLE_WORKER_AUTH` | `api_key` passes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` to the `claude` CLI (local meetings) and `OPENAI_API_KEY` to `codex`; otherwise they use their own login (including `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, and Bedrock, Vertex or Foundry credentials when the CLI is set to use them) and get no provider keys | CLI login |
-| `ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS` | a per-call `base_url` may reach private, CGNAT, link-local and ULA addresses, over plain http too (cloud metadata stays blocked; loopback is always allowed) | off (`1`, `true`, `yes` or `on` enables) |
-| `ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS` | comma-separated origins (`https://host:port`) besides `OPENAI_COMPATIBLE_BASE_URL`'s that receive `OPENAI_COMPATIBLE_API_KEY` when passed as `base_url` | — (the key goes only to the configured origin) |
-| `ROUNDTABLE_AGENT_PATHS` | extra directories (separated by `:`, or `;` on Windows) that path-like agent refs may point into | — (the agents directory, `<workspace>/.claude/agents` and `~/.claude/agents` are always allowed) |
-| `ROUNDTABLE_PROVIDER_RETRIES` | retries after a provider call fails with 408, 409, 429, 5xx or a network error (backoff with jitter, `Retry-After` honored up to 60 s, always within `ROUNDTABLE_LLM_TIMEOUT_MS`) | `2` (`0` disables, at most `5`) |
-| `ROUNDTABLE_DOTENV` | `off` skips loading `.env` entirely (worker MCP servers start keyless) | `.env` is loaded |
-| `ROUNDTABLE_DEFAULT_VISIBILITY` | how `execute` shows a run when the call names no channel: a comma list of `dashboard`, `chat_only` and `github:<owner/name>` | — (`execute` asks) |
-| `ROUNDTABLE_DEFAULT_BUDGET_USD` | a run's budget when neither `execute` nor the contract sets one | — (`execute` asks) |
-| `ROUNDTABLE_EXECUTION_PROVIDER` | provider of the runner's persona calls: micro-huddles, the lead fallback and goal review | `anthropic` |
-| `ROUNDTABLE_EXECUTION_MODEL` | model of those calls | the provider's default model |
-| `ROUNDTABLE_EXECUTION_BASE_URL` | `base_url` of those calls (an `openai_compatible` or `ollama` endpoint) | — (the provider's configured URL) |
-| `ROUNDTABLE_EXECUTION_RETENTION_DAYS` | days a completed, failed or aborted run (worktrees, branches, log) is kept; swept at server start | `30` (`0` or `off` keeps all) |
-| `ROUNDTABLE_SESSION_RETENTION_DAYS` | days an archived at-the-table session is kept after it ended; swept at server start | `30` (`0` or `off` keeps all) |
-| `ROUNDTABLE_AUDIT_RETENTION_DAYS` | days the audit log keeps a month file after the month ended; swept at server start | `365` (`0` or `off` keeps all) |
+| [Meeting](docs/modes/meetings.md) | Talk with one persona on a chosen provider/model. | “Start a meeting via agent-roundtable with cfo about our Q3 budget.” |
+| [Local meeting](docs/modes/meetings.md#local-meetings) | Talk with a persona through your installed Claude CLI and login. | “Start a local meeting with product-lead about onboarding.” |
+| [Collaboration: collaborate](docs/modes/collaborations.md) | Personas take turns building a shared idea. | “Have cfo and product-lead collaborate on launch priorities for three rounds.” |
+| [Collaboration: debate](docs/modes/collaborations.md#formats) | One proponent faces challengers. | “Have cfo defend our pricing plan against skeptic in a roundtable debate.” |
+| [Collaboration: waffle-house](docs/modes/collaborations.md#formats) | A defender refines an idea through repeated attacks and rebuttals. | “Run a two-round waffle-house: product-lead defends one-click checkout against cfo and skeptic.” |
+| [Collaboration: conversation](docs/modes/collaborations.md#conversation-mode) | Informal colleague chat with an optional theme and private grounding. | “Let cfo and product-lead chat about the launch in conversation mode.” |
+| [Ultraplan](docs/modes/ultraplan.md) | Collect input, review revisions and record sign-offs on a plan. | “Ultraplan the launch with product-lead, cfo and skeptic; show the final document verbatim.” |
+| [Agent workshops](docs/modes/agent-workshops.md) | Specialists create or improve an agent and reusable skills. | “Have cfo and skeptic create a budget agent, then improve product-lead's escalation rules; preview both.” |
+| [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local board for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
+| [Public sessions](docs/modes/public-sessions.md) | Mirror an explicitly public session to ntfy or a webhook. | “Make that pricing debate public and give me the viewing link.” |
 
-`.env` is loaded from the package directory (next to `package.json`) with `override: true`, so values there win over anything the MCP host passes in its `env` block. `.env` is gitignored and is the single source of truth for secrets. See `.env.example`.
+### Heads-down
 
-## Agent prompt resolution
+[Heads-down runs](docs/heads-down.md) execute an agreed, frozen contract in parallel task worktrees with leases, checks, a watchdog and escalations. Example: “Execute the approved contract with a $20 budget and a dashboard; keep me posted here.” See the [example contract](examples/contract.example.json).
 
-An `agent` argument that contains `/` or `\`, or ends in `.md`, is a path: it must be a `.md` file whose real path is inside `ROUNDTABLE_AGENTS_DIR`, `<ROUNDTABLE_WORKSPACE_DIR>/.claude/agents`, `~/.claude/agents` or a directory listed in `ROUNDTABLE_AGENT_PATHS`. Any other `agent` is a name, resolved in order as:
+## Tools
 
-1. `<ROUNDTABLE_AGENTS_DIR>/<agent>.md`;
-2. `<ROUNDTABLE_AGENTS_DIR>/subagent-<agent>.md`;
-3. `<ROUNDTABLE_AGENTS_DIR>/<agent>/AGENT.md`.
+**37 tools on the orchestrator server; 7 on worker servers.** Worker tools appear in both; the orchestrator's copies also require `execution_id` and `agent_token`. The table follows the registered definitions in `src/tools/*.ts`; [full arguments and examples](docs/tools.md).
 
-Either way the file's real path must stay inside those directories: an agent file that is a symlink to somewhere else (dotfiles, say) needs that directory in `ROUNDTABLE_AGENT_PATHS`.
+| Group | Tool | Purpose |
+| --- | --- | --- |
+| Meetings | [`start_meeting`](docs/tools.md#start_meeting) | Start a conversation with one persona. |
+| Meetings | [`say`](docs/tools.md#say) | Send a message in an API meeting. |
+| Meetings | [`end_meeting`](docs/tools.md#end_meeting) | End an API meeting, optionally with a summary. |
+| Meetings | [`list_meetings`](docs/tools.md#list_meetings) | List active API meetings. |
+| Local meetings | [`start_local_meeting`](docs/tools.md#start_local_meeting) | Start a persona meeting on the local Claude CLI. |
+| Local meetings | [`say_local`](docs/tools.md#say_local) | Send a message in a local meeting. |
+| Local meetings | [`end_local_meeting`](docs/tools.md#end_local_meeting) | End a local meeting, optionally with a summary. |
+| Local meetings | [`list_local_meetings`](docs/tools.md#list_local_meetings) | List active local meetings. |
+| Collaborations | [`start_collaboration`](docs/tools.md#start_collaboration) | Start a discussion between two or more personas. |
+| Collaborations | [`continue_collaboration`](docs/tools.md#continue_collaboration) | Run additional rounds. |
+| Collaborations | [`nudge_collaboration`](docs/tools.md#nudge_collaboration) | Inject guidance without consuming an agent turn. |
+| Collaborations | [`pause_collaboration`](docs/tools.md#pause_collaboration) | Pause after the current turn. |
+| Collaborations | [`end_collaboration`](docs/tools.md#end_collaboration) | End a discussion and return its transcript and optional summary. |
+| Collaborations | [`get_collaboration_transcript`](docs/tools.md#get_collaboration_transcript) | Read a discussion without ending it. |
+| Collaborations | [`list_collaborations`](docs/tools.md#list_collaborations) | List active collaborations. |
+| Ultraplan | [`start_ultraplan`](docs/tools.md#start_ultraplan) | Collect input and begin a reviewed plan. |
+| Ultraplan | [`submit_plan`](docs/tools.md#submit_plan) | Review a full plan version or collect final sign-offs. |
+| Ultraplan | [`end_ultraplan`](docs/tools.md#end_ultraplan) | Close a plan without sign-offs. |
+| Agent workshops | [`create_agent`](docs/tools.md#create_agent) | Have specialists design and optionally save a new agent. |
+| Agent workshops | [`improve_agent`](docs/tools.md#improve_agent) | Review and optionally update an agent with a backup. |
+| Contracts | [`propose_contract`](docs/tools.md#propose_contract) | Turn a plan into a draft execution contract. |
+| Contracts | [`amend_contract`](docs/tools.md#amend_contract) | Apply a versioned contract merge patch. |
+| Contracts | [`freeze_contract`](docs/tools.md#freeze_contract) | Freeze the current contract after consent. |
+| Runs | [`execute`](docs/tools.md#execute) | Preflight and start an authorized frozen contract. |
+| Runs | [`execution_status`](docs/tools.md#execution_status) | Report progress, blockers, budget and context. |
+| Runs | [`control_execution`](docs/tools.md#control_execution) | Pause, resume, steer, abort or purge a run. |
+| Runs | [`resolve_escalation`](docs/tools.md#resolve_escalation) | Decide, huddle, retry, reassign or amend after an escalation. |
+| Runs | [`join_execution`](docs/tools.md#join_execution) | Register an external worker and return its token once. |
+| Workers (both servers) | [`read_blackboard`](docs/tools.md#read_blackboard) | Read shared run state and your inbox. |
+| Workers (both servers) | [`claim_task`](docs/tools.md#claim_task) | Claim or release an external worker task. |
+| Workers (both servers) | [`lease`](docs/tools.md#lease) | Request or release path leases. |
+| Workers (both servers) | [`post_update`](docs/tools.md#post_update) | Post progress, notes, interfaces, needs or acknowledgements. |
+| Workers (both servers) | [`run_command`](docs/tools.md#run_command) | Run structured argv or a contract check in the sandbox. |
+| Workers (both servers) | [`submit_work`](docs/tools.md#submit_work) | Checkpoint or submit leased changes for checks and merging. |
+| Workers (both servers) | [`escalate`](docs/tools.md#escalate) | Raise a blocker, question, conflict or emergency. |
+| Completion | [`chat_completion`](docs/tools.md#chat_completion) | Call any of the six text providers directly. |
+| Diagnostics | [`debug_env`](docs/tools.md#debug_env) | Inspect configuration and key presence without key values. |
 
-A leading YAML frontmatter block (`--- ... ---` with at least one `key: value` line, as in Claude Code agent files) is stripped before the text becomes the system prompt; a body that merely opens with a markdown horizontal rule is left intact. Metadata is read the way Claude Code reads it: the first following `---` ends the block, even inside a line, and a failed YAML parse gets one quoting and leading-tab recovery pass. Refinement preserves exactly the keys Claude Code sees and refuses files Claude Code cannot parse or whose frontmatter contains `---` inside a value. Identity collision checks use this same metadata view.
+## CLI
 
-When frontmatter lists `skills` (a name, comma-separated names, or a YAML list), skill bodies are appended to the persona under `## Skills`. Lookup tries `~/.claude/skills/<name>/SKILL.md`, then `<project>/.claude/skills/<name>/SKILL.md` beside an agent in `<project>/.claude/agents`, then `<ROUNDTABLE_SKILLS_DIR>/<name>/SKILL.md`: personal skills take precedence over project skills. Any found skill is reused and never overwritten or shadowed. Creation includes the destination project's `.claude/skills` in lookup even when `ROUNDTABLE_SKILLS_DIR` points elsewhere. New skills from creation go to `ROUNDTABLE_SKILLS_DIR`; refinement writes them beside its target in the project's `.claude/skills` when the target sits in `.claude/agents` and neither `.claude` nor `.claude/skills` is a symlink, with the skills realpath inside the project. Unsafe project skills directories fall back to `ROUNDTABLE_SKILLS_DIR` with a warning. Results report actual paths. Plugin names containing `:` are skipped and missing skills warn and are skipped. Each skill is capped at 12,000 characters, 40,000 total, with explicit truncation notes. Personas without skills keep their existing prompt text. Local meetings append skill instructions alongside mode/public directives.
+No arguments starts the orchestrator MCP server. The **8 subcommands** are documented in the [CLI reference](docs/cli.md).
 
-Three generic personas ship in `examples/` (`cfo.md`, `product-lead.md`, `skeptic.md`); copy them into your agents directory or point `ROUNDTABLE_AGENTS_DIR` at `examples/` to try them.
+| Subcommand | Purpose |
+| --- | --- |
+| `mcp` | Start an orchestrator or token-bound worker stdio server. |
+| `hook pre-tool-use` | Check worker file access and leases using stdin hook JSON. |
+| `run <exe>` | Run or recover a heads-down runner. |
+| `watch <exe> --as <name>` | Wait for one orchestrator wake, printing JSON. |
+| `status <exe> [--json]` | Inspect a run's tasks, budget and health. |
+| `verify <exe> [--json]` | Verify execution and audit chains. |
+| `purge <exe> --confirm` | Delete a finished run's worktrees, branches and log. |
+| `help` | Print usage. |
 
-## Setup
+## Docs
 
-Requires Node 22+.
+- [Getting started and registration](docs/getting-started.md)
+- [Mode guides](docs/modes/meetings.md): [collaborations](docs/modes/collaborations.md), [ultraplan](docs/modes/ultraplan.md), [agent workshops](docs/modes/agent-workshops.md), [prototypes](docs/modes/prototype-mode.md), [public sessions](docs/modes/public-sessions.md)
+- [Heads-down user guide](docs/heads-down.md) and [design specification](docs/design/heads-down.md)
+- [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)
+- [Configuration](docs/configuration.md) and [providers](docs/providers.md)
+- [Agent personas and skills](docs/agents.md) and [session archives](docs/sessions.md)
+- [Changelog](CHANGELOG.md), [threat model](docs/THREAT_MODEL.md), [security controls](docs/SECURITY_CONTROLS.md)
 
-```sh
-git clone <repository-url> agent-roundtable
-cd agent-roundtable
-cp .env.example .env   # fill in the keys you have
-npm install
-npm run build          # dist/ is gitignored — a fresh clone must build
-npm test               # offline: unit tests with stubbed fetch + a stdio smoke test, zero API spend
-```
+## Security
 
-Opt-in live check (one tiny `chat_completion` per provider; costs well under a cent):
-
-```sh
-ROUNDTABLE_LIVE_TEST=1 npm run test:live
-# providers default to anthropic,openai,together; replicate is billed per second, so it is opt-in:
-ROUNDTABLE_LIVE_TEST=1 ROUNDTABLE_LIVE_PROVIDERS=replicate npm run test:live
-```
-
-## Registering with Claude Code
-
-Use absolute paths. Any of the three forms works.
-
-**(a) `claude mcp add`** (add `--scope user` to make it global):
-
-```sh
-claude mcp add agent-roundtable \
-  -e ROUNDTABLE_AGENTS_DIR=/absolute/path/to/.claude/agents \
-  -- node /absolute/path/to/agent-mcp/dist/index.js
-```
-
-**(b) `claude mcp add-json`:**
-
-```sh
-claude mcp add-json agent-roundtable '{"type":"stdio","command":"node","args":["/absolute/path/to/agent-mcp/dist/index.js"],"env":{"ROUNDTABLE_AGENTS_DIR":"/absolute/path/to/.claude/agents"}}'
-```
-
-**(c) A project `.mcp.json`:**
-
-```json
-{
-  "mcpServers": {
-    "agent-roundtable": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/absolute/path/to/agent-mcp/dist/index.js"],
-      "env": {
-        "ROUNDTABLE_AGENTS_DIR": "${ROUNDTABLE_AGENTS_DIR:-.claude/agents}"
-      }
-    }
-  }
-}
-```
-
-Tools then appear as `mcp__agent-roundtable__<tool>`. After a rebuild, reload with `/mcp` → Reconnect.
-
-Any other MCP client: run `node dist/index.js` over stdio.
-
-## Tool call reference
-
-A meeting with one persona on Anthropic Sonnet:
-
-```json
-start_meeting { "agent": "cfo", "agenda": "Q3 budget review", "provider": "anthropic", "model": "sonnet" }
-say           { "meeting_id": "<id>", "message": "Runway is 14 months at current burn. What would you cut first?" }
-end_meeting   { "meeting_id": "<id>", "request_summary": true }
-```
-
-A collaboration between two personas, one round run immediately, then continued:
-
-```json
-start_collaboration    { "agents": ["cfo", "skeptic"], "topic": "Should we raise now?", "max_rounds": 3, "auto_run_rounds": 1 }
-continue_collaboration { "collaboration_id": "<id>", "rounds": 2 }
-```
-
-A direct completion on Replicate, addressing the model by its page URL:
-
-```json
-chat_completion {
-  "provider": "replicate",
-  "model": "https://replicate.com/qwen/qwen3-235b-a22b-instruct-2507",
-  "messages": [{ "role": "user", "content": "Summarize the tradeoffs of a four-day work week in three bullets." }]
-}
-```
-
-A direct completion against a local OpenAI-compatible server (LM Studio on its default port):
-
-```json
-chat_completion {
-  "provider": "openai_compatible",
-  "base_url": "http://localhost:1234/v1",
-  "model": "local-model",
-  "messages": [{ "role": "user", "content": "Hello." }]
-}
-```
-
-### Ultraplan tool calls
-
-Orchestrator-owned planning; replace the plan placeholders with the complete text you write:
-
-```json
-start_ultraplan { "agents": ["product-lead", "cfo", "skeptic"], "task": "Plan the onboarding launch" }
-submit_plan    { "ultraplan_id": "<id>", "plan": "<full v1 plan with contributor tags>" }
-submit_plan    { "ultraplan_id": "<id>", "plan": "<full revised plan, including amendment decisions>", "final": true }
-```
-
-Autonomous planner variant:
-
-```json
-start_ultraplan { "agents": ["cfo", "skeptic"], "task": "Plan the onboarding launch", "planner": "product-lead", "revision_rounds": 2 }
-```
-
-To review or sign off the latest version again without creating a new version, omit `plan`:
-
-```json
-submit_plan { "ultraplan_id": "<id>" }
-submit_plan { "ultraplan_id": "<id>", "final": true }
-```
-
-Passing `plan` submits the full next version. Without any version yet, omitting it fails with `No plan version exists yet; pass plan.` To review an existing draft at startup, add `draft_plan`. A stopped planner run can return `phase: "plan"`, the unreviewed latest version, with `previousReviews` when an earlier version was reviewed. Recover with `submit_plan` with or without a full revised `plan`; use `final: true` for sign-off. To close without sign-off, use `end_ultraplan { "ultraplan_id": "<id>" }`.
-
-### Conversation tool calls
-
-```json
-start_collaboration { "agents": ["cfo", "product-lead"], "mode": "conversation", "context": "We just shipped the onboarding redesign; cfo last reviewed the launch budget.", "auto_run_rounds": 2 }
-continue_collaboration { "collaboration_id": "<id>", "rounds": 1 }
-end_collaboration { "collaboration_id": "<id>", "request_summary": true }
-```
-
-Add `topic` for a loose theme, or `grounding: false` to skip workspace, memory and activity excerpts.
-
-### Prototype tool calls
-
-```json
-start_collaboration { "agents": ["product-lead", "skeptic"], "topic": "Checkout redesign", "prototype": true, "max_rounds": 2, "auto_run_rounds": 1 }
-```
-
-The start and `continue_collaboration` JSON results carry a `prototypes` block. `destroyed_this_call` lists what was destroyed since the previous result; `url` is the prototype's page on the board (use it as returned):
-
-```json
-"prototypes": {
-  "board_url": "http://127.0.0.1:<port>/<token>/",
-  "live": [
-    {
-      "label": "P2 v1",
-      "title": "Inline coupon field",
-      "kind": "web",
-      "proposer": "product-lead",
-      "url": "http://127.0.0.1:<port>/<token>/p/P2v1/",
-      "awaiting_verdicts_from": ["skeptic"]
-    }
-  ],
-  "destroyed_this_call": ["P1 v1"],
-  "notice": "Show the human the board URL. Prototypes exist only until the other participants finish assessing them. Do not relay the human's feedback on prototypes into this session until it ends."
-}
-```
-
-Continue as usual; a prototype may be proposed, assessed and destroyed inside one call. If the session is paused while a prototype is under assessment, `continue_collaboration` resumes it:
-
-```json
-continue_collaboration { "collaboration_id": "<id>", "rounds": 1 }
-```
-
-In a prototype meeting you are the assessor. Reply to the agent's prototype with a verdict line; the reply ends with a `Prototypes:` block of the same shape:
-
-```json
-start_meeting { "agent": "product-lead", "agenda": "Pricing page", "prototype": true }
-say           { "meeting_id": "<id>", "message": "Verdict on P1: REVISE — the annual toggle is easy to miss on mobile." }
-```
-
-`nudge_collaboration` is refused while a prototype is under assessment; `pause_collaboration`, `nudge_collaboration` and `get_collaboration_transcript` carry no `prototypes` block. Ending returns the outcomes and the shortlist:
-
-```json
-end_collaboration { "collaboration_id": "<id>", "request_summary": true }
-```
-
-The result adds a **Prototype outcomes** section and a **Shortlist for the human** with the final source, diagram or draft of each shortlisted prototype.
-
-### Agent workshop tool calls
-
-```json
-create_agent { "agents": ["cfo", "product-lead"], "task": "Own marketing budgets and tradeoffs", "name": "marketing-budget", "perform_task": true }
-create_agent { "from_session": "collab-4k9q2mzt", "write": false }
-improve_agent { "agent": "cfo", "with": ["skeptic"], "focus": "Assumptions and escalation rules" }
-improve_agent { "agent": "cfo", "with": ["product-lead"], "include_self": false, "write": false }
-```
-
-## Notes
-
-- State is in memory. A rebuild + reconnect drops every meeting, collaboration and open ultraplan. Activity records and written agent/skill files remain local on disk.
-- Every session is archived when it ends (meetings, local meetings, collaborations, ultraplans when finalized or ended, and agent workshops) to `~/.agent-roundtable/sessions/<id>.json` under `ROUNDTABLE_HOME`: the participants, topic, the transcript as agents saw it, the summary, the ultraplan document with its versions and sign-offs, or the workshop result. Directories are 0700, files 0600, writes are atomic, and secrets are redacted first. Archiving never fails a session; a failed write is logged to stderr.
-- Session ids are a prefix plus 8 random characters (`meeting-`, `local-`, `collab-`, `ultraplan-`, `create-`, `improve-`), so an id from before a restart never points at a different session.
-- Local meetings require the `claude` CLI on `PATH`.
-- The smoke test pins temporary directories and test configuration after loading `.env`, and stubs every fetch. Local credentials or endpoint settings cannot enable network calls or home-directory writes in it.
-- Provider errors (missing key, empty reply, timeout, unknown model) surface as tool errors with the reason; they never abort the server.
+Read the [security policy and private reporting instructions](SECURITY.md).
 
 ## Contributing
 
-`npm test` must pass before a pull request. CI runs the build and tests on Node 22 and 24 and enforces that no absolute user paths are committed.
+Build and run `npm test` before a pull request. See [contributing](docs/contributing.md) for test isolation and checks.
 
 ## License
 
-MIT — see `LICENSE`.
+[MIT](LICENSE).

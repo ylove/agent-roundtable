@@ -762,7 +762,7 @@ describe("debug_env", () => {
   test("reports the prototype configuration", async (t) => {
     stubFetch(t, () => json(500, {}));
     const d = JSON.parse((await handleToolCall("debug_env", {})).content[0].text);
-    assert.equal(d.version, "0.4.0");
+    assert.equal(d.version, "1.0.0");
     assert.equal(d.prototypes.dir, PROTO_ROOT);
     assert.equal(typeof d.prototypes.screenshots, "boolean");
     assert.equal(d.prototypes.open_browser, false);

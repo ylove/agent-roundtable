@@ -53,6 +53,8 @@ const { readActivity } = await import("../../dist/activity.js");
 test("config derives workspace, skills, activity, parallel turns, and version", () => {
   function config(env = {}) {
     const childEnv = { ...process.env, ...env };
+    // This probe checks normal application defaults, outside the test runner.
+    delete childEnv.NODE_TEST_CONTEXT;
     for (const name of ["ROUNDTABLE_HOME", "ROUNDTABLE_SKILLS_DIR", "ROUNDTABLE_WORKSPACE_DIR", "ROUNDTABLE_ACTIVITY_LOG", "ROUNDTABLE_PARALLEL_TURNS"]) {
       if (!(name in env)) delete childEnv[name];
     }
@@ -63,7 +65,7 @@ test("config derives workspace, skills, activity, parallel turns, and version", 
     return JSON.parse(child.stdout);
   }
   const defaults = config();
-  assert.equal(defaults.VERSION, "0.4.0");
+  assert.equal(defaults.VERSION, "1.0.0");
   assert.equal(defaults.SKILLS_DIR, skillsDir);
   assert.equal(defaults.WORKSPACE_DIR, root);
   assert.equal(defaults.ACTIVITY_LOG_PATH, join(fakeHome, ".agent-roundtable", "activity.jsonl"));

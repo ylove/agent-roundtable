@@ -11,6 +11,17 @@
     "node": ">=22"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ylove/agent-roundtable.git"
+  },
+  "homepage": "https://github.com/ylove/agent-roundtable#readme",
+  "bugs": {
+    "url": "https://github.com/ylove/agent-roundtable/issues"
+  },
+  "publishConfig": {
+    "provenance": true
+  },
   "files": [
     "dist",
     "examples",

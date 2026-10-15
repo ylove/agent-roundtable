@@ -536,14 +536,79 @@ export interface CoverageResult {
   changes: ChangedPath[];
 }
 
-/** True when a symlink at `linkPath` with `target` would resolve outside the repository. */
-export function symlinkEscapes(linkPath: string, target: string): boolean {
-  if (!target || target.includes("\0") || posix.isAbsolute(target) || /^[A-Za-z]:/.test(target) || target.startsWith("~")) return true;
-  const resolved = posix.normalize(posix.join(posix.dirname(linkPath), target));
-  return resolved === ".." || resolved.startsWith("../");
+type LinkEntry = { kind: "directory" | "file" } | { kind: "symlink"; target: string };
+type LinkLookup = (path: string) => Promise<LinkEntry | undefined>;
+
+/**
+ * True for unsafe or uncertain resolution, including dangling links and >40 symlink hops.
+ * lookup reads entries without following their final component, from one proposed tree.
+ * Expand links BEFORE processing subsequent `..` segments; lexical normalization is unsafe.
+ */
+export async function symlinkEscapes(linkPath: string, lookup: LinkLookup): Promise<boolean> {
+  const pending = linkPath.split("/");
+  const resolved: string[] = [];
+  let hops = 0;
+  while (pending.length) {
+    const part = pending.shift()!;
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (!resolved.length) return true;
+      resolved.pop();
+      continue;
+    }
+    // Git metadata is not part of the proposed source tree.
+    if (part.toLowerCase() === ".git") return true;
+    let entry: LinkEntry | undefined;
+    try {
+      entry = await lookup([...resolved, part].join("/"));
+    } catch {
+      return true;
+    }
+    if (!entry) return true; // Dangling links are refused, even when lexically in-root.
+    if (entry.kind === "symlink") {
+      const target = entry.target;
+      if (++hops > 40 || !target || /[\0\\\uFFFD]/.test(target) || posix.isAbsolute(target) || /^[A-Za-z]:/.test(target) || target.startsWith("~")) return true;
+      pending.unshift(...target.split("/"));
+    } else {
+      resolved.push(part);
+      if (entry.kind !== "directory" && pending.length) return true;
+    }
+  }
+  return false;
 }
 
-async function judge(t: GitTarget, changes: readonly ChangedPath[], leases: readonly LeaseLike[] | null): Promise<Violation[]> {
+/** Resolve ALL links in an immutable Git tree, including unchanged links affected by edits. */
+async function unsafeTreeSymlinks(t: GitTarget, tree: string): Promise<Violation[]> {
+  const entries = new Map<string, { mode: string; sha: string }>();
+  const listing = await runGit(t, ["ls-tree", "-r", "-t", "-z", "--full-tree", tree]);
+  for (const rec of splitZ(listing.stdout)) {
+    const match = /^(\d{6}) (?:blob|tree|commit) ([0-9a-f]+)\t([\s\S]+)$/.exec(rec);
+    if (!match || match[3].includes("\uFFFD")) throw new GitSafetyError("Cannot safely read proposed tree paths");
+    entries.set(match[3], { mode: match[1], sha: match[2] });
+  }
+  const targets = new Map<string, string>();
+  const lookup: LinkLookup = async (path) => {
+    const entry = entries.get(path);
+    if (!entry) return undefined;
+    if (entry.mode === "040000") return { kind: "directory" };
+    if (entry.mode === "100644" || entry.mode === "100755") return { kind: "file" };
+    if (entry.mode !== "120000") return undefined;
+    let target = targets.get(entry.sha);
+    if (target === undefined) {
+      // Oversized/unreadable targets fail closed; never validate truncated blob contents.
+      target = (await runGit(t, ["cat-file", "blob", entry.sha], { maxOutputBytes: 4096 })).stdout;
+      targets.set(entry.sha, target);
+    }
+    return { kind: "symlink", target };
+  };
+  const out: Violation[] = [];
+  for (const [path, entry] of entries) {
+    if (entry.mode === "120000" && await symlinkEscapes(path, lookup)) out.push({ path, reason: "symlink leaves the worktree" });
+  }
+  return out;
+}
+
+async function judge(changes: readonly ChangedPath[], leases: readonly LeaseLike[] | null): Promise<Violation[]> {
   const out: Violation[] = [];
   const add = (path: string, reason: Violation["reason"]) => {
     if (!out.some((v) => v.path === path && v.reason === reason)) out.push({ path, reason });
@@ -557,10 +622,6 @@ async function judge(t: GitTarget, changes: readonly ChangedPath[], leases: read
     }
     if (c.status === "D") continue;
     if (c.mode === "160000") add(c.path, "nested repository");
-    if (c.mode === "120000") {
-      const target = (await runGit(t, ["cat-file", "blob", c.sha], { maxOutputBytes: 4096, truncate: true })).stdout;
-      if (symlinkEscapes(c.path, target)) add(c.path, "symlink leaves the worktree");
-    }
   }
   return out;
 }
@@ -573,7 +634,7 @@ function globMatched(path: string, leases: readonly LeaseLike[]): boolean {
 /**
  * Lease enforcement for submit and merge: every path HEAD changed since its merge base with
  * `base` (both sides of renames) must be covered by `leases`; .git* metadata needs an explicit
- * lease; gitlinks and symlinks that leave the repository are refused outright.
+ * lease; gitlinks and unsafe symlink chains (including dangling links) are refused outright.
  */
 export async function checkLeaseCoverage(worktree: string, base: string, leases: readonly LeaseLike[]): Promise<CoverageResult> {
   const w = await openWorktree(worktree);
@@ -582,9 +643,10 @@ export async function checkLeaseCoverage(worktree: string, base: string, leases:
 
 /** checkLeaseCoverage for an arbitrary tip in an open target (the merge queue checks a branch). */
 export async function checkRangeCoverage(t: GitTarget, base: string, tip: string, leases: readonly LeaseLike[]): Promise<CoverageResult> {
-  const mb = await mergeBaseOf(t, tip, base);
-  const changes = await rawChanges(t, mb, await resolveCommit(t, tip));
-  const details = await judge(t, changes, leases);
+  const commit = await resolveCommit(t, tip);
+  const mb = await mergeBaseOf(t, commit, base);
+  const changes = await rawChanges(t, mb, commit);
+  const details = [...await judge(changes, leases), ...await unsafeTreeSymlinks(t, commit)];
   return { ok: details.length === 0, base: mb, violations: [...new Set(details.map((d) => d.path))], details, changes };
 }
 
@@ -714,7 +776,7 @@ async function commitCore(
       // During a merge, a change the merge staged and nobody touched since is the integration
       // branch's: it is committed with the merge, and is not the worker's uncovered edit.
       if (!(merging && e.xy[1] === " " && !UNMERGED.has(e.xy))) uncovered.push(e.path);
-    } else if (escapingSymlink(t, e.path)) rejected.push({ path: e.path, reason: "symlink leaves the worktree" });
+    } else if (await escapingSymlink(t, e.path)) rejected.push({ path: e.path, reason: "symlink leaves the worktree" });
     else {
       toStage.push(e.path);
       if (UNMERGED.has(e.xy)) conflicted.push(e.path);
@@ -745,6 +807,15 @@ async function commitCore(
     throw new CommitRefusedError(`Staged changes outside the leases: ${bad.join(", ")}`, bad);
   }
 
+  // Leases can leave target edits unstaged. Check the actual proposed tree as well as the
+  // working files, and include unchanged links whose resolution another edit may affect.
+  const tree = (await runGit(t, ["write-tree"])).stdout.trim();
+  const unsafe = await unsafeTreeSymlinks(t, tree);
+  if (unsafe.length) {
+    if (!merging) await runGit(t, ["reset", "-q"]);
+    throw new CommitRefusedError(`Unsafe symlinks in proposed tree: ${unsafe.map((v) => v.path).join(", ")}`, unsafe.map((v) => v.path));
+  }
+
   const before = await resolveCommit(t, "HEAD");
   if (!staged.length && !merging) {
     return { commit: before, created: false, stat: "", files: [], rewrites: [], uncovered, rejected };
@@ -756,14 +827,21 @@ async function commitCore(
   return { commit, created: true, ...(await summarize(t, from, commit)), uncovered, rejected };
 }
 
-function escapingSymlink(t: GitTarget, rel: string): boolean {
+async function escapingSymlink(t: GitTarget, rel: string): Promise<boolean> {
   try {
     const p = join(t.workTree, rel);
     if (!lstatSync(p).isSymbolicLink()) return false;
-    return symlinkEscapes(rel, readlinkSync(p, "utf8"));
-  } catch {
-    return false; // gone (a deletion)
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== "ENOENT"; // A deletion is safe; other errors are uncertain.
   }
+  return symlinkEscapes(rel, async (path) => {
+    const p = join(t.workTree, path);
+    const entry = lstatSync(p);
+    if (entry.isSymbolicLink()) return { kind: "symlink", target: readlinkSync(p, "utf8") };
+    if (entry.isDirectory()) return { kind: "directory" };
+    if (entry.isFile()) return { kind: "file" };
+    return undefined;
+  });
 }
 
 function hasConflictMarkers(file: string): boolean {

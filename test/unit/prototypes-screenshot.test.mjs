@@ -52,10 +52,10 @@ const { PrototypeTracker } = await import("../../dist/prototypes/index.js");
 
 const posix = process.platform !== "win32";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitFor(cond, ms = 5000) {
+async function waitFor(cond, ms = 15000, description = "condition") {
   const end = Date.now() + ms;
   while (!cond()) {
-    if (Date.now() > end) throw new Error("timed out waiting");
+    if (Date.now() > end) throw new Error(`timed out waiting for ${description}`);
     await sleep(20);
   }
 }
@@ -68,6 +68,10 @@ const gone = (pid) => {
     return e.code === "ESRCH";
   }
 };
+
+// A browser's exit event need not mean its helpers have exited yet. On POSIX the
+// negative pid probes its entire process group, including those helpers.
+const groupsGone = (pids) => pids.every((pid) => gone(pid) && gone(-pid));
 
 /** Set the fake browser's mode and output file for this test only. */
 function fakeMode(t, mode, out) {
@@ -145,18 +149,22 @@ test("ChromeProcesses: killAll stops captures in flight (the whole process group
   const pidsFile = join(await tmpd("rt-chrome-"), "pids.txt");
   fakeMode(t, "hang", pidsFile);
   const procs = new ChromeProcesses();
-  const t0 = Date.now();
   const capture = captureScreenshots("http://127.0.0.1:9/x", out, [DESKTOP_VIEWPORT, MOBILE_VIEWPORT], {
     chromePath: fakeChrome,
     processes: procs,
   });
   await waitFor(() => lines(pidsFile).length === 2 && procs.running.length === 2);
   const pids = lines(pidsFile).map(Number);
+  // Wait until both browsers really have written their profiles before killing
+  // them; a pid alone is published before the fake browser starts its helpers.
+  await waitFor(() => ["desktop", "mobile"].every((name) => existsSync(join(out, `.chrome-${name}`, "Default"))));
+  const t0 = Date.now();
   procs.killAll();
   assert.deepEqual(await capture, []);
-  assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0} ms`);
+  await waitFor(() => groupsGone(pids), 15000, "browser process groups to exit");
+  assert.ok(Date.now() - t0 < 15000, `took ${Date.now() - t0} ms`);
   assert.ok(pids.every(gone), "browsers killed");
-  await sleep(300);
+  assert.ok(groupsGone(pids), "browser helpers killed");
   assert.deepEqual(readdirSync(out), [], "nothing (helpers included) recreates the profile directories");
   // A capture that starts after killAll never leaves a browser running.
   assert.deepEqual(await captureScreenshots("http://127.0.0.1:9/x", out, [DESKTOP_VIEWPORT], { chromePath: fakeChrome, processes: procs }), []);
@@ -184,8 +192,10 @@ for (const how of ["closeSync", "close"]) {
     else await tr.close("ended");
     const r = await turn;
     assert.deepEqual(r.attachments, []);
-    assert.ok(lines(pidsFile).map(Number).every(gone), "browsers killed");
-    await sleep(300);
+    const pids = lines(pidsFile).map(Number);
+    await waitFor(() => groupsGone(pids), 15000, "browser process groups to exit");
+    assert.ok(pids.every(gone), "browsers killed");
+    assert.ok(groupsGone(pids), "browser helpers killed");
     assert.equal(existsSync(tr.sessionDir), false, "nothing recreated the sandbox");
     assert.equal(tr.hasLiveUnderAssessment(), false);
   });

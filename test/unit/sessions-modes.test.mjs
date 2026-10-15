@@ -124,7 +124,7 @@ describe("meeting debate mode", () => {
 });
 
 describe("local meeting debate mode (fake claude on PATH)", () => {
-  const FLAGS = ["-p", "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config"];
+  const FLAGS = ["-p", "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--restricted", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome"];
 
   test("arg builder: no positional prompt, read-only tools, no permission prompts, no MCP servers", () => {
     assert.deepEqual(buildClaudeCliArgs("/p.md"), ["--system-prompt-file", "/p.md", ...FLAGS]);
@@ -137,7 +137,7 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
    * A fake `claude` that records its argv and stdin, then runs `body(dir)` (JavaScript source; default:
    * print "fake reply"). The prompt arrives on stdin only.
    */
-  function fakeClaude(t, body = () => 'process.stdout.write("fake reply");', { help = "  --permission-prompts <target>\n" } = {}) {
+  function fakeClaude(t, body = () => 'process.stdout.write("fake reply");', { help = "  --permission-prompts --restricted --settings --strict-mcp-config --tools --permission-mode --disable-slash-commands --no-chrome\n" } = {}) {
     const dir = mkdtempSync(join(tmpdir(), "fake-claude-"));
     const log = join(dir, "runs.jsonl");
     const script = join(dir, "claude");
@@ -266,7 +266,7 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
 
   test("--permission-prompts is feature-detected once per CLI and omitted when the CLI lacks it", async (t) => {
     resetClaudeCliFeatures();
-    const { dir, runs } = fakeClaude(t, undefined, { help: "Usage: claude [options]\n  --permission-mode <mode>\n" });
+    const { dir, runs } = fakeClaude(t, undefined, { help: "--restricted --settings --strict-mcp-config --tools --permission-mode --disable-slash-commands --no-chrome\n" });
     const { meetingId } = await startLocalMeeting(sample, "agenda");
     await continueLocalMeeting(meetingId, "more");
     await endLocalMeeting(meetingId);
@@ -276,8 +276,18 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     }
     assert.equal(readFileSync(join(dir, "help.log"), "utf8"), "help\n", "one --help for the whole meeting");
     assert.deepEqual(buildClaudeCliArgs("/p.md", undefined, { permissionPrompts: false }), [
-      "--system-prompt-file", "/p.md", "-p", "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--strict-mcp-config",
+      "--system-prompt-file", "/p.md", "-p", "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--strict-mcp-config", "--restricted", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome",
     ]);
+  });
+
+  test("missing safety flags fail closed, name the flag, and cache the failed preflight", async (t) => {
+    const required = ["--restricted", "--settings", "--strict-mcp-config", "--tools", "--permission-mode", "--disable-slash-commands", "--no-chrome"];
+    for (const missing of required) {
+      const { dir, runs } = fakeClaude(t, undefined, { help: required.filter(f => f !== missing).join(" ") });
+      for (let i = 0; i < 2; i++) await assert.rejects(startLocalMeeting(sample, "agenda"), e => e.message.includes(missing));
+      assert.equal(runs().length, 0);
+      assert.equal(readFileSync(join(dir, "help.log"), "utf8"), "help\n");
+    }
   });
 
   test("a failure reported on stdout reaches the error when stderr is empty", async (t) => {

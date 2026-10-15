@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const { buildDockerRunArgs, dockerLimitsFromEnv, defaultSandboxImage, containerUser, DockerBackend, DEFAULT_DOCKER_LIMITS } = await import("../../dist/sandbox/docker.js");
@@ -42,6 +42,9 @@ test("buildDockerRunArgs: the full hardened argv", () => {
     "run", "--rm", "--init",
     "--log-driver", "none",
     "--name", "rt-cmd-abc123",
+    "--label", "roundtable.sandbox=1",
+    "--label", `roundtable.owner-pid=${process.pid}`,
+    "--label", `roundtable.owner-host=${hostname()}`,
     "--network", "none",
     "--read-only",
     "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
@@ -130,7 +133,7 @@ test("limits, image and user come from the environment with safe fallbacks", () 
 // DockerBackend against a fake docker CLI (runs everywhere)
 // ============================================================================
 
-function fakeDocker({ down = false } = {}) {
+function fakeDocker({ down = false, failRm = false, orphan = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "rt-fake-docker-"));
   const log = join(dir, "calls.jsonl");
   const bin = join(dir, "docker");
@@ -142,6 +145,16 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, env: Object.keys(process.env).sort() }) + "\\n");
 const dir = ${JSON.stringify(dir)};
 switch (args[0]) {
+  case "ps":
+    if (${orphan}) {
+      console.log("abcdef012345 2147483647 " + ${JSON.stringify(hostname())});
+      console.log("abcdef012346 " + process.ppid + " " + ${JSON.stringify(hostname())});
+      console.log("abcdef012347 2147483647 other-host");
+    }
+    process.exit(0);
+  case "rm":
+    if (${failRm} && !fs.existsSync(dir + "/allow-rm")) { console.error("daemon disconnected"); process.exit(1); }
+    process.exit(0);
   case "info":
     if (${down}) { console.error("Cannot connect to the Docker daemon. Is the docker daemon running?"); process.exit(1); }
     console.log("27.1.1"); process.exit(0);
@@ -402,4 +415,51 @@ test("docker: egress reaches allowlisted hosts through the proxy and nothing els
   assert.doesNotMatch(r.output, /direct=connected/, r.output);
   const left = await runQuiet("docker", ["ps", "-aq", "--filter", `label=io.agent-roundtable.egress=${tag}`], childEnv("docker"), 30_000);
   assert.equal(left.output, "", "the proxy is torn down after the run");
+});
+
+
+test("early Docker client failure always awaits non-egress container removal", async () => {
+  const fake = fakeDocker();
+  const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1" });
+  const r = await backend.run({ argv: ["lost-attach", "17"], workdir: worktree(), timeoutMs: 10_000 });
+  assert.equal(r.exit, 17);
+  const calls = fake.calls().map(c => c.args);
+  const run = calls.find(a => a[0] === "run");
+  const name = run[run.indexOf("--name") + 1];
+  assert.ok(run.includes("roundtable.sandbox=1"));
+  assert.ok(run.includes(`roundtable.owner-pid=${process.pid}`));
+  assert.deepEqual(calls.at(-1), ["rm", "-f", name], "cleanup completes before run resolves");
+});
+
+test("sweep reconciles labelled containers only when this host's owner is gone", async () => {
+  const fake = fakeDocker({ orphan: true });
+  const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1" });
+  await backend.run({ argv: ["echo", "0"], workdir: worktree(), timeoutMs: 10_000 });
+  const removals = fake.calls().filter(c => c.args[0] === "rm").map(c => c.args[2]);
+  assert.ok(removals.includes("abcdef012345"));
+  assert.ok(!removals.includes("abcdef012346"), "a live owner is retained");
+  assert.ok(!removals.includes("abcdef012347"), "another host's pid is not meaningful here");
+});
+
+test("failed container cleanup is retried by the next call and remains registered for shutdown", async () => {
+  const { killAllSandboxed, sandboxedInFlight } = await import("../../dist/sandbox/process.js");
+  const fake = fakeDocker({ failRm: true });
+  const backend = new DockerBackend({ dockerPath: fake.bin, image: "rt-test-image:1" });
+  const req = { argv: ["echo", "0"], workdir: worktree(), timeoutMs: 10_000 };
+  await backend.run(req);
+  const firstRun = fake.calls().find(c => c.args[0] === "run").args;
+  const firstName = firstRun[firstRun.indexOf("--name") + 1];
+  assert.ok(sandboxedInFlight() > 0);
+  writeFileSync(join(fake.dir, "allow-rm"), "yes");
+  await backend.run(req);
+  const calls = fake.calls().map(c => c.args);
+  assert.equal(calls.filter(a => a[0] === "rm" && a[2] === firstName).length, 2);
+  assert.equal(sandboxedInFlight(), 0);
+
+  const pending = fakeDocker({ failRm: true });
+  await new DockerBackend({ dockerPath: pending.bin, image: "rt-test-image:1" }).run(req);
+  const count = pending.calls().filter(c => c.args[0] === "rm").length;
+  writeFileSync(join(pending.dir, "allow-rm"), "yes");
+  await killAllSandboxed();
+  assert.equal(pending.calls().filter(c => c.args[0] === "rm").length, count + 1);
 });

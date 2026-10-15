@@ -11,6 +11,7 @@ import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { ROUNDTABLE_HOME, WORKSPACE_DIR, localTimeoutMs } from "../config.js";
 import { findExecutable } from "../executables.js";
+import { hasFlag } from "../workers/claude-code.js";
 import { newId } from "../ids.js";
 import { childEnv } from "../security/child-env.js";
 import { mkdirPrivate } from "../security/fs-safe.js";
@@ -120,7 +121,7 @@ export function buildClaudeCliArgs(
   }
   args.push("-p", "--tools", LOCAL_MEETING_TOOLS, "--permission-mode", "dontAsk");
   if (features.permissionPrompts) args.push("--permission-prompts", "none");
-  args.push("--strict-mcp-config");
+  args.push("--strict-mcp-config", "--restricted", "--settings", '{"disableAllHooks":true}', "--disable-slash-commands", "--no-chrome");
   return args;
 }
 
@@ -130,13 +131,19 @@ const featureChecks = new Map<string, Promise<ClaudeCliFeatures>>();
 function claudeCliFeatures(cli: string, cwd: string): Promise<ClaudeCliFeatures> {
   let check = featureChecks.get(cli);
   if (!check) {
-    check = new Promise((resolveFeatures) => {
+    check = new Promise((resolveFeatures, rejectFeatures) => {
       execFile(
         cli,
         ["--help"],
         { env: childEnv("local-meeting"), cwd, encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024, windowsHide: true },
         (err, stdout) => {
-          const permissionPrompts = !err && /--permission-prompts\b/.test(String(stdout));
+          const required = ["--restricted", "--settings", "--strict-mcp-config", "--tools", "--permission-mode", "--disable-slash-commands", "--no-chrome"];
+          const missing = required.filter(flag => err || !hasFlag(String(stdout), flag));
+          if (missing.length) {
+            rejectFeatures(new Error(`Local meetings require claude CLI flags: ${missing.join(", ")}${err ? " (--help failed)" : ""}. Upgrade the installed CLI.`));
+            return;
+          }
+          const permissionPrompts = hasFlag(String(stdout), "--permission-prompts");
           if (!permissionPrompts) {
             console.error(
               `[LocalMeeting] this claude CLI ${err ? "did not answer --help" : "has no --permission-prompts"}; ` +
@@ -282,7 +289,7 @@ export async function executeClaudeCLI(
   console.error(
     `[LocalMeeting] Executing: claude --system-prompt-file ${systemPromptPath}` +
       `${appendSystemPrompt ? " --append-system-prompt <directive>" : ""} -p --tools ${LOCAL_MEETING_TOOLS} ` +
-      `--permission-mode dontAsk${features.permissionPrompts ? " --permission-prompts none" : ""} --strict-mcp-config ` +
+      `--permission-mode dontAsk${features.permissionPrompts ? " --permission-prompts none" : ""} --strict-mcp-config --restricted --settings <hooks-disabled> --disable-slash-commands --no-chrome ` +
       `(prompt on stdin, cwd ${cwd})`
   );
   console.error(`[LocalMeeting] Prompt length: ${prompt.length} chars`);

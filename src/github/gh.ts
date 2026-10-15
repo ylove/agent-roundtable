@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findExecutable } from "../executables.js";
 import { childEnv } from "../security/child-env.js";
+import { redact } from "../publishers/redact.js";
 import { scrubAndCap } from "../security/secrets.js";
 
 export const GH_TIMEOUT_MS = 30_000;
@@ -164,7 +165,7 @@ export async function withBodyFile<T>(body: string, fn: (path: string) => Promis
   const dir = mkdtempSync(join(tmpdir(), "rt-gh-"));
   const path = join(dir, "body.md");
   try {
-    writeFileSync(path, body, { mode: 0o600, flag: "wx" });
+    writeFileSync(path, redact(body).text, { mode: 0o600, flag: "wx" });
     return await fn(path);
   } finally {
     rmSync(dir, { recursive: true, force: true });

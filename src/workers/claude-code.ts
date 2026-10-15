@@ -71,7 +71,7 @@ export interface ClaudeCaps {
 
 export const FULL_CAPS: ClaudeCaps = { model: true, fallbackModel: true, effort: true };
 
-function hasFlag(help: string, flag: string): boolean {
+export function hasFlag(help: string, flag: string): boolean {
   const esc = flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (new RegExp(`(?:^|[\\s,])${esc}(?![\\w-])`, "m").test(help)) return true;
   // "--append-system-prompt[-file]" in the help of CLI 2.1.x

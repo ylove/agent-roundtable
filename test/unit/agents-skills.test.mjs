@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -183,7 +183,7 @@ test("local meetings append skills on every CLI call with debate/public directiv
   const bin = join(root, "bin");
   const log = join(root, "cli-argv.jsonl");
   // The prompt arrives on stdin; drain it before answering, as the real CLI does.
-  const script = fixture(join(bin, "claude"), `#!${process.execPath}\nif (process.argv.includes("--help")) { process.stdout.write("--permission-prompts\\n"); process.exit(0); }\nprocess.stdin.resume();\nprocess.stdin.on("end", () => {\n  require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n  process.stdout.write("local reply");\n});\n`);
+  const script = fixture(join(bin, "claude"), `#!${process.execPath}\nif (process.argv.includes("--help")) { process.stdout.write("--permission-prompts --restricted --settings --strict-mcp-config --tools --permission-mode --disable-slash-commands --no-chrome\\n"); process.exit(0); }\nprocess.stdin.resume();\nprocess.stdin.on("end", () => {\n  require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n  process.stdout.write("local reply");\n});\n`);
   chmodSync(script, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${bin}:${previousPath}`;
@@ -277,4 +277,27 @@ test("retry preserves the literal quotes and comment in a recovered scalar", () 
   const parsed = agents.readFrontmatter('---\nname: "bad\\q" # identity\nbroken: [unclosed\n---\nBody');
   assert.deepEqual(parsed.data, { name: '"bad\\q" # identity', broken: "[unclosed" });
   assert.equal(parsed.parseError, undefined);
+});
+
+
+test("skills refuse outside secret files, intermediate directory links, dangling links and cycles", async () => {
+  const secret = fixture(join(root, ".env.outside"), "opaque-private-value");
+  mkdirSync(join(skillsDir, "leak-file"));
+  symlinkSync(secret, join(skillsDir, "leak-file", "SKILL.md"));
+  const outside = join(root, "outside-skills");
+  fixture(join(outside, "SKILL.md"), "outside private context");
+  symlinkSync(outside, join(skillsDir, "leak-dir"));
+  mkdirSync(join(skillsDir, "dangling"));
+  symlinkSync(join(root, "absent"), join(skillsDir, "dangling", "SKILL.md"));
+  symlinkSync("cycle", join(skillsDir, "cycle"));
+  const internalSecret = fixture(join(skillsDir, ".env.internal"), "internal secret");
+  mkdirSync(join(skillsDir, "secret-name"));
+  symlinkSync(internalSecret, join(skillsDir, "secret-name", "SKILL.md"));
+  fixture(join(agentsDir, "unsafe-skills.md"), "---\nskills: [leak-file, leak-dir, dangling, cycle, secret-name]\n---\nPersona");
+  assert.deepEqual((await agents.loadAgent("unsafe-skills")).skills, []);
+  const listed = agents.listSkills(skillsDir);
+  for (const name of ["leak-file", "leak-dir", "dangling", "cycle", "secret-name"]) assert.ok(!listed.some(s => s.name === name));
+  // Safe in-root links still work.
+  symlinkSync("checking", join(skillsDir, "safe-link"));
+  assert.equal((await agents.loadSkills(["safe-link"], skillsDir))[0].body, "Checking instructions.");
 });

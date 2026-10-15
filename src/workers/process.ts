@@ -2,13 +2,14 @@
 // Worker processes: detached spawns whose output goes to a file, and process-group stops
 //
 // A worker leads its own process group (detached), so stopping it also stops what it started
-// (its MCP server, tool processes). Its stdout and stderr are appended to runs/<attempt>.jsonl
-// rather than piped, so a runner that restarts can adopt a live worker and keep tailing the file.
+// (its MCP server, tool processes). A detached relay owns the group and scrubs stdout/stderr
+// into runs/<attempt>.jsonl, surviving runner restart so adoption can keep tailing that file.
 // The prompt goes in on stdin; nothing of it is ever on argv.
 // ============================================================================
 
 import { spawn } from "node:child_process";
-import { closeSync, lstatSync, openSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { mkdirPrivate } from "../security/fs-safe.js";
 
@@ -46,17 +47,17 @@ export function realDirectory(path: string): string {
 export function spawnWorker(o: SpawnWorkerOptions): Promise<{ pid: number }> {
   const cwd = realDirectory(o.cwd);
   mkdirPrivate(dirname(o.outputPath));
-  const fd = openSync(o.outputPath, "a", 0o600);
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(o.file, o.args, { cwd, env: o.env, detached: true, shell: false, windowsHide: true, stdio: ["pipe", fd, fd] });
+      child = spawn(process.execPath, [fileURLToPath(new URL("./output-relay.js", import.meta.url))], {
+        cwd, env: process.env, detached: true, shell: false, windowsHide: true,
+        stdio: ["pipe", "ignore", "ignore", "ipc"],
+      });
     } catch (e) {
-      closeSync(fd);
       reject(e);
       return;
     }
-    closeSync(fd); // the child holds its own copy
     const exited = new Promise<WorkerExit>((res) => child.once("exit", (code, signal) => res({ code, signal })));
     child.once("error", (e) => {
       if (child.pid === undefined) reject(e);
@@ -68,8 +69,15 @@ export function spawnWorker(o: SpawnWorkerOptions): Promise<{ pid: number }> {
       child.stdin!.on("error", () => {
         /* the worker exited before reading all of stdin; its output says why */
       });
-      child.stdin!.end(o.prompt);
-      resolve({ pid });
+      child.stdin!.end(JSON.stringify({ ...o, cwd }));
+    });
+    let started = false;
+    child.on("message", (message: { started?: boolean; error?: string }) => {
+      if (message.error) reject(new Error(message.error));
+      if (message.started) { started = true; resolve({ pid: child.pid! }); }
+    });
+    child.once("exit", () => {
+      if (!started) reject(new Error("Worker output relay exited before worker startup"));
     });
   });
 }

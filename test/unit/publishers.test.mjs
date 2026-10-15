@@ -761,3 +761,21 @@ test("mergeTranscript: whitespace-trimmed chunks still confirm delivery of multi
   const diff = mergeTranscript(local, [{ turn: 1, speaker: "A", content: "other", complete: true }]);
   assert.equal(diff[0].publicDiffers, true);
 });
+
+test("opaque configured secrets are scrubbed from public replies, titles and metadata", async (t) => {
+  const secret = "opaque-configured-key-Q7m2R9z4";
+  process.env.OPENAI_COMPATIBLE_API_KEY = secret;
+  t.after(() => delete process.env.OPENAI_COMPATIBLE_API_KEY);
+  const calls = stubFetch(t, ok);
+  const ch = createPublicChannel("secret-test", { mode: secret, topic: secret, participants: [secret] }, {
+    config: ntfyCfg, transcriptsDir: await tmp(),
+  });
+  ch.record({ turn: 1, speaker: secret, content: `A reply echoing ${secret}` });
+  const result = await ch.finalize();
+  const outgoing = calls.filter(c => c.init.method === "POST");
+  assert.ok(outgoing.length >= 2);
+  assert.ok(!JSON.stringify(outgoing).includes(secret));
+  const saved = await readFile(result.savedPath, "utf8");
+  assert.ok(!saved.includes(secret));
+  assert.match(saved, /redacted:env:OPENAI_COMPATIBLE_API_KEY/);
+});

@@ -11,6 +11,7 @@
 // ============================================================================
 
 import { realpathSync, statSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import type { SandboxBackend, SandboxResult, SandboxRunRequest } from "../execution/types.js";
 import { randomBase32 } from "../ids.js";
@@ -29,7 +30,7 @@ import {
   validateWorkdir,
 } from "./common.js";
 import { EGRESS_TAG_RE, ensureEgressNetwork, normalizeAllowlist, type EgressNetwork } from "./egress-proxy.js";
-import { runQuiet, sandboxShuttingDown, spawnCaptured } from "./process.js";
+import { registerInflight, runQuiet, sandboxShuttingDown, spawnCaptured } from "./process.js";
 
 // ============================================================================
 // Limits and validation
@@ -145,6 +146,9 @@ export function buildDockerRunArgs(req: SandboxRunRequest, opts: DockerRunOption
     "run", "--rm", "--init",
     "--log-driver", "none",
     "--name", opts.name,
+    "--label", "roundtable.sandbox=1",
+    "--label", `roundtable.owner-pid=${process.pid}`,
+    "--label", `roundtable.owner-host=${hostname()}`,
     "--network", egress ? egress.network : "none",
     "--read-only",
     "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
@@ -191,6 +195,52 @@ const PULL_TIMEOUT_MS = 600_000;
 const KILL_TIMEOUT_MS = 10_000;
 /** A tag can be re-pushed; re-read the digest at least this often. */
 const DIGEST_TTL_MS = 10 * 60_000;
+
+const CLEANUP_TIMEOUT_MS = 3_000;
+interface CleanupTarget {
+  docker: string;
+  name: string;
+  pending: boolean;
+  unregister: () => void;
+  cleaning?: Promise<void>;
+}
+// Failed removals stay registered for shutdown and are retried by the next sandbox call.
+const cleanupTargets = new Set<CleanupTarget>();
+
+function removeContainer(target: CleanupTarget): Promise<void> {
+  if (target.cleaning) return target.cleaning;
+  target.cleaning = (async () => {
+    const r = await runQuiet(target.docker, ["rm", "-f", target.name], childEnv("docker"), CLEANUP_TIMEOUT_MS);
+    if (r.ok || /No such container/i.test(r.output)) {
+      cleanupTargets.delete(target);
+      target.unregister();
+    } else target.pending = true;
+  })().finally(() => { target.cleaning = undefined; });
+  return target.cleaning;
+}
+
+function trackContainer(docker: string, name: string): CleanupTarget {
+  const target: CleanupTarget = { docker, name, pending: false, unregister: () => {} };
+  cleanupTargets.add(target);
+  target.unregister = registerInflight({ label: `container ${name}`, stop: () => removeContainer(target) });
+  return target;
+}
+
+/** Sweep only this host's labelled containers whose recorded owner demonstrably no longer exists. */
+async function reconcileContainers(docker: string): Promise<void> {
+  await Promise.all([...cleanupTargets].filter(t => t.pending).map(removeContainer));
+  const r = await runQuiet(docker, ["ps", "-a", "--filter", "label=roundtable.sandbox=1", "--format",
+    '{{.ID}} {{.Label "roundtable.owner-pid"}} {{.Label "roundtable.owner-host"}}'], childEnv("docker"), CLEANUP_TIMEOUT_MS);
+  if (!r.ok) return;
+  for (const line of r.output.split("\n")) {
+    const [id, owner, host] = line.trim().split(/\s+/);
+    const pid = Number(owner);
+    if (!/^[a-f0-9]{12,64}$/.test(id) || host !== hostname() || !Number.isSafeInteger(pid) || pid <= 1) continue;
+    try { process.kill(pid, 0); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ESRCH") await removeContainer(trackContainer(docker, id));
+    }
+  }
+}
 
 export class DockerBackend implements SandboxBackend {
   readonly id = "docker" as const;
@@ -293,6 +343,8 @@ export class DockerBackend implements SandboxBackend {
     });
     if (sandboxShuttingDown()) return failure("sandbox is shutting down");
 
+    await reconcileContainers(this.docker);
+    if (sandboxShuttingDown()) return failure("sandbox is shutting down");
     const prepared = await this.prepare(image, setupSignal, remaining());
     if (!prepared.ok) return failure(prepared.error);
     if (setupSignal.aborted) return { ...failure("interrupted"), imageDigest: prepared.digest };
@@ -313,6 +365,7 @@ export class DockerBackend implements SandboxBackend {
       }
     }
 
+    const cleanup = trackContainer(this.docker, name);
     try {
       if (setupSignal.aborted) return { ...failure("interrupted"), imageDigest: prepared.digest };
       const args = buildDockerRunArgs(canonical, egress ? { ...base, egress } : base);
@@ -327,10 +380,6 @@ export class DockerBackend implements SandboxBackend {
         beforeKill: async () => {
           await runQuiet(docker, ["kill", name], childEnv("docker"), KILL_TIMEOUT_MS);
         },
-        // A container killed before it started is left "created", which --rm does not remove.
-        afterKill: () => {
-          void runQuiet(docker, ["rm", "-f", name], childEnv("docker"), KILL_TIMEOUT_MS);
-        },
       });
       return {
         exit: r.exit,
@@ -343,11 +392,9 @@ export class DockerBackend implements SandboxBackend {
         imageDigest: prepared.digest,
       };
     } finally {
-      if (egress) {
-        // The network cannot be removed while the container still has an endpoint on it.
-        await runQuiet(this.docker, ["rm", "-f", name], childEnv("docker"), KILL_TIMEOUT_MS);
-        await egress.teardown();
-      }
+      // Await removal even when attach fails or no egress network exists.
+      await removeContainer(cleanup);
+      if (egress) await egress.teardown();
     }
   }
 }

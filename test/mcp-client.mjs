@@ -5,8 +5,9 @@ import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-export function startServer({ env = {}, timeoutMs = 120_000 } = {}) {
-  const child = spawn(process.execPath, [resolve(here, "../dist/index.js")], {
+/** Start dist/index.js; `args` are its command-line arguments (none: the orchestrator server). */
+export function startServer({ env = {}, timeoutMs = 120_000, args = [] } = {}) {
+  const child = spawn(process.execPath, [resolve(here, "../dist/index.js"), ...args], {
     env: { ...process.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -87,6 +88,9 @@ export function startServer({ env = {}, timeoutMs = 120_000 } = {}) {
     stderr: () => stderr.join(""),
     noise: () => noise.slice(),
     stop: () => child.kill(),
+    /** Resolves with the exit code once the server process has exited. */
+    exited: () => new Promise((r) => (child.exitCode !== null ? r(child.exitCode) : child.once("exit", (code) => r(code)))),
+    pid: child.pid,
   };
 }
 

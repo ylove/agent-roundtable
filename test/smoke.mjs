@@ -43,6 +43,35 @@ const smokeEnv = {
   ROUNDTABLE_PROTOTYPE_OPEN: "",
 };
 const PROTOTYPE_START_TOOLS = ["start_meeting", "start_local_meeting", "start_collaboration"];
+const WORKER_TOOLS = ["read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"];
+
+// A worker server (mcp --worker) for a registered agent lists exactly the seven worker tools.
+async function checkWorkerServer() {
+  console.log("worker server");
+  Object.assign(process.env, smokeEnv);
+  const { createExecutionStore } = await import("../dist/execution/store.js");
+  const { prepareWorkerFiles } = await import("../dist/workers/files.js");
+  const store = await createExecutionStore({ repoRoot: root, baseSha: "0".repeat(40), agentsDir });
+  const files = await prepareWorkerFiles({ store, agent: "builder-1", persona: { body: "Builder.", skills: [] }, task: "api" });
+  const source = { kind: "runner", id: "runner", pid: process.pid };
+  await store.transact(() => ({
+    events: [{ type: "agent.registered", source, payload: { agent: "builder-1", persona: "builder", driver: "claude-code", token_sha256: files.token_sha256, external: false } }],
+  }));
+  const worker = startServer({
+    args: ["mcp", "--worker", "--execution", store.id, "--agent", "builder-1", "--token-file", files.tokenPath],
+    env: { ...smokeEnv, ROUNDTABLE_DOTENV: "off" },
+  });
+  try {
+    await worker.init();
+    const listed = await worker.listTools();
+    check("worker-mode listTools returns exactly the 7 worker tools", () =>
+      assert(JSON.stringify(listed.map((t) => t.name)) === JSON.stringify(WORKER_TOOLS), listed.map((t) => t.name).join(", ")));
+    check("the worker server consumed its token file", () => assert(!existsSync(files.tokenPath), files.tokenPath));
+    check("the worker server writes only JSON-RPC to stdout", () => assert(worker.noise().length === 0, JSON.stringify(worker.noise())));
+  } finally {
+    worker.stop();
+  }
+}
 // Load .env once, then pin test config before index.js imports config.ts. Stub every child fetch,
 // including Ollama reachability; a developer's .env must never enable network or home-directory writes.
 const preload = join(root, "offline.mjs");
@@ -257,7 +286,14 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 22 distinct tools", () => assert(tools.length === 22 && new Set(tools.map((t) => t.name)).size === 22, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 30 distinct tools", () => assert(tools.length === 30 && new Set(tools.map((t) => t.name)).size === 30, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("the orchestrator's worker tools take execution_id and agent_token", () => {
+    for (const name of WORKER_TOOLS) {
+      const req = byName[name]?.inputSchema?.required ?? [];
+      assert(req[0] === "execution_id" && req[1] === "agent_token", `${name}: ${JSON.stringify(req)}`);
+    }
+    assert(byName.join_execution, "join_execution is listed");
+  });
   check("every tool carries MCP annotations (a title and four hints) and no internal fields", () => {
     for (const t of tools) {
       const a = t.annotations ?? {};
@@ -466,6 +502,7 @@ try {
     assert(noise.length === 0, `non-JSON stdout lines: ${JSON.stringify(noise)}`);
   });
   await checkDispatch();
+  await checkWorkerServer();
 } catch (e) {
   failures++;
   console.log(`  FAIL harness: ${e.message}`);

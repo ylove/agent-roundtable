@@ -1,6 +1,6 @@
 // Titles, history reassembly, local/public merge, and the saved Markdown transcript.
-import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import type { EntryKind, HistoryMessage } from "./types.js";
 
 export function formatTitle(turn: number, speaker: string, part = 1, parts = 1): string {
@@ -186,15 +186,16 @@ export function renderTranscript(meta: TranscriptMeta, entries: MergedEntry[]): 
 
 const safeName = (s: string) => s.replace(/[^-_A-Za-z0-9]/g, "-").slice(0, 80) || "session";
 
+/** Transcripts hold private session text: a 0700 directory, 0600 files, written atomically. */
 export async function writeTranscript(
   dir: string,
   meta: TranscriptMeta,
   suffix: string,
   entries: MergedEntry[]
 ): Promise<string> {
-  await mkdir(dir, { recursive: true });
+  mkdirPrivate(dir);
   const date = meta.startedAt.slice(0, 10);
   const path = join(dir, `${date}-${safeName(meta.sessionId)}-${safeName(suffix)}.md`);
-  await writeFile(path, renderTranscript(meta, entries), "utf8");
+  writeFileAtomic(path, renderTranscript(meta, entries));
   return path;
 }

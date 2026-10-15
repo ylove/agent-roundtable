@@ -401,6 +401,19 @@ test("unwritable transcripts dir: savedPath null, warning, no throw", async (t) 
   assert.ok(res.warnings.some((w) => /Could not save the transcript/.test(w)));
 });
 
+test("transcripts are private: 0600 files in a 0700 directory, no temp files left", { skip: process.platform === "win32" }, async (t) => {
+  stubFetch(t, ok);
+  const { stat, readdir } = await import("node:fs/promises");
+  const dir = join(await tmp(), "nested", "transcripts");
+  const ch = createPublicChannel("s1", { participants: ["a"] }, { config: ntfyCfg, transcriptsDir: dir, postHeader: false });
+  ch.record({ turn: 1, speaker: "a", content: "private words" });
+  const res = await ch.finalize();
+  assert.equal((await stat(dir)).mode & 0o777, 0o700);
+  assert.equal((await stat(res.savedPath)).mode & 0o777, 0o600);
+  assert.deepEqual((await readdir(dir)).filter((n) => n.endsWith(".tmp")), []);
+  assert.ok((await readFile(res.savedPath, "utf8")).includes("private words"));
+});
+
 test("Retry-After: HTTP-date is honored and a huge value is capped at maxWait", async (t) => {
   const sleeps = [];
   let n = 0;

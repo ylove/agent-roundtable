@@ -6,6 +6,9 @@ import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
 import { agentKey, loadAgentPrompt } from "../agents.js";
 import { recordActivity } from "../activity.js";
+import { newId } from "../ids.js";
+import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
+import { archiveMeeting } from "./archive.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
@@ -48,7 +51,10 @@ export interface Meeting {
 }
 
 export const meetings = new Map<string, Meeting>();
-let meetingCounter = 0;
+
+function meetingBusy(id: string): string {
+  return sessionBusyMessage("Meeting", id);
+}
 
 export type MeetingRecordHook = (meeting: Meeting, message: Message) => void;
 
@@ -109,7 +115,7 @@ export async function startMeeting(
   }
   if (isPublic) systemPrompt += publicDirectiveSuffix();
   if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic });
-  const meetingId = `meeting-${++meetingCounter}`;
+  const meetingId = newId("meeting");
   // Board, then public channel, both before the first LLM call so the header is the first post. Config
   // errors fail the start (a public config error closes the board first).
   const { prototype, publicChannel } = await openSessionSurfaces(
@@ -165,10 +171,16 @@ export async function startMeeting(
     ...(prototype && { prototype }),
   };
   meetings.set(meetingId, meeting);
-  const record = recorderFor(meeting);
-  // Publish the agenda only: userMessage also carries the private context and the debate suffix.
-  await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
-  await recordMeetingAgentReply(meeting, assistantMessage, record);
+  // Listed from here on: hold the lock until the opening exchange is recorded.
+  const release = lockSession(meetingId, meetingBusy(meetingId));
+  try {
+    const record = recorderFor(meeting);
+    // Publish the agenda only: userMessage also carries the private context and the debate suffix.
+    await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
+    await recordMeetingAgentReply(meeting, assistantMessage, record);
+  } finally {
+    release();
+  }
 
   return {
     meetingId,
@@ -199,6 +211,10 @@ export async function continueMeeting(
   meetingId: string,
   message: string
 ): Promise<string> {
+  return withSessionLock(meetingId, meetingBusy(meetingId), () => runMeetingTurn(meetingId, message));
+}
+
+async function runMeetingTurn(meetingId: string, message: string): Promise<string> {
   const meeting = meetings.get(meetingId);
   if (!meeting) {
     throw new Error(`Meeting not found: ${meetingId}`);
@@ -227,6 +243,10 @@ export async function endMeeting(
   meetingId: string,
   requestSummary: boolean = false
 ): Promise<string> {
+  return withSessionLock(meetingId, meetingBusy(meetingId), () => closeMeeting(meetingId, requestSummary));
+}
+
+async function closeMeeting(meetingId: string, requestSummary: boolean): Promise<string> {
   const meeting = meetings.get(meetingId);
   if (!meeting) {
     throw new Error(`Meeting not found: ${meetingId}`);
@@ -266,6 +286,7 @@ export async function endMeeting(
     outcome: summary || history.slice().reverse().find((m) => m.role === "assistant")?.content,
     public: meeting.publicChannel !== undefined,
   });
+  archiveMeeting("meeting", meeting, summary);
   meetings.delete(meetingId);
 
   let text = summary || `Meeting ${meetingId} with ${meeting.agent} ended.`;

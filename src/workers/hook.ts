@@ -1,10 +1,10 @@
 // ============================================================================
 // PreToolUse lease hook: `agent-roundtable hook pre-tool-use`
 //
-// Claude Code runs it before every Edit, Write, NotebookEdit or MultiEdit of a claude-code worker
+// Claude Code runs it before every Read, Glob, Grep, Edit, Write, NotebookEdit or MultiEdit of a claude-code worker
 // (settings.json), with the hook JSON on stdin and the worker's environment, which carries
-// ROUNDTABLE_EXECUTION_ID, ROUNDTABLE_AGENT_ID and ROUNDTABLE_HOME. It reads only the agent's
-// leases.json: it never opens the event log and never touches the network, so it is fast.
+// ROUNDTABLE_EXECUTION_ID, ROUNDTABLE_AGENT_ID and ROUNDTABLE_HOME. Authority comes from the agent's
+// leases.json; paths are inspected on disk. The hook never opens the event log or uses the network.
 //
 // A write is refused when its path (resolved through symlinks) leaves the task worktree, has a .git
 // segment at any depth, names .gitmodules, looks like a secret, or is not covered by a live lease
@@ -14,7 +14,7 @@
 // the write through. An allowed write exits 0 silently, so the permission rules still apply.
 // ============================================================================
 
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { EXECUTION_ID_RE } from "../ids.js";
@@ -23,7 +23,7 @@ import { hasDotGitSegment, pathCovered } from "../execution/leases.js";
 import { isContained } from "../security/fs-safe.js";
 
 /** Tools whose target the hook checks; any other tool that reaches it is left to the permission rules. */
-export const GATED_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "NotebookEdit", "MultiEdit"]);
+export const GATED_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "NotebookEdit", "MultiEdit", "Read", "Glob", "Grep"]);
 
 const MAX_INPUT_BYTES = 4 * 1024 * 1024;
 
@@ -64,8 +64,9 @@ const toPosix = (p: string) => p.split(sep).join("/");
  * ancestor is resolved with realpath (so a symlinked directory is followed and judged by where it
  * leads); a target that is itself a symlink, or a path with "..", is refused.
  */
-export function resolveTarget(worktree: string, raw: unknown): { rel: string } | { reason: string } {
+export function resolveTarget(worktree: string, raw: unknown, allowRoot = false): { rel: string } | { reason: string } {
   if (typeof raw !== "string" || !raw || raw.includes("\0")) return { reason: "Refused: the tool call names no file path" };
+  if (raw.startsWith("~") || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw) || raw.includes("\\")) return { reason: `Refused: ${raw} must be a relative or absolute path inside your worktree` };
   if (raw.split(/[\\/]/).includes("..")) return { reason: `Refused: ${raw} contains "..": pass a path inside your worktree` };
   const abs = isAbsolute(raw) ? resolve(raw) : resolve(worktree, raw);
   let cur = abs;
@@ -92,7 +93,7 @@ export function resolveTarget(worktree: string, raw: unknown): { rel: string } |
   }
   if (!isContained(worktree, real)) return { reason: `Refused: ${raw} is outside your task worktree` };
   const rel = toPosix(relative(worktree, real));
-  if (!rel) return { reason: "Refused: that is the worktree itself" };
+  if (!rel && !allowRoot) return { reason: "Refused: that is the worktree itself" };
   return { rel };
 }
 
@@ -125,14 +126,53 @@ export function decidePreToolUse(input: unknown, env: NodeJS.ProcessEnv = proces
     return deny(`Refused: cannot resolve the worktree of task ${task}`);
   }
 
-  const raw = args && typeof args === "object" ? (args.file_path ?? args.notebook_path ?? args.path) : undefined;
-  const target = resolveTarget(worktree, raw);
+  const reading = tool === "Read" || tool === "Glob" || tool === "Grep";
+  const raw = args && typeof args === "object" ? (args.file_path ?? args.notebook_path ?? args.path ?? (reading ? "." : undefined)) : undefined;
+  if (tool === "Read" && (!args || typeof args.file_path !== "string")) return deny("Refused: the tool call names no file path");
+  if (tool === "Glob") {
+    if (typeof args?.pattern !== "string") return deny("Refused: Glob names no pattern");
+    const pattern = args.pattern;
+    if (pattern.startsWith("~") || isAbsolute(pattern) || pattern.includes("\\") || pattern.includes("..") || /[{}()~]/.test(pattern) || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(pattern)) {
+      return deny("Refused: Glob needs a relative pattern inside your worktree");
+    }
+  }
+  const target = resolveTarget(worktree, raw, reading);
   if ("reason" in target) return deny(target.reason, typeof raw === "string" ? raw : undefined);
   const rel = target.rel;
   const segments = rel.split("/");
   if (hasDotGitSegment(rel)) return deny(`Refused: ${rel} is inside a .git directory, which is never writable`, rel);
   if (segments.some((s) => s.toLowerCase() === ".gitmodules")) return deny(`Refused: ${rel} (.gitmodules) is never writable by a worker`, rel);
-  if (SECRET_NAME_RE.test(basename(rel))) return deny(`Refused: ${rel} looks like a secret file; workers never write secrets`, rel);
+  if (rel.split("/").some((s) => SECRET_NAME_RE.test(s))) return deny(`Refused: ${rel} looks like a secret file; workers never access secrets`, rel);
+  if (reading) {
+    // Searches may recurse or follow links: validate the whole reachable subtree before allowing them.
+    const seen = new Set<string>();
+    const inspect = (path: string): string | undefined => {
+      if (SECRET_NAME_RE.test(basename(path))) return `Refused: ${path} looks like a secret file`;
+      const real = realpathSync(path);
+      if (!isContained(worktree, real)) return `Refused: ${path} is outside your task worktree`;
+      const parts = toPosix(relative(worktree, real)).split("/");
+      if (parts.some((s) => SECRET_NAME_RE.test(s))) return `Refused: ${path} looks like a secret file`;
+      if (parts.some((s) => s.toLowerCase() === ".git")) return `Refused: ${path} is inside a .git directory`;
+      if (seen.has(real)) return undefined;
+      seen.add(real);
+      if (lstatSync(real).isDirectory()) {
+        for (const name of readdirSync(real)) {
+          // A worktree's gitfile is a pointer, not a directory a search can traverse.
+          if (name === ".git" && lstatSync(join(real, name)).isFile()) continue;
+          const reason = inspect(join(real, name));
+          if (reason) return reason;
+        }
+      }
+      return undefined;
+    };
+    try {
+      const reason = inspect(join(worktree, rel));
+      if (reason) return deny(reason, rel);
+    } catch {
+      return deny(`Refused: cannot inspect ${rel || "."}`, rel);
+    }
+    return { allow: true, path: rel };
+  }
   const mine = leases.leases.filter((l) => l && l.task === task && Array.isArray(l.paths));
   if (!pathCovered(rel, mine)) return deny(noLeaseMessage(rel), rel);
   return { allow: true, path: rel };

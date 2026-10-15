@@ -111,23 +111,56 @@ test("an adopted run resumes from its offset; an overlong line is skipped withou
 
 const MCP = { command: "/opt/node/bin/node", args: ["/opt/rt/dist/index.js", "mcp", "--worker", "--execution", "exe-0000000000abcdef", "--agent", "builder-1", "--token-file", "/s/token"], env: { ROUNDTABLE_DOTENV: "off", ROUNDTABLE_HOME: "/s" } };
 
+const FS = { worktree: "/wt", deny: ["/home/test", "/s", "/repo"], read: ["/opt/node", "/repo/.git"] };
+
 test("buildCodexArgs and buildCodexResumeArgs (snapshots)", () => {
   const cfg = [
+    "-c", 'default_permissions="roundtable"',
+    "-c", 'permissions.roundtable.filesystem={":minimal"="read","/home/test"="none","/s"="none","/repo"="none","/opt/node"="read","/repo/.git"="read","/wt"="write"}',
     "-c", "shell_environment_policy.inherit=core",
-    "-c", "sandbox_workspace_write.network_access=false",
+    "-c", 'shell_environment_policy.set={GIT_CONFIG_GLOBAL="/dev/null",GIT_CONFIG_NOSYSTEM="1"}',
     "-c", 'approval_policy="never"',
     "-c", 'mcp_servers.roundtable.command="/opt/node/bin/node"',
     "-c", 'mcp_servers.roundtable.args=["/opt/rt/dist/index.js","mcp","--worker","--execution","exe-0000000000abcdef","--agent","builder-1","--token-file","/s/token"]',
     "-c", 'mcp_servers.roundtable.env={ROUNDTABLE_DOTENV="off",ROUNDTABLE_HOME="/s"}',
+    "-c", 'mcp_servers.roundtable.default_tools_approval_mode="approve"',
   ];
-  assert.deepEqual(codex.buildCodexArgs({ cwd: "/wt" }, MCP), ["exec", "--json", "-C", "/wt", "-s", "workspace-write", "--ignore-user-config", ...cfg, "-"]);
-  assert.deepEqual(codex.buildCodexArgs({ cwd: "/wt", model: "gpt-5.6" }, MCP).slice(-3), ["-m", "gpt-5.6", "-"]);
-  assert.deepEqual(codex.buildCodexResumeArgs("01a13f90-4d81-7413-a355-d0d09239222c", {}, MCP), [
-    "exec", "resume", "--json", "--ignore-user-config", "-c", 'sandbox_mode="workspace-write"', ...cfg, "01a13f90-4d81-7413-a355-d0d09239222c", "-",
+  assert.deepEqual(codex.buildCodexArgs({ cwd: "/wt" }, MCP, FS), ["exec", "--json", "-C", "/wt", "--ignore-user-config", "--ignore-rules", ...cfg, "-"]);
+  assert.deepEqual(codex.buildCodexArgs({ cwd: "/wt", model: "gpt-5.6" }, MCP, FS).slice(-3), ["-m", "gpt-5.6", "-"]);
+  assert.deepEqual(codex.buildCodexResumeArgs("01a13f90-4d81-7413-a355-d0d09239222c", {}, MCP, FS), [
+    "exec", "resume", "--json", "--ignore-user-config", "--ignore-rules", ...cfg, "01a13f90-4d81-7413-a355-d0d09239222c", "-",
   ]);
-  assert.throws(() => codex.buildCodexResumeArgs("--last", {}, MCP), /invalid thread/);
-  assert.throws(() => codex.buildCodexArgs({ cwd: "/wt", model: "-x" }, MCP), /invalid model/);
-  assert.throws(() => codex.buildCodexArgs({ cwd: "/wt" }, { ...MCP, env: { "A=B": "x" } }), /invalid env/);
+  assert.throws(() => codex.buildCodexResumeArgs("--last", {}, MCP, FS), /invalid thread/);
+  assert.throws(() => codex.buildCodexArgs({ cwd: "/wt", model: "-x" }, MCP, FS), /invalid model/);
+  assert.throws(() => codex.buildCodexArgs({ cwd: "/wt" }, { ...MCP, env: { "A=B": "x" } }, FS), /invalid env/);
+});
+
+test("Codex is opt-in, denies sensitive roots and refuses outstanding peer tokens", async () => {
+  const { mkdirSync, realpathSync } = await import("node:fs");
+  const { makeRun } = await import("../fixtures/workers/run.mjs");
+  const { prepareWorkerFiles } = await import("../../dist/workers/files.js");
+  const driver = new codex.CodexDriver({ cli: "/fake/codex", env: {} });
+  const detect = await driver.detect();
+  assert.equal(detect.ok, false);
+  assert.match(detect.missing.join(";"), /ROUNDTABLE_ALLOW_CODEX_DRIVER=1/);
+  assert.throws(() => driver.launch({}), /opt-in/);
+  const enabled = new codex.CodexDriver({ cli: "/fake/codex", env: { ROUNDTABLE_ALLOW_CODEX_DRIVER: "1" } });
+  assert.equal((await enabled.detect()).ok, true);
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rt-codex-policy-")));
+  for (const dir of ["home", "state", "repo/.git", "wt", "node/bin", "extra"]) mkdirSync(join(root, dir), { recursive: true });
+  const policy = codex.codexFilesystemPolicy({
+    worktree: join(root, "wt"), repoRoot: join(root, "repo"), home: join(root, "home"), roundtableHome: join(root, "state"),
+    execPath: join(root, "node/bin/node"), platform: "linux", env: { ROUNDTABLE_CODEX_READ_ROOTS: join(root, "extra") },
+  });
+  assert.deepEqual(policy.deny, ["home", "state", "repo"].map((p) => join(root, p)));
+  assert.equal(policy.worktree, join(root, "wt"));
+  for (const dir of ["node", "repo/.git", "extra"]) assert.ok(policy.read.includes(join(root, dir)));
+  assert.throws(() => codex.codexPermissionArgs({ ...policy, worktree: "relative" }), /absolute/);
+  const run = await makeRun();
+  const files = await prepareWorkerFiles({ store: run.store, agent: "peer", task: "api", persona: { body: "Builder", skills: [] } });
+  assert.deepEqual(codex.pendingTokens(run.store.id, "self"), ["peer"]);
+  assert.deepEqual(codex.pendingTokens(run.store.id, "peer"), []);
+  assert.throws(() => enabled.launch({ execution: run.store.id, agent: "self" }), /unconsumed token/);
 });
 
 test("parseCodexLine and RunMonitor: thread id, last message, summed turn usage (estimated), failures", () => {

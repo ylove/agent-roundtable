@@ -39,7 +39,8 @@ test("buildWorkerSettings: denials (nested .git and .gitmodules too) and the lea
     permissions: {
       deny: [
         "Read(./.env*)", "Read(./**/.env*)",
-        "Edit(./.git/**)", "Write(./.git/**)", "Edit(./**/.git/**)", "Write(./**/.git/**)",
+        "Edit(./.git)", "Write(./.git)", "Edit(./.git/**)", "Write(./.git/**)",
+        "Edit(./**/.git)", "Write(./**/.git)", "Edit(./**/.git/**)", "Write(./**/.git/**)",
         "Edit(./.gitmodules)", "Edit(./**/.gitmodules)",
         "Bash",
       ],
@@ -47,6 +48,9 @@ test("buildWorkerSettings: denials (nested .git and .gitmodules too) and the lea
     hooks: {
       PreToolUse: [{
         matcher: "Edit|Write|NotebookEdit|MultiEdit",
+        hooks: [{ type: "command", command: `"${EXEC}" "${CLI}" hook pre-tool-use`, timeout: 30 }],
+      }, {
+        matcher: "Read|Glob|Grep",
         hooks: [{ type: "command", command: `"${EXEC}" "${CLI}" hook pre-tool-use`, timeout: 30 }],
       }],
     },

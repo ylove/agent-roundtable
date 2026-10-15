@@ -36,7 +36,7 @@ import { realDirectory, signalGroup, spawnWorker, stopGroup } from "./process.js
 /** The built-in tools a worker has. Bash is never among them: commands go through run_command. */
 export const WORKER_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"] as const;
 export const WORKER_ALLOWED_TOOLS = `${WORKER_TOOLS.join(" ")} mcp__${ROUNDTABLE_SERVER}`;
-export const WORKER_DISALLOWED_TOOLS = "Bash WebFetch WebSearch Task";
+export const WORKER_DISALLOWED_TOOLS = "Bash WebFetch WebSearch Task Agent";
 export const ROUNDTABLE_TOOL_PREFIX = `mcp__${ROUNDTABLE_SERVER}__`;
 
 /** Flags every worker run needs; detect() reports the ones this CLI lacks and launch() refuses without them. */
@@ -375,7 +375,7 @@ export function workerEnvExtras(l: Pick<WorkerLaunch, "execution" | "agent" | "e
   };
 }
 
-const detections = new Map<string, Promise<DetectResult>>();
+const detections = new Map<string, { result: Promise<DetectResult>; expires: number }>();
 
 /** Forget cached detections (tests swap fake CLIs). */
 export function resetClaudeDetection(): void {
@@ -400,7 +400,7 @@ export class ClaudeCodeDriver implements WorkerDriver {
     return cli;
   }
 
-  /** `claude --help` and `--version`, parsed once per binary. */
+  /** Cache capabilities per binary; failed preflights expire after a minute. */
   detect(): Promise<DetectResult> {
     let cli: string;
     try {
@@ -409,8 +409,8 @@ export class ClaudeCodeDriver implements WorkerDriver {
       return Promise.resolve({ ok: false, missing: ["the claude CLI on PATH"], caps: { model: false, fallbackModel: false, effort: false } });
     }
     let d = detections.get(cli);
-    if (!d) {
-      d = (async () => {
+    if (!d || d.expires <= Date.now()) {
+      const result = (async () => {
         const help = await runForText(cli, ["--help"]);
         if (!help.ok || !help.stdout.trim()) {
           return { ok: false, missing: ["a claude CLI that answers --help"], caps: { model: false, fallbackModel: false, effort: false }, cli };
@@ -420,9 +420,12 @@ export class ClaudeCodeDriver implements WorkerDriver {
         const version = /\d+\.\d+\.\d+/.exec(ver.stdout)?.[0];
         return { ok: missing.length === 0, missing, caps, cli, ...(version && { version }) };
       })();
+      d = { result, expires: Infinity };
+      const cached = d;
+      result.then((r) => { if (!r.ok) cached.expires = Date.now() + 60_000; });
       detections.set(cli, d);
     }
-    return d;
+    return d.result;
   }
 
   private async start(l: WorkerLaunch, resume: boolean): Promise<WorkerHandle> {
@@ -462,12 +465,17 @@ export class ClaudeCodeDriver implements WorkerDriver {
    * tools, in the worker's worktree (where its session lives), the question on stdin. The live run
    * is not disturbed. Usage is reported as huddle spend.
    */
-  async answer(rec: WorkerRecord, question: string, maxUsd: number): Promise<{ text: string; usage?: UsageRecord }> {
+  async answer(rec: WorkerRecord, question: string, maxUsd: number, signal?: AbortSignal): Promise<{ text: string; usage?: UsageRecord }> {
+    signal?.throwIfAborted();
     const cli = (await this.detect()).cli ?? this.cli();
+    signal?.throwIfAborted();
     const args = buildAnswerArgs(rec.sessionId, maxUsd);
     const cwd = realDirectory(rec.cwd);
     const out = await new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>((resolve, reject) => {
       const child = spawn(cli, args, { cwd, env: childEnv("claude-worker", { ROUNDTABLE_DOTENV: "off" }), detached: true, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      const abort = () => signalGroup(child.pid ?? 0, "SIGKILL");
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
       let stdout = "";
       let stderr = "";
       let timedOut = false;
@@ -478,22 +486,25 @@ export class ClaudeCodeDriver implements WorkerDriver {
       child.stdout!.setEncoding("utf8");
       child.stderr!.setEncoding("utf8");
       child.stdout!.on("data", (s: string) => {
-        if (stdout.length < ANSWER_OUTPUT_MAX) stdout += s;
+        stdout = (stdout + s).slice(-ANSWER_OUTPUT_MAX);
       });
       child.stderr!.on("data", (s: string) => {
         if (stderr.length < 64 * 1024) stderr += s;
       });
       child.once("error", (e) => {
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
         reject(e);
       });
       child.once("close", (code) => {
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
         resolve({ code, stdout, stderr, timedOut });
       });
       child.stdin!.on("error", () => {});
       child.stdin!.end(question);
     });
+    signal?.throwIfAborted();
     if (out.timedOut) throw new Error(`answer: claude timed out after ${this.answerTimeoutMs} ms`);
     let r: Record<string, unknown> | undefined;
     for (const line of out.stdout.trim().split("\n").reverse()) {

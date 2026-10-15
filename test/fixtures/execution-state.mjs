@@ -203,8 +203,16 @@ const HANDLERS = {
   "task.blocked": (s, p) => {
     const rt = s.tasks[p.task];
     if (!rt || TERMINAL.has(rt.state)) return;
+    const prev = rt.state === "blocked" ? rt.blocked_by : undefined;
     rt.state = "blocked";
-    rt.blocked_by = { ...(p.escalation !== undefined ? { escalation: p.escalation } : {}), ...(p.deps ? { deps: [...p.deps] } : {}) };
+    const escalation = p.escalation ?? prev?.escalation;
+    const deps = [...new Set([...(prev?.deps ?? []), ...(p.deps ?? [])])];
+    const needs = rt.blocked_by?.needs;
+    rt.blocked_by = {
+      ...(escalation !== undefined ? { escalation } : {}),
+      ...(deps.length || p.deps ? { deps } : {}),
+      ...(needs?.length ? { needs } : {}),
+    };
   },
   "task.unblocked": (s, p) => {
     const rt = s.tasks[p.task];

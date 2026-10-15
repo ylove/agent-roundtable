@@ -236,7 +236,11 @@ export interface TaskRuntime {
   last_commit?: string;
   submitted_seq?: number;
   accepted_seq?: number;
-  blocked_by?: { escalation?: string; deps?: string[] };
+  /**
+   * Why a blocked task waits. needs (added in WS07) are its open interface and artifact needs:
+   * dependency.requested adds one, dependency.satisfied removes it. Task needs are in deps.
+   */
+  blocked_by?: { escalation?: string; deps?: string[]; needs?: Array<{ kind: "interface" | "artifact"; ref: string }> };
   started_at?: string;
   finished_at?: string;
 }
@@ -369,7 +373,11 @@ export interface EventPayloads {
   "task.released": { task: string; agent: string; note?: string };
   "task.progress": { task: string; percent?: number; note: string };
   "task.submitted": { task: string; commit: string; diff_blob: string; stat: string; files: string[]; rewrites: string[] };
-  "task.checks_passed": { task: string; commands: string[] };
+  /**
+   * commit and submitted_seq (added in WS07) bind the result to one submission: the task.submitted
+   * seq and the commit its checks ran on. The runner merges exactly that commit.
+   */
+  "task.checks_passed": { task: string; commands: string[]; commit?: string; submitted_seq?: number };
   "task.rejected": { task: string; reasons: string[]; violations?: string[] };
   "task.merged": { task: string; integration_sha: string };
   "task.accepted": { task: string };
@@ -391,11 +399,12 @@ export interface EventPayloads {
   "artifact.published": { name: string; kind: "interface" | "design" | "doc"; path?: string; blob?: string; task: string };
   "artifact.changed": { name: string; version: number; consumers: string[] };
 
-  "dependency.requested": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string } };
-  "dependency.satisfied": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string }; by_event: string };
+  "dependency.requested": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string; owner?: string } };
+  "dependency.satisfied": { task: string; need: { kind: "task" | "interface" | "artifact"; ref: string; owner?: string }; by_event: string };
 
-  "check.started": { command_id: string; scope: "task" | "integration"; task?: string };
-  "check.passed": { command_id: string; scope: "task" | "integration"; task?: string; duration_ms: number };
+  /** A submission's checks carry its task.submitted seq and commit (WS07); run_command's carry neither. */
+  "check.started": { command_id: string; scope: "task" | "integration"; task?: string; commit?: string; submitted_seq?: number };
+  "check.passed": { command_id: string; scope: "task" | "integration"; task?: string; duration_ms: number; commit?: string; submitted_seq?: number };
   "check.failed": {
     command_id: string;
     scope: "task" | "integration";
@@ -403,8 +412,10 @@ export interface EventPayloads {
     exit: number | null;
     signature: string;
     output_blob?: string;
+    commit?: string;
+    submitted_seq?: number;
   };
-  "check.timed_out": { command_id: string; scope: "task" | "integration"; task?: string };
+  "check.timed_out": { command_id: string; scope: "task" | "integration"; task?: string; commit?: string; submitted_seq?: number };
 
   "command.completed": {
     task: string;
@@ -718,7 +729,7 @@ export interface WorkerDriver {
   parse(line: string, acc: RunAccumulator): void;
   stop(h: WorkerHandle, reason: string): Promise<void>;
   /** Read-only answer from a live worker's context (micro-huddles). */
-  answer?(rec: WorkerRecord, question: string, maxUsd: number): Promise<{ text: string; usage?: UsageRecord }>;
+  answer?(rec: WorkerRecord, question: string, maxUsd: number, signal?: AbortSignal): Promise<{ text: string; usage?: UsageRecord }>;
 }
 
 // ---------------------------------------------------------------------------

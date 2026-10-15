@@ -52,6 +52,7 @@ import {
   taskDiffSummary,
   taskStartPoint,
   taskWorktreePath,
+  withCommitCheckout,
 } from "../execution/worktrees.js";
 import {
   adhocCommandId,
@@ -150,7 +151,7 @@ export const workerTools: ToolDefinition[] = [
   workerTool({
     name: CLAIM_TASK,
     description:
-      "Claim a ready task (all dependencies accepted, nobody holding it) or, with release: true, give yours back (its leases are released; the work stays in the worktree). " +
+      "External agents only: claim a ready task (all dependencies accepted, nobody holding it) or, with release: true, give yours back (its leases are released; the work stays in the worktree). " +
       "Without task_id, the first ready task (your team's first) is claimed. Returns the task card and the worktree to work in. External workers' claims expire after 15 minutes without a tool call.",
     inputSchema: {
       type: "object",
@@ -196,6 +197,7 @@ export const workerTools: ToolDefinition[] = [
         percent: { type: "number", minimum: 0, maximum: 100 },
         topic: { type: "string", maxLength: 100 },
         name: { type: "string", maxLength: 200, description: "interface: its name; need: the task, interface or artifact you wait for." },
+        owner: { type: "string", pattern: ID_PATTERN, description: "need: expected publishing task." },
         path: { type: "string", maxLength: 512, description: "interface: where it lives in the repository." },
         refs: { type: "array", items: { type: "string", maxLength: 300 }, maxItems: 20 },
         directive_id: { type: "string", maxLength: 100 },
@@ -395,8 +397,28 @@ function cap(text: unknown, max: number): string {
 const RESPONSE_MAX = 96 * 1024;
 
 function render(body: Json, isError = false): CallToolResult {
-  let text = JSON.stringify(body, null, 2);
-  if (text.length > RESPONSE_MAX) text = `${text.slice(0, RESPONSE_MAX)}\n… [response truncated; narrow it with limit, task_id or query]`;
+  const { inbox, ...sections } = body;
+  const response: Json = inbox === undefined ? {} : { inbox };
+  const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+  for (const [key, value] of Object.entries(sections)) {
+    if (size({ ...response, [key]: value }) <= RESPONSE_MAX - 128) {
+      response[key] = value;
+      continue;
+    }
+    response.truncated = "Narrow the other sections with limit, task_id or query";
+    if (Array.isArray(value)) {
+      const kept: unknown[] = [];
+      response[key] = kept;
+      for (const item of value) {
+        kept.push(item);
+        if (size(response) > RESPONSE_MAX - 128) { kept.pop(); break; }
+      }
+    }
+  }
+  if (Array.isArray(response.events) && response.events.length && "next_since_seq" in response) {
+    response.next_since_seq = (response.events.at(-1) as Json).seq;
+  }
+  const text = JSON.stringify(response);
   return { content: [{ type: "text", text: isError ? `Error: ${text}` : text }], ...(isError && { isError: true }) };
 }
 
@@ -408,8 +430,13 @@ function heartbeat(a: Actor): void {
   }
 }
 
-/** New inbox items since the cursor (advanced to the newest), and directives still awaiting an ack. */
-async function takeInbox(a: Actor): Promise<Json | undefined> {
+interface InboxDelivery {
+  inbox: Json;
+  delivered: () => void;
+}
+
+/** Build a bounded oldest-first page. The cursor is committed only after rendering succeeds. */
+async function takeInbox(a: Actor): Promise<InboxDelivery | undefined> {
   const state = await a.store.state();
   const items = own(state.inbox, a.agent) ?? [];
   if (!items.length) return undefined;
@@ -420,13 +447,33 @@ async function takeInbox(a: Actor): Promise<Json | undefined> {
   } catch {
     /* first delivery */
   }
-  const fresh = items.filter((i) => i.seq > cursor);
-  if (fresh.length) writeFileAtomic(path, `${Math.max(...fresh.map((i) => i.seq))}\n`);
-  const awaiting = [...new Set(items.filter((i) => i.kind === "directive" && i.requires_ack).map((i) => i.id))];
+  const fresh = items.filter((i) => i.seq > cursor).sort((x, y) => x.seq - y.seq);
+  const awaiting = items.filter((i) => i.kind === "directive" && i.requires_ack);
   if (!fresh.length && !awaiting.length) return undefined;
+  const inbox: Json = {};
+  const page: unknown[] = [];
+  for (const item of fresh) {
+    page.push(item);
+    if (Buffer.byteLength(JSON.stringify(page)) > RESPONSE_MAX / 2) { page.pop(); break; }
+    cursor = item.seq;
+  }
+  if (page.length) inbox.new = page;
+  if (page.length < fresh.length) inbox.more = true;
+  const acks: unknown[] = [];
+  for (const item of awaiting) {
+    acks.push({ id: item.id, text: item.text });
+    if (Buffer.byteLength(JSON.stringify(acks)) > RESPONSE_MAX / 4) { acks.pop(); break; }
+  }
+  if (acks.length) inbox.awaiting_ack = acks;
+  if (acks.length < awaiting.length) inbox.more_awaiting_ack = true;
   return {
-    ...(fresh.length && { new: fresh.map((i) => ({ seq: i.seq, kind: i.kind, id: i.id, text: i.text, ...(i.requires_ack && { requires_ack: true }) })) }),
-    ...(awaiting.length && { awaiting_ack: awaiting }),
+    inbox,
+    delivered: () => {
+      if (!page.length) return;
+      let previous = 0;
+      try { previous = Number.parseInt(readFileSync(path, "utf8"), 10) || 0; } catch { /* first delivery */ }
+      writeFileAtomic(path, `${Math.max(previous, cursor)}\n`);
+    },
   };
 }
 
@@ -472,6 +519,8 @@ function worktreeOf(a: Actor, task: string): string {
 
 interface CheckOutcome {
   command_id: string;
+  /** The submitted commit a submission check ran on (run_command checks run in the worktree). */
+  commit?: string;
   status: "passed" | "failed" | "timed_out";
   exit: number | null;
   duration_ms: number;
@@ -480,15 +529,31 @@ interface CheckOutcome {
   output_tail: string;
 }
 
+/** The submission a check belongs to: its task.submitted seq and commit. */
+interface CheckBinding {
+  submitted_seq: number;
+  commit: string;
+}
+
 /**
  * Run one contract command as a check of `task`: check.started, then check.passed / failed /
- * timed_out. No sandbox is not a failed check: it throws before anything is recorded.
+ * timed_out. No sandbox is not a failed check: it throws before anything is recorded. A
+ * submission's checks run in `workdir` (the checkout of its commit) and their events carry the
+ * binding; run_command's run in the worktree.
  */
-async function runCheck(a: Actor, task: string, spec: CommandSpec | undefined, commandId: string, opts: { maxTimeoutMs: number; signal?: AbortSignal; image?: string }): Promise<CheckOutcome> {
+async function runCheck(
+  a: Actor,
+  task: string,
+  spec: CommandSpec | undefined,
+  commandId: string,
+  opts: { maxTimeoutMs: number; signal?: AbortSignal; image?: string; workdir?: string; bind?: CheckBinding }
+): Promise<CheckOutcome> {
   const backend = await sandboxFor(a);
-  const workdir = worktreeOf(a, task);
+  const workdir = opts.workdir ?? worktreeOf(a, task);
+  const bind = opts.bind ?? {};
+  const at = opts.bind ? { commit: opts.bind.commit } : {};
   const emit = (draft: (s: EventSource) => AnyEventDraft) => a.store.transact(({ state }) => ({ events: [draft(sourceOf(state, a, task))] }));
-  await emit((source) => ({ type: "check.started", source, payload: { command_id: commandId, scope: "task", task } }));
+  await emit((source) => ({ type: "check.started", source, payload: { command_id: commandId, scope: "task", task, ...bind } }));
   let output: string;
   let exit: number | null;
   let timedOut = false;
@@ -508,16 +573,16 @@ async function runCheck(a: Actor, task: string, spec: CommandSpec | undefined, c
   const blob = await a.store.putBlob(output || "(no output)");
   const tail = tailForTool(output);
   if (timedOut) {
-    await emit((source) => ({ type: "check.timed_out", source, payload: { command_id: commandId, scope: "task", task } }));
-    return { command_id: commandId, status: "timed_out", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
+    await emit((source) => ({ type: "check.timed_out", source, payload: { command_id: commandId, scope: "task", task, ...bind } }));
+    return { command_id: commandId, ...at, status: "timed_out", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
   }
   if (exit === 0) {
-    await emit((source) => ({ type: "check.passed", source, payload: { command_id: commandId, scope: "task", task, duration_ms: duration } }));
-    return { command_id: commandId, status: "passed", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
+    await emit((source) => ({ type: "check.passed", source, payload: { command_id: commandId, scope: "task", task, duration_ms: duration, ...bind } }));
+    return { command_id: commandId, ...at, status: "passed", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
   }
   const signature = failureSignature(commandId, output);
-  await emit((source) => ({ type: "check.failed", source, payload: { command_id: commandId, scope: "task", task, exit, signature, output_blob: blob } }));
-  return { command_id: commandId, status: "failed", exit, duration_ms: duration, signature, output_blob: blob, output_tail: tail };
+  await emit((source) => ({ type: "check.failed", source, payload: { command_id: commandId, scope: "task", task, exit, signature, output_blob: blob, ...bind } }));
+  return { command_id: commandId, ...at, status: "failed", exit, duration_ms: duration, signature, output_blob: blob, output_tail: tail };
 }
 
 // ============================================================================
@@ -594,7 +659,8 @@ function fuzzyQuery(state: Readonly<BlackboardState>, q: string, limit: number):
 }
 
 function compactEvent(e: AnyEvent): Json {
-  const p = e.payload as Json;
+  const p = { ...e.payload } as Json;
+  if (e.type === "agent.registered") delete p.token_sha256;
   let payload: unknown = p;
   const text = JSON.stringify(p);
   if (text.length > 1500) payload = { truncated: `${text.slice(0, 1500)}…` };
@@ -716,7 +782,7 @@ async function readBlackboard(a: Actor, args: Record<string, unknown>): Promise<
       return { section, notes: state.notes.filter((n) => n.seq > since && matches(`${n.topic} ${n.text}`)).slice(-limit) };
     }
     case "inbox":
-      return { section, inbox: (own(state.inbox, a.agent) ?? []).slice(-limit) };
+      return { section, items: (own(state.inbox, a.agent) ?? []).slice(-limit) };
     case "budget":
       return { section, budget: state.budget, contract_budget: c?.budget };
     case "agents":
@@ -765,11 +831,15 @@ function claimProblem(state: Readonly<BlackboardState>, task: string): string | 
 async function claimTask(a: Actor, args: Record<string, unknown>): Promise<Json> {
   const state = await a.store.state();
   const rec = own(state.agents, a.agent);
-  if (rec?.external === false) throw new Refusal("The runner assigns your task; claim_task is for external agents only");
+  const externalOnly = (s: Readonly<BlackboardState>) => {
+    if (!own(s.agents, a.agent)?.external) throw new Refusal("The runner manages your assignment; only external agents may claim or release tasks");
+  };
+  externalOnly(state);
   if (args.release === true) {
     const task = agentTask(state, a.agent);
     if (!task || own(state.claims, task)?.agent !== a.agent) throw new Refusal("You hold no claim to release");
     const r = await a.store.transact(({ state: s }) => {
+      externalOnly(s);
       if (own(s.claims, task)?.agent !== a.agent) throw new Refusal(`You no longer hold ${task}`);
       const source = sourceOf(s, a, task);
       const note = typeof args.note === "string" && args.note.trim() ? { note: cap(args.note, 2000) } : {};
@@ -781,7 +851,7 @@ async function claimTask(a: Actor, args: Record<string, unknown>): Promise<Json>
   requireActive(state);
   if (state.status !== "running") throw new Refusal(`The run is ${state.status}; tasks can be claimed once it is running`);
   const held = agentTask(state, a.agent);
-  if (held && own(state.claims, held)?.agent === a.agent) throw new Refusal(`You already hold ${held}; finish it or release it first`);
+  if (held) throw new Refusal(`You already hold ${held}; finish it or release it first`);
   let task = typeof args.task_id === "string" ? args.task_id : undefined;
   if (!task) {
     const ready = Object.values(state.tasks).filter((rt) => claimProblem(state, rt.spec.id) === null);
@@ -793,12 +863,16 @@ async function claimTask(a: Actor, args: Record<string, unknown>): Promise<Json>
   const wt = await ensureTaskWorktree(a.store.header(), task, taskStartPoint(state, task));
   const claimedTask = task;
   await a.store.transact(({ state: s }) => {
+    externalOnly(s);
+    requireActive(s, claimedTask);
+    if (s.status !== "running") throw new Refusal(`The run is ${s.status}`);
+    const held = agentTask(s, a.agent);
+    if (held) throw new Refusal(`You already hold ${held}; finish it or release it first`);
     const p = claimProblem(s, claimedTask);
     if (p) throw new Refusal(p);
     const rt = s.tasks[claimedTask];
-    const external = own(s.agents, a.agent)?.external !== false;
     return {
-      events: [{ type: "task.claimed", source: sourceOf(s, a, claimedTask), payload: { task: claimedTask, agent: a.agent, attempt: Math.max(1, rt.attempt), ttl_s: external ? 900 : 0 } }],
+      events: [{ type: "task.claimed", source: sourceOf(s, a, claimedTask), payload: { task: claimedTask, agent: a.agent, attempt: Math.max(1, rt.attempt), ttl_s: 900 } }],
     };
   });
   await writeAgentLeases(a.store, a.agent, { task: claimedTask });
@@ -910,6 +984,12 @@ async function lease(a: Actor, args: Record<string, unknown>): Promise<Json> {
 // post_update
 // ============================================================================
 
+function publicationAvailable(state: Readonly<BlackboardState>, name: string, expectedOwner?: string): boolean {
+  const cur = own(state.interfaces, name);
+  const owner = cur?.spec?.owner ?? cur?.task;
+  return !!cur && cur.version > 0 && !!owner && cur.task === owner && (!expectedOwner || expectedOwner === owner);
+}
+
 const SATISFYING_KINDS: Record<string, ReadonlySet<string>> = {
   interface: new Set(["interface", "artifact"]),
 };
@@ -929,14 +1009,16 @@ async function postUpdate(a: Actor, args: Record<string, unknown>): Promise<Json
   const state = await a.store.state();
   const text = String(args.text);
   const kind = args.kind as (typeof POST_KINDS)[number];
+  if (kind !== "ack") requireActive(state, agentTask(state, a.agent));
 
   if (kind === "note") {
     const task = agentTask(state, a.agent);
     const refs = ((args.refs as string[] | undefined) ?? []).map((r) => r.trim()).filter(Boolean);
     const topic = cap(typeof args.topic === "string" && args.topic.trim() ? args.topic : (task ?? "general"), 100);
-    const r = await a.store.transact(({ state: s }) => ({
-      events: [{ type: "note.posted", source: sourceOf(s, a, task), payload: { topic, text: cap(text, 4000), refs } }],
-    }));
+    const r = await a.store.transact(({ state: s }) => {
+      requireActive(s, task);
+      return { events: [{ type: "note.posted", source: sourceOf(s, a, task), payload: { topic, text: cap(text, 4000), refs } }] };
+    });
     return { posted: "note", seq: r.events[0]?.seq };
   }
 
@@ -954,9 +1036,10 @@ async function postUpdate(a: Actor, args: Record<string, unknown>): Promise<Json
   const task = requireTask(state, a);
   if (kind === "progress") {
     const percent = typeof args.percent === "number" ? Math.round(Math.min(100, Math.max(0, args.percent))) : undefined;
-    await a.store.transact(({ state: s }) => ({
-      events: [{ type: "task.progress", source: sourceOf(s, a, task), payload: { task, note: cap(text, 4000), ...(percent !== undefined && { percent }) } }],
-    }));
+    await a.store.transact(({ state: s }) => {
+      requireActive(s, task);
+      return { events: [{ type: "task.progress", source: sourceOf(s, a, task), payload: { task, note: cap(text, 4000), ...(percent !== undefined && { percent }) } }] };
+    });
     return { posted: "progress", task, ...(percent !== undefined && { percent }) };
   }
 
@@ -964,7 +1047,8 @@ async function postUpdate(a: Actor, args: Record<string, unknown>): Promise<Json
   if (!name) throw new Refusal(`kind ${kind} needs a name`);
 
   if (kind === "interface") {
-    const owner = own(state.interfaces, name)?.spec?.owner;
+    const cur = own(state.interfaces, name);
+    const owner = cur?.spec?.owner ?? cur?.task;
     if (owner && owner !== task) throw new Refusal(`Interface ${name} is owned by task ${owner}; escalate if it must change`);
     let path: string | undefined;
     if (typeof args.path === "string" && args.path.trim()) {
@@ -972,24 +1056,45 @@ async function postUpdate(a: Actor, args: Record<string, unknown>): Promise<Json
       if (!path) throw new Refusal(`Not a repository path: ${preview(args.path)}`);
     }
     const blob = await a.store.putBlob(text);
-    const published = await a.store.transact(({ state: s }) => ({
-      events: [{ type: "artifact.published", source: sourceOf(s, a, task), payload: { name, kind: "interface", task, blob, ...(path && { path }) } }],
-    }));
+    const published = await a.store.transact(({ state: s }) => {
+      requireActive(s, task);
+      const cur = own(s.interfaces, name);
+      const owner = cur?.spec?.owner ?? cur?.task;
+      if (owner && owner !== task) throw new Refusal(`Interface ${name} is owned by task ${owner}; escalate if it must change`);
+      return { events: [{ type: "artifact.published", source: sourceOf(s, a, task), payload: { name, kind: "interface", task, blob, ...(path && { path }) } }] };
+    });
     const by = published.events[0];
     const waiting = await waitingOn(a, name, SATISFYING_KINDS.interface);
     const satisfied = waiting.length
-      ? await a.store.transact(({ state: s }) => ({
-          events: waiting
-            .filter((w) => own(s.tasks, w.task) && !["accepted", "failed", "cancelled"].includes(s.tasks[w.task].state))
-            .map((w) => ({ type: "dependency.satisfied" as const, source: sourceOf(s, a, task), payload: { task: w.task, need: w.need, by_event: by.id } })),
-        }))
+      ? await a.store.transact(({ state: s }) => {
+          requireActive(s, task);
+          const met = waiting.filter((w) => {
+            const rt = own(s.tasks, w.task);
+            return rt && !["accepted", "failed", "cancelled"].includes(rt.state) && !s.paused_tasks.includes(w.task)
+              && publicationAvailable(s, name, w.need.owner) && own(s.interfaces, name)?.task === task;
+          });
+          const source = sourceOf(s, a, task);
+          const events: AnyEventDraft[] = met.map((w) => ({ type: "dependency.satisfied" as const, source, payload: { task: w.task, need: w.need, by_event: by.id } }));
+          // A blocked task whose last open need this was, with no deps or blocking escalation, resumes now.
+          for (const waiter of new Set(met.map((w) => w.task))) {
+            const rt = s.tasks[waiter];
+            const why = rt.blocked_by;
+            if (rt.state !== "blocked" || why?.escalation !== undefined || why?.deps?.length) continue;
+            const open = (why?.needs ?? []).filter((n) => !met.some((w) => w.task === waiter && w.need.kind === n.kind && w.need.ref === n.ref));
+            if (!open.length) events.push({ type: "task.unblocked", source, payload: { task: waiter } });
+          }
+          return { events };
+        })
       : { events: [] };
     const after = await a.store.state();
     return {
       published: name,
       version: own(after.interfaces, name)?.version,
       blob,
-      satisfied: satisfied.events.map((e) => (e as AnyEvent & { type: "dependency.satisfied" }).payload.task),
+      satisfied: satisfied.events.flatMap((e) => (e.type === "dependency.satisfied" ? [e.payload.task] : [])),
+      ...(satisfied.events.some((e) => e.type === "task.unblocked") && {
+        unblocked: satisfied.events.flatMap((e) => (e.type === "task.unblocked" ? [e.payload.task] : [])),
+      }),
     };
   }
 
@@ -1001,15 +1106,16 @@ async function postUpdate(a: Actor, args: Record<string, unknown>): Promise<Json
       : own(state.tasks, name) ? "task" : own(state.interfaces, name) ? "interface" : "artifact";
   if (needKind === "task" && !ID_RE.test(name)) throw new Refusal(`Not a task id: ${preview(name)}`);
   const available =
-    needKind === "task" ? own(state.tasks, name)?.state === "accepted" : (own(state.interfaces, name)?.version ?? 0) > 0;
+    needKind === "task" ? own(state.tasks, name)?.state === "accepted" : publicationAvailable(state, name, typeof args.owner === "string" ? args.owner : undefined);
   if (available) {
     return { need: name, kind: needKind, available: true, note: needKind === "task" ? `Task ${name} is accepted and merged.` : `${name} is published; read it with read_blackboard(section: "interfaces").` };
   }
   await a.store.transact(({ state: s }) => {
+    requireActive(s, task);
     const source = sourceOf(s, a, task);
     return {
       events: [
-        { type: "dependency.requested", source, payload: { task, need: { kind: needKind, ref: name } } },
+        { type: "dependency.requested", source, payload: { task, need: { kind: needKind, ref: name, ...(typeof args.owner === "string" && { owner: args.owner }) } } },
         { type: "task.blocked", source, payload: { task, ...(needKind === "task" && { deps: [name] }) } },
       ],
     };
@@ -1079,10 +1185,46 @@ async function rejectSubmission(a: Actor, task: string, reasons: string[], viola
   });
 }
 
+/** Tasks with a submit_work in flight in this process (execution and task): one at a time per task. */
+const submitting = new Set<string>();
+
+/** One recorded submission and the ownership it was made under. */
+interface Submission extends CheckBinding {
+  attempt: number;
+  token_sha256: string;
+}
+
+/**
+ * Why `sub` may no longer pass or fail its task, or null while it is the live one: the task's
+ * latest task.submitted, still submitted or checking, claimed by the same agent in the same attempt
+ * under the same token. Another process (or a reassignment) can change any of these during checks.
+ */
+function staleSubmission(s: Readonly<BlackboardState>, a: Actor, task: string, sub: Submission): string | null {
+  const rt = own(s.tasks, task);
+  if (!rt || rt.submitted_seq !== sub.submitted_seq || rt.last_commit !== sub.commit) return `a newer submission of ${task} was recorded`;
+  const claim = own(s.claims, task);
+  if (!claim || claim.agent !== a.agent || claim.attempt !== sub.attempt) return `${task} is no longer claimed by ${a.agent} in attempt ${sub.attempt}`;
+  const rec = own(s.agents, a.agent);
+  if (!rec || rec.status === "left" || !sameDigest(rec.token_sha256, sub.token_sha256)) return `${a.agent} was registered again or left`;
+  if (rt.state !== "submitted" && rt.state !== "checking") return `${task} is ${rt.state}`;
+  return null;
+}
+
 async function submitWork(a: Actor, args: Record<string, unknown>, ctx: ToolCallContext): Promise<Json> {
   const state = await a.store.state();
   const task = requireTask(state, a);
   requireActive(state, task);
+  const key = `${a.execution}\0${task}`;
+  if (submitting.has(key)) throw new Refusal(`A submission of ${task} is already in progress; wait for its result before you submit again`);
+  submitting.add(key);
+  try {
+    return await submitLocked(a, args, ctx, state, task);
+  } finally {
+    submitting.delete(key);
+  }
+}
+
+async function submitLocked(a: Actor, args: Record<string, unknown>, ctx: ToolCallContext, state: Readonly<BlackboardState>, task: string): Promise<Json> {
   const rt = state.tasks[task];
   const ready = args.ready === true;
   if (rt.state === "merging") throw new Refusal(`Task ${task} passed its checks and is being merged; end your turn`);
@@ -1090,6 +1232,7 @@ async function submitWork(a: Actor, args: Record<string, unknown>, ctx: ToolCall
   const leases = leasesFor(state, task, a.agent);
   const wt = worktreeOf(a, task);
   const integration = integrationBranch(a.execution);
+  const token = own(state.agents, a.agent)?.token_sha256;
 
   // 1. Commit what the leases cover; anything else stays in the worktree, uncommitted.
   let commit;
@@ -1119,8 +1262,10 @@ async function submitWork(a: Actor, args: Record<string, unknown>, ctx: ToolCall
     throw new Refusal(`Submission rejected: ${reasons.join("; ")}. Lease these paths (lease request) or revert them, then submit again.`);
   }
 
-  // 2. Everything the branch changed since its merge base with the integration branch must be leased.
-  const cov = await checkLeaseCoverage(wt, integration, leases);
+  // 2. Everything the commit changed since its merge base with the integration branch must be
+  // leased. From here on everything is measured at that commit, never at a HEAD that may move.
+  const head = commit.commit;
+  const cov = await checkLeaseCoverage(wt, integration, leases, head);
   if (!cov.ok) {
     const reasons = cov.details.slice(0, 20).map((d) => `${d.path}: ${d.reason}`);
     await rejectSubmission(a, task, reasons, cov.violations);
@@ -1128,57 +1273,80 @@ async function submitWork(a: Actor, args: Record<string, unknown>, ctx: ToolCall
   }
 
   // 3. The submission: diff blob, stat and files of the whole task (the sandbox is checked first,
-  // so a run without one never leaves a submission whose checks cannot start).
+  // so a run without one never leaves a submission whose checks cannot start). It is recorded only
+  // while the agent still holds the claim under the token it started with.
   if (rt.spec.checks.length) await sandboxFor(a);
-  const diff = await diffForTask(wt, integration);
+  const diff = await diffForTask(wt, integration, undefined, head);
   const diffBlob = await a.store.putBlob(diff || "(no changes)\n");
-  const sum = await taskDiffSummary(wt, integration);
-  await a.store.transact(({ state: s }) => ({
-    events: [{
-      type: "task.submitted",
-      source: sourceOf(s, a, task),
-      payload: { task, commit: sum.head, diff_blob: diffBlob, stat: sum.stat, files: capPathList(sum.files, 4500), rewrites: capPathList(sum.rewrites, 1500) },
-    }],
-  }));
+  const sum = await taskDiffSummary(wt, integration, head);
+  let attempt = 0;
+  const recorded = await a.store.transact(({ state: s }) => {
+    const claim = own(s.claims, task);
+    if (!claim || claim.agent !== a.agent) throw new Refusal(`You no longer hold the claim on ${task}; nothing was submitted`);
+    const rec = own(s.agents, a.agent);
+    if (!rec || !token || !sameDigest(rec.token_sha256, token)) throw new Refusal(`${a.agent} was registered again; nothing was submitted`);
+    attempt = claim.attempt;
+    return {
+      events: [{
+        type: "task.submitted",
+        source: sourceOf(s, a, task),
+        payload: { task, commit: head, diff_blob: diffBlob, stat: sum.stat, files: capPathList(sum.files, 4500), rewrites: capPathList(sum.rewrites, 1500) },
+      }],
+    };
+  });
+  const sub: Submission = { submitted_seq: recorded.events[0].seq, commit: head, attempt, token_sha256: token! };
+  const bind: CheckBinding = { submitted_seq: sub.submitted_seq, commit: head };
 
-  // 4. The task's checks, within 15 minutes in all.
+  // 4. The task's checks, within 15 minutes in all, in a fresh checkout of the submitted commit
+  // that no worker tool can reach (so nothing done to the worktree meanwhile changes what is checked).
   const c = state.contract;
   const ids = rt.spec.checks;
   const deadline = Date.now() + SUBMIT_CHECKS_MS;
-  const results: CheckOutcome[] = [];
-  for (const [i, id] of ids.entries()) {
-    ctx.progress?.(i, ids.length, `check ${id}`);
-    const left = deadline - Date.now();
-    if (left < 1000) {
-      await a.store.transact(({ state: s }) => ({ events: [{ type: "check.timed_out", source: sourceOf(s, a, task), payload: { command_id: id, scope: "task", task } }] }));
-      results.push({ command_id: id, status: "timed_out", exit: null, duration_ms: 0, output_blob: "", output_tail: "submit_work's 15 minutes ran out before this check started" });
-      continue;
+  const runAll = async (dir: string): Promise<CheckOutcome[]> => {
+    const results: CheckOutcome[] = [];
+    for (const [i, id] of ids.entries()) {
+      ctx.progress?.(i, ids.length, `check ${id}`);
+      const left = deadline - Date.now();
+      if (left < 1000) {
+        await a.store.transact(({ state: s }) => ({ events: [{ type: "check.timed_out", source: sourceOf(s, a, task), payload: { command_id: id, scope: "task", task, ...bind } }] }));
+        results.push({ command_id: id, commit: head, status: "timed_out", exit: null, duration_ms: 0, output_blob: "", output_tail: "submit_work's 15 minutes ran out before this check started" });
+        continue;
+      }
+      results.push(await runCheck(a, task, c?.validation.commands.find((x) => x.id === id), id, { maxTimeoutMs: left, signal: ctx.signal, image: c?.sandbox.image || undefined, workdir: dir, bind }));
     }
-    results.push(await runCheck(a, task, c?.validation.commands.find((x) => x.id === id), id, { maxTimeoutMs: left, signal: ctx.signal, image: c?.sandbox.image || undefined }));
-  }
+    return results;
+  };
+  const results = ids.length ? await withCommitCheckout(a.store.header(), task, head, runAll) : [];
   ctx.progress?.(ids.length, ids.length, "checks done");
   const failed = results.filter((r) => r.status !== "passed");
   const view = results.map(({ output_tail, ...r }) => (r.status === "passed" ? r : { ...r, output_tail }));
+
+  // 5. The outcome, recorded only for the live submission (staleSubmission), so a slow check can
+  // never pass or fail a newer submission or a task that changed hands.
+  const outcome = (draft: (s: Readonly<BlackboardState>) => AnyEventDraft) =>
+    a.store.transact(({ state: s }) => {
+      const why = staleSubmission(s, a, task, sub);
+      if (why) throw new Refusal(`This submission (${head.slice(0, 12)}) is out of date: ${why}. Nothing was recorded for it; read_blackboard shows where ${task} stands.`);
+      return { events: [draft(s)] };
+    });
   if (!failed.length) {
-    await a.store.transact(({ state: s }) => ({ events: [{ type: "task.checks_passed", source: sourceOf(s, a, task), payload: { task, commands: [...ids] } }] }));
+    await outcome((s) => ({ type: "task.checks_passed", source: sourceOf(s, a, task), payload: { task, commands: [...ids], ...bind } }));
     return {
       submitted: task,
-      commit: sum.head,
+      commit: head,
       stat: sum.stat,
       checks: view,
       next: "Your checks passed and the runner will merge your work. End your turn now with a one-line summary.",
     };
   }
-  await a.store.transact(({ state: s }) => ({
-    events: [{
-      type: "task.rejected",
-      source: sourceOf(s, a, task),
-      payload: { task, reasons: failed.map((f) => cap(`check ${f.command_id} ${f.status === "timed_out" ? "timed out" : `failed (exit ${f.exit ?? "none"})`}`, 300)) },
-    }],
+  await outcome((s) => ({
+    type: "task.rejected",
+    source: sourceOf(s, a, task),
+    payload: { task, reasons: failed.map((f) => cap(`check ${f.command_id} ${f.status === "timed_out" ? "timed out" : `failed (exit ${f.exit ?? "none"})`}`, 300)) },
   }));
   return {
     submitted: task,
-    commit: sum.head,
+    commit: head,
     checks_passed: false,
     checks: view,
     next: "Fix what failed (the output tails are above; read_blackboard(section: \"blob\", ref) has the full output) and call submit_work again.",
@@ -1320,5 +1488,7 @@ export async function handleWorkerTool(name: string, args: ToolArgs, ctx: ToolCa
     if (!(e instanceof Refusal)) console.error(`[Worker] ${name} failed for ${actor.agent}: ${body.error}`);
   }
   const inbox = await takeInbox(actor).catch(() => undefined);
-  return render(inbox ? { ...body, inbox } : body, failed);
+  const result = render(inbox ? { inbox: inbox.inbox, ...body } : body, failed);
+  inbox?.delivered();
+  return result;
 }

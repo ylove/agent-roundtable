@@ -24,7 +24,7 @@ import { loadAgent, renderSkillsSection, type LoadedAgent } from "../agents.js";
 import { ID_RE, preview } from "../execution/events.js";
 import { executionDir } from "../execution/store.js";
 import { taskWorktreePath } from "../execution/worktrees.js";
-import type { BlackboardState, ExecutionStore, LeaseMode } from "../execution/types.js";
+import type { BlackboardState, ExecutionStore, LeaseMode, WorkerDriverId } from "../execution/types.js";
 import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 
 // ============================================================================
@@ -131,6 +131,8 @@ export function buildMcpConfig(i: McpConfigInput): McpConfig {
 
 /** The file-writing tools the lease hook gates (an unanchored regex, as Claude Code reads matchers). */
 export const HOOK_MATCHER = "Edit|Write|NotebookEdit|MultiEdit";
+/** The file-reading tools the hook confines to the worktree (no lease is needed to read). */
+export const READ_HOOK_MATCHER = "Read|Glob|Grep";
 
 /** The PreToolUse hook command: `"<execPath>" "<cli>" hook pre-tool-use` (run by `sh -c`). */
 export function hookCommand(c: WorkerCommand): string {
@@ -143,11 +145,12 @@ export interface WorkerSettings {
 }
 
 /**
- * Denials and the lease hook. Claude Code consults Edit(...) path rules for every file-writing
- * tool; it accepts Write(...) path rules but never consults them, so the Write rules are only a
- * declaration of intent. A .git directory at any depth is denied (a nested repository's config can
- * define filter drivers that host git would run), and so is .gitmodules anywhere. The hook is what
- * enforces leases, and it refuses the same paths.
+ * Denials and the hooks. Claude Code consults Edit(...) path rules for every file-writing tool; it
+ * accepts Write(...) path rules but never consults them, so the Write rules are only a declaration
+ * of intent. A .git directory, or a worktree's .git file, is denied at any depth: a nested
+ * repository's config can define filter drivers that host git would run. So is .gitmodules
+ * anywhere. The write hook enforces leases and refuses the same paths; the read hook confines
+ * Read, Glob and Grep to the worktree by realpath, so a symlink a command planted cannot lead out.
  */
 export function buildWorkerSettings(c: WorkerCommand): WorkerSettings {
   return {
@@ -155,8 +158,12 @@ export function buildWorkerSettings(c: WorkerCommand): WorkerSettings {
       deny: [
         "Read(./.env*)",
         "Read(./**/.env*)",
+        "Edit(./.git)",
+        "Write(./.git)",
         "Edit(./.git/**)",
         "Write(./.git/**)",
+        "Edit(./**/.git)",
+        "Write(./**/.git)",
         "Edit(./**/.git/**)",
         "Write(./**/.git/**)",
         "Edit(./.gitmodules)",
@@ -165,7 +172,10 @@ export function buildWorkerSettings(c: WorkerCommand): WorkerSettings {
       ],
     },
     hooks: {
-      PreToolUse: [{ matcher: HOOK_MATCHER, hooks: [{ type: "command", command: hookCommand(c), timeout: 30 }] }],
+      PreToolUse: [
+        { matcher: HOOK_MATCHER, hooks: [{ type: "command", command: hookCommand(c), timeout: 30 }] },
+        { matcher: READ_HOOK_MATCHER, hooks: [{ type: "command", command: hookCommand(c), timeout: 30 }] },
+      ],
     },
   };
 }
@@ -175,16 +185,21 @@ export function buildWorkerSettings(c: WorkerCommand): WorkerSettings {
 // ============================================================================
 
 /** Appended to every worker's system prompt (the task card arrives as the first user message). */
-export function workerProtocol(task: string): string {
+export function workerProtocol(task: string, driver: WorkerDriverId = "claude-code"): string {
+  const codex = driver === "codex";
   return [
     "## Heads-down worker protocol",
     "",
     `You are a worker in a heads-down run of the agent roundtable, assigned to task \`${task}\`. You work alone in your task's git worktree (your working directory). No human is watching this session.`,
     "",
     "- You never message other agents. Read what others did with `read_blackboard` (sections, a `query` such as \"is the nav done?\", events, blobs).",
-    "- Edit only files your leases cover. Request them first with `lease(action: \"request\", paths: [...])`; an edit outside your leases is refused. If someone else holds a path, use `escalate(with: \"path_owner\")`.",
-    "- Make targeted edits (Edit) instead of rewriting whole files.",
-    "- You have no shell. Run builds, tests and checks with `run_command` (a named `command_id`, or an `argv`), which runs in a sandbox.",
+    codex
+      ? "- Edit only files your leases cover. Request them first with `lease(action: \"request\", paths: [...])`; leases are checked when you submit, and a submission that changed anything else is rejected. If someone else holds a path, use `escalate(with: \"path_owner\")`."
+      : "- Edit only files your leases cover. Request them first with `lease(action: \"request\", paths: [...])`; an edit outside your leases is refused. If someone else holds a path, use `escalate(with: \"path_owner\")`.",
+    "- Make targeted edits instead of rewriting whole files.",
+    codex
+      ? "- Your shell is sandboxed to your worktree, with no network: use it to build and test. Contract checks run with `run_command(command_id)` and `submit_work`."
+      : "- You have no shell. Run builds, tests and checks with `run_command` (a named `command_id`, or an `argv`), which runs in a sandbox.",
     "- Report progress with `post_update(kind: \"progress\", percent, text)`. Publish an interface you own with `post_update(kind: \"interface\", name, text)`; say what you are waiting for with `post_update(kind: \"need\", name, text)`; acknowledge a directive with `post_update(kind: \"ack\", directive_id)`.",
     "- When you are blocked or unsure, `escalate`. After a blocking escalation, end your turn with a one-line summary; you will be resumed with the resolution.",
     "- Finish with `submit_work(summary, ready: true)`: it commits your leased changes and runs your task's checks. `ready: false` saves a checkpoint.",
@@ -195,8 +210,8 @@ export function workerProtocol(task: string): string {
 }
 
 /** Persona body, its skills, then the protocol. */
-export function buildWorkerPrompt(persona: Pick<LoadedAgent, "body" | "skills">, task: string): string {
-  return `${persona.body.trim()}${renderSkillsSection(persona.skills)}\n\n${workerProtocol(task)}\n`;
+export function buildWorkerPrompt(persona: Pick<LoadedAgent, "body" | "skills">, task: string, driver: WorkerDriverId = "claude-code"): string {
+  return `${persona.body.trim()}${renderSkillsSection(persona.skills)}\n\n${workerProtocol(task, driver)}\n`;
 }
 
 // ============================================================================
@@ -215,6 +230,8 @@ export interface PrepareWorkerFilesOptions {
   cliPath?: string;
   /** Default ROUNDTABLE_HOME. */
   home?: string;
+  /** The driver the files are for: the protocol differs for codex, which has its own shell. Default claude-code. */
+  driver?: WorkerDriverId;
 }
 
 export interface WorkerFiles {
@@ -259,7 +276,7 @@ export async function prepareWorkerFiles(opts: PrepareWorkerFilesOptions): Promi
   writeFileAtomic(files.tokenPath, token + "\n");
   writeFileAtomic(files.mcpConfigPath, json(buildMcpConfig({ ...command, execution: store.id, agent: opts.agent, tokenFile: files.tokenPath, home })));
   writeFileAtomic(files.settingsPath, json(buildWorkerSettings(command)));
-  writeFileAtomic(files.promptPath, buildWorkerPrompt(persona, opts.task));
+  writeFileAtomic(files.promptPath, buildWorkerPrompt(persona, opts.task, opts.driver));
   await writeAgentLeases(store, opts.agent, { task: opts.task });
   return { dir, runsDir, ...files, token_sha256: sha256 };
 }

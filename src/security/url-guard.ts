@@ -210,13 +210,13 @@ export function checkUrl(raw: string, opts: UrlGuardOptions = {}): URL {
 }
 
 async function lookupAll(host: string, label: string, timeoutMs: number): Promise<string[]> {
+  // Not unref'd: a check in flight is real work, and dns.lookup itself may hold no handle open.
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
       () => reject(new UrlGuardError(`${label}: could not resolve ${host} within ${timeoutMs} ms`, true)),
       timeoutMs
     );
-    timer.unref?.();
   });
   try {
     const found = await Promise.race([dns.lookup(host, { all: true, verbatim: true }), timeout]);

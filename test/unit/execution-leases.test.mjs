@@ -94,6 +94,27 @@ test("globsOverlap is conservative, comparing whole segments", () => {
   }
 });
 
+test("overlap folds case and Unicode normalization (one physical path on macOS); coverage stays exact", () => {
+  const nfc = "café/**";
+  const nfd = "café/**";
+  assert.equal(L.globsOverlap("SRC/**", "src/**"), true);
+  assert.equal(L.globsOverlap("Src/Nav/**", "src/nav/bar.ts"), true);
+  assert.equal(L.globsOverlap(nfc, nfd), true);
+  assert.equal(L.globsOverlap("STRASSE/x.ts", "straße/**"), true);
+  assert.equal(L.globsOverlap("DOCS/**", "src/**"), false, "folding never joins different names");
+  const ex = (agent, task, paths) => ({ agent, task, paths, mode: "exclusive" });
+  assert.equal(L.leasesConflict(ex("a", "t1", ["SRC/**"]), ex("b", "t2", ["src/**"])), true);
+  assert.equal(L.leasesConflict(ex("a", "t1", [nfc]), ex("b", "t2", [nfd])), true);
+  const s = stateWith({ leases: [{ id: "upper", agent: "a", task: "t1", paths: ["SRC/**"] }] });
+  const d = L.decideLeaseRequest(s, { agent: "b", task: "t2", paths: ["src/a.ts"] });
+  assert.ok(d.queue, "a second exclusive lease on the same physical path is queued");
+  assert.deepEqual(d.queue.blocking, ["upper"]);
+  // Coverage is exact: a path in another case or form is not covered (fails closed).
+  assert.equal(L.pathCovered("SRC/a.ts", [{ paths: ["src/**"] }]), false);
+  assert.equal(L.pathCovered("café/x", [{ paths: [nfc] }]), false);
+  assert.equal(L.pathCovered("café/x", [{ paths: [nfc] }]), true);
+});
+
 test("leasesConflict: exclusive vs anything, shared only vs exclusive, never with yourself", () => {
   const ex = (agent, task, paths) => ({ agent, task, paths, mode: "exclusive" });
   const sh = (agent, task, paths) => ({ agent, task, paths, mode: "shared" });

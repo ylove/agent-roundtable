@@ -115,15 +115,27 @@ function segmentPrefix(a: string, b: string): boolean {
 }
 
 /**
- * Whether two globs may match a common path. Conservative: they overlap when one static prefix
- * is a whole-segment prefix of the other. That never misses a real overlap, but it reports some
- * that cannot happen (src/*.ts and src/*.css overlap; src/a.ts and src/b.ts do not), so leases
- * may queue unnecessarily, never collide silently. An invalid glob overlaps everything.
+ * A name as a case-insensitive, normalization-insensitive filesystem (macOS by default) may see
+ * it: NFC, then case folded through upper and lower case (so "ß" and "ss" fold together). Used
+ * only for overlap, where folding can merely add false positives.
+ */
+function foldName(s: string): string {
+  return s.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
+}
+
+/**
+ * Whether two globs may match a common path, on any filesystem. Conservative: they overlap when
+ * one static prefix is a whole-segment prefix of the other, compared case-insensitively and
+ * Unicode-normalized (SRC/** and src/** name the same files on macOS). That never misses a real
+ * overlap, but it reports some that cannot happen (src/*.ts and src/*.css overlap; src/a.ts and
+ * src/b.ts do not), so leases may queue unnecessarily, never collide silently. An invalid glob
+ * overlaps everything. Coverage (pathCovered) stays exact: a path git reports in another case
+ * is simply not covered, which fails closed.
  */
 export function globsOverlap(a: string, b: string): boolean {
   if (normalizeGlob(a) === null || normalizeGlob(b) === null) return true;
-  const pa = staticPrefix(a);
-  const pb = staticPrefix(b);
+  const pa = foldName(staticPrefix(a));
+  const pb = foldName(staticPrefix(b));
   return segmentPrefix(pa, pb) || segmentPrefix(pb, pa);
 }
 

@@ -1,7 +1,8 @@
 // --- Ollama (native /api/chat; optional, only when reachable) ---
 import type { ProviderCall } from "./shared.js";
-import { assertNonEmpty, stripThinkTags } from "./shared.js";
+import { assertNonEmpty, readProviderJson, stripThinkTags } from "./shared.js";
 import { OLLAMA_URL } from "../config.js";
+import { scrubAndCap } from "../security/secrets.js";
 
 /**
  * Check whether the configured Ollama server is reachable (GET /api/tags).
@@ -40,7 +41,7 @@ export const callOllama: ProviderCall = async (messages, o) => {
     }),
     signal: o.signal,
   });
-  const result = (await response.json()) as {
+  const result = (await readProviderJson(response)) as {
     error?: string;
     message?: { content?: string };
     model?: string;
@@ -49,7 +50,7 @@ export const callOllama: ProviderCall = async (messages, o) => {
     eval_count?: number;
   };
   if (!response.ok || result.error) {
-    throw new Error(`Ollama API error (${response.status}): ${result.error || response.statusText}`);
+    throw new Error(`Ollama API error (${response.status}): ${scrubAndCap(String(result.error || response.statusText), 300)}`);
   }
   const text = stripThinkTags(result.message?.content ?? "");
   return {

@@ -2,6 +2,7 @@
 import type { ProviderCall } from "./shared.js";
 import { assertNonEmpty, assertNotRedirect, readProviderJson } from "./shared.js";
 import { requireEnv } from "../config.js";
+import { scrubAndCap } from "../security/secrets.js";
 
 export const callAnthropic: ProviderCall = async (messages, o) => {
   const apiKey = requireEnv("ANTHROPIC_API_KEY", "the anthropic provider");
@@ -37,9 +38,10 @@ export const callAnthropic: ProviderCall = async (messages, o) => {
   };
 
   if (!response.ok || result.error) {
+    // The body comes from the remote server: redact anything secret-shaped and keep it short.
     throw new Error(
-      `Anthropic API error (${response.status}${result.error?.type ? ` ${result.error.type}` : ""}): ${
-        result.error?.message || response.statusText
+      `Anthropic API error (${response.status}${result.error?.type ? ` ${scrubAndCap(String(result.error.type), 60)}` : ""}): ${
+        scrubAndCap(String(result.error?.message || response.statusText), 300)
       }`
     );
   }

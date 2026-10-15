@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { LLMMessage, ProviderCall } from "./shared.js";
 import { assertNonEmpty, assertNotRedirect, stripThinkTags } from "./shared.js";
 import { requireEnv } from "../config.js";
+import { scrubAndCap } from "../security/secrets.js";
 import { describeUrl } from "../security/url-guard.js";
 
 const API_ORIGIN = "https://api.replicate.com";
@@ -192,7 +193,7 @@ export function fetchReplicateInputSchema(
     }
     if (!response.ok) {
       let message = `Replicate API error (${response.status}) fetching schema for model ${key}: ${
-        body.detail || response.statusText
+        scrubAndCap(String(body.detail || response.statusText), 300)
       }`;
       if (response.status === 404) {
         message += " — check owner/name; community models may need owner/name:version";
@@ -325,12 +326,12 @@ export function createReplicateCall({
     if (o.signal.aborted) throw o.signal.reason;
     if (!response.ok) {
       let message = `Replicate API error (${response.status}) for model ${refText}: ${
-        prediction.detail || prediction.title || response.statusText
+        scrubAndCap(String(prediction.detail || prediction.title || response.statusText), 300)
       }`;
       const fields = (prediction.invalid_fields ?? [])
         .map((f) => f.field)
         .filter((f): f is string => Boolean(f));
-      if (fields.length > 0) message += ` (invalid fields: ${fields.join(", ")})`;
+      if (fields.length > 0) message += ` (invalid fields: ${scrubAndCap(fields.join(", "), 200)})`;
       throw new Error(message);
     }
 
@@ -338,7 +339,7 @@ export function createReplicateCall({
       if (p.status === "succeeded") return normalizeReplicateOutput(p.output, refText);
       if (p.status === "failed" || p.status === "canceled") {
         throw new Error(
-          `Replicate prediction ${p.status} for model ${refText}: ${p.error || "no error detail"}`
+          `Replicate prediction ${p.status} for model ${refText}: ${p.error ? scrubAndCap(String(p.error), 300) : "no error detail"}`
         );
       }
       return undefined;

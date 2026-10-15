@@ -31,6 +31,7 @@ import type { LLMMessage } from "./providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "./providers/index.js";
 import { findExecutable } from "./executables.js";
 import { describeUrl } from "./security/url-guard.js";
+import { scrub } from "./security/secrets.js";
 import {
   meetings,
   startMeeting,
@@ -1126,7 +1127,7 @@ export async function handleToolCall(
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = scrub(error instanceof Error ? error.message : String(error));
     return {
       content: [{ type: "text", text: `Error: ${message}` }],
       isError: true,

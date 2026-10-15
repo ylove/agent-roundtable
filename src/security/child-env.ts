@@ -18,8 +18,12 @@ export type ChildEnvProfile =
   | "cloud-cli"
   | "runner";
 
-/** Names that look like credentials. Used by tests and by the contract validator. */
-export const SECRET_NAME_RE = /KEY|TOKEN|SECRET|PASS|CRED|AUTH|SESSION|COOKIE/i;
+/**
+ * Names that look like credentials (used by secret scrubbing, tests and the contract validator).
+ * AUTH, PASS and CRED count only as whole name segments, so GIT_AUTHOR_NAME, BYPASS_CACHE and
+ * session ids are not treated as secrets while ROUNDTABLE_WEBHOOK_AUTH_HEADER and DB_PASS are.
+ */
+export const SECRET_NAME_RE = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|COOKIE|(?:^|_)(?:AUTH|PASS|CREDS?)(?:_|$)/i;
 
 const BASE = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TMPDIR", "TERM"];
 const PROXY = ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"];

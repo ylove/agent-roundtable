@@ -7,6 +7,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { LLMMessage, ProviderCall } from "./shared.js";
 import { assertNonEmpty, assertNotRedirect, stripThinkTags } from "./shared.js";
+import { providerHttpError, withRetry } from "./retry.js";
 import { requireEnv } from "../config.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { describeUrl } from "../security/url-guard.js";
@@ -310,30 +311,34 @@ export function createReplicateCall({
       : `${API_BASE}/models/${ref.owner}/${ref.name}/predictions`;
     const createBody = ref.version ? { version: ref.version, input } : { input };
 
-    const response = await fetch(createUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Prefer: `wait=${waitSeconds}`,
-      },
-      body: JSON.stringify(createBody),
-      signal: o.signal,
-      redirect: "manual",
-    });
-    assertNotRedirect("Replicate", response, createUrl);
-    let prediction = (await readJson(response)) as ReplicatePrediction;
-    if (o.signal.aborted) throw o.signal.reason;
-    if (!response.ok) {
-      let message = `Replicate API error (${response.status}) for model ${refText}: ${
-        scrubAndCap(String(prediction.detail || prediction.title || response.statusText), 300)
-      }`;
-      const fields = (prediction.invalid_fields ?? [])
-        .map((f) => f.field)
-        .filter((f): f is string => Boolean(f));
-      if (fields.length > 0) message += ` (invalid fields: ${scrubAndCap(fields.join(", "), 200)})`;
-      throw new Error(message);
-    }
+    // Only the create call is retried (429 and transient failures); polls run inside the same signal.
+    let prediction = await withRetry(async () => {
+      const response = await fetch(createUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Prefer: `wait=${waitSeconds}`,
+        },
+        body: JSON.stringify(createBody),
+        signal: o.signal,
+        redirect: "manual",
+      });
+      assertNotRedirect("Replicate", response, createUrl);
+      const created = (await readJson(response)) as ReplicatePrediction;
+      if (o.signal.aborted) throw o.signal.reason;
+      if (!response.ok) {
+        let message = `Replicate API error (${response.status}) for model ${refText}: ${
+          scrubAndCap(String(created.detail || created.title || response.statusText), 300)
+        }`;
+        const fields = (created.invalid_fields ?? [])
+          .map((f) => f.field)
+          .filter((f): f is string => Boolean(f));
+        if (fields.length > 0) message += ` (invalid fields: ${scrubAndCap(fields.join(", "), 200)})`;
+        throw providerHttpError(message, response);
+      }
+      return created;
+    }, { signal: o.signal, label: "Replicate" });
 
     const terminal = (p: ReplicatePrediction): string | undefined => {
       if (p.status === "succeeded") return normalizeReplicateOutput(p.output, refText);

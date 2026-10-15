@@ -1,6 +1,7 @@
 // --- Ollama (native /api/chat; optional, only when reachable) ---
 import type { ProviderCall } from "./shared.js";
 import { assertNonEmpty, readProviderJson, stripThinkTags } from "./shared.js";
+import { providerHttpError, withRetry } from "./retry.js";
 import { OLLAMA_URL } from "../config.js";
 import { scrubAndCap } from "../security/secrets.js";
 
@@ -30,28 +31,33 @@ export const callOllama: ProviderCall = async (messages, o) => {
         `Set OLLAMA_URL in the MCP server .env or choose another provider.`
     );
   }
-  const response = await fetch(`${OLLAMA_URL}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: o.model,
-      messages,
-      stream: false,
-      options: { num_predict: o.maxTokens, temperature: o.temperature ?? 0.7 },
-    }),
-    signal: o.signal,
+  const body = JSON.stringify({
+    model: o.model,
+    messages,
+    stream: false,
+    options: { num_predict: o.maxTokens, temperature: o.temperature ?? 0.7 },
   });
-  const result = (await readProviderJson(response)) as {
-    error?: string;
-    message?: { content?: string };
-    model?: string;
-    done_reason?: string;
-    prompt_eval_count?: number;
-    eval_count?: number;
-  };
-  if (!response.ok || result.error) {
-    throw new Error(`Ollama API error (${response.status}): ${scrubAndCap(String(result.error || response.statusText), 300)}`);
-  }
+  const result = await withRetry(async () => {
+    const response = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal: o.signal,
+    });
+    const parsed = (await readProviderJson(response)) as {
+      error?: string;
+      message?: { content?: string };
+      model?: string;
+      done_reason?: string;
+      prompt_eval_count?: number;
+      eval_count?: number;
+    };
+    if (!response.ok || parsed.error) {
+      const text = `Ollama API error (${response.status}): ${scrubAndCap(String(parsed.error || response.statusText), 300)}`;
+      throw response.ok ? new Error(text) : providerHttpError(text, response);
+    }
+    return parsed;
+  }, { signal: o.signal, label: "Ollama" });
   const text = stripThinkTags(result.message?.content ?? "");
   return {
     content: assertNonEmpty("Ollama", text, result.done_reason),

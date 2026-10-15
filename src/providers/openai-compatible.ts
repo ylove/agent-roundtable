@@ -1,6 +1,7 @@
 // --- OpenAI-compatible chat completions (OpenAI, Together AI, any /v1/chat/completions server) ---
 import type { LLMCompletionResult, ProviderCall } from "./shared.js";
 import { assertNonEmpty, assertNotRedirect, readProviderJson, stripThinkTags } from "./shared.js";
+import { providerHttpError, withRetry } from "./retry.js";
 import type { LLMProvider } from "../config.js";
 import { openAICompatibleKeyOrigins, requireEnv } from "../config.js";
 import { scrubAndCap } from "../security/secrets.js";
@@ -23,7 +24,8 @@ export function parseChatCompletions(
   if (!response.ok || result.error) {
     const message = typeof result.error === "string" ? result.error : result.error?.message;
     // The body comes from the remote server: redact anything secret-shaped and keep it short.
-    throw new Error(`${label} API error (${response.status}): ${scrubAndCap(String(message || response.statusText), 300)}`);
+    const text = `${label} API error (${response.status}): ${scrubAndCap(String(message || response.statusText), 300)}`;
+    throw response.ok ? new Error(text) : providerHttpError(text, response);
   }
   const choice = result.choices?.[0];
   const text = stripThinkTags(choice?.message?.content ?? "");
@@ -113,21 +115,18 @@ export function createOpenAICompatibleCall(spec: OpenAICompatibleSpec): Provider
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model: o.model,
-        messages, // system messages are accepted inline by every OpenAI-compatible server
-        [spec.tokenParam]: o.maxTokens,
-        ...(o.temperature !== undefined && { temperature: o.temperature }),
-      }),
-      signal: o.signal,
-      redirect: "manual",
+    const body = JSON.stringify({
+      model: o.model,
+      messages, // system messages are accepted inline by every OpenAI-compatible server
+      [spec.tokenParam]: o.maxTokens,
+      ...(o.temperature !== undefined && { temperature: o.temperature }),
     });
-    assertNotRedirect(spec.label, response, url);
-    const result = (await readProviderJson(response)) as ChatCompletionsResponse;
-    return parseChatCompletions(spec.label, spec.provider, response, result, o.model);
+    return withRetry(async () => {
+      const response = await fetch(url, { method: "POST", headers, body, signal: o.signal, redirect: "manual" });
+      assertNotRedirect(spec.label, response, url);
+      const result = (await readProviderJson(response)) as ChatCompletionsResponse;
+      return parseChatCompletions(spec.label, spec.provider, response, result, o.model);
+    }, { signal: o.signal, label: spec.label });
   };
 }
 

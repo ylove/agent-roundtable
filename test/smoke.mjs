@@ -35,6 +35,8 @@ const smokeEnv = {
   ROUNDTABLE_ACTIVITY_LOG: join(root, "activity.jsonl"),
   ROUNDTABLE_TRANSCRIPTS_DIR: join(root, "transcripts"),
   ROUNDTABLE_PARALLEL_TURNS: "2",
+  // Scripted provider failures must fail at once, not be retried.
+  ROUNDTABLE_PROVIDER_RETRIES: "0",
   // Prototype sandboxes stay under the temp root; never spawn a browser or headless Chrome.
   ROUNDTABLE_PROTOTYPE_DIR: join(root, "prototypes"),
   ROUNDTABLE_PROTOTYPE_SCREENSHOTS: "0",

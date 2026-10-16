@@ -551,3 +551,19 @@ test("gh sync links a PR published after the completion event once", async () =>
   await sync.syncOnce();
   assert.equal(gh.calls().length, after);
 });
+
+test("opaque configured secrets never reach fake gh issue or comment bodies", async (t) => {
+  const secret = "opaque-configured-key-Q7m2R9z4";
+  process.env.OPENAI_COMPATIBLE_API_KEY = secret;
+  t.after(() => delete process.env.OPENAI_COMPATIBLE_API_KEY);
+  const gh = fakeGh();
+  // Exercise the final external body boundary, independent of earlier store/event scrubbing.
+  await withBodyFile(`An issue reply containing ${secret}`, path =>
+    runGh(["issue", "create", "--repo", REPO, "--title", ghText(secret), "--body-file", path]));
+  await withBodyFile(`A comment echoing ${secret}`, path =>
+    runGh(["issue", "comment", "1", "--repo", REPO, "--body-file", path]));
+  const calls = gh.calls();
+  assert.equal(calls.filter(c => c.body).length, 2);
+  assert.ok(!JSON.stringify(calls).includes(secret));
+  assert.ok(calls.every(c => c.body.includes("[redacted:env:OPENAI_COMPATIBLE_API_KEY]")));
+});

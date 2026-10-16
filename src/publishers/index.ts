@@ -172,7 +172,7 @@ export class PublicChannel {
     const topicRedaction = meta.topic !== undefined ? redact(meta.topic) : undefined;
     if (topicRedaction) mergeCounts(this.redactions, topicRedaction.counts);
     this.meta = {
-      ...(meta.mode !== undefined && { mode: meta.mode }),
+      ...(meta.mode !== undefined && { mode: redact(meta.mode).text }),
       participants: meta.participants.map(publicLabel),
       ...(topicRedaction && { topic: topicRedaction.text }),
     };

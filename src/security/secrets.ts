@@ -5,7 +5,7 @@
 // shape), then the pattern-based credential rules shared with public redaction.
 // ============================================================================
 
-import { redactSecrets } from "../publishers/redact.js";
+import { redactSecrets } from "./redaction-rules.js";
 import { SECRET_NAME_RE } from "./child-env.js";
 
 const MIN_SECRET_LENGTH = 8;
@@ -29,8 +29,8 @@ export interface ScrubResult {
   redactions: number;
 }
 
-/** Replace exact env secret values and credential patterns. Safe to call on any string. */
-export function scrubSecrets(input: string, source: NodeJS.ProcessEnv = process.env): ScrubResult {
+/** Replace exact configured secret values. Safe to call on any string. */
+export function scrubConfiguredSecrets(input: string, source: NodeJS.ProcessEnv = process.env): ScrubResult {
   if (!input) return { text: input, redactions: 0 };
   let text = input;
   let redactions = 0;
@@ -40,6 +40,12 @@ export function scrubSecrets(input: string, source: NodeJS.ProcessEnv = process.
     redactions += parts.length - 1;
     text = parts.join(`[redacted:env:${name}]`);
   }
+  return { text, redactions };
+}
+
+/** Replace exact configured values first, then credential patterns. */
+export function scrubSecrets(input: string, source: NodeJS.ProcessEnv = process.env): ScrubResult {
+  let { text, redactions } = scrubConfiguredSecrets(input, source);
   const patterns = redactSecrets(text);
   for (const n of Object.values(patterns.counts)) redactions += n;
   return { text: patterns.text, redactions };

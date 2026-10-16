@@ -249,19 +249,19 @@ test("9c: final validation failure can be retried after its escalation is resolv
 
 test("2b: recovery cancels an unstarted launch before a late child can do work", async (t) => {
   const { reconcileLaunch } = await import("../../dist/workers/launch-intent.js");
-  const { spawnWorker, workerExit } = await import("../../dist/workers/process.js");
+  const { spawnWorker } = await import("../../dist/workers/process.js");
   const f = await makeRun();
   const path = join(f.store.dir, "launch.json");
   const marker = join(f.store.dir, "should-not-exist");
   const token = "b".repeat(64);
   writeFileSync(path, JSON.stringify({ token_sha256: token, at: new Date().toISOString(), run: {} }));
   assert.equal(await reconcileLaunch(path), null);
-  const h = await spawnWorker({
+  // The relay takes the fence before starting the CLI, so a cancelled launch fails to start.
+  await assert.rejects(spawnWorker({
     file: process.execPath, args: ["-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", marker],
     cwd: f.root, env: { PATH: process.env.PATH, ROUNDTABLE_LAUNCH_INTENT: path, ROUNDTABLE_LAUNCH_SHA: token },
     prompt: "", outputPath: join(f.store.dir, "late.jsonl"),
-  });
-  assert.equal((await workerExit(h.pid)).code, 1);
+  }), /cancelled/);
   assert.equal(existsSync(marker), false);
 });
 

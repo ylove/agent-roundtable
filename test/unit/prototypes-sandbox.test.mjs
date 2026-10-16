@@ -207,3 +207,15 @@ test("sweepStaleSessionDirs: same host and dead pid, any host after 24 h, unowne
   assert.equal(existsSync(mineOld), false);
   assert.ok(existsSync(mine));
 });
+
+test("public prototype materialization removes opaque configured secrets", async (t) => {
+  const secret = "opaque-configured-key-Q7m2R9z4";
+  process.env.OPENAI_COMPATIBLE_API_KEY = secret;
+  t.after(() => delete process.env.OPENAI_COMPATIBLE_API_KEY);
+  const dir = await tmp();
+  const files = await materializeFiles(dir, [{ path: "index.html", content: `<p>${secret}</p>` }], { redactContent: true });
+  assert.ok(!JSON.stringify(files).includes(secret));
+  assert.ok(!(await readFile(join(dir, "index.html"), "utf8")).includes(secret));
+  await assert.rejects(materializeFiles(dir, [{ path: `${secret}.html`, content: "test" }], { redactContent: true }), /sensitive public prototype file path/);
+  assert.ok(!existsSync(join(dir, `${secret}.html`)));
+});

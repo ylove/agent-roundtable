@@ -45,7 +45,7 @@ function fakeProgram(t, names, out, stdout = "") {
     // Drains stdin first (local meetings send the prompt there), then reports.
     writeFileSync(
       p,
-      `#!${process.execPath}\nif (process.argv.includes("--help")) { process.stdout.write("--permission-prompts\\n"); process.exit(0); }\nprocess.stdin.resume();\nprocess.stdin.on("end", () => {\n` +
+      `#!${process.execPath}\nif (process.argv.includes("--help")) { process.stdout.write("--permission-prompts --restricted --settings --strict-mcp-config --tools --permission-mode --disable-slash-commands --no-chrome\\n"); process.exit(0); }\nprocess.stdin.resume();\nprocess.stdin.on("end", () => {\n` +
         `  require("node:fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(process.env));\n` +
         `  process.stdout.write(${JSON.stringify(stdout)});\n});\n`
     );

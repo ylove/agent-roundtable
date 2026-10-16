@@ -3,9 +3,9 @@
 // ============================================================================
 
 import { readFile } from "node:fs/promises";
-import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, relative, resolve, sep } from "node:path";
 import { parse } from "yaml";
 import { AGENTS_DIR, SKILLS_DIR, WORKSPACE_DIR, agentPaths } from "./config.js";
 import { isContained } from "./security/fs-safe.js";
@@ -154,6 +154,43 @@ export function skillSearchDirs(agentPath?: string): string[] {
   ].map(dir => resolve(dir)))];
 }
 
+/** Resolve every directory and symlink hop before reading skill text. Roots' parents are trusted. */
+function containedSkillPath(candidate: string, dirs: readonly string[]): string {
+  const roots = dirs.flatMap(dir => {
+    try {
+      // A repository cannot replace its entire skill root with an outside directory link.
+      if (lstatSync(dir).isSymbolicLink()) return [];
+      return [realpathSync.native(dir)];
+    } catch { return []; }
+  });
+  let hops = 0;
+  const secretName = (path: string) => /^(?:\.env.*|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?|.*\.(?:pem|key|p12|pfx)|credentials(?:\..*)?)$/i.test(basename(path));
+  const walk = (path: string): string => {
+    const root = roots.find(root => isContained(root, path));
+    if (!root) throw new Error("Skill path escapes approved roots");
+    let current = root;
+    const parts = relative(root, path).split(sep).filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      current = join(current, parts[i]);
+      if (secretName(current)) throw new Error("Refusing secret-shaped skill target");
+      const st = lstatSync(current); // also rejects dangling/cyclic intermediate paths
+      if (st.isSymbolicLink()) {
+        if (++hops > 40) throw new Error("Skill symlink chain exceeds 40 hops");
+        const target = walk(resolve(dirname(current), readlinkSync(current)));
+        return walk(join(target, ...parts.slice(i + 1)));
+      }
+    }
+    return current;
+  };
+  // Canonicalize only the trusted parents, never the candidate's unvalidated directories.
+  const dir = dirs.find(dir => isContained(resolve(dir), resolve(candidate)));
+  if (!dir || lstatSync(dir).isSymbolicLink()) throw new Error("Unapproved skill root");
+  const real = realpathSync.native(walk(join(realpathSync.native(dir), relative(resolve(dir), resolve(candidate)))));
+  if (!roots.some(root => isContained(root, real)) || secretName(real)) throw new Error("Unapproved skill target");
+  if (!statSync(real).isFile()) throw new Error("Skill is not a file");
+  return real;
+}
+
 export async function loadSkills(
   names: string[],
   dirs: string | readonly string[] = skillSearchDirs(),
@@ -169,7 +206,8 @@ export async function loadSkills(
     if (name && name !== "." && name !== ".." && !/[\\/]/.test(name)) {
       for (const candidate of candidates) {
         try {
-          const { data, body } = readFrontmatter(await readFile(candidate, "utf-8"));
+          const path = containedSkillPath(candidate, searchDirs);
+          const { data, body } = readFrontmatter(await readFile(path, "utf-8"));
           skills.push({ name, path: resolve(candidate), body, ...metadataDescription(data) });
           loaded = true;
           break;
@@ -374,7 +412,8 @@ export function listSkills(
       const path = resolve(dir, name, "SKILL.md");
       if (!isFile(path)) continue;
       try {
-        const { data } = readFrontmatter(readFileSync(path, "utf-8"));
+        const safe = containedSkillPath(path, typeof dirs === "string" ? [dirs] : dirs);
+        const { data } = readFrontmatter(readFileSync(safe, "utf-8"));
         skills.push({ name, path, ...metadataDescription(data) });
         seen.add(name);
       } catch (e) {

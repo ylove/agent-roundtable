@@ -2,11 +2,12 @@
 // Configuration (reads process.env only; imports no local modules)
 // ============================================================================
 
+import { mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 // Version (also reported by debug_env and the startup banner)
-export const VERSION = "0.4.0";
+export const VERSION = "1.0.0";
 
 // Agent meetings
 // The default is relative to the server process's cwd (whatever directory the MCP host launched it
@@ -26,7 +27,16 @@ export const WORKSPACE_DIR = process.env.ROUNDTABLE_WORKSPACE_DIR || defaultWork
 
 // Local state root (built from the home directory at runtime so no literal home path appears in source).
 // Archived sessions, heads-down runs, task worktrees and the audit log live under it.
-export const ROUNDTABLE_HOME = process.env.ROUNDTABLE_HOME || join(homedir(), ".agent-roundtable");
+function stateHome(): string {
+  if (process.env.ROUNDTABLE_HOME) return process.env.ROUNDTABLE_HOME;
+  if (process.env.NODE_TEST_CONTEXT !== undefined) {
+    const dir = mkdtempSync(join(tmpdir(), "roundtable-test-home-"));
+    console.error("[Roundtable] NODE_TEST_CONTEXT is set without ROUNDTABLE_HOME; using a fresh temporary state directory. Preload test/fixtures/foundation/test-env.mjs for test cleanup.");
+    return dir;
+  }
+  return join(homedir(), ".agent-roundtable");
+}
+export const ROUNDTABLE_HOME = stateHome();
 export const SESSIONS_DIR = join(ROUNDTABLE_HOME, "sessions");
 export const EXECUTIONS_DIR = join(ROUNDTABLE_HOME, "executions");
 export const WORKTREES_DIR = join(ROUNDTABLE_HOME, "worktrees");

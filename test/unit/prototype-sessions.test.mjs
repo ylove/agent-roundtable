@@ -378,7 +378,7 @@ describe("local meeting (fake claude on PATH)", () => {
     // Records { argv, stdin } per call: the prompt arrives on stdin, never as an argument.
     writeFileSync(
       bin,
-      `#!${process.execPath}\nif (process.argv.includes("--help")) { process.stdout.write("--permission-prompts\\n"); process.exit(0); }\nconst fs = require("node:fs");\nlet input = "";\n` +
+      `#!${process.execPath}\nif (process.argv.includes("--help")) { process.stdout.write("--permission-prompts --restricted --settings --strict-mcp-config --tools --permission-mode --disable-slash-commands --no-chrome\\n"); process.exit(0); }\nconst fs = require("node:fs");\nlet input = "";\n` +
         `process.stdin.setEncoding("utf8");\nprocess.stdin.on("data", (d) => (input += d));\nprocess.stdin.on("end", () => {\n` +
         `  fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), stdin: input }) + "\\n");\n` +
         `  const n = fs.readFileSync(${JSON.stringify(log)}, "utf8").trim().split("\\n").length - 1;\n` +
@@ -762,7 +762,7 @@ describe("debug_env", () => {
   test("reports the prototype configuration", async (t) => {
     stubFetch(t, () => json(500, {}));
     const d = JSON.parse((await handleToolCall("debug_env", {})).content[0].text);
-    assert.equal(d.version, "0.4.0");
+    assert.equal(d.version, "1.0.0");
     assert.equal(d.prototypes.dir, PROTO_ROOT);
     assert.equal(typeof d.prototypes.screenshots, "boolean");
     assert.equal(d.prototypes.open_browser, false);

@@ -315,3 +315,24 @@ test("1b: amended checks run in a private checkout of the checked SHA and retain
   assert.equal(passed.payload.submitted_seq, rt.submitted_seq);
   assert.equal(git(f.root, "show", integrationBranch(f.store.id) + ":src/a/a.txt"), "checked");
 });
+
+test("an abort interrupted before its workers stopped is finished by the next runner, and purge then succeeds", async (t) => {
+  const { groupAlive } = await import("../../dist/workers/process.js");
+  const { purgeExecution } = await import("../../dist/execution/run-admin.js");
+  const f = await setup(t);
+  await f.r.tick();
+  const h = f.driver.calls[0];
+  await until(() => readFileSync(h.outputPath, "utf8").includes("init"));
+  await stoppedRunner(f.r);
+  assert.ok(groupAlive(h.pid), "the worker outlives its runner");
+  // The abort tool committed execution.aborted and was lost before stopping anything.
+  await emit(f.store, "execution.aborted", { reason: "interrupted abort" });
+  await assert.rejects(purgeExecution(f.store.id, { confirm: true }), /Workers still run in .*agent-roundtable run/);
+  const next = f.create();
+  await next.start();
+  assert.ok(!groupAlive(h.pid), "the next runner stopped the worker");
+  assert.equal((await f.store.state()).agents[h.agent].status, "exited");
+  assert.deepEqual((await eventsOf(f.store, "agent.exited")).map((e) => e.payload.reason), ["killed"]);
+  assert.equal(await next.run(), 0);
+  assert.equal((await purgeExecution(f.store.id, { confirm: true })).status, "aborted");
+});

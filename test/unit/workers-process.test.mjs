@@ -74,3 +74,38 @@ test("worker spawn errors remain observable through spawnWorker", async (t) => {
   const cwd = fixture(t);
   await assert.rejects(spawnWorker({ file: join(cwd, "missing"), args: [], cwd, env: {}, prompt: "go", outputPath: join(cwd, "runs", "1.jsonl") }), /ENOENT/);
 });
+
+test("worker relay redacts every secret-shaped JSON key and a lone PEM header never silences later lines", async (t) => {
+  const cwd = fixture(t);
+  const outputPath = join(cwd, "runs", "1.jsonl");
+  const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+  const lines = [
+    JSON.stringify({ type: "user", auth: "opaque-auth-1111", authorization: "opaque-authz-2222", pwd: "opaque-pwd-3333",
+      aws_access_key_id: "opaque-access-4444", token: ["opaque-array-5555"], author: "kept-author", usage: { output_tokens: 20 } }),
+    JSON.stringify({ type: "user", content: "fixture: -----BEGIN RSA PRIVATE KEY-----" }),
+    "plain -----BEGIN PRIVATE KEY-----",
+    body,
+    "-----END PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+    "Warning: not a key body",
+    JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.25, usage: { output_tokens: 20 } }),
+  ];
+  const code = `process.stdin.resume(); process.stdin.on("end", () => { process.stdout.write(${JSON.stringify(lines.join("\n") + "\n")}); });`;
+  const { pid } = await spawnWorker({ file: process.execPath, args: ["-e", code], cwd, env: {}, prompt: "go", outputPath });
+  assert.equal((await workerExit(pid)).code, 0);
+  const log = readFileSync(outputPath, "utf8");
+  for (const leaked of ["opaque-auth-1111", "opaque-authz-2222", "opaque-pwd-3333", "opaque-access-4444", "opaque-array-5555", body]) {
+    assert.ok(!log.includes(leaked), `leaked ${leaked}`);
+  }
+  const out = log.trimEnd().split("\n");
+  assert.equal(out.length, lines.length);
+  const first = JSON.parse(out[0]);
+  assert.equal(first.author, "kept-author");
+  assert.equal(first.usage.output_tokens, 20);
+  assert.equal(JSON.parse(out[1]).type, "user", "a JSON line with a header keeps its syntax");
+  assert.deepEqual(out.slice(2, 6), Array(4).fill("[redacted:private_key]"));
+  assert.equal(out[6], "Warning: not a key body", "a line that cannot be a PEM body ends the redaction");
+  const result = JSON.parse(out[7]);
+  assert.equal(result.type, "result");
+  assert.equal(result.total_cost_usd, 0.25, "the result line, and with it the run's cost, survives");
+});

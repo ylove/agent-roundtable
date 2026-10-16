@@ -18,7 +18,7 @@ import { agentDir } from "../workers/files.js";
 import { join } from "node:path";
 import { acquireLock, processMatches, LockTimeoutError } from "./lock.js";
 import { executionDir, openExecutionStore } from "./store.js";
-import type { BlackboardState, TaskState } from "./types.js";
+import type { BlackboardState, EventSource, ExecutionStore, TaskState } from "./types.js";
 import { verifyExecution, type VerifyResult } from "./verify.js";
 import { watcherObservations } from "./watch.js";
 import { executionWorktreesDir, pruneWorktrees } from "./worktrees.js";
@@ -30,6 +30,58 @@ const cap = (s: string | undefined, n: number) => {
   const t = scrub((s ?? "").trim());
   return t.length > n ? `${t.slice(0, n)}…` : t;
 };
+
+// ============================================================================
+// stopping a run's workers
+// ============================================================================
+
+/**
+ * Stop every runner-launched worker of a run that is still ours by start-time identity: adopt a
+ * published launch first, record workers already gone as lost, then stop each live group. Used by
+ * abort and by a runner that starts on an aborted run, so an abort interrupted before its workers
+ * stopped never leaves them running (purge refuses while they do). `recordExit` records each
+ * stopped worker as killed; only a caller that holds the runner lock passes it, so a live runner
+ * never sees a second exit.
+ */
+export async function stopLiveWorkers(
+  store: ExecutionStore,
+  exe: string,
+  source: EventSource,
+  stop: (pgid: number, graceMs: number, started?: string) => Promise<void>,
+  graceMs: number,
+  recordExit = false,
+): Promise<{ stopped: string[]; warnings: string[] }> {
+  for (const x of Object.values((await store.state()).agents)) {
+    if (x.external || !["registered", "running"].includes(x.status)) continue;
+    const launch = await reconcileLaunch(join(agentDir(exe, x.id), "launch.json"));
+    if (launch && processMatches(launch.pid, launch.started)) {
+      await store.transact(() => ({ events: [{ type: "agent.spawned", source, payload: {
+        agent: x.id, task: launch.task, attempt: launch.attempt, pid: launch.pid, started: launch.started,
+      } }] }));
+    }
+  }
+  const after = await store.state();
+  const live = Object.values(after.agents).filter((x) => !x.external && x.status === "running" && x.pid !== undefined && x.pid > 1 && processMatches(x.pid, x.started));
+  const gone = Object.values(after.agents).filter((x) => !x.external && x.status === "running" && !live.includes(x));
+  if (gone.length) await store.transact(() => ({ events: gone.map((x) => ({
+    type: "agent.exited" as const, source, payload: { agent: x.id, ...(x.task && { task: x.task }), code: null, reason: "lost" as const },
+  })) }));
+  const stopped: string[] = [];
+  const warnings: string[] = [];
+  await Promise.all(live.map(async (x) => {
+    try {
+      await stop(x.pid!, graceMs, x.started);
+      stopped.push(x.id);
+    } catch (e) {
+      warnings.push(`could not stop ${x.id} (pid ${x.pid}): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }));
+  const killed = live.filter((x) => stopped.includes(x.id));
+  if (recordExit && killed.length) await store.transact(() => ({ events: killed.map((x) => ({
+    type: "agent.exited" as const, source, payload: { agent: x.id, ...(x.task && { task: x.task }), code: null, reason: "killed" as const },
+  })) }));
+  return { stopped: stopped.sort(), warnings };
+}
 
 // ============================================================================
 // status
@@ -199,7 +251,7 @@ export async function purgeExecution(exe: string, opts: { confirm: boolean; acto
       if (a.external) continue;
       const launch = await reconcileLaunch(join(agentDir(exe, a.id), "launch.json"));
       if (launch === undefined || launch || (a.pid !== undefined && processMatches(a.pid, a.started))) {
-        throw new PurgeRefusal(`Workers still run in ${exe}; stop them before purging their worktrees`);
+        throw new PurgeRefusal(`Workers still run in ${exe}; stop them before purging their worktrees (\`agent-roundtable run ${exe}\` stops the workers of an aborted run)`);
       }
     }
     const repoMissing = !existsSync(store.header().repo_root);

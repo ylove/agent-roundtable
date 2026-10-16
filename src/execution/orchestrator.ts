@@ -32,12 +32,15 @@ import { appendAudit } from "../security/audit.js";
 import { scrub } from "../security/secrets.js";
 import { ClaudeCodeDriver } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
+import { reconcileLaunch } from "../workers/launch-intent.js";
+import { agentDir } from "../workers/files.js";
 import { stopGroup } from "../workers/process.js";
 import { amendContract } from "./contract-lifecycle.js";
 import { openContractStore, orchestratorSource } from "./contract-state.js";
 import { BUDGET_FALLBACK } from "./contract.js";
 import { resolveEscalation, type HookCtx, type HuddleLLM } from "./escalation.js";
-import { openRepo, runGit, splitZ, SubmodulesUnsupportedError } from "./git.js";
+import { assertNoGitlinksInIndex, assertNoGitlinksInTree, openRepo, runGit, splitZ, SubmodulesUnsupportedError } from "./git.js";
+import { processMatches } from "./lock.js";
 import { writeHandoff } from "./handoff.js";
 import { PurgeRefusal, purgeExecution } from "./run-admin.js";
 import { ensureRunner, launchRunner, runnerLiveness, type EnsureRunnerResult } from "./runner-launch.js";
@@ -53,7 +56,7 @@ import type {
   WorkerRecord,
 } from "./types.js";
 import { WATCH_DEFAULT_TIMEOUT_MIN } from "./watch.js";
-import { ensureIntegrationWorktree, executionWorktreesDir } from "./worktrees.js";
+import { executionWorktreesDir } from "./worktrees.js";
 
 type Json = Record<string, unknown>;
 
@@ -87,7 +90,7 @@ export interface OrchestratorDeps {
   selectSandbox(p: SandboxProbe): Promise<{ backend: SandboxBackendId; degraded?: string }>;
   detectDriver(id: WorkerCli): Promise<{ ok: boolean; missing: string[]; version?: string }>;
   checkGh(opts: Parameters<typeof checkGhReady>[0]): Promise<GhReadiness>;
-  stopGroup(pgid: number, graceMs: number): Promise<void>;
+  stopGroup(pgid: number, graceMs: number, started?: string): Promise<void>;
   /** How long execute waits for the runner's dashboard.json before answering without its URL. */
   dashboardWaitMs: number;
 }
@@ -106,7 +109,7 @@ const DEFAULT_DEPS: OrchestratorDeps = {
   },
   detectDriver: (id) => (id === "codex" ? new CodexDriver() : new ClaudeCodeDriver()).detect(),
   checkGh: (opts) => checkGhReady(opts),
-  stopGroup: (pgid, graceMs) => stopGroup(pgid, graceMs),
+  stopGroup: (pgid, graceMs, started) => stopGroup(pgid, graceMs, started),
   dashboardWaitMs: 5_000,
 };
 
@@ -332,7 +335,9 @@ async function probeRepository(store: FileExecutionStore): Promise<{ question?: 
   const header = store.header();
   const warnings: string[] = [];
   try {
-    await ensureIntegrationWorktree(header);
+    const repo = await openRepo(header.repo_root);
+    await assertNoGitlinksInIndex(repo);
+    await assertNoGitlinksInTree(repo, header.base_sha);
   } catch (e) {
     if (e instanceof SubmodulesUnsupportedError) {
       return {
@@ -727,12 +732,25 @@ export async function controlExecution(a: ControlInput): Promise<Json> {
       });
       if (!r.result) throw new Error(`Execution ${exe} already ended`);
       // The runner stops its workers when it sees the abort; stop them here too, for a runner that is gone.
+      for (const x of Object.values((await store.state()).agents)) {
+        if (x.external || !["registered", "running"].includes(x.status)) continue;
+        const launch = await reconcileLaunch(join(agentDir(exe, x.id), "launch.json"));
+        if (launch && processMatches(launch.pid, launch.started)) {
+          await store.transact(() => ({ events: [{ type: "agent.spawned", source, payload: {
+            agent: x.id, task: launch.task, attempt: launch.attempt, pid: launch.pid, started: launch.started,
+          } }] }));
+        }
+      }
       const after = await store.state();
-      const live = Object.values(after.agents).filter((x) => !x.external && x.status === "running" && x.pid !== undefined && x.pid > 1 && pidAlive(x.pid));
+      const live = Object.values(after.agents).filter((x) => !x.external && x.status === "running" && x.pid !== undefined && x.pid > 1 && processMatches(x.pid, x.started));
+      const gone = Object.values(after.agents).filter((x) => !x.external && x.status === "running" && !live.includes(x));
+      if (gone.length) await store.transact(() => ({ events: gone.map((x) => ({
+        type: "agent.exited" as const, source, payload: { agent: x.id, ...(x.task && { task: x.task }), code: null, reason: "lost" as const },
+      })) }));
       const stopped: string[] = [];
       await Promise.all(live.map(async (x) => {
         try {
-          await deps.stopGroup(x.pid!, ABORT_GRACE_MS);
+          await deps.stopGroup(x.pid!, ABORT_GRACE_MS, x.started);
           stopped.push(x.id);
         } catch (e) {
           warnings.push(`could not stop ${x.id} (pid ${x.pid}): ${errText(e)}`);

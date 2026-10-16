@@ -121,8 +121,8 @@ test("ensureRunner relaunches a dead owner and SIGTERM snapshots and releases ow
   await waitFor(async () => (await store.events()).some((e) => e.type === "runner.takeover"), 10000);
   assert.equal(readRunnerInfo(store.id).pid, next.pid);
   process.kill(next.pid, "SIGTERM");
-  await waitFor(() => readRunnerInfo(store.id)?.stoppedAt, 10000);
-  assert.equal(existsSync(join(store.dir, "runner.lock")), false);
+  // stoppedAt is written just before the lock is released (never after, which could mark a successor stopped).
+  await waitFor(() => readRunnerInfo(store.id)?.stoppedAt && !existsSync(join(store.dir, "runner.lock")), 10000);
   const snap = JSON.parse(readFileSync(join(store.dir, "snapshot.json"), "utf8"));
   assert.equal(snap.seq, (await store.state()).seq);
   assert.equal((statSync(join(store.dir, "runner.log")).mode & 0o777), 0o600);

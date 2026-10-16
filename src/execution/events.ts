@@ -165,8 +165,8 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "runner.takeover": { previous_pid: "int" },
   "runner.stopped": { reason: "t" },
 
-  "agent.registered": { agent: "s", persona: "s", "team?": "s", driver: DRIVER, token_sha256: "s", external: "b" },
-  "agent.spawned": { agent: "s", task: "id", attempt: "int", pid: "int", "session_id?": "s" },
+  "agent.registered": { agent: "s", persona: "s", "team?": "s", driver: DRIVER, token_sha256: "s", external: "b", "budget_usd?": "n" },
+  "agent.spawned": { agent: "s", task: "id", attempt: "int", pid: "int", "session_id?": "s", "started?": "s" },
   "agent.attested": { agent: "s", tools: "s[]", mcp_servers: "s[]", ok: "b" },
   "agent.exited": {
     agent: "s",

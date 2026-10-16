@@ -22,14 +22,14 @@ export function scriptedDriver(t, behavior = () => ({})) {
     async launch(l) { return start(l, false); },
     async resume(_rec, l) { return start(l, true); },
     parse: parseClaudeLine,
-    async stop(h) { await stopGroup(h.pid, 30); },
+    async stop(h) { await stopGroup(h.pid, 30, h.started); },
   };
   async function start(l, resume) {
     const b = behavior(l, calls.length);
     const init = b.init ?? goodInit;
     const script = b.sessionGone && resume ? `process.stderr.write("No conversation found with session ID\\n"); process.exit(1);` : `process.stdin.resume(); console.log(${JSON.stringify(JSON.stringify(init))}); ${b.result ? `console.log(${JSON.stringify(JSON.stringify(b.result))});` : ""} ${b.exit ? "setTimeout(() => process.exit(1), 20)" : "setInterval(() => {}, 1000)"};`;
-    const { pid } = await spawnWorker({ file: process.execPath, args: ["-e", script], cwd: l.cwd, env: {}, prompt: l.prompt, outputPath: l.outputPath });
-    const handle = { ...l, pid, pgid: pid, startedAt: new Date().toISOString(), resume };
+    const { pid, started } = await spawnWorker({ file: process.execPath, args: ["-e", script], cwd: l.cwd, env: { PATH: process.env.PATH, ...l.env }, prompt: l.prompt, outputPath: l.outputPath });
+    const handle = { ...l, pid, pgid: pid, started, startedAt: new Date().toISOString(), resume };
     calls.push(handle);
     return handle;
   }
@@ -53,8 +53,8 @@ export async function submit(store, handle, { checks = true, content } = {}) {
   const committed = await commitLeasedPaths(handle.cwd, leasesFor(state, handle.task), { message: "task done", trailers: { execution: store.id, task: handle.task, agent: handle.agent }, summaryBase: integrationBranch(store.id) });
   const diff = await store.putBlob(await diffForTask(handle.cwd, integrationBranch(store.id)));
   const source = { kind: "agent", id: handle.agent, task: handle.task, pid: handle.pid };
-  await store.transact(() => ({ events: [
+  await store.transact(({ state: current }) => ({ events: [
     { type: "task.submitted", source, payload: { task: handle.task, commit: committed.commit, diff_blob: diff, stat: committed.stat, files: committed.files, rewrites: committed.rewrites } },
-    ...(checks ? [{ type: "task.checks_passed", source, payload: { task: handle.task, commands: state.tasks[handle.task].spec.checks } }] : []),
+    ...(checks ? [{ type: "task.checks_passed", source, payload: { task: handle.task, commands: state.tasks[handle.task].spec.checks, commit: committed.commit, submitted_seq: current.seq + 1 } }] : []),
   ] }));
 }

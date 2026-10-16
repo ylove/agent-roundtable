@@ -8,18 +8,20 @@
 // ============================================================================
 
 import { existsSync, rmSync } from "node:fs";
-import { pidAlive } from "../prototypes/sandbox.js";
 import { completion } from "../dashboard/render.js";
 import { appendAudit, verifyAudit, type AuditVerifyResult } from "../security/audit.js";
 import { scrub } from "../security/secrets.js";
 import { executionBudgetUsd } from "./budget.js";
 import { runnerLiveness, type RunnerLiveness } from "./runner-launch.js";
-import { acquireLock, LockTimeoutError } from "./lock.js";
+import { reconcileLaunch } from "../workers/launch-intent.js";
+import { agentDir } from "../workers/files.js";
+import { join } from "node:path";
+import { acquireLock, processMatches, LockTimeoutError } from "./lock.js";
 import { executionDir, openExecutionStore } from "./store.js";
 import type { BlackboardState, TaskState } from "./types.js";
 import { verifyExecution, type VerifyResult } from "./verify.js";
 import { watcherObservations } from "./watch.js";
-import { pruneWorktrees } from "./worktrees.js";
+import { executionWorktreesDir, pruneWorktrees } from "./worktrees.js";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "failed", "aborted"]);
 const OPEN_ESCALATION = new Set(["open", "routed", "in_huddle", "awaiting_human"]);
@@ -193,14 +195,22 @@ export async function purgeExecution(exe: string, opts: { confirm: boolean; acto
     const store = await openExecutionStore(exe);
     const state = await store.state();
     if (!TERMINAL.has(state.status)) throw new PurgeRefusal(`Execution ${exe} is ${state.status}; only completed, failed or aborted runs can be purged`);
-    if (Object.values(state.agents).some((a) => !a.external && a.pid !== undefined && pidAlive(a.pid))) throw new PurgeRefusal(`Workers still run in ${exe}; stop them before purging their worktrees`);
-    const pruned = await pruneWorktrees(store.header(), { remove: true, branches: true });
+    for (const a of Object.values(state.agents)) {
+      if (a.external) continue;
+      const launch = await reconcileLaunch(join(agentDir(exe, a.id), "launch.json"));
+      if (launch === undefined || launch || (a.pid !== undefined && processMatches(a.pid, a.started))) {
+        throw new PurgeRefusal(`Workers still run in ${exe}; stop them before purging their worktrees`);
+      }
+    }
+    const repoMissing = !existsSync(store.header().repo_root);
+    const pruned = repoMissing ? { removed: [], branches: [] } : await pruneWorktrees(store.header(), { remove: true, branches: true });
+    if (repoMissing) rmSync(executionWorktreesDir(exe), { recursive: true, force: true });
     const result: PurgeResult = { execution: exe, status: state.status, worktrees: pruned.removed, branches: pruned.branches, removedDir: dir };
     await appendAudit({
       actor: opts.actor ?? "human",
       action: "execution.purged",
       target: exe,
-      details: { status: state.status, worktrees: pruned.removed.length, branches: pruned.branches, repo_root: store.header().repo_root },
+      details: { status: state.status, worktrees: pruned.removed.length, branches: pruned.branches, repo_root: store.header().repo_root, ...(repoMissing && { repo_missing: true }) },
     });
     rmSync(dir, { recursive: true, force: true });
     return result;

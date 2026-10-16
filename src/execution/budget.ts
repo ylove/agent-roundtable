@@ -42,12 +42,15 @@ export function agentCapUsd(state: BlackboardState): number | undefined {
 
 /**
  * What may still be spent: min(execution remaining, the task's remaining, the agent's remaining),
- * never below 0. This is the worker's --max-budget-usd. 0 without a contract (fail closed).
+ * less other workers' outstanding allocations, never below 0. The scoped agent's own allocation
+ * is excluded so its post-registration spawn gate can spend the reservation it owns. This is the worker's --max-budget-usd. 0 without a contract (fail closed).
  */
 export function remainingUsd(state: BlackboardState, scope: { task?: string; agent?: string } = {}): number {
   if (!state.contract) return 0;
   const b = state.budget;
-  let rem = executionBudgetUsd(state) - b.spent_usd;
+  const reserved = Object.values(state.agents).reduce((sum, a) =>
+    sum + (a.id === scope.agent ? 0 : (a.budget_reserved_usd ?? 0)), 0);
+  let rem = executionBudgetUsd(state) - b.spent_usd - reserved;
   if (scope.task !== undefined) {
     const cap = taskCapUsd(state, scope.task);
     if (cap !== undefined) rem = Math.min(rem, cap - (own(b.by_task, scope.task) ?? 0));

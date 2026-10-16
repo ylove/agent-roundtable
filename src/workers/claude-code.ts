@@ -434,9 +434,9 @@ export class ClaudeCodeDriver implements WorkerDriver {
     const args = buildWorkerArgs(l, d.caps, { resume });
     const env = childEnv("claude-worker", workerEnvExtras(l));
     const startedAt = new Date().toISOString();
-    const { pid } = await spawnWorker({ file: d.cli, args, cwd: l.cwd, env, prompt: l.prompt, outputPath: l.outputPath });
+    const { pid, started } = await spawnWorker({ file: d.cli, args, cwd: l.cwd, env, prompt: l.prompt, outputPath: l.outputPath });
     console.error(`[Worker] ${l.agent} ${resume ? "resumed" : "started"} on ${l.task} (attempt ${l.attempt}, pid ${pid}, session ${l.sessionId})`);
-    return { agent: l.agent, task: l.task, attempt: l.attempt, pid, pgid: pid, sessionId: l.sessionId, outputPath: l.outputPath, startedAt };
+    return { agent: l.agent, task: l.task, attempt: l.attempt, pid, pgid: pid, started, sessionId: l.sessionId, outputPath: l.outputPath, startedAt };
   }
 
   /** Start a worker: detached in its own process group, cwd the task worktree, output appended to l.outputPath, the card on stdin. */
@@ -457,7 +457,7 @@ export class ClaudeCodeDriver implements WorkerDriver {
   async stop(h: WorkerHandle, reason: string): Promise<void> {
     const pgid = h.pgid ?? h.pid;
     console.error(`[Worker] stopping ${h.agent} (pid ${h.pid}): ${scrubAndCap(reason, 200)}`);
-    await stopGroup(pgid, this.killGraceMs);
+    await stopGroup(pgid, this.killGraceMs, h.started);
   }
 
   /**

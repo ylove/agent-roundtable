@@ -355,8 +355,10 @@ export interface EventPayloads {
     driver: WorkerDriverId;
     token_sha256: string;
     external: boolean;
+    /** Worker allocation reserved atomically before launch. */
+    budget_usd?: number;
   };
-  "agent.spawned": { agent: string; task: string; attempt: number; pid: number; session_id?: string };
+  "agent.spawned": { agent: string; task: string; attempt: number; pid: number; session_id?: string; started?: string };
   "agent.attested": { agent: string; tools: string[]; mcp_servers: string[]; ok: boolean };
   "agent.exited": {
     agent: string;
@@ -577,6 +579,8 @@ export interface AgentRecord {
   token_sha256: string;
   task?: string;
   pid?: number;
+  started?: string;
+  budget_reserved_usd?: number;
   session_id?: string;
   status: "registered" | "running" | "exited" | "left";
 }
@@ -702,6 +706,7 @@ export interface WorkerHandle {
   attempt: number;
   pid: number;
   pgid?: number;
+  started?: string;
   sessionId: string;
   outputPath: string;
   startedAt: string;

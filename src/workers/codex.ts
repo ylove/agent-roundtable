@@ -312,8 +312,8 @@ export class CodexDriver implements WorkerDriver {
     const system = readFileSync(l.appendPromptPath, "utf8");
     const env = childEnv("codex-worker", workerEnvExtras(l));
     const startedAt = new Date().toISOString();
-    const { pid } = await spawnWorker({ file: this.cli(), args, cwd: realDirectory(l.cwd), env, prompt: `${system.trim()}\n\n---\n\n${l.prompt}`, outputPath: l.outputPath });
-    return { agent: l.agent, task: l.task, attempt: l.attempt, pid, pgid: pid, sessionId: l.sessionId, outputPath: l.outputPath, startedAt };
+    const { pid, started } = await spawnWorker({ file: this.cli(), args, cwd: realDirectory(l.cwd), env, prompt: `${system.trim()}\n\n---\n\n${l.prompt}`, outputPath: l.outputPath });
+    return { agent: l.agent, task: l.task, attempt: l.attempt, pid, pgid: pid, started, sessionId: l.sessionId, outputPath: l.outputPath, startedAt };
   }
 
   launch(l: WorkerLaunch): Promise<WorkerHandle> {
@@ -333,6 +333,6 @@ export class CodexDriver implements WorkerDriver {
 
   async stop(h: WorkerHandle, reason: string): Promise<void> {
     console.error(`[Worker] stopping ${h.agent} (pid ${h.pid}): ${scrubAndCap(reason, 200)}`);
-    await stopGroup(h.pgid ?? h.pid, this.killGraceMs);
+    await stopGroup(h.pgid ?? h.pid, this.killGraceMs, h.started);
   }
 }

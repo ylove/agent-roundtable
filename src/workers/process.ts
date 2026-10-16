@@ -10,6 +10,7 @@
 import { spawn } from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { processMatches, processStart } from "../execution/lock.js";
 import { dirname } from "node:path";
 import { mkdirPrivate } from "../security/fs-safe.js";
 
@@ -31,6 +32,7 @@ export interface WorkerExit {
 }
 
 const exits = new Map<number, Promise<WorkerExit>>();
+const starts = new Map<number, string | undefined>();
 
 /** A real directory (not a symlink), as its canonical path. */
 export function realDirectory(path: string): string {
@@ -44,12 +46,14 @@ export function realDirectory(path: string): string {
  * (0600), the prompt on stdin. Resolves with the pid once the process has started; rejects when
  * it could not start.
  */
-export function spawnWorker(o: SpawnWorkerOptions): Promise<{ pid: number }> {
+export function spawnWorker(o: SpawnWorkerOptions): Promise<{ pid: number; started?: string }> {
   const cwd = realDirectory(o.cwd);
   mkdirPrivate(dirname(o.outputPath));
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
+      // The relay leads the group: it takes the launch fence (when the env carries one), starts
+      // the CLI with pipes and scrubs its output into the log.
       child = spawn(process.execPath, [fileURLToPath(new URL("./output-relay.js", import.meta.url))], {
         cwd, env: process.env, detached: true, shell: false, windowsHide: true,
         stdio: ["pipe", "ignore", "ignore", "ipc"],
@@ -66,18 +70,23 @@ export function spawnWorker(o: SpawnWorkerOptions): Promise<{ pid: number }> {
       const pid = child.pid!;
       // Kept after the exit, so a caller that asks late still learns how it ended (a reused pid replaces it).
       exits.set(pid, exited);
+      const started = processStart(pid) ?? undefined;
+      starts.set(pid, started);
       child.stdin!.on("error", () => {
         /* the worker exited before reading all of stdin; its output says why */
       });
       child.stdin!.end(JSON.stringify({ ...o, cwd }));
     });
-    let started = false;
+    let ready = false;
     child.on("message", (message: { started?: boolean; error?: string }) => {
       if (message.error) reject(new Error(message.error));
-      if (message.started) { started = true; resolve({ pid: child.pid! }); }
+      if (message.started) {
+        ready = true;
+        resolve({ pid: child.pid!, started: starts.get(child.pid!) });
+      }
     });
     child.once("exit", () => {
-      if (!started) reject(new Error("Worker output relay exited before worker startup"));
+      if (!ready) reject(new Error("Worker output relay exited before worker startup"));
     });
   });
 }
@@ -112,11 +121,13 @@ export function signalGroup(pgid: number, signal: NodeJS.Signals): boolean {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** SIGTERM the group, wait up to graceMs for it to go, then SIGKILL whatever is left. */
-export async function stopGroup(pgid: number, graceMs: number): Promise<void> {
+export async function stopGroup(pgid: number, graceMs: number, started?: string): Promise<void> {
+  const identity = started ?? starts.get(pgid);
+  if (!processMatches(pgid, identity)) return;
   if (!signalGroup(pgid, "SIGTERM")) return;
   const deadline = Date.now() + graceMs;
   while (Date.now() < deadline && groupAlive(pgid)) await sleep(50);
-  if (groupAlive(pgid)) signalGroup(pgid, "SIGKILL");
+  if (groupAlive(pgid) && processMatches(pgid, identity)) signalGroup(pgid, "SIGKILL");
   const reaped = Date.now() + 2000;
   while (Date.now() < reaped && groupAlive(pgid)) await sleep(25);
 }

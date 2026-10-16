@@ -40,8 +40,9 @@ import {
  * 3: an identical resubmitted diff is no patch; threshold epochs; circuit open counts.
  * 4: blocked_by.needs; task.blocked keeps the other reasons; checks bound to an older submission
  *    are ignored and a bound task.checks_passed for one is refused.
+ * 5: worker start identities and budget reservations; bound amendment rechecks while merging.
  */
-export const REDUCER_VERSION = 4;
+export const REDUCER_VERSION = 5;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -385,6 +386,8 @@ const HANDLERS: Handlers = {
       token_sha256: p.token_sha256,
       status: "registered",
     };
+    if (p.budget_usd !== undefined) rec.budget_reserved_usd = p.budget_usd;
+    else delete rec.budget_reserved_usd;
     if (p.team !== undefined) rec.team = p.team;
     put(s.agents, p.agent, rec);
     if (p.team !== undefined) addMember(s, p.team, p.agent);
@@ -394,6 +397,8 @@ const HANDLERS: Handlers = {
     if (!rec) return;
     rec.task = p.task;
     rec.pid = p.pid;
+    if (p.started !== undefined) rec.started = p.started;
+    else delete rec.started;
     if (p.session_id !== undefined) rec.session_id = p.session_id;
     rec.status = "running";
   },
@@ -403,12 +408,16 @@ const HANDLERS: Handlers = {
     if (!rec) return;
     rec.status = "exited";
     delete rec.pid;
+    delete rec.started;
+    delete rec.budget_reserved_usd;
   },
   "agent.left": (s, { payload: p }) => {
     const rec = own(s.agents, p.agent);
     if (!rec) return;
     rec.status = "left";
     delete rec.pid;
+    delete rec.started;
+    delete rec.budget_reserved_usd;
   },
 
   // --- tasks and claims (unknown or terminal tasks are refused; see liveTask) ---
@@ -472,7 +481,7 @@ const HANDLERS: Handlers = {
       }
     }
   },
-  /** merging. One bound to a submission (submitted_seq) is refused unless it is the task's latest and still checking. */
+  /** merging. One bound to a submission (submitted_seq) is refused unless it is the task's latest and checking (or an amendment recheck while merging). */
   "task.checks_passed": (s, e, x) => {
     const p = e.payload;
     const rt = liveTask(s, e, x);
@@ -481,7 +490,7 @@ const HANDLERS: Handlers = {
       if (rt.submitted_seq !== p.submitted_seq || (p.commit !== undefined && rt.last_commit !== p.commit)) {
         return refuse(x, `task.checks_passed: submission ${p.submitted_seq} of ${p.task} is not its latest`);
       }
-      if (rt.state !== "submitted" && rt.state !== "checking") return refuse(x, `task.checks_passed: task ${p.task} is ${rt.state}, not checking`);
+      if (rt.state !== "submitted" && rt.state !== "checking" && rt.state !== "merging") return refuse(x, `task.checks_passed: task ${p.task} is ${rt.state}, not checking`);
     }
     rt.state = "merging";
   },
@@ -762,6 +771,10 @@ const HANDLERS: Handlers = {
   "budget.usage_recorded": (s, { payload: p }) => {
     const b = s.budget;
     b.spent_usd += p.usd;
+    if (p.source === "worker" && p.agent !== undefined) {
+      const agent = own(s.agents, p.agent);
+      if (agent) delete agent.budget_reserved_usd;
+    }
     if (p.estimated) b.estimated = true;
     if (p.agent !== undefined) addUsd(b.by_agent, p.agent, p.usd);
     if (p.task !== undefined) addUsd(b.by_task, p.task, p.usd);

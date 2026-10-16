@@ -1,3 +1,5 @@
+import { installProcessIdentity } from "../fixtures/execution/process-identity.mjs";
+installProcessIdentity();
 // WS11: process operations an orchestrator tool hands to the runner (handoff.ts). The runner takes
 // them before its watchdog pass and scheduler, applies each once, and deletes the files.
 import { test } from "node:test";
@@ -8,7 +10,7 @@ import { makeRun, task } from "../fixtures/workers/run.mjs";
 import { sandbox, scriptedDriver } from "../fixtures/runner/driver.mjs";
 
 const { Runner } = await import("../../dist/execution/runner.js");
-const { writeHandoff, takeHandoffs, handoffDir } = await import("../../dist/execution/handoff.js");
+const { writeHandoff, takeHandoffs, acknowledgeHandoff, handoffDir } = await import("../../dist/execution/handoff.js");
 
 test("the runner applies a handed-over retry before scheduling, once, and removes the file", async (t) => {
   const run = await makeRun({ contract: { tasks: [task("a"), task("b")] } });
@@ -43,5 +45,7 @@ test("handoff files: only well-formed operations are handed over; a corrupt file
   const ops = takeHandoffs(exe);
   assert.deepEqual(ops.map((o) => o.type), ["kill_worker", "resume_worker"], "stops before starts");
   assert.ok(existsSync(join(handoffDir(exe), `${"f".repeat(24)}.json.bad`)));
+  assert.deepEqual(takeHandoffs(exe), ops, "a crash after reading loses no operation");
+  for (const op of ops) acknowledgeHandoff(exe, op);
   assert.deepEqual(takeHandoffs(exe), []);
 });

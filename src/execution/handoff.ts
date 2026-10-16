@@ -5,8 +5,8 @@
 //
 // resolve_escalation runs in the orchestrator server, but only the runner starts, resumes and stops
 // workers. A resolution's process operations (WS10's resume_worker with its card, spawn_retry and
-// kill_worker) are written here; the runner takes them on its next tick, deletes the file and
-// applies each operation once by its deterministic key, stops before starts. A file that does not
+// kill_worker) are written here; the runner reads them on its next tick and
+// acknowledges each operation only after its effect is observed, stops before starts. A file that does not
 // parse is moved aside as <name>.bad. Only the runner deletes files here.
 // ============================================================================
 
@@ -56,7 +56,7 @@ export function writeHandoff(exe: string, ops: readonly ProcessOp[], from: strin
 }
 
 /**
- * Take every handed-over operation (oldest file first) and delete the files: kills first, then
+ * Read every handed-over operation (oldest file first), retaining it until acknowledgement: kills first, then
  * resumes and retries. For the runner only.
  */
 export function takeHandoffs(exe: string): ProcessOp[] {
@@ -76,7 +76,6 @@ export function takeHandoffs(exe: string): ProcessOp[] {
       const body = JSON.parse(text) as { v?: unknown; at?: unknown; ops?: unknown };
       if (body.v !== 1 || !Array.isArray(body.ops)) throw new Error("not a handoff");
       files.push({ at: typeof body.at === "string" ? body.at : "", ops: body.ops.map(checkOp).filter((op): op is ProcessOp => op !== null) });
-      rmSync(path, { force: true });
     } catch {
       try {
         renameSync(path, `${path}.bad`);
@@ -87,4 +86,18 @@ export function takeHandoffs(exe: string): ProcessOp[] {
   }
   const ops = files.sort((a, b) => a.at.localeCompare(b.at)).flatMap((f) => f.ops);
   return [...ops.filter((op) => op.type === "kill_worker"), ...ops.filter((op) => op.type !== "kill_worker")];
+}
+
+/** Acknowledge one observed effect, retaining the other operations across crashes. */
+export function acknowledgeHandoff(exe: string, op: ProcessOp): void {
+  const dir = handoffDir(exe);
+  let names: string[];
+  try { names = readdirSync(dir).filter((n) => /^[0-9a-f]{24}\.json$/.test(n)); } catch { return; }
+  for (const name of names) {
+    const path = join(dir, name);
+    const body = JSON.parse(readFileSync(path, "utf8")) as { ops: ProcessOp[] };
+    body.ops = body.ops.filter((item) => item.type !== op.type || item.key !== op.key);
+    if (body.ops.length) writeFileAtomic(path, JSON.stringify(body) + "\n");
+    else rmSync(path, { force: true });
+  }
 }

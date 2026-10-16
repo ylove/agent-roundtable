@@ -1,3 +1,5 @@
+import { installProcessIdentity } from "../fixtures/execution/process-identity.mjs";
+installProcessIdentity();
 // WS11: execute (preflight, start, idempotence), control_execution and resolve_escalation through
 // the tool layer, against temp repositories and execution stores. The runner, the sandbox probe, the
 // worker CLI detection, gh and process groups are replaced through setOrchestratorDeps.
@@ -11,9 +13,10 @@ import { git, makeRepo } from "../fixtures/execution/git-fixture.mjs";
 import { contractFor, runner, task } from "../fixtures/workers/run.mjs";
 import { json, stubFetch } from "./helpers.mjs";
 
+const { processStart } = await import("../../dist/execution/lock.js");
 const { handleToolCall } = await import("../../dist/tools.js");
 const { setOrchestratorDeps, parseVisibility, contractBudgetSet } = await import("../../dist/execution/orchestrator.js");
-const { takeHandoffs, handoffDir } = await import("../../dist/execution/handoff.js");
+const { takeHandoffs, acknowledgeHandoff, handoffDir } = await import("../../dist/execution/handoff.js");
 const { createExecutionStore } = await import("../../dist/execution/store.js");
 const { scrubbedJSON } = await import("../../dist/execution/blobs.js");
 const { SandboxUnavailableError } = await import("../../dist/sandbox/index.js");
@@ -307,7 +310,7 @@ test("control_execution: abort stops the workers' process groups and keeps the w
   await f.emit([
     { type: "agent.registered", payload: { agent: "w-api", persona: "builder", driver: "claude-code", token_sha256: "a".repeat(64), external: false } },
     { type: "task.claimed", payload: { task: "api", agent: "w-api", attempt: 1, ttl_s: 0 } },
-    { type: "agent.spawned", payload: { agent: "w-api", task: "api", attempt: 1, pid: process.pid, session_id: "11111111-2222-4333-8444-555555555555" } },
+    { type: "agent.spawned", payload: { agent: "w-api", task: "api", attempt: 1, pid: process.pid, started: processStart(process.pid), session_id: "11111111-2222-4333-8444-555555555555" } },
     { type: "agent.registered", payload: { agent: "outside", persona: "outside", driver: "external", token_sha256: "c".repeat(64), external: true } },
   ]);
   assert.match(errorOf(await handleToolCall("control_execution", { execution_id: f.exe, action: "purge" })), /pass confirm: true/);
@@ -363,7 +366,7 @@ async function escalated(t, over = {}) {
     await f.emit([
       { type: "agent.registered", payload: { agent, persona, driver: "claude-code", token_sha256: "a".repeat(64), external: false } },
       { type: "task.claimed", payload: { task: id, agent, attempt: 1, ttl_s: 0 } },
-      { type: "agent.spawned", payload: { agent, task: id, attempt: 1, pid: process.pid, session_id: "11111111-2222-4333-8444-555555555555" } },
+      { type: "agent.spawned", payload: { agent, task: id, attempt: 1, pid: process.pid, started: processStart(process.pid), session_id: "11111111-2222-4333-8444-555555555555" } },
     ]);
   }
   const escalation = { id: "esc-test", agent: "wa", task: "a", kind: "ambiguity", with: "orchestrator", summary: "REST or GraphQL for the API?", blocking: true, status: "open", raised_seq: 0, ...over };
@@ -387,7 +390,9 @@ test("resolve_escalation: decide resolves through WS10, unblocks the task and ha
   assert.equal(ops.length, 1);
   assert.equal(ops[0].type, "resume_worker");
   assert.match(ops[0].card, /Use REST\./);
-  assert.deepEqual(readdirSync(handoffDir(f.exe)), [], "the runner's take deletes the file");
+  assert.equal(readdirSync(handoffDir(f.exe)).length, 1, "reading retains the operation until its effect is observed");
+  acknowledgeHandoff(f.exe, ops[0]);
+  assert.deepEqual(readdirSync(handoffDir(f.exe)), []);
   // Idempotent: a second call changes nothing and hands nothing over.
   const again = parse(await handleToolCall("resolve_escalation", { execution_id: f.exe, escalation_id: "esc-test", action: "decide", decision: "Use GraphQL." }));
   assert.equal(again.noop, true);
@@ -416,4 +421,46 @@ test("resolve_escalation: a micro-huddle calls the chosen provider outside trans
   assert.match(r.escalation.resolution.decision, /Keep the v1 API shape/);
   assert.equal((await f.eventsOf("huddle.concluded"))[0].payload.outcome, "AGREED");
   assert.ok((await f.eventsOf("budget.usage_recorded")).some((e) => e.payload.source === "huddle"));
+});
+
+test("5: abort marks a worker gone and never signals a live pid with a different start identity", async (t) => {
+  const f = await frozenRun(t, { start: true });
+  await f.emit([
+    { type: "agent.registered", payload: { agent: "w-api", persona: "builder", driver: "claude-code", token_sha256: "a".repeat(64), external: false } },
+    { type: "task.claimed", payload: { task: "api", agent: "w-api", attempt: 1, ttl_s: 0 } },
+    { type: "agent.spawned", payload: { agent: "w-api", task: "api", attempt: 1, pid: process.pid, started: "a previous occupant of this pid" } },
+  ]);
+  const result = parse(await handleToolCall("control_execution", { execution_id: f.exe, action: "abort", reason: "stop" }));
+  assert.deepEqual(result.stopped, []);
+  assert.deepEqual(calls.stop, []);
+  assert.equal((await f.store.state()).agents["w-api"].status, "exited");
+});
+
+test("10: repeated execute preflight needs_input or failure creates no integration worktree or branch", async (t) => {
+  const { executionWorktreesDir } = await import("../../dist/execution/worktrees.js");
+  const { integrationBranch } = await import("../../dist/execution/git.js");
+  const f = await frozenRun(t);
+  for (let n = 0; n < 2; n++) {
+    const result = parse(await handleToolCall("execute", { contract_id: f.contractId, confirmation: "go" }));
+    assert.equal(result.status, "needs_input");
+    assert.equal(result.execution_id, f.exe);
+    assert.equal(existsSync(executionWorktreesDir(f.exe)), false);
+    assert.equal(git(f.root, "branch", "--list", integrationBranch(f.exe)), "");
+  }
+  const undo = setOrchestratorDeps({ selectSandbox: async () => { throw new Error("probe failed"); } });
+  try {
+    const failed = parse(await handleToolCall("execute", { contract_id: f.contractId, confirmation: "go", visibility: { chat_only: true }, budget_usd: 20 }));
+    assert.equal(failed.status, "needs_input");
+    assert.match(failed.questions[0].question, /probe failed/);
+  } finally { undo(); }
+  assert.equal(existsSync(executionWorktreesDir(f.exe)), false);
+  assert.equal((await f.eventsOf("execution.started")).length, 0);
+  const result = parse(await handleToolCall("execute", { contract_id: f.contractId, confirmation: "go", visibility: { chat_only: true }, budget_usd: 20 }));
+  assert.equal(result.execution_id, f.exe);
+  assert.equal(result.status, "started");
+  const again = parse(await handleToolCall("execute", { contract_id: f.contractId, confirmation: "go" }));
+  assert.equal(again.status, "already_started");
+  assert.equal(again.execution_id, f.exe);
+  assert.equal((await f.eventsOf("execution.started")).length, 1);
+  assert.deepEqual(calls.launch, [f.exe]);
 });

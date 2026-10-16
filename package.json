@@ -19,9 +19,6 @@
   "bugs": {
     "url": "https://github.com/ylove/agent-roundtable/issues"
   },
-  "publishConfig": {
-    "provenance": true
-  },
   "files": [
     "dist",
     "examples",

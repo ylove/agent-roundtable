@@ -47,6 +47,7 @@ import { acknowledgeHandoff, takeHandoffs } from "./handoff.js";
 import { decideLeaseRequest, leaseDrafts, leasesFor } from "./leases.js";
 import { acquireLock, LockTimeoutError, processMatches, processStart, readLockOwner, type LockRelease } from "./lock.js";
 import { MergeQueue } from "./runner-merge.js";
+import { stopLiveWorkers } from "./run-admin.js";
 import {
   newRunnerInfo,
   readRunnerInfo,
@@ -129,6 +130,8 @@ const PASS_MS = 5_000;
 const SNAPSHOT_EVENTS = 500;
 const SNAPSHOT_MS = 60_000;
 const TERMINAL_RUN: ReadonlySet<string> = new Set(["completed", "failed", "aborted"]);
+/** As control_execution abort: the CLI's time to stop before its group is killed. */
+const ABORT_STOP_GRACE_MS = 5_000;
 const OPEN_ESCALATION: ReadonlySet<string> = new Set(["open", "routed", "in_huddle", "awaiting_human"]);
 const ACTIVE_TASK: ReadonlySet<string> = new Set(["claimed", "in_progress", "submitted", "checking"]);
 const SESSION_GONE_RE = /no conversation found|session(?: id)?[^\n]{0,80}\bnot found|could not (?:find|resume) (?:the )?session/i;
@@ -412,6 +415,13 @@ export class Runner {
       this.driverId = state.contract?.workers.driver === "codex" ? "codex" : "claude-code";
       if (TERMINAL_RUN.has(state.status)) {
         if (state.status === "failed") this.exitCode = 1;
+        // An abort interrupted before its workers stopped (both the tool and the previous runner
+        // gone) would otherwise leave them running, and purge refuses while they do.
+        if (state.status === "aborted") {
+          const { stopped, warnings } = await stopLiveWorkers(this.store, this.execution, this.source, stopGroup, ABORT_STOP_GRACE_MS, true);
+          if (stopped.length) this.say(`stopped ${stopped.length} worker(s) still running after the abort: ${stopped.join(", ")}`);
+          for (const w of warnings) this.say(w);
+        }
         if (state.status === "completed" && this.githubSettings()?.pr) {
           await this.startVisibility();
           const completed = [...this.log].reverse().find((e) => e.type === "execution.completed");

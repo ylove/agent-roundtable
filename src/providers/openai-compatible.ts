@@ -73,12 +73,13 @@ function trustedOrigins(configured: string | undefined): Set<string> {
   const origins = new Set<string>();
   const own = originOf(configured);
   if (own) origins.add(own);
-  for (const entry of openAICompatibleTrustedOrigins()) {
+  for (const [i, entry] of openAICompatibleTrustedOrigins().entries()) {
     const origin = originOf(entry);
     if (origin) origins.add(origin);
     else if (!badTrustedOrigins.has(entry)) {
       badTrustedOrigins.add(entry);
-      console.error(`[Providers] ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS: ignoring "${entry}" (not an origin such as https://host:port)`);
+      // By position, not value: a mistyped entry may hold something that should not reach a log.
+      console.error(`[Providers] ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS: ignoring entry ${i + 1} (not an origin such as https://host:port)`);
     }
   }
   return origins;

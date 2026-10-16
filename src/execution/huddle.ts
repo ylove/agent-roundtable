@@ -257,7 +257,9 @@ export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOpt
   try {
     const rec = liveWorkerRecord(ctx, state, cp, o.alive ?? defaultAlive);
     if (rec) {
-      const r = await meter.run(() => ctx.driver!.answer!(rec, `${ANSWER_INTRO}\n\n${turn0}`, MICRO_ANSWER_USD));
+      // Within what is left of the run (other workers' reservations included), never above the fixed cap.
+      const capUsd = Math.min(MICRO_ANSWER_USD, remainingUsd(state));
+      const r = await meter.run(() => ctx.driver!.answer!(rec, `${ANSWER_INTRO}\n\n${turn0}`, capUsd));
       meter.add(r.usage);
       answer = r.text;
     } else {

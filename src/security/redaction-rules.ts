@@ -8,6 +8,11 @@ export interface RedactionResult {
 const mark = (kind: string) => `[redacted:${kind}]`;
 const NOT_ALREADY = "(?!\\[redacted:)";
 
+/** Words that make a key or identifier secret-shaped ("author" and "authority" excepted). */
+const SECRET_WORD = "secret|token|password|passwd|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth(?!or(?!iz)|ority)";
+/** A JSON key or identifier whose value is a secret, the same vocabulary as the key=value rule. */
+export const SECRET_KEY_RE = new RegExp(SECRET_WORD, "i");
+
 type Replace = (re: RegExp, kind: string, fn?: (match: string, ...groups: string[]) => string | null) => void;
 
 export function redactWith(input: string, rules: (rep: Replace) => void): RedactionResult {
@@ -72,7 +77,7 @@ export function redactSecrets(input: string): RedactionResult {
     // prose such as "the token budget is 250" is untouched. Quoted values may hold spaces/commas/semicolons.
     rep(
       new RegExp(
-        "(?<![A-Za-z0-9])([A-Za-z0-9_.-]*?(?:secret|token|password|passwd|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth(?!or(?!iz)|ority))[A-Za-z0-9_-]*[\"']?\\s*[:=]\\s*)" +
+        "(?<![A-Za-z0-9])([A-Za-z0-9_.-]*?(?:" + SECRET_WORD + ")[A-Za-z0-9_-]*[\"']?\\s*[:=]\\s*)" +
           "(?:\"" + NOT_ALREADY + "([^\"]+)\"|'" + NOT_ALREADY + "([^']+)'|" + NOT_ALREADY + "([^\\s\"',;]{4,}))",
         "gi"
       ),

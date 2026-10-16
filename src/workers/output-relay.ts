@@ -7,34 +7,38 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, constants, fchmodSync, openSync, writeSync } from "node:fs";
 import { acquireLock, processStart, type LockRelease } from "../execution/lock.js";
 import { writeFileAtomic } from "../security/fs-safe.js";
+import { SECRET_KEY_RE } from "../security/redaction-rules.js";
 import { scrubSecrets } from "../security/secrets.js";
 import { launchLock, readLaunchIntent } from "./launch-intent.js";
 import type { SpawnWorkerOptions } from "./process.js";
 
 const LINE_CAP = 1024 * 1024;
 const STOP_WINDOW_MS = 5 * 60_000;
-const SECRET_KEY = /api[_-]?key|token|secret|passw(?:or)?d|credential|private[_-]?key/i;
+const PEM_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+const PEM_END = /-----END [A-Z ]*PRIVATE KEY-----/;
+/** A line of a PEM body: base64, or an RFC 1421 header such as Proc-Type or DEK-Info. */
+const PEM_BODY = /^\s*(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info|Comment):.*)?\s*$/;
+
+/** A stream-json line, or undefined for anything else. */
+function parseJSONLine(line: string): unknown {
+  const t = line.trim();
+  if (!t.startsWith("{") && !t.startsWith("[")) return undefined;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * A stream-json line is scrubbed value by value: scrubbing serialized JSON as text can break its
  * syntax (a "…tokens": 20 pair would lose its number, and with it the run's usage). String values
- * under secret-shaped keys are redacted outright. Anything else is scrubbed as text.
+ * under secret-shaped keys, the same vocabulary as the text rule, are redacted outright, including
+ * inside arrays held by such a key. Anything else is scrubbed as text.
  */
-function scrubLine(line: string): string {
-  const t = line.trim();
-  if (t.startsWith("{") || t.startsWith("[")) {
-    try {
-      return JSON.stringify(scrubJSON(JSON.parse(t)));
-    } catch {
-      /* not JSON: scrubbed as text */
-    }
-  }
-  return scrubSecrets(line).text;
-}
-
 function scrubJSON(v: unknown, key?: string): unknown {
-  if (typeof v === "string") return key !== undefined && v && SECRET_KEY.test(key) ? "[redacted:secret]" : scrubSecrets(v).text;
-  if (Array.isArray(v)) return v.map((x) => scrubJSON(x));
+  if (typeof v === "string") return key !== undefined && v && SECRET_KEY_RE.test(key) ? "[redacted:secret]" : scrubSecrets(v).text;
+  if (Array.isArray(v)) return v.map((x) => scrubJSON(x, key));
   if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrubJSON(x, k)]));
   return v;
 }
@@ -107,13 +111,27 @@ async function run(o: SpawnWorkerOptions): Promise<void> {
       let line = "";
       let dropping = false;
       let privateKey = false;
+      // A JSON line carries any key whole inside one string value, so the text rules redact it
+      // there and the line keeps its syntax (and the result line its cost). A key printed as plain
+      // text spans lines: its body is redacted line by line until the END marker, or until a line
+      // that cannot be part of a PEM body, so a lone header never silences the rest of the run.
       const flush = (newline: boolean) => {
-        if (dropping) append("[worker output line omitted: size limit]\n");
-        else {
-          if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(line)) privateKey = true;
-          if (privateKey) append("[redacted:private_key]" + (newline ? "\n" : ""));
-          else append(scrubLine(line) + (newline ? "\n" : ""));
-          if (/-----END [A-Z ]*PRIVATE KEY-----/.test(line)) privateKey = false;
+        const nl = newline ? "\n" : "";
+        if (dropping) {
+          append("[worker output line omitted: size limit]\n");
+          privateKey = false;
+        } else {
+          const json = parseJSONLine(line);
+          if (json !== undefined) {
+            privateKey = false;
+            append(JSON.stringify(scrubJSON(json)) + nl);
+          } else if (privateKey && (PEM_END.test(line) || PEM_BODY.test(line))) {
+            append("[redacted:private_key]" + nl);
+            if (PEM_END.test(line)) privateKey = false;
+          } else {
+            privateKey = PEM_BEGIN.test(line) && !PEM_END.test(line.slice(line.search(PEM_BEGIN)));
+            append(privateKey ? "[redacted:private_key]" + nl : scrubSecrets(line).text + nl);
+          }
         }
         line = "";
         dropping = false;

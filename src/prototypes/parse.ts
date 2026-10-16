@@ -113,7 +113,7 @@ const MERMAID_TYPES = [
   "architecture", "architecture-beta", "kanban", "radar", "radar-beta", "treemap", "treemap-beta", "zenuml",
   "C4Context", "C4Container", "C4Component", "C4Dynamic", "C4Deployment",
 ];
-const MERMAID_START = new RegExp(`^(?:${MERMAID_TYPES.map((t) => t.replace(/-/g, "\\-")).join("|")})(?:\\s|$|;)`);
+const MERMAID_START = new RegExp(`^(?:${MERMAID_TYPES.map((t) => t.replace(/[\\^$.*+?()[\]{}|-]/g, "\\$&")).join("|")})(?:\\s|$|;)`);
 
 /** True when the text is Mermaid source (optional front matter, %% comments and %%{init}%% directives allowed). */
 export function isMermaidSource(text: string): boolean {

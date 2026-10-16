@@ -32,17 +32,14 @@ import { appendAudit } from "../security/audit.js";
 import { scrub } from "../security/secrets.js";
 import { ClaudeCodeDriver } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
-import { reconcileLaunch } from "../workers/launch-intent.js";
-import { agentDir } from "../workers/files.js";
 import { stopGroup } from "../workers/process.js";
 import { amendContract } from "./contract-lifecycle.js";
 import { openContractStore, orchestratorSource } from "./contract-state.js";
 import { BUDGET_FALLBACK } from "./contract.js";
 import { resolveEscalation, type HookCtx, type HuddleLLM } from "./escalation.js";
 import { assertNoGitlinksInIndex, assertNoGitlinksInTree, openRepo, runGit, splitZ, SubmodulesUnsupportedError } from "./git.js";
-import { processMatches } from "./lock.js";
 import { writeHandoff } from "./handoff.js";
-import { PurgeRefusal, purgeExecution } from "./run-admin.js";
+import { PurgeRefusal, purgeExecution, stopLiveWorkers } from "./run-admin.js";
 import { ensureRunner, launchRunner, runnerLiveness, type EnsureRunnerResult } from "./runner-launch.js";
 import { executionDir, openExecutionStore, type FileExecutionStore } from "./store.js";
 import type {
@@ -732,30 +729,9 @@ export async function controlExecution(a: ControlInput): Promise<Json> {
       });
       if (!r.result) throw new Error(`Execution ${exe} already ended`);
       // The runner stops its workers when it sees the abort; stop them here too, for a runner that is gone.
-      for (const x of Object.values((await store.state()).agents)) {
-        if (x.external || !["registered", "running"].includes(x.status)) continue;
-        const launch = await reconcileLaunch(join(agentDir(exe, x.id), "launch.json"));
-        if (launch && processMatches(launch.pid, launch.started)) {
-          await store.transact(() => ({ events: [{ type: "agent.spawned", source, payload: {
-            agent: x.id, task: launch.task, attempt: launch.attempt, pid: launch.pid, started: launch.started,
-          } }] }));
-        }
-      }
-      const after = await store.state();
-      const live = Object.values(after.agents).filter((x) => !x.external && x.status === "running" && x.pid !== undefined && x.pid > 1 && processMatches(x.pid, x.started));
-      const gone = Object.values(after.agents).filter((x) => !x.external && x.status === "running" && !live.includes(x));
-      if (gone.length) await store.transact(() => ({ events: gone.map((x) => ({
-        type: "agent.exited" as const, source, payload: { agent: x.id, ...(x.task && { task: x.task }), code: null, reason: "lost" as const },
-      })) }));
-      const stopped: string[] = [];
-      await Promise.all(live.map(async (x) => {
-        try {
-          await deps.stopGroup(x.pid!, ABORT_GRACE_MS, x.started);
-          stopped.push(x.id);
-        } catch (e) {
-          warnings.push(`could not stop ${x.id} (pid ${x.pid}): ${errText(e)}`);
-        }
-      }));
+      // A runner started later on the aborted run repeats this (Runner.start).
+      const { stopped, warnings: stopWarnings } = await stopLiveWorkers(store, exe, source, deps.stopGroup, ABORT_GRACE_MS);
+      warnings.push(...stopWarnings);
       try {
         await appendAudit({ actor: orchestrator, action: "execution.aborted", target: exe, details: { reason: why, stopped } });
       } catch (e) {

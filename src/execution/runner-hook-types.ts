@@ -1,40 +1,6 @@
 // ============================================================================
-// WS08 integration: these interfaces must stay identical to runner-hooks.ts.
-// Kept here until the runner branch lands; no dependency on that unmerged module.
+// The runner hook interface WS10 implements. WS08's runner-hooks.ts owns it; WS10 kept a mirror
+// here until the runner branch landed, and now re-exports it.
 // ============================================================================
 
-import type { TaskCardOptions } from "./task-card.js";
-import type { BlackboardState, Escalation, EventSource, ExecutionHeader, WorkerDriver, WorkerRecord } from "./types.js";
-import type { FileExecutionStore } from "./store.js";
-
-export interface RunnerContext {
-  readonly execution: string;
-  readonly store: FileExecutionStore;
-  readonly header: ExecutionHeader;
-  readonly source: EventSource;
-  log(message: string): void;
-  resumeTask(task: string, immediate?: TaskCardOptions["immediate"]): Promise<boolean>;
-  worker(agent: string): WorkerRecord | undefined;
-  driver(): WorkerDriver;
-}
-
-export interface GoalReviewInput {
-  integrationSha: string;
-  state: Readonly<BlackboardState>;
-}
-
-export interface GoalReview {
-  verdict: "COMPLETE" | "INCOMPLETE";
-  reason?: string;
-}
-
-export interface RunnerHooks {
-  escalationRouter(ctx: RunnerContext, escalation: Escalation): Promise<void>;
-  leadFallback(ctx: RunnerContext, escalationId: string): Promise<void>;
-  goalReview(ctx: RunnerContext, input: GoalReviewInput): Promise<GoalReview>;
-  /**
-   * Every runner pass: what resolutions left undone after a failure or a crash (a resume not yet
-   * started, a huddle concluded but not applied). Idempotent; its operations may repeat.
-   */
-  escalationPass?(ctx: RunnerContext): Promise<void>;
-}
+export type { GoalReview, GoalReviewInput, RunnerContext, RunnerHooks } from "./runner-hooks.js";

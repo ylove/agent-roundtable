@@ -27,7 +27,22 @@ const fields = {
     boolean: ["consent", "override_consent"], object: ["patch"],
   },
   freeze_contract: { string: ["contract_id", "orchestrator"], boolean: ["abandon_round"], objects: ["excuse"] },
+  execute: {
+    string: ["contract_id", "confirmation", "lead", "worker_model"], usd: ["budget_usd"], integer: ["max_parallel"],
+    visibility: ["visibility"], sandbox: ["sandbox"], driver: ["worker_driver"],
+  },
+  execution_status: { exe: ["execution_id"], string: ["focus"], view: ["view"], integer: ["since_seq", "limit"] },
+  control_execution: {
+    exe: ["execution_id"], control: ["action"], string: ["reason", "message", "session"],
+    array: ["task_ids", "targets"], boolean: ["confirm", "to_table"],
+  },
+  resolve_escalation: {
+    exe: ["execution_id"], string: ["escalation_id", "decision", "resolved_by", "provider", "model", "base_url"],
+    resolution: ["action"], format: ["format"], array: ["participants"], object: ["amendment"],
+  },
 };
+// Run-tool fields whose valid values are narrower (ids, enums, ranges): wrong types still fail the same way.
+const typed = (valid, message = "a string", invalid = [5, false, [], {}]) => ({ valid, invalid, message });
 const rules = {
   string: { valid: ["text", "", " "], invalid: [5, false, [], {}], message: "a string" },
   array: {
@@ -39,6 +54,16 @@ const rules = {
   boolean: { valid: [true, false], invalid: ["true", 0, 1, [], {}], message: "a boolean" },
   object: { valid: [{}, { tasks: [] }], invalid: ["{}", 5, [], false], message: "an object" },
   objects: { valid: [[], [{ agent: "cfo", reason: "out of scope" }]], invalid: ["cfo", 5, {}, false], message: "an array" },
+  exe: typed(["exe-0123456789abcdef"]),
+  view: typed(["summary", "context"]),
+  control: typed(["pause", "purge"]),
+  resolution: typed(["decide", "await_human"]),
+  format: typed(["micro", "waffle-house"]),
+  sandbox: typed(["docker", "local"]),
+  driver: typed(["claude-code", "codex"]),
+  usd: typed([0.5, 25], "a finite number", ["2", "two", NaN, Infinity, false, {}]),
+  integer: typed([1, 3], "an integer", ["2", 2.5, NaN, false, {}]),
+  visibility: typed([{}, { dashboard: true }, { chat_only: true }, { github: { repo: "acme/shop", project_number: 3 } }], "an object", ["x", 5, [], false]),
 };
 
 for (const [tool, groups] of Object.entries(fields)) {
@@ -198,4 +223,25 @@ test("worker tools validate their arguments in both modes; the worker copy takes
   assert.equal(r.content[0].text, 'Error: submit_work: "ready" is required');
   const r2 = await handleToolCall("post_update", { kind: "ack", text: "ok" }, "worker");
   assert.equal(r2.content[0].text, 'Error: post_update: kind ack needs "directive_id"');
+});
+
+test("run tools check ranges, enums and nested visibility, and are orchestrator-only", async () => {
+  assert.throws(() => checkArgs("execute", { budget_usd: 0 }), { message: 'execute: "budget_usd" must be at least 0.01' });
+  assert.throws(() => checkArgs("execute", { max_parallel: 17 }), /"max_parallel" must be at most 16/);
+  assert.throws(() => checkArgs("execute", { visibility: { github: {} } }), { message: 'execute: "visibility.github.repo" is required' });
+  assert.throws(() => checkArgs("execute", { visibility: { github: { repo: "a/b", project_number: 0 } } }), /"visibility.github.project_number" must be at least 1/);
+  assert.throws(() => checkArgs("execute", { visibility: { slack: true } }), /"visibility.slack" is not allowed/);
+  assert.throws(() => checkArgs("execute", { sandbox: "vm" }), /"sandbox" must be one of: docker, local/);
+  assert.throws(() => checkArgs("execution_status", { view: "everything" }), /"view" must be one of: summary, tasks, escalations, events, budget, context/);
+  assert.throws(() => checkArgs("execution_status", { execution_id: "exe-1" }), /"execution_id" must match the pattern/);
+  assert.throws(() => checkArgs("control_execution", { action: "restart" }), /"action" must be one of: pause, resume, steer, abort, purge/);
+  assert.throws(() => checkArgs("resolve_escalation", { format: "brainstorm" }), /"format" must be one of: micro, meeting/);
+  const missing = await handleToolCall("execute", { contract_id: "ctr-abcdef-1" });
+  assert.equal(missing.content[0].text, "Error: execute: \"confirmation\" is required: quote the human's words asking you to execute");
+  const r = await handleToolCall("resolve_escalation", { execution_id: "exe-0123456789abcdef", escalation_id: "esc-1", action: "decide", provider: "openai", base_url: "http://x.test/v1" });
+  assert.match(r.content[0].text, /base_url is only supported with provider "openai_compatible"/);
+  for (const name of ["execute", "execution_status", "control_execution", "resolve_escalation"]) {
+    const w = await handleToolCall(name, {}, "worker");
+    assert.equal(w.content[0].text, `Error: Unknown tool: ${name}`);
+  }
 });

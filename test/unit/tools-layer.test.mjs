@@ -9,7 +9,7 @@ const HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHi
 const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
 test("every tool has a title and all four MCP hints", () => {
-  assert.equal(tools.length, 33, "22 at the table, 3 contract tools, join_execution and the 7 worker tools");
+  assert.equal(tools.length, 37, "22 at the table, 3 contract tools, join_execution, the 7 worker tools and the 4 run tools");
   assert.equal(toolsFor("worker").length, 7);
   for (const tool of tools) {
     assert.equal(typeof tool.annotations?.title, "string", tool.name);
@@ -85,6 +85,22 @@ test("contract tools: orchestrator only, strict schemas, and annotations that ma
   assert.equal(byName.amend_contract.annotations.destructiveHint, true, "amend can cancel tasks");
   assert.equal(byName.freeze_contract.annotations.openWorldHint, false, "freeze is local");
   assert.equal(byName.freeze_contract.inputSchema.properties.excuse.items.additionalProperties, false);
+});
+
+test("run tools: orchestrator only, strict schemas, and annotations that match what they do", async () => {
+  const { executionTools } = await import("../../dist/tools/execution.js");
+  assert.deepEqual(executionTools.map((d) => d.name), [names.EXECUTE, names.EXECUTION_STATUS, names.CONTROL_EXECUTION, names.RESOLVE_ESCALATION]);
+  for (const def of executionTools) {
+    assert.deepEqual([...def.modes], ["orchestrator"], def.name);
+    assert.equal(def.inputSchema.additionalProperties, false, def.name);
+  }
+  assert.equal(byName.execute.inputSchema.properties.visibility.additionalProperties, false);
+  assert.equal(byName.execute.inputSchema.properties.visibility.properties.github.additionalProperties, false);
+  assert.equal(byName.execute.annotations.idempotentHint, true, "a started run is returned as it is");
+  assert.equal(byName.execute.annotations.openWorldHint, true, "workers, gh and the dashboard");
+  assert.equal(byName.execution_status.annotations.readOnlyHint, true);
+  assert.equal(byName.control_execution.annotations.destructiveHint, true, "abort and purge");
+  assert.equal(byName.resolve_escalation.annotations.openWorldHint, true, "huddles call a provider");
 });
 
 test("names.ts: mode labels and one constant per tool", () => {

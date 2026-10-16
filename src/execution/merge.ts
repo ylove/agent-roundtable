@@ -48,6 +48,8 @@ export type MergeResult =
   | { ok: false; reason: "conflict" | "violation"; conflicts: string[]; violations: string[] };
 
 export interface MergeTaskOptions {
+  /** Immutable checked commit. Resolved before coverage and merge, never a moving ref. */
+  commit?: string;
   /**
    * When given, the branch's changes since its merge base with the integration branch must be
    * covered by these leases (enforcement point 3); otherwise nothing is merged.
@@ -93,17 +95,18 @@ export async function mergeTask(header: ExecutionHeader, taskId: string, opts: M
       await assertNoGitlinksInIndex(t);
       await assertNoGitlinksInTree(t, "HEAD");
       if (!(await branchExists(t, branch))) throw new Error(`Task ${taskId} has no branch ${branch}`);
-      await assertNoGitlinksInTree(t, `refs/heads/${branch}`);
+      const commit = await resolveCommit(t, opts.commit ?? `refs/heads/${branch}`);
+      await assertNoGitlinksInTree(t, commit);
       await resetIntegration(t);
       if (opts.leases) {
-        const cov = await checkRangeCoverage(t, "HEAD", `refs/heads/${branch}`, opts.leases);
+        const cov = await checkRangeCoverage(t, "HEAD", commit, opts.leases);
         if (!cov.ok) return { ok: false, reason: "violation", conflicts: [], violations: cov.violations };
       }
       const before = await resolveCommit(t, "HEAD");
       const identity = opts.identity ?? (await gitIdentity(repo));
       const r = await runGit(
         t,
-        ["merge", "--no-ff", "--no-edit", "--no-verify", "--no-stat", "-q", "-m", `rt: merge task ${taskId}`, "-m", trailers(header, taskId), `refs/heads/${branch}`],
+        ["merge", "--no-ff", "--no-edit", "--no-verify", "--no-stat", "-q", "-m", `rt: merge task ${taskId}`, "-m", trailers(header, taskId), commit],
         { identity, allowExit: [1], timeoutMs: MERGE_TIMEOUT_MS }
       );
       if (r.exit === 0) {

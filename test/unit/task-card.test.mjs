@@ -84,3 +84,15 @@ test("the goal and the original prompt are capped, and the protocol survives the
   assert.ok(big.length <= CARD_LIMITS.total);
   assert.match(big, /\[task card truncated\]\n\n## Protocol/);
 });
+
+test("the total card cap counts UTF-8 bytes and keeps the protocol with multibyte content", () => {
+  const contract = base();
+  contract.goal.ultimate = "界".repeat(2000);
+  contract.goal.original_prompt = "🚀".repeat(6000);
+  contract.tasks[1].acceptance = Array.from({ length: 40 }, () => "界".repeat(500));
+  const card = buildTaskCard(stateWith(contract), "build-nav-bar", { immediate: "界".repeat(8000) });
+  assert.ok(Buffer.byteLength(card) <= CARD_LIMITS.total);
+  assert.ok(!card.includes("\ufffd"));
+  assert.match(card, /## Protocol/);
+  assert.match(card, /submit_work/);
+});

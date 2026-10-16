@@ -229,6 +229,15 @@ A contract is what a heads-down run builds: the goal and the human's request ver
 - `amend_contract` applies an RFC 7396 merge patch and makes v(N+1). Amending a draft makes a new proposal that everyone must consent to again (`consent: true` asks them all). Amending a frozen contract cancels the tasks it removes and tells the agents of affected tasks to re-read the contract; a change to its budget, scope, sandbox, authority, validation, workers or goal needs `consent: true` (everyone is asked first, and it applies only if all agree) or `override_consent: true` (audited). `patch: {}` with `consent: true` asks everyone who has not agreed to the current version.
 - `freeze_contract` lists every reason it refuses: an unresolved objection or unclear answer, a participant who has not answered about the current version, a consent round in flight, a busy source session, or, for a child contract, a parent that is not frozen. `excuse` sets these aside with a reason, and `abandon_round` ends a consent round whose process died. Excusals, abandoned rounds and the frozen sha256 are written to the audit log. Freezing starts nothing.
 
+### Heads-down runs
+
+- `execute` starts a frozen contract when the human asks; it returns `needs_input` questions until visibility, budget, sandbox and the worker CLI are settled, then the runner and the `watch` command to run in the background.
+- `execution_status` reports progress (`focus: "nav"` answers "how close is the nav?") with the views summary, tasks, escalations, events, budget and context.
+- `control_execution` pauses, resumes, steers, aborts or purges a run; `to_table: true` marks a trip back to the table.
+- `resolve_escalation` answers an escalation: decide, huddle, retry, reassign, amend, dismiss or await_human.
+
+Arguments and behaviour: [heads-down design, §13 and §15](docs/design/heads-down.md#13-orchestrator-experience).
+
 ### LLM
 
 | Tool | Arguments |
@@ -332,6 +341,14 @@ Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 
 | `ROUNDTABLE_AGENT_PATHS` | extra directories (separated by `:`, or `;` on Windows) that path-like agent refs may point into | — (the agents directory, `<workspace>/.claude/agents` and `~/.claude/agents` are always allowed) |
 | `ROUNDTABLE_PROVIDER_RETRIES` | retries after a provider call fails with 408, 409, 429, 5xx or a network error (backoff with jitter, `Retry-After` honored up to 60 s, always within `ROUNDTABLE_LLM_TIMEOUT_MS`) | `2` (`0` disables, at most `5`) |
 | `ROUNDTABLE_DOTENV` | `off` skips loading `.env` entirely (worker MCP servers start keyless) | `.env` is loaded |
+| `ROUNDTABLE_DEFAULT_VISIBILITY` | how `execute` shows a run when the call names no channel: a comma list of `dashboard`, `chat_only` and `github:<owner/name>` | — (`execute` asks) |
+| `ROUNDTABLE_DEFAULT_BUDGET_USD` | a run's budget when neither `execute` nor the contract sets one | — (`execute` asks) |
+| `ROUNDTABLE_EXECUTION_PROVIDER` | provider of the runner's persona calls: micro-huddles, the lead fallback and goal review | `anthropic` |
+| `ROUNDTABLE_EXECUTION_MODEL` | model of those calls | the provider's default model |
+| `ROUNDTABLE_EXECUTION_BASE_URL` | `base_url` of those calls (an `openai_compatible` or `ollama` endpoint) | — (the provider's configured URL) |
+| `ROUNDTABLE_EXECUTION_RETENTION_DAYS` | days a completed, failed or aborted run (worktrees, branches, log) is kept; swept at server start | `30` (`0` or `off` keeps all) |
+| `ROUNDTABLE_SESSION_RETENTION_DAYS` | days an archived at-the-table session is kept after it ended; swept at server start | `30` (`0` or `off` keeps all) |
+| `ROUNDTABLE_AUDIT_RETENTION_DAYS` | days the audit log keeps a month file after the month ended; swept at server start | `365` (`0` or `off` keeps all) |
 
 `.env` is loaded from the package directory (next to `package.json`) with `override: true`, so values there win over anything the MCP host passes in its `env` block. `.env` is gitignored and is the single source of truth for secrets. See `.env.example`.
 

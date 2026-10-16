@@ -40,6 +40,7 @@ import {
   type DriverOutcome,
 } from "./circuit.js";
 import { deadlockRules, type DependencyNeed } from "./deadlock.js";
+import { globsOverlap as leaseGlobsOverlap, staticPrefix as leaseStaticPrefix } from "./leases.js";
 import {
   TERMINAL_TASK_STATES,
   draft,
@@ -96,6 +97,8 @@ export interface WatcherObservation {
 
 /** What the runner knows that the blackboard does not. Times are ms since the epoch. */
 export interface Observations {
+  /** Accepted tasks whose post-merge integration checks still hold their leases. */
+  retainedTasks?: readonly string[];
   /** By agent id. */
   agents?: Record<string, AgentObservation>;
   /** By orchestrator name. */
@@ -131,6 +134,12 @@ export interface Observations {
    * pause (its escalation id, or its reason); `seq` the event that recorded the stop.
    */
   pauseStops?: Record<string, { attempt: number; context: string; seq: number }>;
+  /**
+   * Per task, a resolution's unblock (task.unblocked correlated with an escalation) while no
+   * worker of the task lived: the resolver owes it a resume, whose card carries the resolution.
+   * `at` is when; cleared by agent.spawned, task.blocked or task.retried.
+   */
+  resumeOwed?: Record<string, { attempt: number; at: number; seq: number }>;
   /** Escalations whose lead fallback call is running now (set by the runner). */
   leadInFlight?: Record<string, boolean>;
   /** When lead_fallback was last issued per escalation (its watchdog.action audit event). */
@@ -148,6 +157,8 @@ export interface WatchdogConfig {
   huddleTimeoutMs: number;
   /** A watcher whose lastSeenAt is older than this is not alive (it writes every 10 s). */
   watcherStaleMs: number;
+  /** How long a dead-worker retry waits for a resume a resolution owes (obs.resumeOwed) before resuming it itself. */
+  resumeGraceMs: number;
   /** Same check signature this many times with no patch between escalates. */
   failureStreak: number;
   /** Two agents alternating on a note topic this many notes in a row suggests a micro-huddle. */
@@ -169,6 +180,7 @@ export const WATCHDOG_DEFAULTS: Readonly<WatchdogConfig> = Object.freeze({
   leadRetryMs: 5 * MIN,
   huddleTimeoutMs: 20 * MIN,
   watcherStaleMs: 30_000,
+  resumeGraceMs: MIN,
   failureStreak: 3,
   notePingPong: 4,
   infraRetries: 20,
@@ -182,30 +194,16 @@ export const WATCHDOG_DEFAULTS: Readonly<WatchdogConfig> = Object.freeze({
 // ---------------------------------------------------------------------------
 // Lease overlap (conservative static-prefix rule, design §10)
 //
-// TODO(WS06): switch to globsOverlap / leasesConflict from src/execution/leases.ts once PR #113
-// is on release/1.0.0.
-//
-// A small stand-in: the full lease engine (WS06) replaces these. A glob's static prefix is its
-// leading path segments without a wildcard; two globs overlap when one static prefix is a path
-// prefix of the other. An exclusive lease conflicts with any overlapping lease, a shared lease
-// only with an exclusive one.
+// The exported array-shaped prefix keeps the watchdog API compatible with its callers.
 // ---------------------------------------------------------------------------
 
 export function staticPrefix(glob: string): string[] {
-  const out: string[] = [];
-  for (const seg of glob.replace(/\\/g, "/").split("/")) {
-    if (seg === "" || seg === ".") continue;
-    if (/[*?[\]{}]/.test(seg)) break;
-    out.push(seg);
-  }
-  return out;
+  const prefix = leaseStaticPrefix(glob);
+  return prefix ? prefix.split("/") : [];
 }
 
 export function globsOverlap(a: string, b: string): boolean {
-  const pa = staticPrefix(a);
-  const pb = staticPrefix(b);
-  for (let i = 0; i < Math.min(pa.length, pb.length); i++) if (pa[i] !== pb[i]) return false;
-  return true;
+  return leaseGlobsOverlap(a, b);
 }
 
 export function pathsOverlap(a: readonly string[], b: readonly string[]): boolean {
@@ -340,6 +338,7 @@ function leaseRules(state: BlackboardState, now: number, obs: Observations): Wat
 
   for (const id of sortedKeys(state.leases)) {
     if (ending.has(id)) continue;
+    if (obs.retainedTasks?.includes(state.leases[id].task)) continue;
     if (!isTerminal(state, state.leases[id].task)) continue;
     ending.add(id);
     const key = `lease_orphan:${id}`;
@@ -420,6 +419,17 @@ function deadWorker(
   const gate = respawnGate(state, now, obs, { task, agent, driver: rec?.driver }, pass);
   if (!gate.ok) return lost ? [emitAction("worker_dead", `${key}:lost`, task, lostEvent())] : [];
   const before = lost ? lostEvent() : [];
+
+  // A worker that ended its turn on a blocking escalation, whose resolution unblocked the task:
+  // the resolver's resume (with the resolution on its card) comes first. If none has started a
+  // worker within resumeGraceMs, resume the session on the same attempt here; nothing counts.
+  const owed = own(obs.resumeOwed, task);
+  if (!lost && owed !== undefined && owed.attempt === attempt) {
+    if (now - owed.at < cfg.resumeGraceMs) return [];
+    if (gate.trial) pass.admitted.add(gate.trial);
+    const why = `Task ${task} was unblocked by a resolution but its worker ${agent} was not resumed; resuming its session on attempt ${attempt} (not counted against max_attempts).`;
+    return [{ type: "resume_worker", rule: "worker_dead", key: `${key}:unblocked:${owed.seq}`, target: agent, agent, task, why }];
+  }
 
   // A worker that stopped for a pause (an emergency, a driver circuit, a manual pause) did
   // nothing wrong: resume its session on the same attempt, counting nothing. The op repeats
@@ -871,6 +881,8 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
   const attemptOf = new Map<string, number>();
   const infraDeaths: Record<string, { count: number; lastAttempt: number }> = {};
   const pauseStops: Record<string, { attempt: number; context: string; seq: number }> = {};
+  const resumeOwed: Record<string, { attempt: number; at: number; seq: number }> = {};
+  const unblockedBy = new Map<string, number>();
   const pausedTasks = new Map<string, string>();
   let runPause: string | undefined;
   const live = new Map<string, string>();
@@ -904,12 +916,26 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
         putOwn(spawns, e.payload.agent, at);
         live.set(e.payload.agent, e.payload.task);
         delete pauseStops[e.payload.task];
+        delete resumeOwed[e.payload.task];
+        unblockedBy.delete(e.payload.task);
+        break;
+      case "task.unblocked":
+        // A resolution's unblock owes a resume once no worker of the task lives (now, or at its exit).
+        if (!e.correlation?.startsWith("esc-")) break;
+        unblockedBy.set(e.payload.task, e.seq);
+        if (![...live.values()].includes(e.payload.task)) putOwn(resumeOwed, e.payload.task, { attempt: attemptOf.get(e.payload.task) ?? 0, at, seq: e.seq });
+        break;
+      case "task.blocked":
+        delete resumeOwed[e.payload.task];
+        unblockedBy.delete(e.payload.task);
         break;
       case "agent.exited": {
         const t = e.payload.task ?? currentTask.get(e.payload.agent);
         live.delete(e.payload.agent);
         const pause = e.payload.paused ?? (t !== undefined ? runPause ?? pausedTasks.get(t) : undefined);
         if (t !== undefined && pause !== undefined) stopFor(t, pause, e.seq);
+        const unblocked = t !== undefined ? unblockedBy.get(t) : undefined;
+        if (t !== undefined && unblocked !== undefined && !own(resumeOwed, t)) putOwn(resumeOwed, t, { attempt: attemptOf.get(t) ?? 0, at, seq: unblocked });
         if (t === undefined || e.payload.reason !== "error") break;
         if (classifyFailure(e.payload.result_subtype ?? "", { source: "driver" }) === "error") break;
         putOwn(infraDeaths, t, { count: (own(infraDeaths, t)?.count ?? 0) + 1, lastAttempt: attemptOf.get(t) ?? 0 });
@@ -949,6 +975,8 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
       case "task.merged":
         for (const [a, t] of claimOf) if (t === e.payload.task) claimOf.delete(a);
         delete pauseStops[e.payload.task];
+        delete resumeOwed[e.payload.task];
+        unblockedBy.delete(e.payload.task);
         break;
       case "huddle.started":
         putOwn(huddles, e.payload.id, { startedAt: at });
@@ -1002,6 +1030,7 @@ export function observeEvents(events: readonly AnyEvent[], base: Observations = 
     spawns: { ...spawns, ...base.spawns },
     infraDeaths: { ...infraDeaths, ...base.infraDeaths },
     pauseStops: { ...pauseStops, ...base.pauseStops },
+    resumeOwed: { ...resumeOwed, ...base.resumeOwed },
     leadIssuedAt: { ...leadIssuedAt, ...base.leadIssuedAt },
   };
 }

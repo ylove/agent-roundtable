@@ -1204,3 +1204,21 @@ test("a worker lost during a run pause is recorded as paused and resumed on the 
   assert.equal(observeEvents([w.log.find((e) => e.type === "agent.exited")]).pauseStops.t.context, "Manual inspection", "the marker alone is enough");
   assert.equal(observeEvents(w.log).pauseStops.t.attempt, 3);
 });
+
+test("a worker that ended its turn on a blocking escalation waits for the resolver's resume, then resumes on the same attempt", () => {
+  const w = new World(workerState({ attempt: 3 }));
+  const dead = () => w.step().filter((a) => a.rule === "worker_dead");
+  w.emit("agent.spawned", { agent: "w-t", task: "t", attempt: 3, pid: 4242 });
+  w.emit("task.blocked", { task: "t", escalation: "esc-q" });
+  w.emit("agent.exited", { agent: "w-t", task: "t", code: 0, reason: "completed" });
+  w.commit([{ type: "task.unblocked", source: { kind: "orchestrator", id: "main", pid: 1 }, correlation: "esc-q", payload: { task: "t" } }]);
+  assert.deepEqual(dead(), [], "the resolution's resume comes first: no retry, nothing counted");
+  w.now += WATCHDOG_DEFAULTS.resumeGraceMs;
+  const resumed = dead();
+  assert.deepEqual(eventTypes(resumed), []);
+  assert.deepEqual(opsOf(resumed).map((a) => [a.type, a.task]), [["resume_worker", "t"]]);
+  assert.match(opsOf(resumed)[0].why, /attempt 3 \(not counted/);
+  w.emit("agent.spawned", { agent: "w-t", task: "t", attempt: 3, pid: 4243 });
+  w.emit("agent.exited", { agent: "w-t", task: "t", code: 1, reason: "error" });
+  assert.deepEqual(eventTypes(dead()), ["task.failed", "escalation.raised"], "a later death counts again");
+});

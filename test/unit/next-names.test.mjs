@@ -6,8 +6,8 @@ const ultraplan = await import("../../dist/sessions/ultraplan.js");
 // The roundtable-tasks reminder names block fields (depends_on, timeout_s), not tools; the rest must be registered.
 const contractParse = await import("../../dist/execution/contract-parse.js");
 
-// These are session status values and a Claude Code Agent-tool parameter.
-const known = new Set(["awaiting_plan", "awaiting_revision", "subagent_type"]);
+// These are session status values (execute's needs_input too) and a Claude Code Agent-tool parameter.
+const known = new Set(["awaiting_plan", "awaiting_revision", "needs_input", "subagent_type"]);
 const descriptions = [];
 function schema(node) {
   if (!node || typeof node !== "object") return;

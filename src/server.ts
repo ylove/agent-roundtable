@@ -59,7 +59,10 @@ export interface WorkerServerOptions {
 
 /** Start the stdio server of a mode. A worker server first consumes its token and refuses to start without a valid one. */
 export async function startStdio(mode: ToolMode = "orchestrator", worker?: WorkerServerOptions): Promise<void> {
-  if (mode === "worker") return startWorker(worker);
+  if (mode === "worker") {
+    process.umask(0o077);
+    return startWorker(worker);
+  }
   return startOrchestrator();
 }
 
@@ -117,6 +120,11 @@ async function startOrchestrator(): Promise<void> {
   Promise.resolve()
     .then(() => sweepStaleSessionDirs())
     .catch((e) => console.error(`[Prototype] startup sweep skipped: ${e instanceof Error ? e.message : String(e)}`));
+
+  // Best effort: the retention sweep (finished runs, archived sessions, audit months). Never fails startup.
+  import("./execution/retention.js")
+    .then(async ({ sweepRetention, describeRetention }) => console.error(describeRetention(await sweepRetention())))
+    .catch((e) => console.error(`[Retention] startup sweep skipped: ${e instanceof Error ? e.message : String(e)}`));
 
   // Check if claude CLI is available for local meetings (PATH scan, no shell)
   const claudeCliAvailable = findExecutable("claude") !== null;

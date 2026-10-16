@@ -186,3 +186,34 @@ test("parseCodexLine and RunMonitor: thread id, last message, summed turn usage 
   codex.parseCodexLine(JSON.stringify({ type: "turn.failed", error: { message: "rate limited" } }), acc);
   assert.deepEqual({ done: acc.done, isError: acc.isError, resultSubtype: acc.resultSubtype, lastText: acc.lastText }, { done: true, isError: true, resultSubtype: "error", lastText: "rate limited" });
 });
+
+test("a monitor checkpoint preserves attestation, per-message usage and a consumed result across adoption", () => {
+  const path = file();
+  writeFileSync(path, init() + "\n" + assistant("before", "working", { input_tokens: 7, output_tokens: 11 }) + "\n");
+  const first = monitor(path);
+  first.poll();
+  const adopted = monitor(path, { offset: first.offset, checkpoint: first.checkpoint() });
+  assert.equal(adopted.attestation.ok, true);
+  const drafts = adopted.finish({ code: null, signal: "SIGTERM" });
+  assert.equal(drafts.some((d) => d.type === "agent.attested"), false);
+  assert.equal(drafts.find((d) => d.type === "budget.usage_recorded").payload.tokens.inputTokens, 7);
+  assert.equal(drafts.at(-1).payload.reason, "killed");
+
+  appendFileSync(path, result() + "\n");
+  const finished = monitor(path);
+  finished.poll();
+  const again = monitor(path, { offset: finished.offset, checkpoint: finished.checkpoint() });
+  assert.equal(again.acc.done, true);
+  assert.deepEqual(again.finish({ code: 0 }).map((d) => d.type), ["agent.exited"]);
+});
+
+test("a worker that exits without init fails attestation, including an unterminated init line", () => {
+  const empty = monitor(file());
+  const drafts = empty.finish({ code: 0 });
+  assert.equal(drafts.find((d) => d.type === "agent.attested").payload.ok, false);
+  assert.equal(drafts.at(-1).payload.reason, "attestation");
+  const path = file();
+  writeFileSync(path, init(["Bash"]));
+  const bad = monitor(path).finish({ code: 1 });
+  assert.equal(bad.find((d) => d.type === "agent.attested").payload.ok, false);
+});

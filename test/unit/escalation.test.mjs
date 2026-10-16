@@ -454,7 +454,7 @@ test("context bundle: includes diagnostics, tasks, leases, notes and decisions; 
   assert.ok(buildContextBundle(state, esc, { limit: 1000 }).length <= 1000);
 });
 
-test("WS08 hooks: exact hook names, worker answer and resolution resumeTask", async (t) => {
+test("WS08 hooks: exact hook names, worker answer, and the resolution's resume returned to the runner", async (t) => {
   const f = await setup(t);
   const calls = f.provider(["Outcome: AGREED\nDecision: Stable API", "Verdict: COMPLETE\nGaps: None"]);
   const id = await f.raise({ kind: "assistance", with: "agent", target: "wb" });
@@ -468,11 +468,11 @@ test("WS08 hooks: exact hook names, worker answer and resolution resumeTask", as
     worker: (agent) => agent === "wb" ? { driver: "claude-code" } : undefined,
     driver: () => ({ id: "claude-code", answer: async () => { answers++; return { text: "I agree" }; } }),
   };
-  assert.equal(await hooks.escalationRouter(ctx, await stateEsc(f, id)), undefined);
+  const ops = await hooks.escalationRouter(ctx, await stateEsc(f, id));
   assert.equal(answers, 1);
-  assert.equal(resumes[0][0], "a");
-  assert.equal(resumes[0][1].kind, "resolution");
-  assert.match(resumes[0][1].text, /Stable API/);
+  assert.deepEqual(ops.map((o) => [o.type, o.task, o.agent]), [["resume_worker", "a", "wa"]]);
+  assert.match(ops[0].card, /Stable API/);
+  assert.deepEqual(resumes, [], "the runner applies the operations");
   assert.deepEqual(await hooks.goalReview(ctx, { integrationSha: "c".repeat(40), state: await f.store.state() }), { verdict: "COMPLETE" });
   assert.equal(calls.length, 2);
 });
@@ -577,11 +577,11 @@ test("context bundle: plain diagnostics and caller-provided diagnostics are scru
 // Review fixes: lost resumes, unapplied huddles, spoofed directive lines
 // ---------------------------------------------------------------------------
 
-/** A WS08 RunnerContext whose resumeTask records its calls and answers `started`. */
-function runnerCtx(f, resumes, started = () => true) {
+/** A WS08 RunnerContext whose resumeTask records its calls. */
+function runnerCtx(f, resumes) {
   return {
     execution: f.store.id, store: f.store, header: f.header, source: runner, log() {},
-    resumeTask: async (...args) => { resumes.push(args); return started(); },
+    resumeTask: async (...args) => { resumes.push(args); return true; },
     worker: () => undefined, driver: () => ({ id: "claude-code" }),
   };
 }
@@ -597,18 +597,13 @@ test("resolution: a resume lost between the commit and the op, or one that faile
   const again = await routeEscalation(f.ctx, id);
   assert.deepEqual(again.map((o) => [o.type, o.key, o.task]), r.ops.map((o) => [o.type, o.key, o.task]));
   assert.match(again[0].card, /stable API/);
-  // Every runner pass offers it again while the runner cannot start it.
+  // Every runner pass offers it again (the runner applies it, or forgets a resume that did not start).
   const hooks = createRunnerHooks({ llm });
-  const resumes = [];
-  const ctx = runnerCtx(f, resumes, () => false);
-  await hooks.escalationPass(ctx);
-  await hooks.escalationPass(ctx);
-  assert.deepEqual(resumes.map(([task, im]) => [task, im.kind]), [["a", "resolution"], ["a", "resolution"]]);
-  assert.match(resumes[0][1].text, /stable API/);
+  const ctx = runnerCtx(f, []);
+  for (let i = 0; i < 2; i++) assert.deepEqual((await hooks.escalationPass(ctx)).map((o) => o.key), r.ops.map((o) => o.key));
   // A started worker settles it.
   await f.emit([{ type: "agent.spawned", payload: { agent: "wa", task: "a", attempt: 1, pid: process.pid, session_id: session } }]);
-  await hooks.escalationPass(ctx);
-  assert.equal(resumes.length, 2);
+  assert.deepEqual(await hooks.escalationPass(ctx), []);
   assert.deepEqual(await routeEscalation(f.ctx, id), []);
 });
 

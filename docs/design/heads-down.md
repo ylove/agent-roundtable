@@ -33,13 +33,13 @@ All three processes run from `dist/index.js`. `src/cli.ts` dispatches the subcom
 **How the runner starts.** `spawn(process.execPath, [cli, "run", id], {detached: true, stdio: ["ignore", log, log], cwd: repoRoot}).unref()`. Because it is detached, it survives the MCP host killing the server's process group. The stdio server's shutdown never touches runners.
 
 **Runner ownership.**
-- The runner creates `runner.lock/` with `mkdir` and writes `runner.json {pid, host, startedAt, heartbeatAt, version}` atomically every 5 s.
-- A runner counts as stale when its pid is dead on the same host or its heartbeat is older than 30 s.
+- The runner creates `runner.lock/` with `mkdir`; its owner records the process start identity (`started`, from `ps -o lstart=`). It writes `runner.json {pid, host, startedAt, heartbeatAt, version}` atomically every 5 s.
+- A runner counts as stale when its pid is dead on the same host or its heartbeat is older than 30 s. A stale heartbeat is diagnostic only: takeover requires a dead owner on this host (or the lock primitive's proof of pid reuse). A live pid's lock is never stolen.
 - A runner on a different host is refused: 1.0 supports one host per home directory.
 - Takeover renames the lock, removes it, takes a new lock, and emits `runner.takeover`.
 - Every orchestrator tool that touches a live run calls `ensureRunner(id)`.
 
-**Permissions.** Heads-down subcommands (including `mcp --worker` and `hook`) call `process.umask(0o077)`. The orchestrator keeps the host umask; private state uses explicit modes from `fs-safe.ts`.
+**Permissions.** Heads-down subcommands (`run`, `watch`, `status`, `verify`, `purge`, `mcp --worker` and `hook`) call `process.umask(0o077)`. The orchestrator, through the default and explicit stdio entry points, keeps the host umask; private state uses explicit modes from `fs-safe.ts`.
 
 ## 3. Store
 
@@ -58,6 +58,7 @@ executions/<exe>/
   contracts/<ctr>/v<N>.json  CONTRACT.md
   blobs/sha256/ab/<hash>             diffs, outputs, huddle turns, prompts (secrets redacted before writing)
   agents/<agent>/{mcp.json, settings.json, prompt.md, token, token.used, leases.json, inbox.cursor, heartbeat, runs/<attempt>.jsonl}
+  agents/<agent>/{launch.json, launch.json.receipt, launch.json.<token-sha>.lock/}
   watch/<orchestrator>.json          watcher liveness and cursor
   dashboard.json  github.json
 worktrees/<exe>/<task>/  worktrees/<exe>/_integration/
@@ -96,8 +97,8 @@ Details of `transact` (`src/execution/store.ts`):
 **Resume** reconciles in this order:
 1. Verify the chain.
 2. Load the snapshot and replay the tail.
-3. Workers whose pid is still alive are adopted. Their stdout goes to a file, not a pipe, so the new runner can tail it.
-4. Dead workers have their worktree WIP committed (`rt: wip snapshot`) and are respawned with `--resume <session>` and an "interrupted" card. If the session is gone, a fresh worker starts and gets the WIP diff stat.
+3. Reconcile durable launch intents before considering replacements. A detached child holds a worker launch lock and writes its pid and start identity before running CLI code. Recovery adopts a matching live lock owner; otherwise it cancels the intent under that lock, so a late child cannot start work. An uncertain lock owner blocks replacement until it can be reconciled. Workers whose pid and recorded start identity still match are adopted. Their stdout goes to a file, not a pipe, so the new runner can tail it. `agents/<id>/run.json` records the output offset and parser checkpoint, including attestation, accumulated message usage and whether result usage was already recorded. The runner updates it after committing monitor drafts; adoption suppresses any drafts already in the event log if the checkpoint lagged the commit.
+4. Dead workers have their worktree WIP committed (`rt: wip snapshot`) except while their task is `submitted`, `checking` or `merging`. Merging tasks retain their checked commit and need no replacement. Interrupted submissions are durably rejected with an explanation, then resumed so the worker can submit and rerun checks. Other dead workers are respawned with `--resume <session>` and an "interrupted" card. If the session is gone, a fresh worker starts and gets the WIP diff stat.
 5. Lease TTLs restart.
 
 The **task owns its branch and worktree**, and agents come and go. That ownership is what lets a resumed run pick up where it left off.
@@ -151,8 +152,8 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `runner.started` | pid, version |
 | `runner.takeover` | previous_pid |
 | `runner.stopped` | reason (heartbeats are files, never events) |
-| `agent.registered` | agent, persona, team, driver, token_sha256, external |
-| `agent.spawned` | task, attempt, pid, session_id |
+| `agent.registered` | agent, persona, team, driver, token_sha256, external, budget_usd? (reserved worker allocation) |
+| `agent.spawned` | task, attempt, pid, session_id, started? (process start identity) |
 | `agent.attested` | tools, mcp_servers, ok |
 | `agent.exited` | code, reason, result_subtype, usage, paused (the pause it stopped for: not counted against max_attempts) |
 | `agent.left` | reason |
@@ -358,7 +359,7 @@ export interface WorkerDriver {
 }
 ```
 
-The drivers live in `src/workers/` (WS07): `claude-code.ts`, `codex.ts`, the generated files in `files.ts`, the lease hook in `hook.ts`, token consumption in `token.ts`, process groups in `process.ts`, and `RunMonitor` in `monitor.ts`. A worker is spawned detached in its own process group, with cwd set to the task worktree and stdout and stderr appended to `runs/<attempt>.jsonl` (0600), so a restarted runner can adopt it and keep tailing. `stop` sends SIGTERM to the group, then SIGKILL after 10 s.
+The drivers live in `src/workers/` (WS07): `claude-code.ts`, `codex.ts`, the generated files in `files.ts`, the lease hook in `hook.ts`, token consumption in `token.ts`, process groups in `process.ts`, and `RunMonitor` in `monitor.ts`. A worker is spawned detached in its own process group, with cwd set to the task worktree and stdout and stderr appended to `runs/<attempt>.jsonl` (0600), so a restarted runner can adopt it and keep tailing. `stop` verifies the saved process start identity before SIGTERM and again before SIGKILL after 10 s. Abort, adoption, stall stops and retention use the same identity check. A mismatched or unreadable live identity is treated as gone and is never signalled.
 
 ### Claude Code invocation
 
@@ -375,7 +376,7 @@ claude -p --output-format stream-json --verbose
   --allowedTools "Read Edit Write Glob Grep mcp__roundtable"
   --disallowedTools "Bash WebFetch WebSearch Task Agent"
   --permission-mode dontAsk --permission-prompts none
-  --max-budget-usd <min(task remaining, execution remaining)>
+  --max-budget-usd <min(task remaining, execution budget - spent - other reservations)>
   --disable-slash-commands --no-chrome
 ```
 
@@ -429,6 +430,7 @@ The question goes in on stdin. The fork gets a new session id and leaves the ori
 Workers use whatever account the CLI is logged into. `ANTHROPIC_API_KEY` is passed only when `ROUNDTABLE_WORKER_AUTH=api_key`.
 
 **Identity.**
+- Before spawning, the runner durably writes a launch intent containing the agent, task, attempt, token SHA, timestamp and recovery metadata. A detached group leader acquires its launch lock and publishes a pid/start receipt before launching the CLI. Its process start identity is also saved in `run.json` and `agent.spawned`.
 - The runner generates each agent's token immediately before its launch, rather than preparing tokens for all agents ahead of time. It writes a 32-byte token to a single-use file (`prepareWorkerFiles`) and records its sha256 in `agent.registered`.
 - The worker server accepts `--token-file` only at `agents/<agent>/token`, so it can never be pointed at another file to read or unlink. The file must be a private regular file of this user.
 - The server claims the file with an atomic rename, reads it, unlinks it, and compares the sha256 in constant time with `agents[agent].token_sha256`.
@@ -526,18 +528,23 @@ Every host-side git call goes through `src/execution/git.ts`:
 - A submission is one commit. Lease coverage, the diff, `task.submitted` and every check are taken at the commit `submit_work` made, never at a `HEAD` that may move.
 - Checks run in a fresh detached checkout of that commit (`withCommitCheckout`, under `executions/<exe>/checks/`), which no worker tool reaches, and which is removed afterwards. Whatever the worker does to its worktree during the checks, they see the committed bytes and nothing uncommitted. The checkout's `.git` is a gitfile, which the docker backend mounts read-only.
 - Every check event, and `task.checks_passed`, carries the submission's `submitted_seq` and `commit`. The outcome (`task.checks_passed` or `task.rejected`) is recorded only if, in the same transaction, the submission is still the task's latest `task.submitted`, the task is still `submitted` or `checking`, and the same agent holds the claim in the same attempt under the same token. Otherwise nothing is recorded and the worker is told its submission is out of date.
-- **The runner merges exactly `task.checks_passed.commit`**, the commit the checks passed on, never the task branch's current head.
+- **The runner merges exactly `task.checks_passed.commit`**, requiring its `submitted_seq` and SHA to match the current submission. Both lease coverage and `git merge --no-ff <sha>` use that immutable commit. Missing bindings reject the submission. Amended checks run in a private checkout of the same SHA and record those same bindings.
 
 **Merge queue.** The runner merges serially, under `git.lock`, with `git merge --no-ff` into `_integration`.
-- If the conflicted files are inside the task's leases, the runner merges the integration branch into the task worktree, leaving the conflict markers, and resumes the worker.
+- If the conflicted files are inside the task's leases, the runner merges the integration branch into the task worktree, leaving any conflict markers, and resumes the worker. Even a clean preparation requires a new submission and checks of the resulting commit.
 - Conflicts outside the leases escalate as `conflict`.
 - When a merge succeeds, the integration smoke checks run.
+- The task's leases stay held through those checks. The runner supplies `obs.retainedTasks` for accepted tasks until it releases their leases, and reconciles such leases after a restart.
 
 **Completion.**
 1. All tasks are accepted.
 2. Final validation runs on the integration branch.
 3. The lead does a goal review and answers `Verdict: COMPLETE | INCOMPLETE`. A run gets at most 2 review cycles, counted from its goal-review notes; INCOMPLETE may add tasks within authority, then escalates when the cycles are spent.
 4. `execution.completed` is emitted. Optionally the integration branch is pushed and a PR opened with `gh pr create`.
+
+Completion attempts are tracked in runner `note.posted` events with topic `completion-outcome`, keyed by integration SHA, task ids and contract version. A failed final validation or INCOMPLETE review waits for its related escalation to be resolved or dismissed, then may run again at the same SHA. A failed review call retries after five minutes, up to three calls before escalating; outcomes and retry times survive runner restarts.
+
+Publication follows the durable completion event. Its URL is recorded in a `note.posted` with topic `pull_request` and the URL in `refs`; GitHub sync posts that link to the parent issue. The runner looks up an existing PR before creating one, so a publication interrupted before its note can be retried.
 
 The runner never pushes to the base branch, and nothing auto-merges.
 
@@ -548,7 +555,7 @@ The runner never pushes to the base branch, and nothing auto-merges.
 | Rule | Automatic action | Escalates when |
 |---|---|---|
 | Lease or claim expiry | Reclaim and grant the head of the queue | — |
-| Worker died or lost | Retry with `--resume`, attempt+1; a death from a transient driver failure (rate limit, auth, credit) is not counted against `max_attempts`; a worker that stopped while its task was paused (an emergency, a driver circuit, a manual pause) is resumed on the same attempt once the pause ends | Attempts exceed `max_attempts`; transient deaths exceed `infraRetries` (20) |
+| Worker died or lost | Retry with `--resume`, attempt+1; a death from a transient driver failure (rate limit, auth, credit) is not counted against `max_attempts`; a worker that stopped while its task was paused (an emergency, a driver circuit, a manual pause) is resumed on the same attempt once the pause ends; one that ended its turn on a blocking escalation waits `resumeGraceMs` (1 min) for the resolution's resume, then is resumed on the same attempt | Attempts exceed `max_attempts`; transient deaths exceed `infraRetries` (20) |
 | Stall (pid alive, no output or heartbeat for 10 min) | SIGTERM, then SIGKILL, then resume | 2 stalls on the same task |
 | Dependency wait | Block the task; unblock on `dependency.satisfied` or `task.merged` | A wait-for cycle → `deadlock_detected`, sent to the common orchestrator |
 | Repeated failure | — | The same check signature 3× with no patch in between (a diff-hash change resets the streak); or diff-hash ping-pong A→B→A |
@@ -563,6 +570,7 @@ The runner never pushes to the base branch, and nothing auto-merges.
 - `callLLMDetailed` plus an `AsyncLocalStorage` usage sink (`src/providers/usage.ts`), so the existing engines feed the ledger.
 - `pricing.ts` is a data table that can be overridden with `ROUNDTABLE_PRICING_FILE`.
 - Models missing from the table are recorded as `estimated: true`.
+- A runner launch reserves its allocation atomically in `agent.registered.budget_usd`. The reducer keeps each agent's outstanding reservation, subtracts other reservations when allocating, and clears it on the worker's result usage or exit. Launches below the useful budget minimum wait. Snapshot reducer version 5 includes these semantics and the bound amendment recheck transition.
 
 **Implementation** (`src/execution/watchdog.ts`, with `budget.ts`, `pricing.ts`, `circuit.ts`, `deadlock.ts`, and the action types shared by all of them in `watchdog-actions.ts`):
 - The signature is `evaluate(state, now, obs, cfg?)`. `obs` holds what the blackboard does not: agent liveness and output and heartbeat times, watcher liveness, lead calls in flight, and times kept only in the log. `observeEvents(events, base)` derives the log part: claim renewals, spawn times, huddle starts, routing times, lead fallback issue times, diff history, open dependency needs, stall counts, transient driver deaths, driver outcomes and circuit history.
@@ -618,18 +626,28 @@ Resolvers serialize through a separate per-escalation lock, leaving the event lo
 
 A resolution that unblocks a task owes it a resume until `agent.spawned` (or `task.retried`) for that task is observed. `owedResumeOps` re-derives the same `resume_worker` (same key) from the log on every pass, so a resume that failed or was lost in a crash is issued again. Directive lines (`Action:`, `Outcome:`, `Verdict:`, `Decision:`) are read only from the answer's own lines, never inside blockquotes or fences; conflicting `Action:` lines fail closed to `await_human`, conflicting `Outcome:` lines to `NEEDS_ORCHESTRATOR` and conflicting `Verdict:` lines to `INCOMPLETE`.
 
-`createRunnerHooks({llm?, alive?})` implements WS08's `escalationRouter(ctx, escalation)`, `leadFallback(ctx, id)` and `goalReview(ctx, input)` interface, plus the optional `escalationPass(ctx)` the runner calls every pass for owed resumes and concluded huddles. The mirror in `runner-hook-types.ts` must stay identical to WS08's `runner-hooks.ts`. The adapter uses `ctx.worker` for live session records and applies returned process operations through the driver's stop control and `ctx.resumeTask`. Persona calls use the supplied provider/model, or the provider layer's default OpenAI model. The direct WS11 resolver returns the current escalation, process operations, an idempotence flag, warnings and any amendment result; `participants[0]` supplies the new persona for a `reassign` action.
+`createRunnerHooks({llm?, alive?})` implements WS08's `escalationRouter(ctx, escalation)`, `leadFallback(ctx, id)` and `goalReview(ctx, input)` interface, plus the optional `escalationPass(ctx)` the runner calls every pass for owed resumes and concluded huddles. `runner-hook-types.ts` re-exports WS08's `runner-hooks.ts`. `runRunner` (the CLI's `run`) installs these hooks; a `Runner` built without hooks keeps `DEFAULT_HOOKS`, which only log (tests). The adapter passes the run's driver and `ctx.worker`, so a live claude-code worker answers a micro-huddle through `driver.answer()`. The hooks return their process operations, and the runner applies them with the handed-over ones (`applyResolutionOps`): kills first, each key once per process, and a resume that could not start is offered again by the next pass. The runner holds `obs.leadInFlight` until the lead's call and its operations are done. Persona calls use the supplied provider/model, else `ROUNDTABLE_EXECUTION_PROVIDER`, `_MODEL` and `_BASE_URL` (`executionLLM()`), else anthropic with its default model, like the tools. The direct WS11 resolver returns the current escalation, process operations, an idempotence flag, warnings and any amendment result; `participants[0]` supplies the new persona for a `reassign` action.
 
 ## 13. Orchestrator experience
 
 **`execute`** requires a frozen contract and `confirmation`, which is the human's verbatim words; it is recorded in the event log and the audit log. It returns `{status: "needs_input", questions}` when any of these is true:
 - no visibility channel was chosen (dashboard, GitHub, or an explicit `chat_only`) and `ROUNDTABLE_DEFAULT_VISIBILITY` is not set;
-- no budget was given, either as an argument or in the environment;
+- no budget was given, either as an argument, in the contract or in the environment (`ROUNDTABLE_DEFAULT_BUDGET_USD`);
 - Docker is unreachable and the local sandbox was not opted into;
 - a required CLI flag is missing;
 - GitHub was requested but the `gh` scopes are missing.
 
 It warns when the main worktree is dirty. Otherwise it returns `{execution_id, runner_pid, dashboard_url?, watch: {argv, instructions}}`.
+
+**Implementation (WS11).** `src/execution/orchestrator.ts` holds execute, control and resolve; `status-report.ts` the status; `retention.ts` the sweep; `src/tools/execution.ts` the four tool definitions.
+- Each question is `{topic, question, answer_with?}`: plain words for the human, plus how the answer goes back into `execute`. Topics: visibility, budget, sandbox, workers, github, repository. Preflight only reads repository metadata; it creates no integration worktree or branch. Repeated pending calls reuse the frozen contract's execution, and failures leave no new worktree artifacts.
+- Two more questions than the list above: Codex workers need an explicit `worker_driver: "codex"` (a contract asking for Codex alone is not the opt-in), and a repository with submodules is refused (read-only repository checks throw `SubmodulesUnsupportedError`).
+- `ROUNDTABLE_DEFAULT_VISIBILITY` is a comma list of `dashboard`, `chat_only` and `github:<owner/name>`.
+- A contract budget that is still `BUDGET_FALLBACK` (proposed without one) counts as unset. A child contract's budget always counts as set.
+- Settings given to `execute` that differ from the contract (`budget_usd`, `max_parallel`, `lead`, `sandbox`, `worker_driver`, `worker_model`) are applied before the start as one `amend_contract` with `override_consent`, because the runner reads the contract. The amendment is audited, and its reason lists the settings.
+- `execution.started.sandbox` is the backend the preflight selected, so `"local"` there records the opt-in for the keyless worker servers.
+- A second `execute` for a run that has already started returns `status: "already_started"` with the current info.
+- `watch.argv` runs `node <dist/index.js> watch <exe> --as <orchestrator>`, which needs no `agent-roundtable` on PATH. `watch.command` is the same argv quoted for a shell.
 
 **`agent-roundtable watch <exe> --as main [--timeout-min 50]`** is a background command the orchestrator runs.
 - It tails from its cursor and writes its liveness every 10 s.
@@ -641,6 +659,10 @@ It warns when the main worktree is dirty. Otherwise it returns `{execution_id, r
 - Completion is weighted: accepted tasks count 1, submitted 0.8, in progress the reported percent or 0.4.
 - The status also reports blockers, the latest checks, an ETA, the budget, runner health and sync health.
 - Views: `summary`, `tasks`, `escalations`, `events`, `budget`, `context`.
+- Without `execution_id` it lists every run, newest first. It calls `ensureRunner` for a running or paused run.
+- Focus scoring, per focus word: 3 for an exact word, 2 for a shared prefix of 3 or more characters, 1 for containment. Interfaces count for the task that owns them and for the tasks that consume them. The tasks shown are those scoring at least half the best score. An escalation id as `focus` picks that escalation for `view: "context"`.
+- ETA: the median duration of the accepted tasks × the remaining work (the sum of 1 − weight over unfinished tasks) ÷ min(`max_parallel`, unfinished tasks). There is no estimate until a task has been accepted.
+- `context` is built from the blackboard only: WS10's bundle for an escalation, otherwise the contract summary, the tasks, the interfaces, the decisions, the open escalations, the failing checks and recent notes. It never includes the confirmation or `original_prompt`, and it is scrubbed and capped at `BUNDLE_LIMIT`.
 
 **`control_execution`** has these actions:
 - `pause` and `resume`, for the whole run or for specific tasks;
@@ -648,7 +670,19 @@ It warns when the main worktree is dirty. Otherwise it returns `{execution_id, r
 - `abort`, which kills the process groups but keeps the worktrees and the log;
 - `purge`, which works on terminal runs only and needs `confirm: true`.
 
-**Back to the table.** Pause the run, run any format with the `context` from `execution_status(view: "context")`, call `amend_contract(from_session)`, then resume. Both switches emit `execution.mode_changed`.
+Details:
+- `steer` records `execution.steered` and a `directive.issued` with `requires_ack`. Its targets may be agents, teams, or tasks (meaning the agent working on each task); without targets it goes to every registered agent.
+- `abort` emits `execution.aborted`, then stops the process groups of the live non-external workers itself (`stopGroup`), in case the runner is gone. It audits the abort.
+- `purge` is run-admin's `purgeExecution`, audited under the orchestrator's name.
+- `resume` calls `ensureRunner`. The other actions do too, while the run is live.
+
+**Back to the table.** Pause the run, run any format with the `context` from `execution_status(view: "context")`, call `amend_contract(from_session)`, then resume. Both switches emit `execution.mode_changed`. The switch is the flag `to_table: true`: on `pause` it records execution → deliberation, and on `resume` it records deliberation → execution. It is not inferred from `reason`. `session` names the session at the table, if there is one.
+
+**`resolve_escalation`** runs WS10's `resolveEscalation` in the orchestrator server.
+- Its `HookCtx` holds the store, a `ClaudeCodeDriver`, live worker records read from `run.json`, and the `provider`, `model` and `base_url` arguments (default anthropic and its default model).
+- Only the runner may start or stop workers. The returned process operations (`resume_worker` with its card, `spawn_retry`, `kill_worker`) are therefore written to `executions/<exe>/handoff/<key>.json` (`src/execution/handoff.ts`).
+- The runner reads them on its next tick, before the watchdog pass: stops first, then starts. Each operation remains on disk until the old process has exited or the new worker has spawned; only then is it acknowledged and removed. Every pass also stops live workers that lost their task claim (including accepted tasks) or belong to an older attempt, so retry/reassign stops are re-derived even if a handoff was lost. A file that does not parse is renamed `.bad`.
+- The tool then calls `ensureRunner`.
 
 ## 14. Visibility
 
@@ -691,8 +725,8 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | | `freeze_contract` | contract_id\*, orchestrator\*, excuse[{agent, reason}], abandon_round |
 | Run | `execute` | contract_id\*, confirmation\*, visibility{dashboard, chat_only, github{repo, project_owner, project_number, create_project, pr}}, budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model |
 | | `execution_status` | execution_id, focus, view, since_seq, limit |
-| | `control_execution` | execution_id\*, action\*, reason, message, task_ids[], targets[], confirm |
-| | `resolve_escalation` | execution_id\*, escalation_id\*, action\*, decision, format, participants[], amendment{}, resolved_by |
+| | `control_execution` | execution_id\*, action\*, reason, message, task_ids[], targets[], confirm, to_table, session |
+| | `resolve_escalation` | execution_id\*, escalation_id\*, action\*, decision, format, participants[], amendment{}, resolved_by, provider, model, base_url |
 | | `join_execution` | execution_id\*, agent\*, team, task_id (orchestrator server only) |
 | Worker | `read_blackboard` | section, query, task_id, ref, since_seq, limit |
 | | `claim_task` | task_id, release, note |
@@ -702,7 +736,7 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | | `submit_work` | summary\*, ready\* |
 | | `escalate` | kind\*, with\*, summary\*, target, question, options[], diagnostics{}, blocking, emergency |
 
-On the worker server, the worker tools are bound to the token. On the orchestrator server, they require `agent_token` and `execution_id`: the tool definition carries a second schema for that mode (`inputSchemaByMode`). Subcontract tasks additionally get scoped `propose_contract` and `freeze_contract`. With WS04's contract tools and WS07's `join_execution` and seven worker tools, the orchestrator lists 33 tools until WS08 lands the other four run tools.
+On the worker server, the worker tools are bound to the token. On the orchestrator server, they require `agent_token` and `execution_id`: the tool definition carries a second schema for that mode (`inputSchemaByMode`). Subcontract tasks additionally get scoped `propose_contract` and `freeze_contract`. WS07 lands `join_execution` and the seven worker tools and WS04 the three contract tools, WS11 lands the four run tools, which brings the orchestrator to 37.
 
 **Worker tool semantics** (`src/tools/worker.ts`). Every response is JSON and carries `inbox`: the agent's new directives and decisions since `agents/<id>/inbox.cursor`, which advances only after a response containing those items is built, plus `awaiting_ack` (directive ids and text) for directives not yet acknowledged. Inbox is the first response key and is never truncated: oversized inboxes deliver the oldest fitting page and advance only to its last item. Pending acknowledgements also page oldest first, retaining each directive's text, with `more_awaiting_ack` when more remain. Other sections are capped as valid JSON; errors carry the inbox too.
 - `read_blackboard`: `section` is summary (the default), goal, contract, tasks, task, interfaces, decisions, leases, claims, files, diffs, checks, escalations, notes, inbox, budget, agents, teams, events, blob or query.
@@ -752,6 +786,9 @@ On the worker server, the worker tools are bound to the token. On the orchestrat
 - **Retries.** Provider calls retry with backoff inside the original timeout.
 - **Sandbox.** Docker runs with no network, as non-root, with a read-only root, all capabilities dropped and `no-new-privileges`. Resources are limited, the env is empty, and output is capped. Dependency installs reach only allowlisted hosts through the egress proxy. The local backend requires an explicit opt-in and reports `sandbox.degraded` when it falls back.
 - **Audit.** The audit log is hash-chained, checked by `verify`, and swept for retention: runs are kept 30 days after they end, and the audit log 365 days.
+  - The orchestrator server runs the sweep once at startup, best effort, and logs it to stderr (`src/execution/retention.ts`). It covers terminal runs (`ROUNDTABLE_EXECUTION_RETENTION_DAYS`, through the audited purge), archived sessions (`ROUNDTABLE_SESSION_RETENTION_DAYS`, 30) and audit month files (`ROUNDTABLE_AUDIT_RETENTION_DAYS`).
+  - For each setting, `0` or `off` keeps everything of that kind.
+  - When a run's repository is gone, purge still takes `runner.lock`, requires terminal state, and refuses a matching live worker or pending launch. Only git worktree/branch cleanup is skipped; directory removal is audited with `repo_missing`.
   - A prune writes `audit-anchor.json {hash, previous, files, at}` before deleting whole month files, and records an `audit.pruned` entry.
   - `verifyAudit` requires the first remaining entry to link to the anchor, or to the genesis hash when nothing was ever pruned. Deleting the oldest entries without a prune is therefore detected.
 - **CI.** Least-privilege permissions, actions pinned by SHA, an `npm audit` gate, CodeQL, Dependabot, an SBOM, and npm provenance on release.
@@ -816,6 +853,21 @@ WS06 adds worktrees, leases and the merge queue:
 | `src/execution/worktrees.ts` | `ensureIntegrationWorktree(header)`, `ensureTaskWorktree(header, task, startPoint?)`, `taskStartPoint(state, task)`, `removeWorktree(path, {deleteBranch?})`, `pruneWorktrees(exe, {remove?, branches?})`, `worktreeStatus(path)`, `withGitLock(exe, fn)`, `mergeBase`, `changedPaths`, `checkLeaseCoverage`, `commitLeasedPaths`, `snapshotWip`, `diffForTask`, `taskDiffSummary` |
 | `src/execution/merge.ts` | `mergeTask(header, task, {leases?})`, `prepareConflictResolution(header, task)`, `classifyConflict(conflicts, leases)`, `mergeDrafts.{succeeded, conflicted, taskMerged}` |
 
+WS07 adds the worker drivers, the worker MCP server and the worker tools:
+
+| Module | API |
+|---|---|
+| `src/workers/claude-code.ts` | `ClaudeCodeDriver({cli?, killGraceMs?, answerTimeoutMs?})` (`detect`, `launch`, `resume`, `parse`, `stop`, `answer`), `buildWorkerArgs(launch, caps?, {resume?})`, `buildAnswerArgs(session, maxUsd)`, `parseClaudeHelp(help)`, `parseClaudeLine(line, acc)`, `attest(acc, expected?)`, `WORKER_ATTESTATION`, `workerEnvExtras(launch)` |
+| `src/workers/codex.ts` | `CodexDriver`, `buildCodexArgs(launch, mcp)`, `buildCodexResumeArgs(thread, launch, mcp)`, `parseCodexLine(line, acc)`, `readCodexMcpServer(path)` |
+| `src/workers/files.ts` | `prepareWorkerFiles({store, agent, persona, task, execPath?, cliPath?, home?})` returns the paths and `token_sha256`; `writeAgentLeases(store, agent, {task?})`; `agentTask(state, agent)`; `agentDir`, `ensureAgentDir`, `buildMcpConfig`, `buildWorkerSettings`, `newAgentToken`, `tokenSha256` |
+| `src/workers/monitor.ts` | `new RunMonitor({path, parse, agent, task, source?, expected?, provider?, model?, offset?})` with `.poll()` returning `{drafts, attestation?, done, bytes}`, `.finish({code, signal?, reason?})` returning drafts, `.offset` and `.acc` |
+| `src/workers/process.ts` | `spawnWorker`, `workerExit(pid)`, `groupAlive(pgid)`, `signalGroup`, `stopGroup(pgid, graceMs, started?)` |
+| `src/workers/hook.ts` | `decidePreToolUse(input, env)`, `runPreToolUseHook()`; the CLI's `hook pre-tool-use` |
+| `src/workers/token.ts` | `consumeWorkerToken({execution, agent, tokenFile})`, `sameDigest` |
+| `src/execution/task-card.ts` | `buildTaskCard(state, taskId, {immediate?, external?, worktree?})` |
+| `src/server.ts`, `src/cli.ts` | `buildServer(mode)`, `startStdio(mode, worker?)`; `runCli(argv)` with `mcp [--worker …]` and `hook pre-tool-use` |
+| `src/tools/worker.ts` | `workerTools`, `handleWorkerTool`, `bindWorkerIdentity`, `globWithin` |
+
 WS12 adds the visibility modules the runner hosts:
 
 | Module | API |
@@ -826,17 +878,13 @@ WS12 adds the visibility modules the runner hosts:
 | `src/github/sync.ts` | `new GitHubSync({executionId, repo, projectOwner?, projectNumber?, createProject?, pr?})`, `syncOnce(): Promise<SyncReport>`, `statusFor(taskState)` |
 | `src/github/gh.ts` | `runGh(args, {input?, timeoutMs?})`, `ghJson`, `ghGraphql`, `withBodyFile`, `checkGhReady({repo, project})` returns `{ok, missing[]}` |
 
-WS07 adds the worker drivers, the worker MCP server and the worker tools:
+WS11 adds the orchestrator's run tools and the retention sweep:
 
 | Module | API |
 |---|---|
-| `src/workers/claude-code.ts` | `ClaudeCodeDriver({cli?, killGraceMs?, answerTimeoutMs?})` (`detect`, `launch`, `resume`, `parse`, `stop`, `answer`), `buildWorkerArgs(launch, caps?, {resume?})`, `buildAnswerArgs(session, maxUsd)`, `parseClaudeHelp(help)`, `parseClaudeLine(line, acc)`, `attest(acc, expected?)`, `WORKER_ATTESTATION`, `workerEnvExtras(launch)` |
-| `src/workers/codex.ts` | `CodexDriver`, `buildCodexArgs(launch, mcp)`, `buildCodexResumeArgs(thread, launch, mcp)`, `parseCodexLine(line, acc)`, `readCodexMcpServer(path)` |
-| `src/workers/files.ts` | `prepareWorkerFiles({store, agent, persona, task, execPath?, cliPath?, home?})` returns the paths and `token_sha256`; `writeAgentLeases(store, agent, {task?})`; `agentTask(state, agent)`; `agentDir`, `ensureAgentDir`, `buildMcpConfig`, `buildWorkerSettings`, `newAgentToken`, `tokenSha256` |
-| `src/workers/monitor.ts` | `new RunMonitor({path, parse, agent, task, source?, expected?, provider?, model?, offset?})` with `.poll()` returning `{drafts, attestation?, done, bytes}`, `.finish({code, signal?, reason?})` returning drafts, `.offset` and `.acc` |
-| `src/workers/process.ts` | `spawnWorker`, `workerExit(pid)`, `groupAlive(pgid)`, `signalGroup`, `stopGroup(pgid, graceMs)` |
-| `src/workers/hook.ts` | `decidePreToolUse(input, env)`, `runPreToolUseHook()`; the CLI's `hook pre-tool-use` |
-| `src/workers/token.ts` | `consumeWorkerToken({execution, agent, tokenFile})`, `sameDigest` |
-| `src/execution/task-card.ts` | `buildTaskCard(state, taskId, {immediate?, external?, worktree?})` |
-| `src/server.ts`, `src/cli.ts` | `buildServer(mode)`, `startStdio(mode, worker?)`; `runCli(argv)` with `mcp [--worker …]` and `hook pre-tool-use` |
-| `src/tools/worker.ts` | `workerTools`, `handleWorkerTool`, `bindWorkerIdentity`, `globWithin` |
+| `src/execution/orchestrator.ts` | `execute(input)`, `controlExecution(input)`, `resolveFromOrchestrator(input)`, `watchSpec(exe, orchestrator)`, `dashboardUrl(exe)`, `parseVisibility(raw)`, `contractBudgetSet(contract)`; `setOrchestratorDeps(over)` replaces the runner launch, `ensureRunner`, the sandbox probe, CLI detection, gh and `stopGroup` (tests) |
+| `src/execution/status-report.ts` | `executionStatusReport(input, now?)`, `listExecutionStatus(limit?)`, `matchFocus(state, focus)`, `focusTokens`, `focusScore`, `taskVocabulary`, `weightedCompletion(tasks)`, `estimateEta(state, tasks?, now?)`, `runContext(store, state, focus?)`, `STATUS_VIEWS` |
+| `src/execution/handoff.ts` | `writeHandoff(exe, ops, from)`, `takeHandoffs(exe)` (the runner only), `handoffDir(exe)` |
+| `src/execution/retention.ts` | `sweepRetention({now?, executionDays?, sessionDays?, auditDays?})` returns `{executions, sessions, audit, errors}`; `pruneExecutions(days, now?)`, `describeRetention(report)` |
+| `src/tools/execution.ts` | `executionTools`, `handleExecutionTool`, `CONTROL_ACTIONS`, `RESOLUTION_ACTIONS`, `HUDDLE_FORMATS` |
+| `src/config.ts` | `defaultVisibility()`, `defaultBudgetUsd()`, `executionRetentionDays()`, `sessionRetentionDays()`, `auditRetentionDays()` (null keeps everything) |

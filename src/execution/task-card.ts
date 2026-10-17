@@ -24,6 +24,8 @@ export interface TaskCardOptions {
   external?: boolean;
   /** The worktree path, when the reader needs it (external workers). */
   worktree?: string;
+  /** Leave the human's original request out (a postmortem context never carries it verbatim). */
+  omitOriginalPrompt?: boolean;
 }
 
 export const CARD_LIMITS = {
@@ -98,7 +100,7 @@ export function buildTaskCard(state: Readonly<BlackboardState>, taskId: string, 
 
   if (goal) {
     out.push(`## Ultimate goal\n\n${cap(goal.ultimate, CARD_LIMITS.goal)}`);
-    if (goal.original_prompt?.trim()) {
+    if (goal.original_prompt?.trim() && !opts.omitOriginalPrompt) {
       out.push(`## The original request (verbatim)\n\n${fence(cap(goal.original_prompt, CARD_LIMITS.originalPrompt))}`);
     }
   }

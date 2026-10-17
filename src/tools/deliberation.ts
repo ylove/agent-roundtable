@@ -63,6 +63,7 @@ import { COLLABORATION_MODES } from "../sessions/modes.js";
 import { startUltraplan, submitPlan, endUltraplan, ultraplans } from "../sessions/ultraplan.js";
 import { createAgent, improveAgent } from "../sessions/agent-creation.js";
 import { prototypeTrailer } from "../sessions/prototype-mode.js";
+import { assertAcceptsInput } from "../postmortem/sessions.js";
 import { prototypeDiagnostics } from "../prototypes/index.js";
 import {
   START_MEETING,
@@ -700,6 +701,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         meeting_id: string;
         message: string;
       };
+      assertAcceptsInput(meeting_id, collaborations.get(meeting_id)?.origin);
       const response = await continueMeeting(meeting_id, message);
       const tracker = meetings.get(meeting_id)?.prototype;
       return {
@@ -755,6 +757,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         meeting_id: string;
         message: string;
       };
+      assertAcceptsInput(meeting_id, collaborations.get(meeting_id)?.origin);
       const response = await continueLocalMeeting(meeting_id, message);
       const tracker = localMeetings.get(meeting_id)?.prototype;
       return {
@@ -856,6 +859,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         rounds?: number;
       };
 
+      assertAcceptsInput(collaboration_id, collaborations.get(collaboration_id)?.origin);
       const result = await continueCollaboration(collaboration_id, rounds ?? 1);
 
       return {
@@ -869,6 +873,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         message: string;
       };
 
+      assertAcceptsInput(collaboration_id, collaborations.get(collaboration_id)?.origin);
       const result = await nudgeCollaboration(collaboration_id, message);
 
       return {

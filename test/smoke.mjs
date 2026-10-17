@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
-const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract", "resolve_escalation"];
+const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract", "resolve_escalation", "hold_postmortem"];
 const NEW_START_TOOLS = ["start_ultraplan", "create_agent", "improve_agent"];
 const root = mkdtempSync(join(tmpdir(), "roundtable-smoke-"));
 const agentsDir = join(root, "agents");
@@ -339,9 +339,9 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 38 distinct tools", () => assert(tools.length === 38 && new Set(tools.map((t) => t.name)).size === 38, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 39 distinct tools", () => assert(tools.length === 39 && new Set(tools.map((t) => t.name)).size === 39, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
   check("contract and run tools are strict (additionalProperties: false)", () => {
-    for (const name of ["propose_contract", "amend_contract", "freeze_contract", "postmortem", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
+    for (const name of ["propose_contract", "amend_contract", "freeze_contract", "postmortem", "hold_postmortem", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });
   check("the orchestrator's worker tools take execution_id and agent_token", () => {
     for (const name of WORKER_TOOLS) {

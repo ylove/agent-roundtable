@@ -79,7 +79,7 @@ export const postmortemTools: ToolDefinition[] = [
     precheck: checkPostmortemArgs,
     annotations: { title: "Postmortem", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     description:
-      "Postmortem mode: while testing sends fixers back, you keep a running draft of every finding; when all fixers are done the agents that did the work meet with you and leave actionable artifacts, kept per project and read back before the next plan. " +
+      "Postmortem mode: while testing sends fixers back, you keep a running draft of every finding; when all fixers are done the agents that did the work meet with you (hold_postmortem) and leave actionable artifacts, kept per project and read back before the next plan. " +
       "Off by default: action enable turns it on for a project ONLY when the human asked for postmortem meetings, retrospectives, or agents improving themselves or each other; reason quotes their words verbatim (recorded in the project's log and the audit log). " +
       "Nothing infers it. A heads-down run inherits it from its contract (propose_contract sets it); the runner then records a finding by itself when a submission is sent back after testing. disable turns it off and keeps stored postmortems. " +
       "record adds a finding to the draft of a scope (execution_id for a run, or work for at-the-table work): {summary, detected_by, responsible[] (persona names, or \"orchestrator\"), category, task?, evidence[] (refs only: sha256: blob refs, event ids, commit shas, paths)}. " +
@@ -120,7 +120,7 @@ export const postmortemTools: ToolDefinition[] = [
           },
           required: ["status"],
         },
-        pm: { type: "string", pattern: PM_PATTERN, description: "read: the postmortem (pm-…) the meeting returned." },
+        pm: { type: "string", pattern: PM_PATTERN, description: "read: the postmortem (pm-…) hold_postmortem returned." },
       },
       required: ["action"],
     },

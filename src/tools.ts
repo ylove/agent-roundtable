@@ -7,6 +7,7 @@ import { assertValid, publicSchema } from "./validate.js";
 import { deliberationTools, handleDeliberationTool } from "./tools/deliberation.js";
 import { contractTools, handleContractTool } from "./tools/contract.js";
 import { executionTools, handleExecutionTool } from "./tools/execution.js";
+import { handleHoldPostmortemTool, holdPostmortemTools } from "./tools/hold-postmortem.js";
 import { handlePostmortemTool, postmortemTools } from "./tools/postmortem.js";
 import { handleWorkerTool, workerTools } from "./tools/worker.js";
 import { schemaFor, type ToolArgs, type ToolCallContext, type ToolDefinition, type ToolGroup, type ToolMode } from "./tools/shared.js";
@@ -20,6 +21,7 @@ const groups: ToolGroup[] = [
   { definitions: contractTools, handle: handleContractTool },
   { definitions: executionTools, handle: handleExecutionTool },
   { definitions: postmortemTools, handle: handlePostmortemTool },
+  { definitions: holdPostmortemTools, handle: handleHoldPostmortemTool },
   { definitions: workerTools, handle: handleWorkerTool },
 ];
 

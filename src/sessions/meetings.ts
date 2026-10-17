@@ -13,7 +13,7 @@ import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
-import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
+import { assertMeetingMode, buildChallengerDirective, buildDissentSummaryPrompt, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
 import {
   closePrototypeTracker,
   meetingPrototypeStatus,
@@ -267,7 +267,8 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
       {
         role: "user" as const,
         content:
-          "Please provide a brief summary of what we discussed and any action items or conclusions.",
+          meeting.mode === "debate" ? buildDissentSummaryPrompt("challenger", meeting.agenda ?? "") :
+            "Please provide a brief summary of what we discussed and any action items or conclusions.",
       },
     ];
     summary = await callLLM(

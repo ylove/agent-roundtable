@@ -22,6 +22,7 @@ import { appendAudit } from "../security/audit.js";
 import { childEnv } from "../security/child-env.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { readArchivedSession, type ArchivedSession } from "../sessions/archive.js";
+import { sessionDissentDrafts } from "../sessions/dissents.js";
 import { isSessionBusy } from "../sessions/lock.js";
 import { scrubbedJSON } from "./blobs.js";
 import { canonicalJSON } from "./chain.js";
@@ -296,6 +297,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   const warnings: string[] = [];
   const orchestrator = o.orchestrator.trim();
   const session = o.fromSession ? archived(o.fromSession) : undefined;
+  const sessionDissents = session ? sessionDissentDrafts(session) : [];
   const src: SessionSource | undefined = session && sessionSource(session);
   if (src?.kind === "ultraplan" && src.signedOff === false) {
     warnings.push(`${o.fromSession} was not signed off: an objection or unclear sign-off stands, or it was ended without sign-off`);
@@ -362,6 +364,19 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
           claim: text.slice(0, CONTRACT_LIMITS.dissent_claim), predicted_failure: text.slice(0, CONTRACT_LIMITS.dissent_prediction), on_fire: "huddle" });
       }
       c.dissents = dissents;
+    }
+    if (sessionDissents.length) {
+      if (c.dissents != null && !Array.isArray(c.dissents)) return c;
+      const dissents = Array.isArray(c.dissents) ? [...c.dissents] : [];
+      const participants = Array.isArray(c.participants) ? [...c.participants] : [];
+      for (const d of sessionDissents) {
+        let id = d.id;
+        while (dissents.some((existing) => isObj(existing) && existing.id === id)) id += "-x";
+        dissents.push({ ...d, id });
+        if (!participants.some((p) => p === d.by || (isObj(p) && p.agent === d.by))) participants.push(d.by);
+      }
+      c.dissents = dissents;
+      c.participants = participants;
     }
     return c;
   };

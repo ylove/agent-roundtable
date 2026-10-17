@@ -21,7 +21,7 @@ import { archiveMeeting } from "./archive.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
-import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
+import { assertMeetingMode, buildChallengerDirective, buildDissentSummaryPrompt, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
 import {
   closePrototypeTracker,
   meetingPrototypeStatus,
@@ -545,7 +545,8 @@ async function closeLocalMeeting(meetingId: string, requestSummary: boolean): Pr
   let summary = "";
   if (requestSummary && meeting.messages.length > 0) {
     const summaryPrompt = buildLocalMeetingContext(meeting) +
-      "\n\n---\n\n## Request\n\nPlease provide a brief summary of what we discussed and any action items or conclusions.";
+      "\n\n---\n\n## Request\n\n" + (meeting.mode === "debate" ? buildDissentSummaryPrompt("challenger", meeting.agenda ?? "") :
+        "Please provide a brief summary of what we discussed and any action items or conclusions.");
     summary = await executeClaudeCLI(meeting.agentPromptPath, summaryPrompt, undefined, meeting.appendSystemPrompt);
   }
 

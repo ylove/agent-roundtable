@@ -54,6 +54,19 @@ An objector can pass `resolve_objection: true` when filing their own dissent. Th
 
 Unsigned ultraplan sessions automatically import their archived `OBJECT` sign-offs as dissent drafts with author and session provenance. `UNCLEAR` and approved sign-offs are not imported. Imported text is capped at 500 characters with a warning when truncated; the full sign-off stays in the archive. Refine the prediction and supply a tripwire, or excuse the draft before freeze.
 
+Ending a debate or waffle-house session with `request_summary: true` also asks each challenger or attacker for their own closing statement. The proponent or defender still writes the main summary. Adversarial statements are archived separately with their authors; debate meetings use the challenger's own summary. For each remaining concern, the summary prompt requests these exact, unindented lines outside fences and blockquotes:
+
+```text
+<DISSENT>
+claim: Retrying an order can create a duplicate.
+predicted_failure: The order validation fails after a retry.
+</DISSENT>
+```
+
+`propose_contract` with `from_session` imports these blocks as dissent drafts with `source.kind: debate` or `waffle_house` and the session id in `source.ref`. Identity comes from the archived speaker. Tags embedded in other lines, quoted or indented blocks, incomplete blocks, multiline values and extra fields (including `Decision:` or `Outcome:` lines) are ignored. Ordinary turns and the proponent's or defender's summary cannot file another participant's concern. Sessions ended without a requested summary add no dissent drafts.
+
+Imports use the existing contract validator: each value must fit the 500-character limit and all explicit and imported dissents together must fit the 16-entry limit. Oversized imports fail proposal validation. Imports do not invent tripwires; use `file_dissent` to arm or explicitly excuse each draft before freeze.
+
 Frozen contracts use `amend_contract`; changing dissents requires the existing consent or audited override path. Runtime behavior follows the [design](design/dissents.md).
 
 ## Runtime

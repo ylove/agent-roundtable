@@ -362,6 +362,9 @@ async function resolveActor(args: Record<string, unknown>, mode: ToolMode): Prom
   throw new Error(`agent_token does not belong to any agent of ${execution}`);
 }
 
+/** Reuse the token-bound identity for draft contract tools; never accept a caller-supplied agent id. */
+export { resolveActor as resolveWorkerActor };
+
 function sourceOf(state: Readonly<BlackboardState>, a: Actor, task?: string): EventSource {
   const team = own(state.agents, a.agent)?.team ?? own(state.tasks, task)?.spec.team;
   return { kind: "agent", id: a.agent, ...(team !== undefined && { team }), ...(task !== undefined && { task }), pid: process.pid };

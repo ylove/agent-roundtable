@@ -102,6 +102,7 @@ No arguments starts the orchestrator MCP server. The **8 subcommands** are docum
 - [Getting started and registration](docs/getting-started.md)
 - [Mode guides](docs/modes/meetings.md): [collaborations](docs/modes/collaborations.md), [ultraplan](docs/modes/ultraplan.md), [agent workshops](docs/modes/agent-workshops.md), [prototypes](docs/modes/prototype-mode.md), [public sessions](docs/modes/public-sessions.md)
 - [Heads-down user guide](docs/heads-down.md) and [design specification](docs/design/heads-down.md)
+- [Draft dissents and tripwires](docs/dissents.md)
 - [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)
 - [Configuration](docs/configuration.md) and [providers](docs/providers.md)
 - [Agent personas and skills](docs/agents.md) and [session archives](docs/sessions.md)

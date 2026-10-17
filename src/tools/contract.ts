@@ -4,12 +4,13 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { LLMProvider } from "../config.js";
-import { amendContract, freezeContract, proposeContract, type ContractResult } from "../execution/contract-lifecycle.js";
+import { amendContract, fileDissent, freezeContract, proposeContract, type ContractResult } from "../execution/contract-lifecycle.js";
 import { openContractStore, describeConsent } from "../execution/contract-state.js";
 import { renderContractMarkdown } from "../execution/contract.js";
 import { truncate } from "../sessions/workshop.js";
-import { AMEND_CONTRACT, FREEZE_CONTRACT, PROPOSE_CONTRACT } from "./names.js";
-import { ORCHESTRATOR_ONLY, PROVIDER_PROPS, validateProviderOptions, type ToolArgs, type ToolDefinition } from "./shared.js";
+import { AMEND_CONTRACT, FILE_DISSENT, FREEZE_CONTRACT, PROPOSE_CONTRACT } from "./names.js";
+import { ORCHESTRATOR_ONLY, PROVIDER_PROPS, validateProviderOptions, type ToolArgs, type ToolCallContext, type ToolDefinition } from "./shared.js";
+import { resolveWorkerActor } from "./worker.js";
 
 /** Contract markdown in a tool result is capped; CONTRACT.md always has all of it. */
 export const CONTRACT_MARKDOWN_LIMIT = 12_000;
@@ -26,7 +27,47 @@ function checkProviderArgs(args: Record<string, unknown>): void {
   validateProviderOptions(args.provider as LLMProvider | undefined, args.base_url as string | undefined);
 }
 
+const DISSENT_PROPS = {
+  contract_id: CONTRACT_ID,
+  dissent: {
+    type: "object", additionalProperties: false,
+    description: "Structured concern. Omit tripwire only for a draft. With excuse_reason, pass just {id}. by is bound to an authenticated agent; orchestrators specify a participant.",
+    properties: {
+      id: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" },
+      by: { type: "string" },
+      source: { type: "object", additionalProperties: false, required: ["kind"], properties: {
+        kind: { type: "string", enum: ["ultraplan", "consent", "debate", "waffle_house", "manual"] }, ref: { type: "string" },
+      } },
+      claim: { type: "string", maxLength: 500 },
+      predicted_failure: { type: "string", maxLength: 500 },
+      tripwire: { type: "object", additionalProperties: false, required: ["kind"], properties: {
+        kind: { type: "string", enum: ["check_failed", "path_touched", "task_state"] },
+        check: { type: "string" }, task: { type: "string" },
+        paths: { type: "array", items: { type: "string" }, maxItems: 64 },
+        state: { type: "string", enum: ["rejected", "blocked"] },
+      } },
+      on_fire: { type: "string", enum: ["notify", "huddle", "pause_and_huddle"], description: "Default huddle." },
+    }, required: ["id"],
+  },
+  resolve_objection: { type: "boolean", description: "The objector explicitly consents to the new version with how: dissented, retaining this dissent. Other participants must re-consent." },
+  excuse_reason: { type: "string", "x-nonblank": true, description: "Orchestrator only: explicitly excuse this dissent by id. Its concern and this reason remain in version history and the audit log. Creates a new draft requiring re-consent." },
+} as const;
+
 export const contractTools: ToolDefinition[] = [
+  {
+    name: FILE_DISSENT,
+    modes: ["orchestrator", "worker"],
+    annotations: { title: "File dissent", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: "File or update a structured dissent on a draft contract, creating a new version. Tripwires are data only. An agent files as its authenticated identity; an orchestrator may file for any participant. A dissent needs a tripwire before freeze or explicit excusal with a reason. Frozen contracts require amend_contract and consent.",
+    inputSchema: { type: "object", additionalProperties: false, properties: DISSENT_PROPS, required: ["contract_id", "dissent"] },
+    inputSchemaByMode: { orchestrator: {
+      type: "object", additionalProperties: false, required: ["contract_id", "dissent"],
+      properties: { ...DISSENT_PROPS, orchestrator: ORCHESTRATOR,
+        execution_id: { type: "string", description: "With agent_token: the agent's execution." },
+        agent_token: { type: "string", pattern: "^[0-9a-f]{64}$", description: "Authenticate as an agent instead of an orchestrator." },
+      },
+    } },
+  },
   {
     name: PROPOSE_CONTRACT,
     modes: ORCHESTRATOR_ONLY,
@@ -57,7 +98,7 @@ export const contractTools: ToolDefinition[] = [
         artifacts: { type: "array", items: { type: "string" }, description: "Repository paths or URLs the goal refers to." },
         from_session: { type: "string", description: "Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from." },
         plan: { type: "string", description: "Plan text: its last roundtable-tasks block is used, else a structuring call turns it into tasks." },
-        contract: { type: "object", description: "An explicit contract (roundtable.contract/1 fields: title, scope.paths, participants, teams, tasks, interfaces, decisions, validation {commands, final}, budget, authority, sandbox, workers). id, version, status and consent are set for you." },
+        contract: { type: "object", description: "An explicit contract (roundtable.contract/1 fields: title, scope.paths, participants, teams, tasks, interfaces, decisions, dissents, validation {commands, final}, budget, authority, sandbox, workers). id, version, status and consent are set for you." },
         parent_contract: { type: "string", description: "For a child contract: the parent contract id (with parent_task, a subcontract task of it)." },
         parent_task: { type: "string", description: "For a child contract: the parent's subcontract task this contract carries out." },
         participants: { type: "array", items: { type: "string" }, description: "Agents who must consent (names or .md paths); task personas are always added." },
@@ -80,7 +121,7 @@ export const contractTools: ToolDefinition[] = [
       "from_session (an archived replan or ultraplan) first replaces the structure with that session's roundtable-tasks block (pass patch: {}). " +
       "id, version, status, consent, frozen, the scope's orchestrator, repository, base commit and parent, and the goal's original_prompt cannot change. " +
       "Consent counts only for the version it was given on. A draft amendment needs every participant's consent again before a freeze: consent: true asks them all, and an objector who now agrees has the objection resolved by the amendment. " +
-      "On a frozen contract, a run-wide change (budget, scope, sandbox, authority, validation, workers, goal) needs consent: true (everyone is asked about it first, and it applies only if all agree) or override_consent: true (audited); " +
+      "On a frozen contract, a run-wide change (budget, scope, sandbox, authority, validation, workers, goal, dissents) needs consent: true (everyone is asked about it first, and it applies only if all agree) or override_consent: true (audited); " +
       "other changes apply at once, and consent: true then asks the personas of affected tasks. patch: {} with consent: true just asks everyone without an agreement on the current version. " +
       "Returns the affected tasks, the consent outcome and the contract markdown.",
     inputSchema: {
@@ -161,10 +202,23 @@ const llmOf = (a: Record<string, unknown>) => ({
 });
 
 /** Dispatch one contract tool. Errors are thrown to handleToolCall, which formats them. */
-export async function handleContractTool(name: string, args: ToolArgs): Promise<CallToolResult> {
+export async function handleContractTool(name: string, args: ToolArgs, ctx: ToolCallContext = { mode: "orchestrator" }): Promise<CallToolResult> {
   const a = (args ?? {}) as Record<string, unknown>;
   let result: ContractResult;
   switch (name) {
+    case FILE_DISSENT: {
+      const id = a.contract_id as string;
+      const asAgent = ctx.mode === "worker" || a.agent_token !== undefined || a.execution_id !== undefined;
+      if (asAgent && a.orchestrator !== undefined) throw new Error("choose agent authentication or orchestrator, not both");
+      const actor = asAgent ? await resolveWorkerActor(a, ctx.mode) : undefined;
+      const store = actor?.store ?? await openContractStore(id);
+      result = await fileDissent(store, a.dissent as Record<string, unknown>, {
+        by: actor?.agent ?? a.orchestrator as string, contractId: id,
+        ...(actor && { source: { kind: "agent", id: actor.agent, pid: process.pid } }),
+        resolveObjection: a.resolve_objection === true, excuseReason: a.excuse_reason as string | undefined,
+      });
+      break;
+    }
     case PROPOSE_CONTRACT:
       result = await proposeContract({
         goal: a.goal as string, orchestrator: a.orchestrator as string,

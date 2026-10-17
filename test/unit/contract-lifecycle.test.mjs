@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { json, stubFetch } from "./helpers.mjs";
 
-const { proposeContract, freezeContract, amendContract, resolveRepo, AuthorityError, ContractRefusal, authorityNeeds } =
+const { proposeContract, freezeContract, amendContract, fileDissent, resolveRepo, AuthorityError, ContractRefusal, authorityNeeds } =
   await import("../../dist/execution/contract-lifecycle.js");
 const { contractRecord, openContractStore, summarizeConsent, consentRoundStaleMs, endConsentRound, CONSENT_ROUND_STALE_CAP_MS } = await import("../../dist/execution/contract-state.js");
 const { requestConsent } = await import("../../dist/execution/consent.js");
@@ -81,6 +81,217 @@ const auditEntries = () => {
   }
 };
 const consentRequests = (calls) => calls.filter((c) => c.body.messages.at(-1).content.includes("Consent: AGREE"));
+
+const concern = (over = {}) => ({
+  id: "empty-state-risk", by: skeptic, source: { kind: "manual" },
+  claim: "The empty state may fail.", predicted_failure: "The page check fails with no orders.",
+  tripwire: { kind: "check_failed", check: "test", task: "ui" }, ...over,
+});
+
+async function draftAgent(store, agent = skeptic) {
+  const { tokenSha256 } = await import("../../dist/workers/files.js");
+  const token = "ab".repeat(32);
+  const source = { kind: "runner", id: "runner", pid: process.pid };
+  await store.transact(() => ({ events: [{ type: "agent.registered", source,
+    payload: { agent, persona: agent, driver: "claude-code", token_sha256: tokenSha256(token), external: true } }] }));
+  return { execution_id: store.id, agent_token: token };
+}
+
+test("file_dissent files and updates drafts, validates data, and rejects frozen contracts and unauthorized callers", async (t) => {
+  const r = await propose();
+  const store = await openContractStore(r.contractId);
+  const args = { contract_id: r.contractId, orchestrator: "main", dissent: concern() };
+  const filed = await handleToolCall("file_dissent", args);
+  assert.equal(filed.isError, undefined, filed.content[0].text);
+  let rec = await contractRecord(store);
+  assert.equal(rec.version, 2);
+  assert.equal(rec.contract.dissents[0].on_fire, "huddle");
+  assert.notEqual(consentHash(r.contract), rec.hash);
+  assert.match(readFileSync(join(store.dir, "contracts", r.contractId, "CONTRACT.md"), "utf8"), /empty-state-risk/);
+  const updated = await fileDissent(store, concern({ on_fire: "notify" }), { by: "main" });
+  assert.equal(updated.version, 3);
+  assert.equal(updated.contract.dissents.length, 1);
+  assert.equal(updated.contract.dissents[0].on_fire, "notify");
+  await assert.rejects(fileDissent(store, concern(), { by: "other" }), /only the contract's orchestrator/);
+  await assert.rejects(fileDissent(store, concern({ tripwire: { kind: "check_failed", check: "missing" } }), { by: "main" }), /unknown command/);
+  const invalid = await handleToolCall("file_dissent", { ...args, dissent: concern({ claim: "x".repeat(501) }) });
+  assert.equal(invalid.isError, true);
+  assert.equal((await contractRecord(store)).version, 3, "invalid filings produce no version");
+  provider(t, () => "Consent: AGREE");
+  await requestConsent(store, r.contractId, { by: "main", llm });
+  await freezeContract(r.contractId, { orchestrator: "main" });
+  await assert.rejects(fileDissent(store, concern(), { by: "main" }), /only be filed while the contract is a draft/);
+  await assert.rejects(amendContract(store, { dissents: [concern({ on_fire: "huddle" })] }, { by: "main" }), /touches every participant/);
+});
+
+test("file_dissent binds agent identity on both servers and forbids impersonation and agent excusal", async () => {
+  const { bindWorkerIdentity, resetWorkerTools } = await import("../../dist/tools/worker.js");
+  const { tokenSha256 } = await import("../../dist/workers/files.js");
+  const r = await propose();
+  const store = await openContractStore(r.contractId);
+  const auth = await draftAgent(store);
+  const args = { contract_id: r.contractId, ...auth, dissent: concern({ by: undefined }) };
+  let result = await handleToolCall("file_dissent", args);
+  assert.equal(result.isError, undefined, result.content[0].text);
+  assert.equal((await contractRecord(store)).contract.dissents[0].by, skeptic);
+  for (const bad of [
+    { dissent: concern({ by: cfo }) }, { agent_token: "cd".repeat(32) }, { orchestrator: "main" },
+    { dissent: { id: concern().id }, excuse_reason: "ignore it" },
+  ]) {
+    result = await handleToolCall("file_dissent", { ...args, ...bad });
+    assert.equal(result.isError, true, result.content[0].text);
+  }
+  const other = await propose();
+  result = await handleToolCall("file_dissent", { ...args, contract_id: other.contractId });
+  assert.equal(result.isError, true, "a token cannot select a contract outside its execution");
+  bindWorkerIdentity({ store, execution: store.id, agent: skeptic, tokenSha256: tokenSha256(auth.agent_token) });
+  try {
+    result = await handleToolCall("file_dissent", { contract_id: r.contractId, dissent: concern({ by: undefined, claim: "Revised concern" }) }, "worker");
+    assert.equal(result.isError, undefined, result.content[0].text);
+    const latest = await contractRecord(store);
+    assert.equal(latest.contract.dissents[0].by, skeptic);
+    assert.equal((await store.events()).at(-1).source.id, skeptic);
+    result = await handleToolCall("file_dissent", { contract_id: r.contractId, dissent: concern({ by: cfo }) }, "worker");
+    assert.equal(result.isError, true);
+  } finally { resetWorkerTools(); }
+});
+
+test("how: dissented retains a concern, consents on its new version, and requires everyone else to re-consent", async (t) => {
+  provider(t, answers({ cfo: ["Consent: AGREE", "Consent: AGREE"], skeptic: ["Consent: OBJECT\nEmpty states fail."] }));
+  const r = await propose({ consent: true });
+  const store = await openContractStore(r.contractId);
+  const auth = await draftAgent(store);
+  const result = await handleToolCall("file_dissent", { contract_id: r.contractId, ...auth,
+    dissent: concern({ by: undefined, tripwire: undefined }), resolve_objection: true });
+  assert.equal(result.isError, undefined, result.content[0].text);
+  let rec = await contractRecord(store);
+  assert.deepEqual(summarizeConsent(rec).agree, [skeptic]);
+  assert.deepEqual(summarizeConsent(rec).stale.map((s) => s.agent), [cfo]);
+  assert.equal(rec.contract.dissents[0].source.kind, "consent");
+  assert.equal(rec.verdicts[skeptic].resolved.how, "dissented");
+  assert.equal(rec.verdicts[skeptic].resolved.version, 2);
+  const event = (await store.events()).at(-1);
+  assert.equal(event.type, "contract.objection_resolved");
+  assert.equal(event.payload.how, "dissented");
+  assert.equal(event.payload.dissent_id, concern().id);
+  await requestConsent(store, r.contractId, { by: "main", participants: [cfo], llm });
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main" }), /dissent empty-state-risk needs a tripwire/);
+  // Any further edit invalidates even the objector's consent to v2.
+  await fileDissent(store, concern(), { by: "main" });
+  rec = await contractRecord(store);
+  assert.deepEqual(summarizeConsent(rec).stale.map((s) => s.agent), [cfo, skeptic]);
+  await assert.rejects(fileDissent(store, concern(), { by: skeptic, source: { kind: "agent", id: skeptic, pid: process.pid }, resolveObjection: true }), /current version/);
+});
+
+test("how: dissented needs a current OBJECT and cannot be used by an orchestrator for someone else", async (t) => {
+  provider(t, answers({ cfo: ["Consent: AGREE"], skeptic: ["Unclear", "Still unclear"] }));
+  const r = await propose({ consent: true });
+  const store = await openContractStore(r.contractId);
+  await assert.rejects(fileDissent(store, concern(), { by: "main", resolveObjection: true }), /objector's own unresolved OBJECT/);
+  await assert.rejects(fileDissent(store, concern(), { by: skeptic, source: { kind: "agent", id: skeptic, pid: process.pid }, resolveObjection: true }), /objector's own unresolved OBJECT/);
+  assert.equal((await contractRecord(store)).version, 1);
+  const { validateDraft } = await import("../../dist/execution/events.js");
+  assert.throws(() => validateDraft({ type: "contract.objection_resolved", source: { kind: "agent", id: skeptic, pid: process.pid },
+    payload: { contract: r.contractId, agent: skeptic, how: "dissented", reason: "Proceed" } }), /dissent_id.*required/);
+});
+
+test("an armed dissented resolution freezes as AGREE and replay ignores a stale resolution", async (t) => {
+  provider(t, answers({ cfo: ["Consent: AGREE", "Consent: AGREE"], skeptic: ["Consent: OBJECT\nEmpty states fail."] }));
+  const r = await propose({ consent: true });
+  const store = await openContractStore(r.contractId);
+  const source = { kind: "agent", id: skeptic, pid: process.pid };
+  await fileDissent(store, concern(), { by: skeptic, source, resolveObjection: true });
+  const event = (await store.events()).at(-1);
+  await store.transact(() => ({ events: [{ ...event, contract_version: 1, payload: { ...event.payload, dissent_id: "missing" } }].map(({ type, source, contract, contract_version, payload }) => ({ type, source, contract, contract_version, payload })) }));
+  let rec = await contractRecord(store);
+  assert.equal(rec.ignored, 1);
+  assert.deepEqual(summarizeConsent(rec).agree, [skeptic]);
+  await requestConsent(store, r.contractId, { by: "main", participants: [cfo], llm });
+  const f = await freezeContract(r.contractId, { orchestrator: "main" });
+  assert.equal(f.contract.consent.find((v) => v.agent === skeptic).verdict, "AGREE");
+  assert.equal(f.contract.dissents.length, 1);
+  rec = await contractRecord(store);
+  assert.equal(summarizeConsent(rec).ready, true);
+  assert.equal(contractHash(f.contract), f.hash);
+});
+
+test("dissent filing refuses an in-flight consent round without changing its version", async () => {
+  const r = await propose();
+  const store = await openContractStore(r.contractId);
+  await store.transact(() => ({ events: [{ type: "contract.consent_requested", source: { kind: "orchestrator", id: "main", pid: process.pid },
+    payload: { contract: r.contractId, version: 1, participants: [skeptic] } }] }));
+  await assert.rejects(fileDissent(store, concern(), { by: "main" }), /consent round is in flight/);
+  assert.equal((await contractRecord(store)).version, 1);
+});
+
+test("amending a historical frozen contract treats absent and empty dissents as the same content", async () => {
+  const { makeRun } = await import("../fixtures/workers/run.mjs");
+  const run = await makeRun({ contract: {
+    tasks: [{ ...baseTasks()[0], kind: "build", depends_on: [], checks: [] }], participants: [{ agent: cfo }], teams: [], decisions: [],
+    authority: { lead: cfo, may: ["retry"], budget_extension_pct: 0 },
+    sandbox: { backend: "docker", image: "node:lts" },
+  } });
+  assert.equal(Object.hasOwn(run.contract, "dissents"), false);
+  const amended = await amendContract(run.store, { title: "Updated legacy title" }, { by: "main", contractId: run.contract.id });
+  assert.equal(amended.version, 2);
+  assert.deepEqual(amended.contract.dissents, []);
+  const normalized = { ...run.contract, dissents: [] };
+  assert.deepEqual(authorityNeeds(run.contract, normalized, []), [], "empty defaults do not require new authority");
+});
+
+test("incomplete dissents block freeze despite consent excusals; explicit dissent excusal preserves history and requires re-consent", async (t) => {
+  provider(t, () => "Consent: AGREE");
+  const r = await propose({ contract: explicit({ dissents: [concern({ tripwire: undefined })] }) });
+  const store = await openContractStore(r.contractId);
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main", excuse: [cfo, skeptic].map((agent) => ({ agent, reason: "proceed" })) }), /dissent empty-state-risk needs a tripwire/);
+  await requestConsent(store, r.contractId, { by: "main", llm });
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main" }), /dissent empty-state-risk needs a tripwire/);
+  await assert.rejects(fileDissent(store, { id: concern().id }, { by: "main", excuseReason: " " }), /must be non-empty/);
+  const result = await handleToolCall("file_dissent", { contract_id: r.contractId, orchestrator: "main", dissent: { id: concern().id }, excuse_reason: "The goal no longer includes empty states." });
+  assert.equal(result.isError, undefined, result.content[0].text);
+  let rec = await contractRecord(store);
+  assert.deepEqual(rec.contract.dissents, []);
+  assert.equal(rec.version, 2);
+  assert.equal(summarizeConsent(rec).ready, false);
+  const prior = JSON.parse((await store.getBlob(rec.versions[0].blob)).toString());
+  assert.equal(prior.dissents[0].claim, concern().claim);
+  assert.match((await store.events()).at(-1).payload.reason, /Excused dissent empty-state-risk: The goal/);
+  assert.ok(auditEntries().some((e) => e.action === "contract.dissent_excused" && e.target === r.contractId));
+  await assert.rejects(freezeContract(r.contractId, { orchestrator: "main" }), /not on v2/);
+  await requestConsent(store, r.contractId, { by: "main", llm });
+  const frozen = await freezeContract(r.contractId, { orchestrator: "main" });
+  assert.deepEqual(frozen.contract.dissents, []);
+  rec = await contractRecord(store);
+  assert.equal(summarizeConsent(rec).ready, true);
+});
+
+test("unsigned ultraplan OBJECT sign-offs import as drafts with provenance; UNCLEAR and approved sign-offs do not", async (t) => {
+  provider(t, () => "Consent: AGREE");
+  for (const signedOff of [false, true]) {
+    const id = signedOff ? "ultraplan-approved1" : "ultraplan-dissents1";
+    const plan = blockText({ tasks: baseTasks(), commands: [{ id: "test", argv: ["npm", "test"] }] });
+    archiveSession({ id, kind: "ultraplan", agents: [cfo, skeptic, ops], topic: "Ship orders", started: new Date().toISOString(), turns: [],
+      document: { markdown: plan, signedOff, version: 1, planner: "orchestrator",
+        versions: [{ version: 1, plan, author: "orchestrator", at: "t" }], entries: [],
+        signoffs: [{ agent: skeptic, verdict: "OBJECT", content: "Empty states will fail." },
+          { agent: ops, verdict: "UNCLEAR", content: "Not sure." }, { agent: cfo, verdict: "APPROVE", content: "Looks good." }], tally: {} }, public: null });
+    const r = await propose({ fromSession: id, contract: undefined, originalPrompt: undefined });
+    assert.equal(r.contract.dissents.length, signedOff ? 0 : 1);
+    if (signedOff) continue;
+    const d = r.contract.dissents[0];
+    assert.equal(d.by, skeptic);
+    assert.deepEqual(d.source, { kind: "ultraplan", ref: id });
+    assert.equal(d.claim, "Empty states will fail.");
+    assert.equal(d.tripwire, undefined);
+    const store = await openContractStore(r.contractId);
+    await requestConsent(store, r.contractId, { by: "main", llm });
+    await assert.rejects(freezeContract(r.contractId, { orchestrator: "main" }), /dissent ultraplan-object-1 needs a tripwire/);
+    await fileDissent(store, { ...d, tripwire: { kind: "path_touched", paths: ["src/ui/**"], task: "ui" } }, { by: "main" });
+    await requestConsent(store, r.contractId, { by: "main", llm });
+    const frozen = await freezeContract(r.contractId, { orchestrator: "main" });
+    assert.equal(frozen.contract.dissents[0].tripwire.kind, "path_touched");
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Git and structure sources

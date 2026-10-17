@@ -154,7 +154,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "contract.proposed": { contract: "s", version: "int", source: "s", blob: "s", "reason?": "t", "patch_blob?": "s" },
   "contract.consent_requested": { contract: "s", version: "int", participants: "s[]", "round?": "s", "hash?": "s", "host?": "s" },
   "contract.consent_recorded": { contract: "s", agent: "s", verdict: VERDICT, "reason?": "t", "round?": "s" },
-  "contract.objection_resolved": { contract: "s", agent: "s", how: "'amended'|'withdrawn'|'excused'", reason: "t" },
+  "contract.objection_resolved": { contract: "s", agent: "s", how: "'amended'|'withdrawn'|'excused'|'dissented'", reason: "t", "dissent_id?": "s" },
   // `blob` (the full contract at this version) is optional in the type but required here: the
   // blackboard reads the contract from it (see blackboard.ts).
   "contract.frozen": { contract: "s", version: "int", by: "s", hash: "s", blob: "s" },
@@ -454,6 +454,9 @@ export function validateDraft(draft: AnyEventDraft): AnyEventDraft {
     const { payload, ...rest } = raw;
     out = checkShape(rest, DRAFT, "draft");
     out.payload = checkField(payload, PAYLOAD_SPECS[type], "payload");
+    if (type === "contract.objection_resolved" && isPlainObject(out.payload) && out.payload.how === "dissented" && !out.payload.dissent_id) {
+      throw new Invalid("payload.dissent_id", "is required for how: dissented");
+    }
   } catch (e) {
     if (e instanceof Invalid) throw new Error(`Invalid ${type} event: ${e.message}`);
     throw e;

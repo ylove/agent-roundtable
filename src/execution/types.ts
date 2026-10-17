@@ -134,6 +134,23 @@ export interface ContractBudget {
   max_attempts: number;
 }
 
+/** Non-executing predicates over recorded execution state. */
+export type DissentTripwire =
+  | { kind: "check_failed"; check: string; task?: string }
+  | { kind: "path_touched"; paths: string[]; task?: string }
+  | { kind: "task_state"; task: string; state: "rejected" | "blocked" };
+
+export interface Dissent {
+  id: string;
+  by: string;
+  source: { kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "manual"; ref?: string };
+  claim: string;
+  predicted_failure: string;
+  /** May be absent only while drafting; freeze requires arming or explicit excusal. */
+  tripwire?: DissentTripwire;
+  on_fire: "notify" | "huddle" | "pause_and_huddle";
+}
+
 export interface Contract {
   schema: typeof CONTRACT_SCHEMA;
   id: string;
@@ -154,6 +171,7 @@ export interface Contract {
   tasks: TaskSpec[];
   interfaces: InterfaceSpec[];
   decisions: Decision[];
+  dissents: Dissent[];
   validation: { commands: CommandSpec[]; final: string[] };
   budget: ContractBudget;
   authority: { lead: string; may: AuthorityAction[]; budget_extension_pct: number };
@@ -326,7 +344,7 @@ export interface EventPayloads {
   "contract.consent_requested": { contract: string; version: number; participants: string[]; round?: string; hash?: string; host?: string };
   /** `round` (WS04, optional): the round this answers; an answer to any other round is ignored. */
   "contract.consent_recorded": { contract: string; agent: string; verdict: ConsentVerdict; reason?: string; round?: string };
-  "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused"; reason: string };
+  "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused" | "dissented"; reason: string; dissent_id?: string };
   /**
    * `blob` (added in WS03) is the full contract JSON at this version, stored with putBlob. The store
    * requires it at runtime: the blackboard reads the contract from it (heads-down.md §6). It is

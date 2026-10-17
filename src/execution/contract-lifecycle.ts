@@ -949,6 +949,14 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
         type: "contract.amended", source, mode: m, contract: contractId, contract_version: version,
         payload: { contract: contractId, version, patch_blob: patchBlob, reason, affected_tasks: affected.all, blob },
       }];
+      const removedDissents = (c.dissents ?? []).filter((d) => !final.dissents.some((next) => next.id === d.id));
+      for (const dissent of removedDissents) {
+        for (const e of Object.values(state.escalations)) {
+          if (e.dissent_id !== dissent.id || e.status === "resolved" || e.status === "withdrawn") continue;
+          events.push({ type: "escalation.withdrawn", source, payload: { id: e.id, reason: `Dissent ${dissent.id} removed by amendment v${version}` } });
+          if (e.task && e.blocking) events.push({ type: "task.unblocked", source, payload: { task: e.task, escalation: e.id } });
+        }
+      }
       for (const task of affected.removed) {
         const rt = Object.hasOwn(state.tasks, task) ? state.tasks[task] : undefined;
         if (!rt || rt.state === "accepted" || rt.state === "cancelled") continue;
@@ -968,7 +976,7 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
     });
     await audit(warnings, {
       actor: by, action: "contract.amended", target: contractId,
-      details: { execution: store.id, version, hash, affected_tasks: affected.all, ...(runWide.length && { run_wide: runWide }), ...(opts.authority && { within_authority: opts.authority }) },
+      details: { execution: store.id, version, hash, affected_tasks: affected.all, removed_dissents: (c.dissents ?? []).filter((d) => !final.dissents.some((next) => next.id === d.id)).map((d) => d.id), ...(runWide.length && { run_wide: runWide }), ...(opts.authority && { within_authority: opts.authority }) },
     });
     // A task-level change: the personas of the affected tasks are asked afterwards, when wanted.
     if (wantConsent && asked === undefined) {

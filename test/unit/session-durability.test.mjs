@@ -275,22 +275,43 @@ describe("session archive", () => {
   });
 
   test("end_meeting archives the history, summary and mode before the meeting leaves the map", async (t) => {
-    scripted(t, "Opening reply", "Second reply", "The summary");
+    const dissent = "<DISSENT>\nclaim: The price change may break callers.\npredicted_failure: The pricing check fails.\n</DISSENT>";
+    const calls = scripted(t, "Opening reply", "Second reply", "The summary", dissent);
     const m = await startMeeting(sample, "Pricing agenda", "private context", "openai_compatible", "m", LLM, "debate");
     await continueMeeting(m.meetingId, "Push back");
     const ended = await handleToolCall("end_meeting", { meeting_id: m.meetingId, request_summary: true });
     assert.equal(ended.isError, undefined);
+    assert.equal(text(ended), "The summary");
+    assert.equal(calls.length, 4);
+    assert.match(calls[2].body.messages.at(-1).content, /action items or conclusions/);
+    assert.match(calls[3].body.messages.at(-1).content, /<DISSENT>/);
     const r = archive.readArchivedSession(m.meetingId);
     assert.equal(r.kind, "meeting");
     assert.equal(r.mode, "debate");
     assert.equal(r.topic, "Pricing agenda");
     assert.deepEqual(r.agents, [sample]);
     assert.equal(r.summary, "The summary");
+    assert.deepEqual(r.dissentSummaries, [{ agent: sample, content: dissent }]);
     assert.deepEqual(r.turns.map((x) => x.role), ["caller", "agent", "caller", "agent"]);
     assert.equal(r.turns[1].agent, sample);
     assert.equal(r.turns[1].speaker, "sample");
     assert.equal(r.public, null);
     assert.ok(Date.parse(r.started) <= Date.parse(r.ended));
+    assert.equal(meetings.has(m.meetingId), false);
+  });
+
+  test("standard meetings archive their normal summary without an extra dissent extraction call", async (t) => {
+    const calls = scripted(t, "Opening reply", "The standard summary");
+    const m = await startMeeting(sample, "Pricing agenda", undefined, "openai_compatible", "m", LLM);
+    assert.equal(await endMeeting(m.meetingId, true), "The standard summary");
+    assert.equal(calls.length, 2, "only the opening and normal summary call run");
+    assert.match(calls[1].body.messages.at(-1).content, /action items or conclusions/);
+    assert.doesNotMatch(calls[1].body.messages.at(-1).content, /<DISSENT>/);
+    const r = archive.readArchivedSession(m.meetingId);
+    assert.equal(r.mode, "standard");
+    assert.equal(r.summary, "The standard summary");
+    assert.equal(r.dissentSummaries, undefined);
+    assert.equal(meetings.has(m.meetingId), false);
   });
 
   test("end_local_meeting archives with kind local-meeting", async () => {
@@ -416,6 +437,12 @@ describe("session archive", () => {
   });
 
   test("a private prototype collaboration whose auto-run fails is archived before it is removed", async (t) => {
+    const { SecureServer } = await import("../../dist/http/secure-server.js");
+    const close = t.mock.fn(async () => {});
+    // This checks archive/cleanup behavior; the prototype blackboard needs no real listener here.
+    const start = t.mock.method(SecureServer, "start", async () => ({
+      url: "http://127.0.0.1:1/test/", base: "/test/", close, closeNow() {},
+    }));
     let n = 0;
     stubFetch(t, () => (n++ === 0 ? reply("Opening turn") : json(500, { error: { message: "auto-run failed" } })));
     const topic = "Auto-run failure topic";
@@ -429,6 +456,8 @@ describe("session archive", () => {
     const r = archive.readArchivedSession(listed[0].id);
     assert.match(r.summary, /^Auto-run stopped: .*auto-run failed/);
     assert.deepEqual(r.turns.map((x) => x.content), ["Opening turn"]);
+    assert.equal(start.mock.callCount(), 1);
+    assert.equal(close.mock.callCount(), 1, "the prototype blackboard is closed after the failed run");
   });
 
   test("from_session on a workshop archive reloads the participants' own files, not a same-key agent in AGENTS_DIR", async (t) => {

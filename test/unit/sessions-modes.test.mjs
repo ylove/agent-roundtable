@@ -174,7 +174,7 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     await continueLocalMeeting(d.meetingId, "more");
     await endLocalMeeting(d.meetingId, true);
     const calls = runs();
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 4);
     for (const { argv: a, stdin } of calls) {
       const i = a.indexOf("--append-system-prompt");
       assert.ok(i >= 0, `missing flag in ${JSON.stringify(a)}`);
@@ -185,7 +185,8 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     }
     assert.ok(calls[0].stdin.includes("You are the challenger in this meeting"));
     assert.ok(calls[1].stdin.includes("**User:** more"), "history goes in on stdin");
-    assert.ok(calls[2].stdin.includes("<DISSENT>"), "the local challenger is asked for its own dissent");
+    assert.match(calls[2].stdin, /action items or conclusions/);
+    assert.ok(calls[3].stdin.includes("<DISSENT>"), "the local challenger is asked for its own dissent separately");
     assert.equal(listLocalMeetings().length, 0);
 
     const s = await startLocalMeeting(sample, "agenda");
@@ -206,9 +207,12 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
 
   test("local debate closing statements retain a dissent for contract import", async (t) => {
     const block = "<DISSENT>\nclaim: Retries duplicate orders.\npredicted_failure: The order check fails.\n</DISSENT>";
-    fakeClaude(t, () => `process.stdout.write(${JSON.stringify(block)});`);
+    const { runs } = fakeClaude(t, () => `process.stdout.write(input.includes("You were the challenger") ? ${JSON.stringify(block)} : "Normal summary\\n" + ${JSON.stringify(block)});`);
     const { meetingId } = await startLocalMeeting(sample, "Orders", undefined, "debate");
-    assert.equal(await endLocalMeeting(meetingId, true), block);
+    assert.equal(await endLocalMeeting(meetingId, true), "Normal summary");
+    assert.equal(readArchivedSession(meetingId).summary, "Normal summary");
+    assert.match(runs()[1].stdin, /action items or conclusions/);
+    assert.match(runs()[2].stdin, /<DISSENT>/);
     const [draft] = sessionDissentDrafts(readArchivedSession(meetingId));
     assert.equal(draft.by, sample);
     assert.equal(draft.claim, "Retries duplicate orders.");
@@ -573,10 +577,13 @@ describe("adversarial closing summaries", () => {
   }
 
   test("debate meeting closing statement is tagged, archived, and attributed to its challenger", async (t) => {
-    const calls = stubFetch(t, (_u, _i, i) => json(200, { choices: [{ message: { content: i ? block : "Opening" } }] }));
+    const calls = stubFetch(t, (_u, _i, i) => json(200, { choices: [{ message: { content: ["Opening", `Normal summary\n${block}`, block][i] } }] }));
     const { meetingId } = await startMeeting(plain, "Orders", undefined, "openai_compatible", "m", BASE, "debate");
-    assert.equal(await endMeeting(meetingId, true), block);
-    assert.ok(calls[1].body.messages.at(-1).content.includes("<DISSENT>"));
+    assert.equal(await endMeeting(meetingId, true), "Normal summary");
+    assert.match(calls[1].body.messages.at(-1).content, /action items or conclusions/);
+    assert.ok(calls[2].body.messages.at(-1).content.includes("<DISSENT>"));
+    assert.equal(calls.length, 3);
+    assert.equal(readArchivedSession(meetingId).summary, "Normal summary");
     const [draft] = sessionDissentDrafts(readArchivedSession(meetingId));
     assert.equal(draft.by, plain);
     assert.deepEqual(draft.source, { kind: "debate", ref: meetingId });

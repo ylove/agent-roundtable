@@ -119,7 +119,7 @@ test("the scripted run produces the expected blackboard", async () => {
 
   // Diffs, files, checks
   assert.deepEqual(s.diffs.a, { stat: "1 file changed", blob, commit: "c2" });
-  assert.deepEqual(s.files["src/a/x.ts"], { task: "a", agent: "w1", last_commit: "c2", merged: true });
+  assert.deepEqual(s.files["src/a/x.ts"], { task: "a", agent: "w1", last_commit: "c2", merged: true, at_seq: seqs.submitted2 });
   const check = s.checks.task[checkKey("task", "test", "a")];
   assert.equal(checkKey("task", "test", "a"), "a/test");
   assert.equal(check.status, "failed");
@@ -446,7 +446,10 @@ test("blocked_by.needs follows dependency.requested and dependency.satisfied; ta
   assert.deepEqual(s.tasks.a.blocked_by, { escalation: "E1", deps: ["b"], needs: [{ kind: "interface", ref: "NavProps" }, { kind: "artifact", ref: "Theme" }] }, "kept, and no duplicate need");
   s = reduce([["dependency.satisfied", { ...need("NavProps"), by_event: "evt-x" }], ["dependency.satisfied", { ...need("Theme", "artifact"), by_event: "evt-y" }]], s);
   assert.deepEqual([s.tasks.a.state, s.tasks.a.blocked_by], ["blocked", { escalation: "E1", deps: ["b"] }], "satisfying needs never unblocks by itself");
-  s = reduce([["task.unblocked", { task: "a" }], ["dependency.requested", need("NavProps")], ["dependency.satisfied", { ...need("NavProps"), by_event: "evt-z" }]], s);
+  s = reduce([["task.unblocked", { task: "a", escalation: "E1" }]], s);
+  assert.equal(s.tasks.a.state, "blocked", "unblocking an escalation preserves the dependency");
+  assert.deepEqual(s.tasks.a.blocked_by, { deps: ["b"] });
+  s = reduce([["task.accepted", { task: "b" }], ["task.unblocked", { task: "a" }], ["dependency.requested", need("NavProps")], ["dependency.satisfied", { ...need("NavProps"), by_event: "evt-z" }]], s);
   assert.equal(s.tasks.a.state, "in_progress");
   assert.equal("blocked_by" in s.tasks.a, false, "an unblocked task drops an emptied blocked_by");
 });
@@ -480,8 +483,8 @@ test("checks and task.checks_passed bound to an older submission change nothing"
   assert.equal(apply(rejected, ev("task.checks_passed", { task: "a", commands: ["test"] })).tasks.a.state, "merging", "an unbound one is unchanged");
 });
 
-test("v6 dissent reducer retains first firing per task and latest advisory score across amendments and replay", async () => {
-  assert.equal(REDUCER_VERSION, 6);
+test("v7 dissent reducer retains first firing per task and latest advisory score across amendments and replay", async () => {
+  assert.equal(REDUCER_VERSION, 7);
   const { readFileSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");
@@ -501,7 +504,7 @@ test("v6 dissent reducer retains first firing per task and latest advisory score
   await emit("dissent.scored", { dissent_id: "risk", outcome: "vindicated" });
   await store.writeSnapshot();
   const snapshot = join(store.dir, "snapshot.json");
-  assert.equal(JSON.parse(readFileSync(snapshot, "utf8")).reducer_version, 6);
+  assert.equal(JSON.parse(readFileSync(snapshot, "utf8")).reducer_version, 7);
   await emit("dissent.scored", { dissent_id: "risk", outcome: "untested" });
   const amended = { ...contract, version: 2, dissents: [{ ...spec, claim: "Refined concern" }] };
   await emit("contract.amended", { contract: CONTRACT_ID, version: 2, patch_blob: "patch", reason: "refine", affected_tasks: [], blob: await store.putBlob(JSON.stringify(amended)) });
@@ -511,9 +514,9 @@ test("v6 dissent reducer retains first firing per task and latest advisory score
   assert.equal(state.dissents.risk.score, "untested");
   assert.equal(state.dissents.risk.spec.claim, "Refined concern");
   assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
-  // An authentic v5 snapshot must be ignored, even when its state digest is valid.
+  // An authentic v6 snapshot must be ignored, even when its state digest is valid.
   const old = JSON.parse(readFileSync(snapshot, "utf8"));
-  old.reducer_version = 5;
+  old.reducer_version = 6;
   delete old.state.dissents;
   delete old.state.tasks.a.rejected_seq;
   old.state_sha256 = sha256Hex(canonicalJSON(old.state));

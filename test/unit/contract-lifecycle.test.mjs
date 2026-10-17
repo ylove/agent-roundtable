@@ -239,6 +239,30 @@ test("amending a historical frozen contract treats absent and empty dissents as 
   assert.deepEqual(authorityNeeds(run.contract, normalized, []), [], "empty defaults do not require new authority");
 });
 
+test("amending away a fired dissent withdraws its escalation, releases its own hold, and audits removal", async (t) => {
+  provider(t, () => "Consent: AGREE\nfine");
+  const r = await propose({ consent: true, contract: explicit({ dissents: [concern({ by: cfo, on_fire: "pause_and_huddle" })] }) });
+  await freezeContract(r.contractId, { orchestrator: "main" });
+  const store = await openContractStore(r.contractId);
+  const source = { kind: "runner", id: "runner", pid: process.pid };
+  const append = (type, payload) => store.transact(() => ({ events: [{ type, payload, source }] }));
+  await append("task.blocked", { task: "ui", deps: ["api"] });
+  await append("check.failed", { task: "ui", scope: "task", command_id: "test", exit: 1, signature: "empty state" });
+  const { dissentTripwireRules, actionsToDrafts } = await import("../../dist/execution/watchdog.js");
+  await store.transact(({ state }) => ({ events: actionsToDrafts(dissentTripwireRules(state)) }));
+  const id = Object.values((await store.state()).escalations).find((e) => e.dissent_id)?.id;
+  assert.ok(id);
+  await amendContract(store, { dissents: [] }, { by: "main", reason: "Removed the risky path", overrideConsent: true });
+  const state = await store.state();
+  assert.deepEqual(state.dissents, {});
+  assert.equal(state.escalations[id].status, "withdrawn");
+  assert.deepEqual(state.tasks.ui.blocked_by, { deps: ["api"] });
+  assert.equal(state.tasks.ui.state, "blocked");
+  assert.ok((await store.events()).some((e) => e.type === "escalation.withdrawn" && e.payload.id === id && /removed by amendment/.test(e.payload.reason)));
+  assert.ok((await store.events()).some((e) => e.type === "task.unblocked" && e.payload.escalation === id));
+  assert.ok(auditEntries().some((e) => e.action === "contract.amended" && e.target === r.contractId && e.details.removed_dissents?.includes("empty-state-risk")));
+});
+
 test("incomplete dissents block freeze despite consent excusals; explicit dissent excusal preserves history and requires re-consent", async (t) => {
   provider(t, () => "Consent: AGREE");
   const r = await propose({ contract: explicit({ dissents: [concern({ tripwire: undefined })] }) });

@@ -692,7 +692,8 @@ const { dissentTripwireRules, actionsToDrafts, escalationId } = await import("..
 const { wakeFor } = await import("../../dist/execution/watch.js");
 
 async function fireDissent(f, { dissent_id = "api-risk", on_fire = "huddle", by = "wa", claim = "The API shape can break callers", tripwire = { kind: "check_failed", check: "unit", task: "b" } } = {}) {
-  const c = { ...(await f.store.state()).contract, dissents: [{
+  const current = (await f.store.state()).contract;
+  const c = { ...current, dissents: [...(current.dissents ?? []).filter((d) => d.id !== dissent_id), {
     id: dissent_id, by, source: { kind: "manual" }, claim, predicted_failure: "Callers fail", tripwire, on_fire,
   }] };
   await f.emit([{ type: "contract.amended", payload: { contract: c.id, version: c.version, blob: await f.store.putBlob(JSON.stringify(c)), reason: "arm dissent", patch_blob: "sha256:test", affected_tasks: [] } }]);
@@ -700,6 +701,129 @@ async function fireDissent(f, { dissent_id = "api-risk", on_fire = "huddle", by 
   await f.store.transact(({ state }) => ({ events: actionsToDrafts(dissentTripwireRules(state)) }));
   return escalationId(`tripwire:${dissent_id}:b`);
 }
+
+for (const dissent of [true, false]) {
+  test(`micro-huddle budget exhaustion between turns charges the requester and stops the conclusion (${dissent ? "dissent" : "ordinary escalation"})`, async (t) => {
+    const f = await setup(t);
+    const c = { ...(await f.store.state()).contract, budget: { ...f.contract.budget, per_agent_usd: 0.01 } };
+    await f.emit([{ type: "contract.amended", payload: { contract: c.id, version: c.version, blob: await f.store.putBlob(JSON.stringify(c)), reason: "set cap", patch_blob: "patch", affected_tasks: [] } }]);
+    const id = dissent ? await fireDissent(f) : await f.raise({ kind: "assistance", with: "agent", target: "wb" });
+    f.provider(() => assert.fail("the conclusion cannot spend after the first turn consumes the allowance"));
+    let answers = 0;
+    const ctx = { ...f.ctx, worker: (agent) => agent === "wb" ? { agent, driver: "claude-code" } : undefined,
+      driver: { id: "claude-code", answer: async (_worker, _prompt, cap) => {
+        answers++;
+        assert.equal(cap, 0.01);
+        return { text: "I can fix it", usage: { source: "worker", agent: "wb", model: "test", tokens: { inputTokens: 1, outputTokens: 1 }, usd: 0.01, estimated: false } };
+      } } };
+    await runMicroHuddle(ctx, id);
+    const state = await f.store.state();
+    assert.equal(answers, 1);
+    assert.equal(state.budget.by_agent.wa, 0.01);
+    assert.equal(state.budget.by_agent.wb, undefined, "the checked requester's allowance pays both turns");
+    assert.equal(state.budget.spent_usd, 0.01);
+    assert.equal(state.escalations[id].routed_to, "main");
+    assert.equal((await f.events("huddle.concluded"))[0].payload.outcome, "NO_OUTCOME");
+    assert.deepEqual((await f.events("huddle.turn")).map((e) => e.payload.seat), ["wa", "wb"]);
+  });
+}
+
+test("micro-huddle persona calls bound both output requests and persist first-turn spend before the conclusion", async (t) => {
+  const f = await setup(t);
+  const c = { ...(await f.store.state()).contract, budget: { ...f.contract.budget, per_agent_usd: 0.02 } };
+  await f.emit([{ type: "contract.amended", payload: { contract: c.id, version: c.version, blob: await f.store.putBlob(JSON.stringify(c)), reason: "set cap", patch_blob: "patch", affected_tasks: [] } }]);
+  const id = await fireDissent(f);
+  const calls = stubFetch(t, async (_url, init, index) => {
+    const body = JSON.parse(init.body);
+    assert.ok(body.max_tokens > 0 && body.max_tokens < 8192);
+    if (index === 1) assert.ok((await f.store.state()).budget.by_agent.wa > 0, "first-turn usage is durable before the next request");
+    return json(200, { model: body.model, choices: [{ message: { content: index ? "Outcome: AGREED\nDecision: Fix it together" : "I can repair it" } }], usage: { prompt_tokens: 100, completion_tokens: 100 } });
+  });
+  await runMicroHuddle({ ...f.ctx, llm: { ...llm, model: "claude-haiku-4-5" } }, id);
+  const state = await f.store.state();
+  assert.equal(calls.length, 2);
+  assert.ok(state.budget.by_agent.wa > 0 && state.budget.by_agent.wa < 0.02);
+  assert.ok((await f.events("budget.usage_recorded")).every((e) => e.payload.agent === "wa"));
+});
+
+test("concurrent micro-huddles reserve the requester's allowance instead of spending it twice", async (t) => {
+  const f = await setup(t);
+  const c = { ...(await f.store.state()).contract, budget: { ...f.contract.budget, per_agent_usd: 0.01 } };
+  await f.emit([{ type: "contract.amended", payload: { contract: c.id, version: c.version, blob: await f.store.putBlob(JSON.stringify(c)), reason: "set cap", patch_blob: "patch", affected_tasks: [] } }]);
+  const first = await fireDissent(f);
+  const second = await fireDissent(f, { dissent_id: "second-risk" });
+  let entered;
+  let release;
+  const ready = new Promise((resolve) => { entered = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  f.provider(() => assert.fail("no unreserved persona call"));
+  const ctx = { ...f.ctx, worker: () => ({ agent: "wb", driver: "claude-code" }), driver: { id: "claude-code", answer: async (_worker, _prompt, cap) => {
+    entered();
+    await gate;
+    return { text: "Repair it", usage: { source: "huddle", model: "test", tokens: { inputTokens: 0, outputTokens: 0 }, usd: cap, estimated: false } };
+  } } };
+  const pending = runMicroHuddle(ctx, first);
+  await ready;
+  await runMicroHuddle(ctx, second);
+  assert.equal((await f.events("huddle.started")).length, 1);
+  assert.equal((await stateEsc(f, second)).routed_to, "main");
+  release();
+  await pending;
+  assert.equal((await f.store.state()).budget.by_agent.wa, 0.01);
+});
+
+test("micro-huddle reservations preserve separate task and agent allowances", { timeout: 10_000 }, async (t) => {
+  const f = await setup(t);
+  const c = { ...(await f.store.state()).contract, budget: { ...f.contract.budget, per_task_usd: 0.01, per_agent_usd: 0.01 } };
+  await f.emit([{ type: "contract.amended", payload: { contract: c.id, version: c.version, blob: await f.store.putBlob(JSON.stringify(c)), reason: "set caps", patch_blob: "patch", affected_tasks: [] } }]);
+  const first = await f.raise({ kind: "assistance", with: "agent", target: "wb" }, "esc-one");
+  const second = await f.raise({ agent: "wb", task: "b", kind: "assistance", with: "agent", target: "wa" }, "esc-two");
+  let entered = 0;
+  let ready;
+  let release;
+  const both = new Promise((resolve) => { ready = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  f.provider(() => assert.fail("both answers spend their own scoped allowance"));
+  const ctx = { ...f.ctx, worker: (agent) => ({ agent, driver: "claude-code" }), driver: { id: "claude-code", answer: async (_worker, _prompt, cap) => {
+    if (++entered === 2) ready();
+    await gate;
+    return { text: "Repair it", usage: { source: "huddle", model: "test", tokens: { inputTokens: 0, outputTokens: 0 }, usd: cap, estimated: false } };
+  } } };
+  const pending = [runMicroHuddle(ctx, first), runMicroHuddle(ctx, second)];
+  await both;
+  release();
+  await Promise.all(pending);
+  const state = await f.store.state();
+  assert.equal(state.budget.by_agent.wa, 0.01);
+  assert.equal(state.budget.by_agent.wb, 0.01);
+  assert.equal(state.budget.spent_usd, 0.02);
+});
+
+test("dissent lead fallback checks and charges the lead rather than the exhausted dissenter", async (t) => {
+  const f = await setup(t);
+  const c = { ...(await f.store.state()).contract, budget: { ...f.contract.budget, per_agent_usd: 0.01 } };
+  await f.emit([{ type: "contract.amended", payload: { contract: c.id, version: c.version, blob: await f.store.putBlob(JSON.stringify(c)), reason: "set cap", patch_blob: "patch", affected_tasks: [] } }]);
+  const id = await fireDissent(f, { on_fire: "pause_and_huddle" });
+  await f.emit([{ type: "budget.usage_recorded", payload: { source: "huddle", agent: "wa", model: "test", tokens: { inputTokens: 0, outputTokens: 0 }, usd: 0.01, estimated: false } }]);
+  f.provider(["Action: decide\nDecision: Repair the callers"]);
+  await leadFallback(f.ctx, id);
+  const state = await f.store.state();
+  assert.equal(state.escalations[id].status, "resolved");
+  const usage = (await f.events("budget.usage_recorded")).find((e) => e.payload.source === "lead");
+  assert.equal(usage.payload.agent, f.personas.lead);
+  assert.equal(state.budget.by_agent.wa, 0.01);
+});
+
+test("dissent huddles cannot substitute a persona seat for the requester's own task", async (t) => {
+  const f = await setup(t);
+  const { counterpartSeat } = await import("../../dist/execution/huddle.js");
+  const state = await f.store.state();
+  for (const target of ["wa", "a"]) {
+    assert.equal(counterpartSeat(state, { agent: "wa", task: "a", dissent_id: "risk", target }), undefined);
+  }
+});
 
 for (const outcome of ["AGREED", "DISAGREED"]) {
   test(`dissent: notify the dissenter, huddle with the tripper, ${outcome} follows normal routing`, async (t) => {

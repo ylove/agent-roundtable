@@ -190,7 +190,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "task.merged": { task: "id", integration_sha: "s" },
   "task.accepted": { task: "id" },
   "task.blocked": { task: "id", "escalation?": "s", "deps?": "id[]" },
-  "task.unblocked": { task: "id" },
+  "task.unblocked": { task: "id", "escalation?": "s" },
   "task.retried": { task: "id", attempt: "int", why: "t" },
   "task.reassigned": { task: "id", from: "s", to: "s" },
   "task.split": { task: "id", into: [TASK_SPEC] },
@@ -239,7 +239,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "decision.recorded": { decision: DECISION },
   "directive.issued": { id: "s", to: "s[]", text: "t", requires_ack: "b" },
   "directive.acknowledged": { id: "s", agent: "s" },
-  "dissent.tripwire_fired": { dissent_id: "id", "task?": "id", tripped_by: "s", evidence: "t" },
+  "dissent.tripwire_fired": { dissent_id: "id", "task?": "id", tripped_by: "s", evidence: "t", "generation?": "n", "notified?": "s[]", "orchestrator_woken?": "b" },
   "dissent.scored": { dissent_id: "id", outcome: "'vindicated'|'refuted'|'untested'" },
 
   "escalation.raised": { escalation: ESCALATION },

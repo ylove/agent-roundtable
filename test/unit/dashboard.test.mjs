@@ -188,13 +188,14 @@ test("dashboard: dissents handle empty state, incomplete drafts and runtime reco
   state.dissents = {
     incomplete: { spec, fires: {} },
     ready: { spec: { ...spec, tripwire: { kind: "path_touched", paths: [XSS], task: ATTR } }, fires: {} },
-    [XSS]: { fires: { one: { seq: 1, dissent_id: XSS, task: ATTR, tripped_by: XSS, evidence: ATTR } } },
+    [XSS]: { fires: { one: { seq: 1, dissent_id: XSS, task: ATTR, tripped_by: XSS, evidence: ATTR, notified: [ATTR], orchestrator_woken: true } } },
   };
   const html = renderDissents(context);
   assert.match(html, /Status: needs tripwire/);
   assert.match(html, /Status: pending freeze/);
   assert.match(html, /Status: fired/);
   assert.match(html, /Dissent definition unavailable\./);
+  assert.match(html, /Orchestrator woken/);
   assert.match(html, /<h2>&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/h2>/);
   assert.match(html, /&quot;&gt;&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.doesNotMatch(html, /<script>|<img/);

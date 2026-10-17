@@ -18,6 +18,7 @@ import { mkdirPrivate } from "../security/fs-safe.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveMeeting } from "./archive.js";
+import { withoutDissentBlocks } from "./dissent-summary.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
@@ -426,7 +427,7 @@ export async function startLocalMeeting(
     isPrototype ? prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic }).trim() : undefined,
   ].filter(Boolean).join("\n\n") || undefined;
   // Board, then public channel, both before the first CLI call so the header is the first post. Config
-  // errors fail the start (a public config error closes the board first).
+  // errors fail the start (a public config error closes the blackboard first).
   const { prototype, publicChannel } = await openSessionSurfaces(
     isPrototype
       ? {
@@ -543,11 +544,16 @@ async function closeLocalMeeting(meetingId: string, requestSummary: boolean): Pr
   if (tracker) await closePrototypeTracker(tracker, "ended");
 
   let summary = "";
+  const dissentSummaries: Array<{ agent: string; content: string }> = [];
   if (requestSummary && meeting.messages.length > 0) {
     const summaryPrompt = buildLocalMeetingContext(meeting) +
-      "\n\n---\n\n## Request\n\n" + (meeting.mode === "debate" ? buildDissentSummaryPrompt("challenger", meeting.agenda ?? "") :
-        "Please provide a brief summary of what we discussed and any action items or conclusions.");
-    summary = await executeClaudeCLI(meeting.agentPromptPath, summaryPrompt, undefined, meeting.appendSystemPrompt);
+      "\n\n---\n\n## Request\n\nPlease provide a brief summary of what we discussed and any action items or conclusions. Do not include DISSENT tags or extraction blocks.";
+    summary = withoutDissentBlocks(await executeClaudeCLI(meeting.agentPromptPath, summaryPrompt, undefined, meeting.appendSystemPrompt));
+    if (meeting.mode === "debate") {
+      const prompt = buildLocalMeetingContext(meeting) + "\n\n## Request\n\n" + buildDissentSummaryPrompt("challenger", meeting.agenda ?? "");
+      const content = await executeClaudeCLI(meeting.agentPromptPath, prompt, undefined, meeting.appendSystemPrompt);
+      dissentSummaries.push({ agent: meeting.agent, content });
+    }
   }
 
   recordActivity({
@@ -559,7 +565,7 @@ async function closeLocalMeeting(meetingId: string, requestSummary: boolean): Pr
     outcome: summary || lastAgentReply(meeting),
     public: meeting.publicChannel !== undefined,
   });
-  archiveMeeting("local-meeting", meeting, summary);
+  archiveMeeting("local-meeting", meeting, summary, dissentSummaries);
   localMeetings.delete(meetingId);
 
   let text = summary || `Local meeting ${meetingId} with ${meeting.agent} ended.`;
@@ -588,7 +594,7 @@ export function listLocalMeetings(): Array<{
   mode: MeetingMode;
   public: boolean;
   prototype: boolean;
-  /** Prototype meetings, while the board is up. */
+  /** Prototype meetings, while the blackboard is up. */
   board_url?: string;
   type: "local";
 }> {

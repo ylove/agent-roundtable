@@ -105,7 +105,9 @@ The existing warning that a session was not signed off is insufficient on its ow
 
 Extend the challenger and attacker summary prompts in `src/sessions/modes.ts` to request a tagged `DISSENT` block for a remaining concern. Carry the author's identity and source session into the resulting dissent draft. The existing proponent and defender summaries do not replace the challenger's or attacker's own statement.
 
-Parse tagged blocks using `ownLines`-style rules from `src/execution/escalation.ts`: ignore content inside backtick or tilde fences and lines inside blockquotes. A quoted transcript, example or another participant's words cannot spoof a filed dissent. Parsed text still passes through structural validation; a tag alone does not arm a tripwire.
+Parse tagged blocks using `ownLines`-style rules from `src/execution/escalation.ts`: ignore content inside backtick or tilde fences and lines inside blockquotes. A closing fence must contain only matching fence characters (at least the opening length) and optional whitespace. A language-labelled fence inside a fence cannot close it. A quoted transcript, example or another participant's words cannot spoof a filed dissent. Parsed text still passes through structural validation; a tag alone does not arm a tripwire.
+
+Debate meetings and local meetings retain their normal discussion summary and action items. They make an additional challenger extraction call, archive it in `dissentSummaries`, and import only that authored extraction. Raw extraction blocks are removed from readable and public meeting summaries.
 
 ### Freeze gate
 
@@ -121,11 +123,13 @@ Add `dissentTripwireRules` to `src/execution/watchdog.ts`, wire it into `evaluat
 
 The rule evaluates the frozen contract's dissents against `state.checks`, `state.files` and task states. It produces action drafts without filesystem access, process execution, model calls or other side effects. The existing runner applies those actions.
 
-Use the deterministic key `tripwire:<dissent>:<task>` for each match. A taskless match, such as an integration check, needs a stable taskless key component rather than an invented task reference. Persist fired keys in the dissent projection so repeated watchdog passes, replay and runner restarts cannot notify or escalate again for the same dissent/task pair. A dissent that applies across tasks can fire once for each matching task.
+Use the deterministic key `tripwire:<dissent>:<task>` for each initial match. A taskless match uses an empty task component. Persist fired keys in the dissent projection so repeated watchdog passes, replay and runner restarts cannot notify or escalate again for the same dissent/task pair and predicate generation. A dissent that applies across tasks can fire once for each matching task. Changing a tripwire assigns a new generation from its amendment sequence and appends `@<generation>` to the key. Preserve historical firings, but display armed/fired status for the current generation.
+
+New or changed tripwires retain an `armed_seq` floor. Check results, path touches and task-state evidence must have a later sequence to match; amendments cannot retroactively fire on older evidence. Unchanged predicates retain their deduplication keys across amendments.
 
 ### Response policy
 
-Every firing records evidence and issues `directive.issued` with `to: [dissenter]`. The existing `deliver` path in `src/execution/blackboard.ts` reduces that directive into `state.inbox`. Notification is required for all three policies, including when a huddle cannot run.
+Every firing records evidence and issues `directive.issued` to the dissenter's identity/persona seats and matching live worker ids, including runner-style ids. The existing `deliver` path in `src/execution/blackboard.ts` reduces that directive into `state.inbox`. The firing payload retains `notified` recipients and `orchestrator_woken`. With no live reader, the firing itself also wakes the orchestrator's watcher. Notification is required for all three policies, including when a huddle cannot run.
 
 The notification identifies the dissent, the matching task when present, the claim and the observed evidence. Scrub free text and fence the claim and evidence as data. Delimiter handling must prevent embedded text from escaping the data fence and becoming instructions in notification or huddle prompts.
 
@@ -139,9 +143,13 @@ For a huddle, call `escalationAction` with `with: "agent"`. Set the escalation's
 
 The dissenter opens the micro-huddle and concludes it after the counterpart answers, using the existing flow in `src/execution/huddle.ts`. A `DISAGREED` outcome routes to the orchestrator. Existing handling for inconclusive outcomes, unavailable seats and budget clamps continues to apply.
 
+Self-trips notify and wake the orchestrator without a huddle, including taskless checks attributed to an orchestrator dissenter. Counterpart selection preserves the task-equality guard and cannot replace a rejected self-seat with an unrelated persona fallback.
+
+The micro-huddle reserves a scoped allowance shared by both calls (at most $1, with a live worker answer still capped at $0.50). Execution, task and requesting-agent budgets bound that allowance. Concurrent micro-huddles in the runner share these reservations. Persona requests subtract a conservative prompt-cost estimate before bounding output tokens; unknown rates use conservative estimates. Both persona and driver usage charge the requesting identity, and the answer's usage is persisted before checking the conclusion's allowance. Exhaustion between turns routes to the orchestrator. Lead fallback checks and charges the lead's identity; if it cannot run for lack of funds, it requests human action.
+
 If no huddle budget remains, retain the firing and notification and wake the orchestrator instead of starting model calls. An integration-only match may lack a task or counterpart; route it through the existing orchestrator fallback when a micro-huddle cannot be seated.
 
-For `pause_and_huddle`, block only the affected task through the existing escalation/task lifecycle. Resolution releases that escalation's block through the normal path; it must not clear an unrelated blocker. A taskless match must not pause arbitrary tasks. When a huddle falls back to the orchestrator, any applicable block remains subject to explicit escalation resolution.
+For `pause_and_huddle`, hold only the affected task through the existing escalation/task lifecycle. Each escalation owns a separate blocking reason. Worker tools refuse work while held, and the runner's existing kill path stops the affected worker regardless of the escalation's requester identity. Submitted, checking and merging tasks retain their pipeline state: the hold gates the merge queue and is checked again under the git lock. A hold winning the merge/acceptance race rolls the merge back. In-flight check completion or rejection cannot erase a hold. Resolution removes only its own escalation reason, preserving other escalations, dependency waits and interface/artifact needs. A taskless match must not pause arbitrary tasks. When a huddle falls back to the orchestrator, any applicable hold remains subject to explicit escalation resolution.
 
 ## 6. Events and reducer
 
@@ -149,16 +157,16 @@ Add these events to `EventPayloads` and `EVENT_TYPES` in `src/execution/types.ts
 
 | Event | Payload | Meaning |
 |---|---|---|
-| `dissent.tripwire_fired` | `dissent_id, task?, tripped_by, evidence` | Records the matching dissent, affected task if any, participant responsible for the observed work, and the observed evidence. |
+| `dissent.tripwire_fired` | `dissent_id, task?, tripped_by, evidence, generation?, notified?, orchestrator_woken?` | Records the matching dissent, affected task if any, observed evidence, predicate generation and delivery disposition. Optional fields preserve replay of older logs. |
 | `dissent.scored` | `dissent_id, outcome: vindicated / refuted / untested` | Records the orchestrator's assessment of the prediction. |
 
 Keep evidence bounded, scrubbed and sufficient to identify the matched check, path or task state. Reuse event causation and correlation to connect the firing, directive, escalation and huddle. Use the normal transaction path so the firing marker and its required notification are durable together.
 
 Add `state.dissents` to `BlackboardState` and initialize and reduce it in `src/execution/blackboard.ts`. It must expose the contract's dissent definitions, fired keys and evidence, links to the associated escalation/huddle, and the latest recorded score. Huddle outcomes come from the existing huddle events; they are not a second, independently maintained verdict.
 
-The reducer remains pure and deterministic. Contract adoption supplies dissent definitions from resolved contract blobs. New firing and scoring events update the projection, and older logs without dissents produce an empty dissent section. Preserve runtime records for unchanged dissent ids across contract amendments so adoption cannot re-arm an already-fired pair accidentally.
+The reducer remains pure and deterministic. Contract adoption supplies dissent definitions from resolved contract blobs. New firing and scoring events update the projection, and older logs without dissents produce an empty dissent section. Preserve runtime records for unchanged predicates across contract amendments. Removed dissents are pruned from the current projection; their unresolved escalations are withdrawn and their own holds released. The amendment tool appends `escalation.withdrawn` and source-specific `task.unblocked` events and includes removed dissent ids in the amendment audit.
 
-Bump `REDUCER_VERSION` from 5 to 6. The store will reject snapshots from the older reducer version and rebuild the projection from the event log. Do not rewrite historical events or add a separate mutable store for runtime dissent state.
+The initial WS16 reducer version was 6. These review fixes bump `REDUCER_VERSION` to 7 for source-specific holds, pipeline-safe pauses, amendment generations and delivery records. The store rejects older snapshots and rebuilds the projection from the event log. Do not rewrite historical events or add a separate mutable store for runtime dissent state.
 
 ## 7. Scoring
 

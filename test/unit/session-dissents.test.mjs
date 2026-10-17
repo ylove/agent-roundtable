@@ -17,6 +17,8 @@ test("DISSENT extraction accepts only complete, standalone, single-line concerns
 for (const [label, spoof] of [
   ["backtick fence", `\`\`\`text\n${block()}\n\`\`\``],
   ["tilde fence", `~~~~text\n${block()}\n~~~~`],
+  ["language-labelled fake closing fence", `\`\`\`\n\`\`\`js\n${block()}\n\`\`\``],
+  ["tilde-labelled fake closing fence", `~~~\n~~~js\n${block()}\n~~~`],
   ["long fence with short nested fence", `\`\`\`\`\n\`\`\`\n${block()}\n\`\`\`\``],
   ["unclosed fence", `\`\`\`\n${block()}`],
   ["blockquote", block().split("\n").map((l) => `> ${l}`).join("\n")],
@@ -58,9 +60,10 @@ test("session draft provenance trusts the adversary's archived identity, never o
   assert.deepEqual(sessionDissentDrafts({ ...session, mode: "collaborate" }), []);
   assert.deepEqual(sessionDissentDrafts({ ...session, kind: "ultraplan" }), []);
   for (const kind of ["meeting", "local-meeting"]) {
-    const [draft] = sessionDissentDrafts({ ...session, kind, agents: ["challenger"], summary: block() });
+    const [draft] = sessionDissentDrafts({ ...session, kind, agents: ["challenger"], summary: "Normal summary", dissentSummaries: [{ agent: "challenger", content: block() }] });
     assert.equal(draft.by, "challenger");
     assert.deepEqual(draft.source, { kind: "debate", ref: session.id });
+    assert.deepEqual(sessionDissentDrafts({ ...session, kind, agents: ["challenger"], summary: block(), dissentSummaries: [] }), []);
   }
 });
 

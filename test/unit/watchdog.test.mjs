@@ -1265,7 +1265,7 @@ for (const kind of ["check_failed", "path_touched", "blocked", "rejected"]) {
     const actions = dissentTripwireRules(w.state);
     assert.deepEqual(w.state, before, "pure rule");
     assert.deepEqual(actions, dissentTripwireRules(w.state), "deterministic");
-    assert.equal(actions[0].key, "tripwire:risk:a");
+    assert.equal(actions.find((a) => a.type === "emit").key, "tripwire:risk:a");
     const fired = ofType(actions, "dissent.tripwire_fired");
     assert.equal(fired.length, 1);
     assert.equal(fired[0].payload.tripped_by, "wa");
@@ -1297,7 +1297,7 @@ test("unscoped check dissents fire independently per task and for integration", 
   for (const task of ["b", "a"]) w.emit("check.failed", { scope: "task", task, command_id: "unit", signature: "broken", exit: 1 });
   w.emit("check.failed", { scope: "integration", command_id: "unit", signature: "integration", exit: 1 });
   const actions = dissentTripwireRules(w.state);
-  assert.deepEqual(actions.map((a) => a.key), ["tripwire:risk:a", "tripwire:risk:b", "tripwire:risk:"]);
+  assert.deepEqual(actions.filter((a) => a.type === "emit").map((a) => a.key), ["tripwire:risk:a", "tripwire:risk:b", "tripwire:risk:"]);
   w.commit(actionsToDrafts(actions));
   assert.deepEqual(dissentTripwireRules(w.state), []);
 });
@@ -1343,6 +1343,7 @@ test("dissent budget fallback keeps waking the orchestrator without later spendi
   assert.equal(w.state.escalations[id].routed_to, "main");
   w.now += 10 * MIN;
   const actions = evaluate(w.state, w.now, observeEvents(w.log));
-  assert.ok(!actions.some((a) => a.rule === "lead_fallback" && (a.escalation === id || a.target === id)));
+  assert.ok(!actions.some((a) => a.type === "lead_fallback" && a.escalation === id));
+  assert.ok(ofType(actions, "escalation.awaiting_human").some((e) => e.payload.id === id));
   assert.equal(w.state.inbox.critic.length, 1);
 });

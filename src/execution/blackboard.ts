@@ -19,6 +19,7 @@
 // ============================================================================
 
 import { ID_RE, preview } from "./events.js";
+import { blockingIds, taskHeld, tripwireKey } from "./task-holds.js";
 import {
   CONTRACT_SCHEMA,
   GENESIS_HASH,
@@ -42,8 +43,9 @@ import {
  *    are ignored and a bound task.checks_passed for one is refused.
  * 5: worker start identities and budget reservations; bound amendment rechecks while merging.
  * 6: dissent firings and advisory scores; retained task rejection evidence.
+ * 7: source-specific holds, pipeline-safe dissent pauses, amendment generations and delivery records.
  */
-export const REDUCER_VERSION = 6;
+export const REDUCER_VERSION = 7;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -249,11 +251,28 @@ function addMember(s: BlackboardState, team: string, agent: string): void {
 }
 
 /** Install a contract version: goal, teams, interfaces, decisions and tasks (new tasks start pending or ready). */
-function adoptContract(s: BlackboardState, c: Contract): void {
+function adoptContract(s: BlackboardState, c: Contract, seq: number): void {
+  const amended = s.contract !== undefined;
   s.contract = c;
   s.goal = clone(c.goal);
+  for (const id of Object.keys(s.dissents)) {
+    if ((c.dissents ?? []).some((d) => d.id === id)) continue;
+    delete s.dissents[id];
+    for (const e of Object.values(s.escalations)) {
+      if (e.dissent_id !== id || e.status === "resolved" || e.status === "withdrawn") continue;
+      e.status = "withdrawn";
+      if (e.task && own(s.tasks, e.task)) releaseBlock(s, e.task, e.id);
+    }
+  }
   for (const d of c.dissents ?? []) {
-    const rec = own(s.dissents, d.id) ?? put(s.dissents, d.id, { fires: {} });
+    let rec = own(s.dissents, d.id);
+    if (!rec) {
+      rec = put(s.dissents, d.id, { fires: {}, armed_seq: amended ? seq : 0 });
+      if (Object.values(s.escalations).some((e) => e.dissent_id === d.id)) rec.generation = seq;
+    } else if (JSON.stringify(rec.spec?.tripwire) !== JSON.stringify(d.tripwire)) {
+      rec.generation = seq;
+      rec.armed_seq = seq;
+    }
     rec.spec = clone(d);
   }
   for (const t of c.teams) {
@@ -273,6 +292,27 @@ function adoptContract(s: BlackboardState, c: Contract): void {
     else put(s.tasks, spec.id, { spec: next, state: "pending", attempt: 0 });
   }
   refreshReadiness(s, true);
+}
+
+/** Release only the named source. Dependency/need waits survive an escalation resolution. */
+function releaseBlock(s: BlackboardState, task: string, escalation?: string): void {
+  const rt = s.tasks[task];
+  const by = { ...rt.blocked_by };
+  const ids = blockingIds(rt).filter((id) => escalation !== undefined ? id !== escalation :
+    own(s.escalations, id) && !["resolved", "withdrawn"].includes(s.escalations[id].status));
+  delete by.escalation;
+  delete by.escalations;
+  if (ids.length) by.escalation = ids[0];
+  if (ids.length > 1) by.escalations = ids;
+  const deps = (by.deps ?? []).filter((id) => own(s.tasks, id)?.state !== "accepted" && !(own(s.interfaces, id)?.version));
+  if (deps.length) by.deps = deps;
+  else delete by.deps;
+  if (by.needs?.length === 0) delete by.needs;
+  if (Object.keys(by).length) rt.blocked_by = by;
+  else delete rt.blocked_by;
+  if (rt.state === "blocked" && !rt.blocked_by) {
+    rt.state = own(s.claims, task) ? "in_progress" : depsAccepted(s, rt.spec) ? "ready" : "pending";
+  }
 }
 
 /** Key of a check in BlackboardState.checks[scope]: "<task>/<command_id>" for task checks, else the command id. */
@@ -360,7 +400,7 @@ const HANDLERS: Handlers = {
   /** Sets contract (stamped frozen with by and hash) and goal; creates or updates tasks. */
   "contract.frozen": (s, e, x) => {
     const c = clone(assertResolved(e, x.resolved));
-    adoptContract(s, { ...c, status: "frozen", frozen: { by: e.payload.by, at: c.frozen?.at ?? e.ts, hash: e.payload.hash } });
+    adoptContract(s, { ...c, status: "frozen", frozen: { by: e.payload.by, at: c.frozen?.at ?? e.ts, hash: e.payload.hash } }, e.seq);
   },
   /** Sets contract (status frozen; freeze record from the blob, else kept) and goal. New tasks are
    *  added; existing tasks get the new spec and keep their runtime state; dependencies on split
@@ -369,7 +409,7 @@ const HANDLERS: Handlers = {
   "contract.amended": (s, e, x) => {
     const c = clone(assertResolved(e, x.resolved));
     const frozen = c.frozen ?? (s.contract?.frozen ? clone(s.contract.frozen) : undefined);
-    adoptContract(s, { ...c, status: "frozen", ...(frozen ? { frozen } : {}) });
+    adoptContract(s, { ...c, status: "frozen", ...(frozen ? { frozen } : {}) }, e.seq);
   },
   "contract.superseded": (s, { payload: p }) => {
     if (s.contract?.id === p.contract) s.contract.status = "superseded";
@@ -472,13 +512,14 @@ const HANDLERS: Handlers = {
     const p = e.payload;
     const rt = liveTask(s, e, x);
     if (!rt) return;
+    if (taskHeld(s, p.task, true)) return refuse(x, `task.submitted: task ${p.task} is held by an escalation`);
     rt.state = "submitted";
     rt.last_commit = p.commit;
     rt.submitted_seq = e.seq;
     const patched = own(s.diffs, p.task)?.blob !== p.diff_blob;
     put(s.diffs, p.task, { stat: p.stat, blob: p.diff_blob, commit: p.commit });
     const agent = rt.agent ?? e.source.id;
-    for (const f of p.files) put(s.files, f, { task: p.task, agent, last_commit: p.commit, merged: false });
+    for (const f of p.files) put(s.files, f, { task: p.task, agent, last_commit: p.commit, merged: false, at_seq: e.seq });
     if (!patched) return;
     for (const [key, c] of Object.entries(s.checks.task)) {
       if (checkTask(key) === p.task) {
@@ -505,7 +546,7 @@ const HANDLERS: Handlers = {
     const p = e.payload;
     const rt = liveTask(s, e, x);
     if (!rt) return;
-    rt.state = own(s.claims, p.task) ? "in_progress" : "ready";
+    rt.state = taskHeld(s, p.task) || rt.blocked_by?.deps?.length || rt.blocked_by?.needs?.length ? "blocked" : own(s.claims, p.task) ? "in_progress" : "ready";
     rt.last_note = p.reasons.join("; ");
     rt.rejected_seq = e.seq;
   },
@@ -525,27 +566,30 @@ const HANDLERS: Handlers = {
     const rt = liveTask(s, e, x, ["accepted"]);
     if (rt) accept(s, e.payload.task, rt, e);
   },
-  /** A task already blocked keeps its other reasons (a new escalation replaces the old one; deps are added); open needs are always kept. */
+  /** Accumulate source-specific reasons; a dissent hold preserves an in-flight pipeline state. */
   "task.blocked": (s, e, x) => {
     const p = e.payload;
     const rt = liveTask(s, e, x);
     if (!rt) return;
-    const prev = rt.state === "blocked" ? rt.blocked_by : undefined;
-    rt.state = "blocked";
+    const prev = rt.blocked_by;
+    const dissent = own(s.escalations, p.escalation)?.dissent_id;
+    if (!dissent || !["submitted", "checking", "merging"].includes(rt.state)) rt.state = "blocked";
+    rt.blocked_seq = e.seq;
     const by: NonNullable<TaskRuntime["blocked_by"]> = {};
     const escalation = p.escalation ?? prev?.escalation;
     if (escalation !== undefined) by.escalation = escalation;
+    const ids = [...new Set([...blockingIds(rt), ...(p.escalation ? [p.escalation] : [])])];
+    if (ids.length > 1) by.escalations = ids;
     const deps = [...new Set([...(prev?.deps ?? []), ...(p.deps ?? [])])];
     if (deps.length || p.deps !== undefined) by.deps = deps;
     if (rt.blocked_by?.needs?.length) by.needs = rt.blocked_by.needs;
     rt.blocked_by = by;
   },
-  /** in_progress while claimed, else ready or pending by its dependencies; a task that is not blocked is unchanged. */
+  /** Release one escalation source (or satisfied dependency reasons); resume only after every reason clears. */
   "task.unblocked": (s, e, x) => {
     const rt = liveTask(s, e, x);
-    if (!rt || rt.state !== "blocked") return;
-    delete rt.blocked_by;
-    rt.state = own(s.claims, e.payload.task) ? "in_progress" : depsAccepted(s, rt.spec) ? "ready" : "pending";
+    if (!rt) return;
+    releaseBlock(s, e.payload.task, e.payload.escalation);
   },
   /** New attempt: ready again (also from failed), claim dropped. */
   "task.retried": (s, e, x) => {
@@ -709,10 +753,11 @@ const HANDLERS: Handlers = {
     else s.decisions.push(d);
     for (const a of decisionTargets(s, d.scope)) deliver(s, a, { seq: e.seq, kind: "decision", id: d.id, text: d.text });
   },
-  /** Delivered to each addressed agent; team ids expand to their members. */
+  /** Dissent notifications address literal identity inboxes; ordinary team directives expand. */
   "directive.issued": (s, e) => {
     const p = e.payload;
-    for (const a of expandTargets(s, p.to)) {
+    const targets = e.correlation?.startsWith("tripwire:") ? [...new Set(p.to)] : expandTargets(s, p.to);
+    for (const a of targets) {
       deliver(s, a, { seq: e.seq, kind: "directive", id: p.id, text: p.text, requires_ack: p.requires_ack });
     }
   },
@@ -725,7 +770,7 @@ const HANDLERS: Handlers = {
   "dissent.tripwire_fired": (s, e) => {
     const p = e.payload;
     const rec = own(s.dissents, p.dissent_id) ?? put(s.dissents, p.dissent_id, { fires: {} });
-    const key = `tripwire:${p.dissent_id}:${p.task ?? ""}`;
+    const key = tripwireKey(p.dissent_id, p.task, p.generation);
     if (!own(rec.fires, key)) put(rec.fires, key, { ...clone(p), seq: e.seq });
   },
   "dissent.scored": (s, e) => {
@@ -752,6 +797,7 @@ const HANDLERS: Handlers = {
     if (!esc) return;
     esc.status = "resolved";
     esc.resolution = { action: "decide", decision: e.payload.rule, by: e.source.id };
+    if (esc.task && own(s.tasks, esc.task)) releaseBlock(s, esc.task, esc.id);
   },
   "escalation.resolved": (s, { payload: p }) => {
     const esc = own(s.escalations, p.id);

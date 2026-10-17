@@ -176,7 +176,8 @@ function publicOf(channel: PublicChannel | undefined): ArchivedSession["public"]
 }
 
 /** A meeting or local meeting at its end (history as the agent saw it). */
-export function archiveMeeting(kind: "meeting" | "local-meeting", meeting: Meeting | LocalMeeting, summary?: string): string | null {
+export function archiveMeeting(kind: "meeting" | "local-meeting", meeting: Meeting | LocalMeeting, summary?: string,
+  dissentSummaries?: ArchivedSession["dissentSummaries"]): string | null {
   return attempt(meeting.id, () => ({
     id: meeting.id,
     kind,
@@ -191,6 +192,7 @@ export function archiveMeeting(kind: "meeting" | "local-meeting", meeting: Meeti
         : { role: "agent", agent: meeting.agent, speaker: agentKey(meeting.agent), content };
     }),
     ...(summary && { summary }),
+    ...(dissentSummaries?.length && { dissentSummaries }),
     public: publicOf(meeting.publicChannel),
   }));
 }

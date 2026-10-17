@@ -19,7 +19,7 @@ export function parseDissentBlocks(text: string): Concern[] {
     const m = /^\s*(`{3,}|~{3,})/.exec(line);
     if (m) {
       if (fence === undefined) fence = m[1];
-      else if (m[1][0] === fence[0] && m[1].length >= fence.length) fence = undefined;
+      else if (m[1][0] === fence[0] && m[1].length >= fence.length && /^\s*(?:`+|~+)\s*$/.test(line)) fence = undefined;
       if (lines) invalid = true;
       continue;
     }
@@ -50,8 +50,8 @@ export function sessionDissentDrafts(session: ArchivedSession): Contract["dissen
   const kind: "debate" | "waffle_house" = session.mode === "debate" ? "debate" : "waffle_house";
   const summaries = session.kind === "collaboration"
     ? (session.dissentSummaries ?? []).filter((s) => session.agents.slice(1).includes(s.agent))
-    : (session.kind === "meeting" || session.kind === "local-meeting") && session.mode === "debate" && session.summary
-      ? [{ agent: session.agents[0], content: session.summary }]
+    : (session.kind === "meeting" || session.kind === "local-meeting") && session.mode === "debate"
+      ? (session.dissentSummaries ?? []).filter((s) => s.agent === session.agents[0])
       : [];
   return summaries.flatMap((s) => parseDissentBlocks(s.content).map((concern) => ({
     ...concern, by: s.agent, source: { kind, ref: session.id }, on_fire: "huddle" as const,

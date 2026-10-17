@@ -380,7 +380,7 @@ export function renderDissents(c: PageContext): string {
   const sections = Object.entries(c.state.dissents).map(([id, rec]) => {
     const d = rec.spec;
     const fires = Object.values(rec.fires).sort((a, b) => a.seq - b.seq);
-    const status = fires.length ? "fired" : d?.tripwire ? (c.state.contract?.status === "frozen" ? "armed" : "pending freeze") : "needs tripwire";
+    const status = fires.some((f) => f.generation === rec.generation) ? "fired" : d?.tripwire ? (c.state.contract?.status === "frozen" ? "armed" : "pending freeze") : "needs tripwire";
     const escalations = Object.values(c.state.escalations).filter((e) => e.dissent_id === id);
     const huddles = Object.entries(c.state.huddles).flatMap(([huddleId, h]) => {
       const e = escalations.find((e) => e.id === h.escalation);
@@ -394,8 +394,9 @@ export function renderDissents(c: PageContext): string {
       `<p>Source: ${t(d?.source.kind ?? "Unknown")}${d?.source.ref ? ` · ${t(d.source.ref)}` : ""}</p>` +
       `<p>Tripwire:</p><pre>${t(d?.tripwire ? JSON.stringify(d.tripwire, null, 2) : "Not supplied")}</pre>` +
       `<p>On fire: ${t(d?.on_fire ?? "Unknown")} · Score: ${t(rec.score ?? "Not scored")}</p>` +
-      (fires.length ? `<h3>Firings</h3><table><thead><tr><th>Task</th><th>Tripped by</th><th>Evidence</th></tr></thead><tbody>` +
-        fires.map((f) => `<tr><td>${t(f.task ?? "Integration")}</td><td>${t(f.tripped_by)}</td><td class="note">${t(f.evidence)}</td></tr>`).join("") +
+      (fires.length ? `<h3>Firings</h3><table><thead><tr><th>Task</th><th>Tripped by</th><th>Evidence</th><th>Notification</th></tr></thead><tbody>` +
+        fires.map((f) => `<tr><td>${t(f.task ?? "Integration")}</td><td>${t(f.tripped_by)}</td><td class="note">${t(f.evidence)}</td>` +
+          `<td>${t((f.notified ?? []).join(", "))}${f.orchestrator_woken ? ` · ${t("Orchestrator woken")}` : ""}</td></tr>`).join("") +
         `</tbody></table>` : "") +
       `<h3>Huddles</h3>` +
       (huddles.length ? `<table><thead><tr><th>Id</th><th>Task</th><th>Outcome</th><th>Decision</th></tr></thead><tbody>${huddles.join("")}</tbody></table>` :

@@ -256,11 +256,12 @@ export interface TaskRuntime {
   accepted_seq?: number;
   /** Latest rejection, retained because rejection immediately returns the task to work. */
   rejected_seq?: number;
+  blocked_seq?: number;
   /**
    * Why a blocked task waits. needs (added in WS07) are its open interface and artifact needs:
    * dependency.requested adds one, dependency.satisfied removes it. Task needs are in deps.
    */
-  blocked_by?: { escalation?: string; deps?: string[]; needs?: Array<{ kind: "interface" | "artifact"; ref: string }> };
+  blocked_by?: { escalation?: string; escalations?: string[]; deps?: string[]; needs?: Array<{ kind: "interface" | "artifact"; ref: string }> };
   started_at?: string;
   finished_at?: string;
 }
@@ -411,7 +412,7 @@ export interface EventPayloads {
   "task.merged": { task: string; integration_sha: string };
   "task.accepted": { task: string };
   "task.blocked": { task: string; escalation?: string; deps?: string[] };
-  "task.unblocked": { task: string };
+  "task.unblocked": { task: string; escalation?: string };
   "task.retried": { task: string; attempt: number; why: string };
   "task.reassigned": { task: string; from: string; to: string };
   "task.split": { task: string; into: TaskSpec[] };
@@ -462,7 +463,7 @@ export interface EventPayloads {
   "decision.recorded": { decision: Decision };
   "directive.issued": { id: string; to: string[]; text: string; requires_ack: boolean };
   "directive.acknowledged": { id: string; agent: string };
-  "dissent.tripwire_fired": { dissent_id: string; task?: string; tripped_by: string; evidence: string };
+  "dissent.tripwire_fired": { dissent_id: string; task?: string; tripped_by: string; evidence: string; generation?: number; notified?: string[]; orchestrator_woken?: boolean };
   "dissent.scored": { dissent_id: string; outcome: "vindicated" | "refuted" | "untested" };
 
   "escalation.raised": { escalation: Escalation };
@@ -628,6 +629,10 @@ export interface BudgetLedger {
 
 export interface DissentRuntime {
   spec?: Dissent;
+  /** New/changed predicates match only evidence recorded after this amendment sequence. */
+  armed_seq?: number;
+  /** Set when changing a predicate (or reintroducing an id with historical escalations). */
+  generation?: number;
   /** Deterministic tripwire keys retain every firing, including across amendments. */
   fires: Record<string, EventPayloads["dissent.tripwire_fired"] & { seq: number }>;
   /** Advisory only; never an input to consent or vote weighting. */
@@ -650,7 +655,7 @@ export interface BlackboardState {
   claims: Record<string, Claim>;
   leases: Record<string, Lease>;
   lease_queue: LeaseRequest[];
-  files: Record<string, { task: string; agent: string; last_commit: string; merged: boolean }>;
+  files: Record<string, { task: string; agent: string; last_commit: string; merged: boolean; at_seq?: number }>;
   diffs: Record<string, { stat: string; blob: string; commit: string }>;
   checks: Record<"task" | "integration", Record<string, CheckState>>;
   escalations: Record<string, Escalation>;

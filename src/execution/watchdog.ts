@@ -16,6 +16,8 @@
 // ============================================================================
 
 import { scrub } from "../security/secrets.js";
+import { agentKey } from "../agents.js";
+import { blockingIds, taskHeld, tripwireKey } from "./task-holds.js";
 import { executionTag } from "../ids.js";
 import {
   CONTRACT_DEFAULTS,
@@ -549,10 +551,13 @@ function workerRules(state: BlackboardState, now: number, obs: Observations, cfg
     const rec = own(state.agents, claim.agent);
     const o = own(obs.agents, claim.agent);
     if (!rt || o?.busy) continue;
-    if (rt.state === "blocked") {
-      const escId = rt.blocked_by?.escalation;
+    if (rt.state === "blocked" || taskHeld(state, task)) {
+      const escId = blockingIds(rt).find((id) => {
+        const e = own(state.escalations, id);
+        return e && e.status !== "resolved" && e.status !== "withdrawn";
+      });
       const esc = own(state.escalations, escId);
-      if (claim.ttl_s <= 0 && esc?.agent === "watchdog" && esc.status !== "resolved" && esc.status !== "withdrawn" && rec?.status === "running") {
+      if (claim.ttl_s <= 0 && (esc?.agent === "watchdog" || taskHeld(state, task)) && esc?.status !== "resolved" && esc?.status !== "withdrawn" && rec?.status === "running") {
         const agent = claim.agent;
         out.push({ type: "kill_worker", rule: "blocked_worker", key: `${escId}:kill`, target: agent, agent, reason: "Its task is blocked", standing: true });
       }
@@ -739,6 +744,8 @@ export function dissentTripwireRules(state: BlackboardState): WatchdogAction[] {
   for (const d of c.dissents ?? []) {
     const tw = d.tripwire;
     if (!tw) continue;
+    const rec = own(state.dissents, d.id);
+    const since = rec?.armed_seq ?? 0;
     const matches = new Map<string, { task?: string; tripped_by: string; evidence: string }>();
     const add = (task: string | undefined, evidence: string, agent?: string) => {
       const rt = own(state.tasks, task);
@@ -753,7 +760,7 @@ export function dissentTripwireRules(state: BlackboardState): WatchdogAction[] {
           const slash = scope === "task" ? key.indexOf("/") : -1;
           const task = slash >= 0 ? key.slice(0, slash) : undefined;
           const check = slash >= 0 ? key.slice(slash + 1) : key;
-          if (ck.status === "failed" && check === tw.check && (tw.task === undefined || tw.task === task)) {
+          if (ck.status === "failed" && ck.at_seq > since && check === tw.check && (tw.task === undefined || tw.task === task)) {
             add(task, `Check ${check} failed (${scope}, seq ${ck.at_seq})${ck.signature ? `: ${ck.signature}` : ""}.`);
           }
         }
@@ -761,26 +768,34 @@ export function dissentTripwireRules(state: BlackboardState): WatchdogAction[] {
     } else if (tw.kind === "path_touched") {
       for (const path of sortedKeys(state.files)) {
         const file = state.files[path];
-        if ((tw.task === undefined || tw.task === file.task) && tw.paths.some((glob) => matchGlob(glob, path))) {
+        if ((since === 0 || (file.at_seq ?? 0) > since) && (tw.task === undefined || tw.task === file.task) && tw.paths.some((glob) => matchGlob(glob, path))) {
           // First matching path in sorted order supplies deterministic evidence.
           if (!matches.has(file.task)) add(file.task, `Path ${path} touched by ${file.agent}, commit ${file.last_commit}.`, file.agent);
         }
       }
     } else {
       const rt = own(state.tasks, tw.task);
-      if (rt && (tw.state === "blocked" ? rt.state === "blocked" : rt.rejected_seq !== undefined)) {
+      if (rt && (tw.state === "blocked" ? rt.state === "blocked" && (since === 0 || (rt.blocked_seq ?? 0) > since) : (rt.rejected_seq ?? 0) > since)) {
         add(tw.task, `Task ${tw.task} ${tw.state}${tw.state === "rejected" ? ` at seq ${rt.rejected_seq}` : ""}.`);
       }
     }
     for (const [taskKey, match] of matches) {
-      const key = `tripwire:${d.id}:${taskKey}`;
+      const key = tripwireKey(d.id, taskKey, rec?.generation);
       if (own(own(state.dissents, d.id)?.fires, key)) continue;
       const text = `Dissent ${d.id} tripwire fired.\n\n${dissentData(d.claim, match.evidence)}`;
+      const readers = Object.values(state.agents).filter((a) => (a.id === d.by || a.persona === d.by || agentKey(a.persona) === agentKey(d.by)) &&
+        (a.status === "running" || a.status === "registered"));
+      const to = [...new Set([d.by, agentKey(d.by), ...readers.flatMap((a) => [a.id, a.persona, agentKey(a.persona)])])];
+      const self = to.includes(match.tripped_by) || agentKey(match.tripped_by) === agentKey(d.by) ||
+        own(state.agents, match.tripped_by)?.persona === d.by;
+      const wake = readers.length === 0 || self;
       const before = [
-        draft("dissent.tripwire_fired", { dissent_id: d.id, ...match }, key),
-        draft("directive.issued", { id: `dir-${escalationId(key)}`, to: [d.by], text, requires_ack: false }, key),
+        draft("dissent.tripwire_fired", { dissent_id: d.id, ...match, ...(rec?.generation !== undefined && { generation: rec.generation }), notified: to, orchestrator_woken: wake }, key),
+        draft("directive.issued", { id: `dir-${escalationId(key)}`, to, text, requires_ack: false }, key),
       ];
-      if (d.on_fire === "notify") {
+      if (wake) out.push({ type: "wake_orchestrator", rule: "dissent_tripwire", key: `${key}:delivery`, target: c.scope.orchestrator,
+        orchestrator: c.scope.orchestrator, reason: self ? `Dissent ${d.id} tripped its own work.` : `Dissent ${d.id} has no live inbox reader.` });
+      if (d.on_fire === "notify" || self) {
         out.push(emitAction("dissent_tripwire", key, match.task ?? d.id, before));
         continue;
       }
@@ -843,8 +858,12 @@ function leadFallbackRules(state: BlackboardState, now: number, obs: Observation
   const out: WatchdogAction[] = [];
   for (const id of sortedKeys(state.escalations)) {
     const esc = state.escalations[id];
-    // A dissent with no remaining budget stays with the orchestrator; fallback must not spend.
-    if (esc.dissent_id && remainingUsd(state, { task: esc.task, agent: esc.agent }) <= 0) continue;
+    if (esc.dissent_id && remainingUsd(state, { agent: lead }) <= 0) {
+      if (esc.status === "routed") out.push(emitAction("lead_fallback", `lead_budget:${id}`, id, [draft("escalation.awaiting_human", {
+        id, class: "money", message: "No budget remains for the lead to resolve this dissent."
+      }, id)]));
+      continue;
+    }
     const to = esc.routed_to;
     if (esc.status !== "routed" || to === undefined) continue;
     if (to === lead) {

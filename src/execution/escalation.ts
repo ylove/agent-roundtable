@@ -39,7 +39,8 @@ import { huddleAction, runFormatHuddle, runMicroHuddle } from "./huddle.js";
 import { leadFallback } from "./lead.js";
 import { acquireLock } from "./lock.js";
 import { normalizeGlob } from "./leases.js";
-import { estimateUsd } from "./pricing.js";
+import { estimateUsd, priceFor } from "./pricing.js";
+import { blockingIds, taskHeld } from "./task-holds.js";
 import { buildTaskCard } from "./task-card.js";
 import type { RunnerContext, RunnerHooks } from "./runner-hook-types.js";
 export type { RunnerContext, RunnerHooks, GoalReviewInput, GoalReview } from "./runner-hook-types.js";
@@ -190,12 +191,22 @@ export function dependentsOf(state: Readonly<BlackboardState>, task: string): st
 
 const blockedBy = (state: Readonly<BlackboardState>, esc: Escalation): boolean => {
   const rt = own(state.tasks, esc.task);
-  return rt?.state === "blocked" && rt.blocked_by?.escalation === esc.id;
+  return blockingIds(rt).includes(esc.id);
 };
 
 // ============================================================================
 // Usage: every provider call made here becomes budget.usage_recorded
 // ============================================================================
+
+/** Conservative micro-huddle rates, including long-context and cache prompt charges. */
+function microRates(model: string, provider?: string): { input: number; output: number } {
+  if (provider === "ollama") return { input: 0, output: 0 };
+  const p = priceFor(model);
+  return {
+    input: Math.max(p?.input ?? 20, p?.long?.input ?? 0, p?.cache_read ?? 0, p?.long?.cache_read ?? 0, p?.cache_write ?? 0, p?.long?.cache_write ?? 0),
+    output: Math.max(p?.output ?? 100, p?.long?.output ?? 0),
+  };
+}
 
 /**
  * Collects the usage of the calls run through it (withUsageSink), priced from the pricing table,
@@ -205,14 +216,14 @@ const blockedBy = (state: Readonly<BlackboardState>, esc: Escalation): boolean =
 export class UsageMeter {
   private records: UsageRecord[] = [];
 
-  constructor(readonly source: BudgetSource, readonly task?: string) {}
+  constructor(readonly source: BudgetSource, readonly task?: string, readonly agent?: string, readonly bounded = false) {}
 
   run<T>(fn: () => Promise<T>): Promise<T> {
     return withUsageSink((r) => this.records.push(this.price(r)), fn);
   }
 
   add(u: UsageRecord | undefined): void {
-    if (u) this.records.push({ ...u, source: this.source });
+    if (u) this.records.push({ ...u, source: this.source, ...(this.task !== undefined && { task: this.task }), ...(this.agent !== undefined && { agent: this.agent }) });
   }
 
   private price(r: UsageReport): UsageRecord {
@@ -220,16 +231,21 @@ export class UsageMeter {
     if (r.usage?.cacheReadTokens !== undefined) tokens.cacheReadTokens = r.usage.cacheReadTokens;
     if (r.usage?.cacheWriteTokens !== undefined) tokens.cacheWriteTokens = r.usage.cacheWriteTokens;
     const model = r.model || "unknown";
+    const estimate = estimateUsd(model, tokens, { provider: r.provider });
+    const rates = this.bounded && estimate.estimated ? microRates(model, r.provider) : undefined;
     return {
       source: this.source,
       ...(this.task !== undefined && { task: this.task }),
+      ...(this.agent !== undefined && { agent: this.agent }),
       ...(r.provider && { provider: r.provider }),
       model,
       tokens,
-      usd: estimateUsd(model, tokens, { provider: r.provider }).usd,
+      usd: rates ? ((tokens.inputTokens + (tokens.cacheReadTokens ?? 0) + (tokens.cacheWriteTokens ?? 0)) * rates.input + tokens.outputTokens * rates.output) / 1_000_000 : estimate.usd,
       estimated: true,
     };
   }
+
+  get pendingUsd(): number { return this.records.reduce((sum, r) => sum + r.usd, 0); }
 
   /** Drafts for everything collected since the last take. */
   take(source: EventSource, correlation: string): AnyEventDraft[] {
@@ -244,10 +260,20 @@ export function callOptions(llm: HuddleLLM): { provider: LLMProvider; model: str
 }
 
 /** One stateless persona call: the persona (body and skills) plus `directive` as the system prompt. */
-export async function askPersona(meter: UsageMeter, llm: HuddleLLM, persona: string, directive: string, prompt: string): Promise<string> {
+export async function askPersona(meter: UsageMeter, llm: HuddleLLM, persona: string, directive: string, prompt: string, allowance?: number): Promise<string> {
   const a = await loadAgent(persona);
   const system = a.body + renderSkillsSection(a.skills) + directive;
-  return meter.run(() => callLLM(system, [{ role: "user", content: prompt }], callOptions(llm)));
+  let maxTokens: number | undefined;
+  if (allowance !== undefined) {
+    const { input: inputRate, output: outputRate } = microRates(llm.model, llm.provider);
+    // UTF-8 bytes plus protocol overhead conservatively bound prompt tokens without a tokenizer.
+    const inputCost = (Buffer.byteLength(system + prompt, "utf8") + 512) * inputRate / 1_000_000;
+    const left = allowance - inputCost;
+    if (left <= 0) throw new Error("Micro-huddle budget cannot cover the next prompt");
+    maxTokens = outputRate ? Math.min(8192, Math.floor(left * 1_000_000 / outputRate)) : 8192;
+    if (maxTokens < 1) throw new Error("Micro-huddle budget is exhausted");
+  }
+  return meter.run(() => callLLM(system, [{ role: "user", content: prompt }], { ...callOptions(llm), ...(maxTokens !== undefined && { maxTokens }) }));
 }
 
 // ============================================================================
@@ -457,14 +483,7 @@ export async function commitResolution(store: ExecutionStore, id: string, plan: 
       events.push(ev("directive.issued", { id: newId("dir"), to, text: cap(plan.directive, DECISION_MAX + 500), requires_ack: false }, src, id));
     }
     if (plan.unblock !== false && wasBlocked) {
-      // Concurrent pause tripwires keep the task blocked until every huddle is resolved.
-      const pending = Object.values(state.escalations).find((other) =>
-        other.id !== e.id && other.task === e.task && other.blocking && UNRESOLVED.includes(other.status) &&
-        (e.dissent_id !== undefined || other.dissent_id !== undefined));
-      if (pending) {
-        events.push(ev("task.blocked", { task: e.task!, escalation: pending.id }, src, id));
-        wasBlocked = false; // this resolution does not yet owe the worker a resume
-      } else events.push(ev("task.unblocked", { task: e.task! }, src, id));
+      events.push(ev("task.unblocked", { task: e.task!, escalation: e.id }, src, id));
     }
     const paused = await pausedBy(store, state, id);
     if (paused.length) events.push(ev("execution.resumed", { scope: paused, reason: `escalation ${id} was resolved` }, src, id));
@@ -481,7 +500,7 @@ export function resumeOps(state: Readonly<BlackboardState>, esc: Escalation, tex
   const task = esc.task;
   const rt = own(state.tasks, task);
   const claim = own(state.claims, task);
-  if (!task || !rt || rt.state !== "in_progress" || !claim) return [];
+  if (!task || !rt || rt.state !== "in_progress" || !claim || taskHeld(state, task)) return [];
   const rec = own(state.agents, claim.agent);
   if (!rec || rec.external || rec.driver === "external") return [];
   const card = buildTaskCard(state, task, { immediate: { kind: "resolution", text: `Escalation ${esc.id}: ${text}` } });

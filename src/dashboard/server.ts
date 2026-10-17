@@ -33,9 +33,11 @@ import {
   renderEscalations,
   renderEvents,
   renderOverview,
+  renderPostmortems,
   renderTaskDetail,
   renderTasks,
   type PageContext,
+  type PostmortemRecordView,
   type RunnerHealth,
   type TaskDetail,
 } from "./render.js";
@@ -48,6 +50,7 @@ export const DASHBOARD_CSP =
 /** Most bytes of a diff shown on a task page, and of a failing check's output. */
 const DIFF_CAP_BYTES = 512 * 1024;
 const OUTPUT_CAP_BYTES = 64 * 1024;
+const RECORD_CAP_BYTES = 256 * 1024;
 /** Most concurrent event streams; more get 503 and the page falls back to polling. */
 const MAX_STREAMS = 32;
 const KEEPALIVE_MS = 15_000;
@@ -129,6 +132,7 @@ class DashboardServer {
         { path: "/escalations", handler: page(async () => renderEscalations(await this.context())) },
         { path: "/events", handler: page((c) => this.eventsPage(c.query)) },
         { path: "/contract", handler: page(() => this.contractPage()) },
+        { path: "/postmortems", handler: page(() => this.postmortemsPage()) },
         { path: "/dag", handler: page(async () => renderDagPage(await this.context())) },
         { path: "/dag.svg", handler: (c) => this.dagSvg(c) },
         { path: "/state.json", handler: async (c) => c.json(200, publicState(await this.store.state(), this.runnerHealth())) },
@@ -245,6 +249,21 @@ class DashboardServer {
       if (written !== undefined) md += `\n\n---\n\n# CONTRACT.md\n\n${written}`;
     }
     return renderContract(await this.context(state), md, source);
+  }
+
+  /** Findings, and each concluded meeting's record from its blob (the record is redacted and escaped at render). */
+  private async postmortemsPage(): Promise<string> {
+    const state = await this.store.state();
+    const records: Record<string, PostmortemRecordView> = {};
+    for (const [id, m] of Object.entries(state.postmortem?.meetings ?? {})) {
+      if (!m.concluded) continue;
+      try {
+        Object.defineProperty(records, id, { value: { markdown: (await this.blobText(m.concluded.record, RECORD_CAP_BYTES)).text }, enumerable: true });
+      } catch (e) {
+        Object.defineProperty(records, id, { value: { error: `The record cannot be read: ${e instanceof Error ? e.message : String(e)}` }, enumerable: true });
+      }
+    }
+    return renderPostmortems(await this.context(state), records);
   }
 
   /** contracts/<ctr>/CONTRACT.md as the contract tools wrote it, when present (a regular file up to 1 MiB). */

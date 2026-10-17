@@ -125,6 +125,12 @@ async function startOrchestrator(): Promise<void> {
   import("./execution/retention.js")
     .then(async ({ sweepRetention, describeRetention }) => console.error(describeRetention(await sweepRetention())))
     .catch((e) => console.error(`[Retention] startup sweep skipped: ${e instanceof Error ? e.message : String(e)}`));
+  import("./postmortem/retention.js")
+    .then(({ sweepPostmortemDrafts }) => {
+      const removed = sweepPostmortemDrafts();
+      if (removed.length) console.error(`[Retention] pruned ${removed.length} postmortem draft${removed.length === 1 ? "" : "s"}`);
+    })
+    .catch((e) => console.error(`[Retention] postmortem draft sweep skipped: ${e instanceof Error ? e.message : String(e)}`));
 
   // Check if claude CLI is available for local meetings (PATH scan, no shell)
   const claudeCliAvailable = findExecutable("claude") !== null;

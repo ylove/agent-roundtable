@@ -5,7 +5,7 @@ const { checkArgs, handleToolCall, formatAgentWorkshopResult, tools } = await im
 // Keep these lists independent of the schemas so omitted fields cannot pass silently.
 const fields = {
   start_ultraplan: {
-    string: ["task", "context", "draft_plan", "planner", "provider", "model", "base_url"],
+    string: ["task", "context", "draft_plan", "planner", "repo_dir", "provider", "model", "base_url"],
     array: ["agents"], number: ["revision_rounds"], boolean: ["public", "execution_ready"],
   },
   submit_plan: { string: ["ultraplan_id", "plan"], boolean: ["final"] },
@@ -40,6 +40,14 @@ const fields = {
     exe: ["execution_id"], string: ["escalation_id", "decision", "resolved_by", "provider", "model", "base_url"],
     resolution: ["action"], format: ["format"], array: ["participants"], object: ["amendment"],
   },
+  postmortem: {
+    string: ["project", "work", "reason", "finding_id"], exe: ["execution_id"], pmAction: ["action"], pmId: ["pm"],
+    pmFinding: ["finding"], pmFix: ["fix"],
+  },
+  hold_postmortem: {
+    string: ["project", "work", "opening", "closing", "provider", "model", "base_url"], exe: ["execution_id"], holdAction: ["action"], pmId: ["pm"],
+    array: ["participants", "accept"], pmFormat: ["format"], pmRounds: ["rounds"], pmMemory: ["memory_target"], pmReject: ["reject"],
+  },
 };
 // Run-tool fields whose valid values are narrower (ids, enums, ranges): wrong types still fail the same way.
 const typed = (valid, message = "a string", invalid = [5, false, [], {}]) => ({ valid, invalid, message });
@@ -64,6 +72,15 @@ const rules = {
   usd: typed([0.5, 25], "a finite number", ["2", "two", NaN, Infinity, false, {}]),
   integer: typed([1, 3], "an integer", ["2", 2.5, NaN, false, {}]),
   visibility: typed([{}, { dashboard: true }, { chat_only: true }, { github: { repo: "acme/shop", project_number: 3 } }], "an object", ["x", 5, [], false]),
+  pmAction: typed(["enable", "read"]),
+  holdAction: typed(["hold", "conclude"]),
+  pmId: typed(["pm-0123abcd"]),
+  pmFinding: typed([{ summary: "x", detected_by: "y", responsible: ["b"], category: "process" }], "an object", ["x", 5, [], false]),
+  pmFix: typed([{ status: "pending" }, { status: "fixed", by: "b" }], "an object", ["x", 5, [], false]),
+  pmFormat: typed(["collaborate", "waffle-house"]),
+  pmRounds: typed([1, 4], "an integer", ["2", 2.5, NaN, false, {}]),
+  pmMemory: typed(["claude"]),
+  pmReject: typed([[], [{ id: "a1", why: "no" }]], "an array", ["cfo", 5, {}, false]),
 };
 
 for (const [tool, groups] of Object.entries(fields)) {

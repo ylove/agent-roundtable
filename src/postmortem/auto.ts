@@ -113,7 +113,7 @@ export function autoFindings(log: readonly AnyEvent[], state: Readonly<Blackboar
         if (!submitted.has(task) || (!fails.length && !violations) || e.seq <= fromSeq || caused.has(e.id)) break;
         const commands = [...new Set(fails.map((f) => f.command))].sort();
         const basis = [...new Set(fails.map((f) => `${f.command}:${f.signature ?? (f.timedOut ? "timed_out" : "")}`))].sort().join(",");
-                const what = [
+        const what = [
           ...(commands.length ? [`${commands.length === 1 ? "check" : "checks"} ${commands.join(", ")} ${fails.every((f) => f.timedOut) ? "timed out" : "failed"}`] : []),
           ...(violations ? [`${plural(violations, "path")} changed outside its leases`] : []),
         ].join("; ");

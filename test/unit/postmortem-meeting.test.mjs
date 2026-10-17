@@ -363,6 +363,29 @@ test("a responsible agent that is seated by path (outside the agents directory) 
   assert.match(readFileSync(ranger, "utf8"), /Check the trail twice/);
 });
 
+test("a damaged lessons.json fails conclude before any file is written; a differently spelled participant does not replace a working seat", async (t) => {
+  const { lessonsPath } = await import("../../dist/postmortem/store.js");
+  const { repo, ids, work } = await atTheTable(t, { responsible: [["builder", "tester"]] });
+  provider(t, { total: 2, block: `Artifact: persona_addendum | builder | ${ids[0]} | Never ship untested\nArtifact: rule | project | ${ids[0]} | A rule` });
+  // "Tester" is another spelling of the seat "tester": the working bare key stays (a file named Tester.md may not exist).
+  const held = await ok("hold_postmortem", { project: repo.root, work, opening: "x", participants: ["Tester"], rounds: 1, ...LLM });
+  assert.deepEqual(held.seats, ["orchestrator", "builder", "tester"]);
+  assert.equal(loadRecord(held.project, held.pm).refs.tester, "tester");
+  const before = readFileSync(join(AGENTS_DIR, "builder.md"), "utf8");
+  const auditCount = () => readdirSync(AUDIT_DIR).map((n) => readFileSync(join(AUDIT_DIR, n), "utf8")).join("\n").split("\n").filter((l) => l.includes(held.pm)).length;
+  const audits = auditCount();
+  mkdirSync(join(lessonsPath(held.project), ".."), { recursive: true });
+  writeFileSync(lessonsPath(held.project), "{ not json");
+  assert.match(await fails("hold_postmortem", { action: "conclude", pm: held.pm, closing: "ok", accept: ["a1", "a2"] }), /damaged/);
+  assert.equal(readFileSync(join(AGENTS_DIR, "builder.md"), "utf8"), before, "no persona was written");
+  assert.equal(auditCount(), audits);
+  assert.equal(loadRecord(held.project, held.pm).status, "held");
+  writeFileSync(lessonsPath(held.project), JSON.stringify({ v: 1, lessons: [] }));
+  const done = await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "ok", accept: ["a1", "a2"] });
+  assert.equal(done.applied.length, 2);
+  assert.equal(auditCount() - audits, 2, "each applied artifact is audited once");
+});
+
 test("hold_postmortem refuses when the project's mode is off, and finding.task must be a task id", async (t) => {
   const { repo, work } = await atTheTable(t);
   await ok("postmortem", { action: "disable", project: repo.root, reason: "stop" });

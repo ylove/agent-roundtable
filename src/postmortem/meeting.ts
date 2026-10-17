@@ -8,7 +8,7 @@
 // applies the accepted artifacts only. No provider call runs inside a lock or transact.
 // ============================================================================
 
-import { agentKey, loadAgent } from "../agents.js";
+import { agentKey, isPathLikeRef, loadAgent } from "../agents.js";
 import type { LLMProvider } from "../config.js";
 import { orchestratorSource } from "../execution/contract-state.js";
 import { UsageMeter } from "../execution/escalation.js";
@@ -24,7 +24,7 @@ import { addLessons, activeLessons, type NewLesson } from "./lessons.js";
 import { requireEnabled, type ProjectRef } from "./project.js";
 import { renderRecord, summaryParagraph } from "./record.js";
 import { POSTMORTEM_ORIGIN_PREFIX, registerPostmortemSession } from "./sessions.js";
-import { findRecord, readProject, recordPath, removeDraft, saveRecord, withProjectLock } from "./store.js";
+import { findRecord, loadLessons, readProject, recordPath, removeDraft, saveRecord, withProjectLock } from "./store.js";
 import { FLAG_CATEGORIES, LIMITS, type AppliedArtifact, type Artifact, type FlagRecord, type PostmortemRecord, type PostmortemScope, type Turn } from "./types.js";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -83,7 +83,7 @@ function chooseSeats(findings: readonly PostmortemFinding[], state: Readonly<Bla
     if (!r || r.toLowerCase() === "orchestrator") return;
     const k = agentKey(r);
     // A ref that names where the persona lives (a path) replaces the bare key a finding gave it.
-    if (!refs.has(k) || (refs.get(k) === k && r !== k)) refs.set(k, r);
+    if (!refs.has(k) || (refs.get(k) === k && isPathLikeRef(r))) refs.set(k, r);
   };
   // Responsible agents first, the most responsible first: they sit nearest the charge.
   const weight = new Map<string, number>();
@@ -312,9 +312,13 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
       record = rec ?? found;
       return;
     }
+    // A damaged lessons.json fails here, before any persona or memory file is written.
+    loadLessons(rec.project);
     const applied: AppliedArtifact[] = [];
     const lessons: NewLesson[] = [];
     const now = new Date();
+    const audit = (a: Artifact, done: AppliedArtifact) =>
+      appendAudit({ actor: "orchestrator", action: "postmortem.applied", target: rec.pm, details: { artifact: a.id, kind: a.kind, target: a.target, path: done.path, hash: a.hash, project: rec.project } });
     for (const a of rec.proposed.filter((x) => accept.includes(x.id))) {
       try {
         let done: AppliedArtifact;
@@ -325,6 +329,8 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
           lessons.push({ kind: LESSON_KIND[a.kind]!, target: a.kind === "agent_rule" ? a.target : "project", text: a.text, pm: rec.pm, findings: a.findings });
           done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: "lessons.json", note: "added to the project's lessons" };
         }
+        // A file-writing kind is audited as soon as its write succeeded; the others after the lessons are written.
+        if (a.kind === "persona_addendum" || a.kind === "memory") await audit(a, done);
         applied.push(done);
       } catch (e) {
         warnings.push(`${a.id} (${a.kind} → ${a.target}) was accepted but not applied: ${errText(e)}`);
@@ -341,11 +347,7 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
       lessons.push({ kind: "flag", target: "project", flag: true, text: `${f.misread}${f.clearer ? ` Clearer: ${f.clearer}` : ""}`.slice(0, 1200), pm: rec.pm, findings: [f.finding] });
     }
     lessonsAdded = lessons.length ? addLessons(rec.project, lessons, now.toISOString()).length : 0;
-    // Audited once everything that can fail has been written, so a retry never leaves duplicate entries.
-    for (const a of rec.proposed.filter((x) => ok.has(x.id))) {
-      const done = applied.find((x) => x.id === a.id)!;
-      await appendAudit({ actor: "orchestrator", action: "postmortem.applied", target: rec.pm, details: { artifact: a.id, kind: a.kind, target: a.target, path: done.path, hash: a.hash, project: rec.project } });
-    }
+    for (const a of rec.proposed.filter((x) => ok.has(x.id) && x.kind !== "persona_addendum" && x.kind !== "memory")) await audit(a, applied.find((x) => x.id === a.id)!);
     const concluded: PostmortemRecord = {
       ...rec, status: "concluded", concluded_at: now.toISOString(), closing,
       accepted: accept, rejected: reject, applied, flagged,

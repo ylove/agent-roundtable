@@ -97,6 +97,19 @@ test("statusline never fails: invalid JSON, empty stdin, junk flags and a missin
   assert.equal(existsSync(nohome.ROUNDTABLE_HOME), false, "no roundtable home: nothing is created for the status line");
 });
 
+test("statusline answers as soon as the host's JSON is complete, even if the host keeps stdin open", async () => {
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, [BIN, "statusline", "--plain"], { env: { ...process.env, TZ: "UTC", ROUNDTABLE_HOME: join(tmpdir(), "no-such-roundtable-home") }, stdio: ["pipe", "pipe", "pipe"] });
+  let out = "";
+  child.stdout.on("data", (d) => (out += d));
+  const started = Date.now();
+  child.stdin.write(JSON.stringify(HOST));
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0);
+  assert.equal(out, "Opus 5.5 | agent-mcp | 5h 0%→21:50 | 7d 82%\n");
+  assert.ok(Date.now() - started < 3000, "no waiting for stdin to close");
+});
+
 test("statusline --no-host omits line 1", async () => {
   const lines = renderStatusline(view(), parseHost(JSON.stringify(HOST)), { ...plain, host: false });
   assert.equal(lines.length, 2);

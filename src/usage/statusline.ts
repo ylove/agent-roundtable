@@ -350,6 +350,7 @@ export function readStdin(stream: NodeJS.ReadableStream & { isTTY?: boolean }, t
       if (done) return;
       done = true;
       clearTimeout(timer);
+      stream.pause?.(); // a host that keeps stdin open must not keep the process alive
       resolve(data);
     };
     const timer = setTimeout(finish, timeoutMs);
@@ -359,7 +360,14 @@ export function readStdin(stream: NodeJS.ReadableStream & { isTTY?: boolean }, t
       data += chunk;
       if (data.length > STDIN_MAX) {
         data = data.slice(0, STDIN_MAX);
+        return finish();
+      }
+      // A host that keeps stdin open after its JSON must not make the line wait for the timeout.
+      try {
+        JSON.parse(data);
         finish();
+      } catch {
+        /* not all of it yet */
       }
     });
     stream.on("end", finish);

@@ -31,6 +31,8 @@ export async function runStatusline(args: string[], env: NodeJS.ProcessEnv = pro
   } catch {
     /* nothing to show */
   }
+  // A host that leaves stdin open after its JSON must not keep this process alive.
+  process.stdin.destroy();
   process.exitCode = 0;
 }
 

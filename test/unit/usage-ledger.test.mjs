@@ -169,6 +169,15 @@ test("the usage sink writes one 0600 line per provider call, with provenance, an
   assert.equal(T.readTableLines([T.day()], dir).length, 3);
 });
 
+test("appendTableLine writes the known fields only: no free text can ride along", () => {
+  const dir = home();
+  T.appendTableLine({ at: new Date().toISOString(), server: "srv-aaaaaaaa", session: "meeting-aaaaaaaa", kind: "meeting", agent: "cfo", provider: "p", model: "m",
+    tokens: { input: 1, output: 2, cache_read: 0, cache_write: 0 }, tokens_prov: "measured", content: "the secret prompt", prompt: "do it" }, dir);
+  const raw = readFileSync(join(dir, "usage", `table-${T.day()}.jsonl`), "utf8");
+  assert.doesNotMatch(raw, /secret prompt|do it|content|prompt/);
+  assert.equal(JSON.parse(raw).agent, "cfo");
+});
+
 test("an outer usage sink (a heads-down huddle) keeps the spend: the table ledger does not count it twice", async () => {
   const dir = home();
   const seen = [];

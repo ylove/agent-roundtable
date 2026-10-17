@@ -96,10 +96,16 @@ export function parseLine(raw: unknown): TableLine | null {
 
 /** Append one line to today's ledger (0600, one write). Names are scrubbed; there is no free text. */
 export function appendTableLine(line: TableLine, home = ROUNDTABLE_HOME): void {
-  const safe: TableLine = { ...line, kind: clean(line.kind, 40), agent: clean(line.agent, 64) };
-  if (safe.provider !== undefined) safe.provider = clean(safe.provider, 64);
-  if (safe.model !== undefined) safe.model = clean(safe.model, 200);
-  if (safe.by !== undefined) safe.by = clean(safe.by, 64);
+  // Only the known fields, so no free text can ride along.
+  const safe: TableLine = { at: line.at, server: line.server, session: line.session, kind: clean(line.kind, 40), agent: clean(line.agent, 64) };
+  if (line.provider !== undefined) safe.provider = clean(line.provider, 64);
+  if (line.model !== undefined) safe.model = clean(line.model, 200);
+  if (line.tokens !== undefined) safe.tokens = { input: num(line.tokens.input), output: num(line.tokens.output), cache_read: num(line.tokens.cache_read), cache_write: num(line.tokens.cache_write) };
+  if (line.tokens_prov !== undefined) safe.tokens_prov = line.tokens_prov;
+  if (line.usd !== undefined) safe.usd = num(line.usd);
+  if (line.usd_prov !== undefined) safe.usd_prov = line.usd_prov;
+  if (line.event !== undefined) safe.event = line.event;
+  if (line.by !== undefined) safe.by = clean(line.by, 64);
   mkdirPrivate(usageDir(home));
   appendFileSync(join(usageDir(home), `table-${day(Date.parse(line.at) || Date.now())}.jsonl`), JSON.stringify(safe) + "\n", { mode: 0o600 });
 }

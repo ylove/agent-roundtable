@@ -678,7 +678,8 @@ export class Runner {
     const state = await this.store.state();
     for (const rec of Object.values(state.agents)) {
       const stop = rec.stop;
-      if (stop?.state !== "requested" || rec.status !== "running" || rec.external || this.stopApplied.has(stop.request)) continue;
+      // A worker with a kill, resume or spawn in flight is tried again next tick.
+      if (stop?.state !== "requested" || rec.status !== "running" || rec.external || this.stopApplied.has(stop.request) || this.busy.has(rec.id)) continue;
       this.stopApplied.add(stop.request);
       this.say(`stopping ${rec.id} (asked by ${stop.by}, from the ${stop.surface})`);
       await this.killWorker(rec.id, "stopped", `stopped by ${stop.by}`);
@@ -692,8 +693,10 @@ export class Runner {
    * agent with resolve_escalation, or write a handoff with control_execution.
    */
   private async settleStops(): Promise<void> {
+    let state = await this.store.state();
+    if (!Object.values(state.agents).some((a) => a.stop?.state === "requested" && a.status === "exited")) return;
     await this.refreshLog();
-    const state = await this.store.state();
+    state = await this.store.state();
     for (const rec of Object.values(state.agents)) {
       const stop = rec.stop;
       if (stop?.state !== "requested" || rec.status !== "exited" || this.busy.has(rec.id)) continue;

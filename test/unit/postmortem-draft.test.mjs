@@ -314,3 +314,34 @@ test("files are private and the draft survives as JSON a reader can parse", asyn
   assert.ok(existsSync(draftPath));
   writeFileSync(join(repo.root, "touch"), "x");
 });
+
+test("the runner's tick records the finding for a submission testing sent back, once, and the fix settles when the task merges", async (t) => {
+  const { Runner } = await import("../../dist/execution/runner.js");
+  const { waitFor } = await import("../fixtures/runner/harness.mjs");
+  const { scriptedDriver, sandbox } = await import("../fixtures/runner/driver.mjs");
+  const run = await makeRun({ contract: { postmortem: { enabled: true }, tasks: [task("a")] } });
+  const r = new Runner(run.store.id, { drivers: { "claude-code": scriptedDriver(t) }, sandbox: sandbox(), lockTimeoutMs: 10, tickMs: 10 });
+  await r.start();
+  t.after(async () => { r.stop("test cleanup"); await r.run(); });
+  await r.tick();
+  const blob = await run.store.putBlob("diff");
+  await run.store.transact(() => ({
+    events: [
+      { type: "task.submitted", source: runner, payload: { task: "a", commit: "c".repeat(40), diff_blob: blob, stat: "1 file changed", files: ["src/a/a.txt"], rewrites: [] } },
+      { type: "check.failed", source: runner, payload: { command_id: "unit", scope: "task", task: "a", exit: 1, signature: "7".repeat(16) } },
+      { type: "task.rejected", source: runner, payload: { task: "a", reasons: ["check unit failed"] } },
+    ],
+  }));
+  await waitFor(async () => { await r.tick(); return Object.keys((await run.store.state()).postmortem.findings).length === 1; }, 10000, "the runner's finding");
+  await r.tick();
+  await r.tick();
+  const state = await run.store.state();
+  const [f] = Object.values(state.postmortem.findings);
+  assert.equal(f.task, "a");
+  assert.equal(f.fix.status, "pending");
+  assert.equal((await run.store.events({ types: ["postmortem.finding_recorded"] })).length, 1, "recorded once");
+  await run.store.transact(() => ({ events: [{ type: "task.merged", source: runner, payload: { task: "a", integration_sha: "e".repeat(40) } }] }));
+  const after = await run.store.state();
+  assert.equal(after.postmortem.findings[f.id].fix.status, "fixed");
+  assert.equal(typeof after.postmortem.ready_seq, "number");
+});

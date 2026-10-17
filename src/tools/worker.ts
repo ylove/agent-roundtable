@@ -33,6 +33,7 @@ import {
 } from "../execution/leases.js";
 import { openExecutionStore, type FileExecutionStore } from "../execution/store.js";
 import { buildTaskCard } from "../execution/task-card.js";
+import { cardLessons } from "../postmortem/lessons.js";
 import type {
   AnyEvent,
   AnyEventDraft,
@@ -881,7 +882,7 @@ async function claimTask(a: Actor, args: Record<string, unknown>): Promise<Json>
     claimed: claimedTask,
     worktree: wt.path,
     branch: wt.branch,
-    task_card: buildTaskCard(after, claimedTask, { external: own(after.agents, a.agent)?.external !== false, worktree: wt.path }),
+    task_card: buildTaskCard(after, claimedTask, { external: own(after.agents, a.agent)?.external !== false, worktree: wt.path, ...cardLessons(after, claimedTask) }),
   };
 }
 
@@ -1442,7 +1443,7 @@ async function joinExecution(args: Record<string, unknown>): Promise<Json> {
     agent_token: token,
     token_note: "Shown once: keep it for this run and pass it as agent_token with execution_id to every worker tool. Joining again issues a new token and voids this one.",
     ...(wt && { worktree: wt.path, branch: wt.branch }),
-    ...(taskId && { task_card: buildTaskCard(after, taskId, { external: true, ...(wt && { worktree: wt.path }) }) }),
+    ...(taskId && { task_card: buildTaskCard(after, taskId, { external: true, ...(wt && { worktree: wt.path }), ...cardLessons(after, taskId) }) }),
     ...(!taskId && { ready_tasks: readyTasks }),
     next: taskId ? `Call claim_task(task_id: "${taskId}") before you edit anything.` : "Pick a ready task and call claim_task(task_id).",
   };

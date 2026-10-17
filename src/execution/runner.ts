@@ -39,6 +39,7 @@ import { RunMonitor, type ExitReason, type MonitorCheckpoint } from "../workers/
 import { reconcileLaunch } from "../workers/launch-intent.js";
 import { stopGroup, workerExit, type WorkerExit } from "../workers/process.js";
 import { autoFindings } from "../postmortem/auto.js";
+import { cardLessons } from "../postmortem/lessons.js";
 import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
 import { classifyFailure } from "./circuit.js";
@@ -1342,7 +1343,7 @@ export class Runner {
       const sinceSeq = this.lastSeq((e) => e.type === "agent.spawned" && e.payload.task === task);
       const immediate: TaskCardOptions["immediate"] | undefined =
         o.immediate ?? (sinceSeq > 0 ? respawnContext(after, task, { sinceSeq, why: o.why ?? rt.last_note ?? "Your previous worker run ended before the task was done." }) : undefined);
-      const card = buildTaskCard(after, task, { ...(immediate && { immediate }) });
+      const card = buildTaskCard(after, task, { ...(immediate && { immediate }), ...cardLessons(after, task) });
       const outputPath = join(files.runsDir, `${attempt}.jsonl`);
       const startOffset = fileSize(outputPath);
       const launch: WorkerLaunch = {

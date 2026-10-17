@@ -37,6 +37,7 @@ import { globWithin } from "./contract.js";
 import { goalReview } from "./goal-review.js";
 import { huddleAction, runFormatHuddle, runMicroHuddle } from "./huddle.js";
 import { leadFallback } from "./lead.js";
+import { cardLessons } from "../postmortem/lessons.js";
 import { acquireLock } from "./lock.js";
 import { normalizeGlob } from "./leases.js";
 import { estimateUsd } from "./pricing.js";
@@ -475,7 +476,7 @@ export function resumeOps(state: Readonly<BlackboardState>, esc: Escalation, tex
   if (!task || !rt || rt.state !== "in_progress" || !claim) return [];
   const rec = own(state.agents, claim.agent);
   if (!rec || rec.external || rec.driver === "external") return [];
-  const card = buildTaskCard(state, task, { immediate: { kind: "resolution", text: `Escalation ${esc.id}: ${text}` } });
+  const card = buildTaskCard(state, task, { immediate: { kind: "resolution", text: `Escalation ${esc.id}: ${text}` }, ...cardLessons(state, task) });
   return [{ type: "resume_worker", rule, key: `${esc.id}:resume`, target: claim.agent, agent: claim.agent, task, why: oneLine(`Resolution of escalation ${esc.id}: ${text}`, 300), card }];
 }
 

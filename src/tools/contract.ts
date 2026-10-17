@@ -150,6 +150,7 @@ export function formatContractResult(r: ContractResult): string {
     ...(r.source !== undefined && { source: r.source }), ...(r.hash !== undefined && { hash: r.hash }),
     warnings: r.warnings, consent: r.consent,
     ...(r.affected && { affected_tasks: r.affected }), ...(r.asked && { asked: r.asked }),
+    ...(r.postmortemLessons && { postmortem_lessons: r.postmortemLessons }),
     files: r.paths, next: r.next,
   };
   return lines.join("\n") + "\n\n" + truncate(renderContractMarkdown(r.contract), CONTRACT_MARKDOWN_LIMIT) +

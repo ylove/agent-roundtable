@@ -17,6 +17,8 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { AGENTS_DIR, WORKSPACE_DIR } from "../config.js";
 import { loadAgent } from "../agents.js";
+import { contractLessons, type ContractLessons } from "../postmortem/lessons.js";
+import { projectOfRoot } from "../postmortem/store.js";
 import { newExecutionId, newId } from "../ids.js";
 import { appendAudit } from "../security/audit.js";
 import { childEnv } from "../security/child-env.js";
@@ -137,6 +139,8 @@ export interface ContractResult {
   affected?: AffectedTasks;
   /** Participants asked in a consent round run by this call. */
   asked?: string[];
+  /** propose: what earlier postmortems of the project taught (docs/design/postmortem.md §7). */
+  postmortemLessons?: ContractLessons["section"];
   paths: { json: string; markdown: string };
   next: string;
 }
@@ -325,6 +329,11 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   const repoDir = o.repoDir ?? (typeof explicitScope.repo_root === "string" ? explicitScope.repo_root : undefined) ?? parent?.contract.scope.repo_root ?? WORKSPACE_DIR;
   const baseRef = o.baseRef ?? (typeof explicitScope.base_ref === "string" ? explicitScope.base_ref : undefined) ?? parent?.contract.scope.base_ref ?? "HEAD";
   const { root, sha } = await resolveRepo(repoDir, baseRef);
+  // Postmortem mode (docs/design/postmortem.md §2, §7): the project's opt-in rides in the contract, and what earlier
+  // postmortems taught becomes decisions and warnings. Lessons are read whether or not the mode is on now.
+  const lessons = contractLessons(root);
+  const postmortemOn = projectOfRoot(root)?.postmortem.enabled === true && !(explicit && explicit.postmortem !== undefined);
+  if (lessons) warnings.push(...lessons.warnings);
 
   const executionId = newExecutionId();
   const contractId = contractIdFor(executionId, 1);
@@ -335,9 +344,14 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
     scope: { orchestrator, repo_root: root, base_ref: sha, ...(o.parentContract && o.parentTask && { parent: { contract: o.parentContract, task: o.parentTask } }) },
     ...(o.title?.trim() && { title: o.title.trim() }),
     ...(o.participants?.length && { participants: o.participants }),
+    ...(postmortemOn && { postmortem: { enabled: true } }),
   };
   const assemble = (structure: Obj): Obj => {
     const c = applyMergePatch<Obj>(applyMergePatch(structure, explicit ?? {}), fixed);
+    if (lessons) {
+      const have = Array.isArray(c.decisions) ? c.decisions : [];
+      c.decisions = [...have, ...lessons.decisions.filter((d) => !have.some((x) => isObj(x) && x.id === d.id))];
+    }
     if (c.title === undefined) c.title = firstLine(o.goal);
     if (c.participants === undefined && src && Array.isArray(c.tasks)) {
       const personas = c.tasks.map((t) => (isObj(t) && typeof t.persona === "string" ? t.persona : "")).filter(Boolean);
@@ -408,7 +422,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
       warnings.push(`the consent round failed: ${errText(e)}`);
     }
   }
-  return resultFor(store, contractId, { warnings, source, ...(asked && { asked }) });
+  return resultFor(store, contractId, { warnings, source, ...(asked && { asked }), ...(lessons && { postmortemLessons: lessons.section }) });
 }
 
 // ---------------------------------------------------------------------------

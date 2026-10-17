@@ -24,6 +24,8 @@ export interface TaskCardOptions {
   external?: boolean;
   /** The worktree path, when the reader needs it (external workers). */
   worktree?: string;
+  /** The "Lessons from earlier postmortems" section for this task (postmortem/lessons.ts cardSection), when there is one. */
+  lessons?: string;
   /** Leave the human's original request out (a postmortem context never carries it verbatim). */
   omitOriginalPrompt?: boolean;
 }
@@ -35,6 +37,7 @@ export const CARD_LIMITS = {
   interface: 400,
   decision: 400,
   immediate: 8000,
+  lessons: 4096,
   listItems: 30,
   total: 32 * 1024,
 } as const;
@@ -165,6 +168,8 @@ export function buildTaskCard(state: Readonly<BlackboardState>, taskId: string, 
     }[im.kind];
     out.push(`## ${title}\n\n${fence(cap(im.text, CARD_LIMITS.immediate))}`);
   }
+
+  if (opts.lessons?.trim()) out.push(cap(opts.lessons, CARD_LIMITS.lessons));
 
   // The protocol always survives the cap: it is cut from the body, never from the protocol.
   const tail = `\n\n## Protocol\n\n${protocol(opts.external === true)}\n`;

@@ -158,8 +158,7 @@ test("stop: plain refusals for an unknown agent, an external worker, an agent wi
 
 test("control_execution stop_agent and handoff, through the tool", async () => {
   const run = await makeRun({ contract: { tasks: [task("a"), task("b")] } });
-  const token = await registerWorker(run.store, "w-a", "a");
-  void token;
+  await registerWorker(run.store, "w-a", "a");
   await append(run.store, "agent.spawned", { agent: "w-a", task: "a", attempt: 1, pid: process.pid });
   await append(run.store, "task.progress", { task: "a", percent: 40, note: "halfway, key ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8" });
   await append(run.store, "agent.registered", { agent: "ext-1", persona: "dev", driver: "external", token_sha256: "t", external: true });

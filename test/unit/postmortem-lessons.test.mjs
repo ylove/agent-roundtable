@@ -177,3 +177,14 @@ test("lessons supersede restatements, stay newest first, and postmortem(action: 
   assert.match(readFileSync(lessonsPath(key), "utf8"), /superseded_by/);
   assert.equal(contractLessons(makeRepo().root), undefined);
 });
+
+test("record table cells escape backslashes before pipes, so text cannot end a cell", async () => {
+  const { renderRecord } = await import("../../dist/postmortem/record.js");
+  const rec = {
+    v: 1, pm: "pm-00000009", project: "0123456789abcdef", scope: { work: "w" }, status: "held", created: "t", held_at: "t",
+    format: "collaborate", rounds: 1, seats: ["orchestrator"], session: "s", opening: "o", findings: [], transcript: [], rejected_lines: [],
+    proposed: [{ id: "a1", kind: "rule", target: "project", findings: [], hash: "h", text: "a \\| b \\" }],
+  };
+  const row = renderRecord(rec).split("\n").find((l) => l.startsWith("| a1 |"));
+  assert.ok(row.endsWith("| a \\\\\\| b \\\\ |"), row);
+});

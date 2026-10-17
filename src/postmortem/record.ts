@@ -8,8 +8,9 @@ import type { PostmortemRecord } from "./types.js";
 
 const text = (s: string | undefined) => scrub(s ?? "").trim();
 const cell = (s: string, n = 300) => {
-  const t = text(s).replace(/\s+/g, " ").replace(/\|/g, "\\|");
-  return t.length <= n ? t : `${t.slice(0, n - 1)}…`;
+  const t = text(s).replace(/\s+/g, " ");
+  // Cut first, then escape: backslashes before pipes, so an input `\|` cannot end the cell, and a cut cannot leave a lone escape.
+  return (t.length <= n ? t : `${t.slice(0, n - 1)}…`).replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
 };
 
 /** A quote block, so a turn's own headings and lines can never pose as the record's structure. */

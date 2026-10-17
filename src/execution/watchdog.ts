@@ -527,6 +527,9 @@ function stalledWorker(
   ];
 }
 
+/** How long the watchdog leaves an agent with a pending stop request to the runner. */
+const STOP_GRACE_MS = 60_000;
+
 /**
  * For each runner claim on a claimed or in-progress task that is not paused:
  *  - the agent exited or left, or its pid is gone ("lost"): retry with attempt+1 (spawn_retry
@@ -548,6 +551,9 @@ function workerRules(state: BlackboardState, now: number, obs: Observations, cfg
     const rec = own(state.agents, claim.agent);
     const o = own(obs.agents, claim.agent);
     if (!rt || o?.busy) continue;
+    // A person asked for this stop: the runner settles it (agent.stopped and a blocker) rather than the
+    // watchdog retrying or failing the task. After a minute without settling, the usual rules resume.
+    if (rec?.stop?.state === "requested" && now - Date.parse(rec.stop.at) < STOP_GRACE_MS) continue;
     if (rt.state === "blocked") {
       const escId = rt.blocked_by?.escalation;
       const esc = own(state.escalations, escId);

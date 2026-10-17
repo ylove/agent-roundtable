@@ -215,6 +215,28 @@ const deadCases = [
     ops: [],
   },
   {
+    name: "an exited worker with a person's stop waiting is left to the runner, which settles it",
+    state: () => {
+      const s = workerState({ status: "exited" });
+      s.agents["w-t"].stop = { request: "evt-1", by: "the human (cli)", surface: "cli", at: new Date(T0 - 1000).toISOString(), seq: 5, state: "requested" };
+      return s;
+    },
+    obs: {},
+    events: [],
+    ops: [],
+  },
+  {
+    name: "a stop request older than a minute no longer holds the retry back",
+    state: () => {
+      const s = workerState({ status: "exited" });
+      s.agents["w-t"].stop = { request: "evt-1", by: "the human (cli)", surface: "cli", at: new Date(T0 - 2 * MIN).toISOString(), seq: 5, state: "requested" };
+      return s;
+    },
+    obs: {},
+    events: ["task.retried"],
+    ops: [["spawn_retry", { task: "t", attempt: 2 }]],
+  },
+  {
     name: "a task at its budget cap is not respawned",
     state: () => {
       const s = workerState({ status: "exited" });

@@ -25,9 +25,11 @@ import { totalText, usd, usdBudget } from "./format.js";
 import { addMoney, moneyTotal, tokenTotal, zeroMoney, zeroTokens } from "./types.js";
 
 /** One line of plain text, scrubbed and capped: safe in a heading, a list item or a table cell. */
-function line(s: unknown, max = 300): string {
+export function line(s: unknown, max = 300): string {
   const t = scrub(String(s ?? "")).replace(/\s+/g, " ").trim();
-  return (t.length > max ? `${t.slice(0, max - 1)}…` : t).replace(/\|/g, "\\|");
+  const cut = t.length > max ? `${t.slice(0, max - 1)}…` : t; // cut first: escaping after it cannot leave a lone escape
+  // Backslash first, so the escapes added for | and ` are not themselves escaped again.
+  return cut.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/`/g, "\\`");
 }
 
 const own = <V>(map: Readonly<Record<string, V>>, key: string): V | undefined => (Object.hasOwn(map, key) ? map[key] : undefined);

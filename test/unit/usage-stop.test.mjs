@@ -422,3 +422,13 @@ test("a session handoff is generated from the archive: no turn text", () => {
   assert.ok(stopped.includes("Stopped by the human (dashboard)") && stopped.includes("(slow)"));
   assert.ok(!stopped.includes("SUMMARY-MARKER"), "a stopped session's summary is not trusted to describe it");
 });
+
+test("handoff text escapes backslashes first, then pipes and backticks, after cutting", async () => {
+  const { line } = await import("../../dist/usage/handoff.js");
+  assert.equal(line("a\\|b"), "a\\\\\\|b", "a backslash before a pipe stays a literal backslash and an escaped pipe");
+  assert.equal(line("x`y"), "x\\`y");
+  assert.equal(line("end\\"), "end\\\\", "a trailing backslash is doubled, never left to escape what follows");
+  const cut = line("\\".repeat(10), 5);
+  assert.equal(cut, "\\\\".repeat(4) + "…", "cut to 4 characters and an ellipsis, then escaped");
+  assert.doesNotMatch(line("p|q"), /(^|[^\\])\|/, "no bare pipe survives");
+});

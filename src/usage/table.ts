@@ -17,11 +17,20 @@ import { appendFileSync, closeSync, fstatSync, openSync, readdirSync, readFileSy
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
-import { pidAlive } from "../prototypes/sandbox.js";
 import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
 import type { Provenance } from "./types.js";
 import { num } from "./types.js";
+
+/** Whether a process exists (signal 0); EPERM means it does. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
 
 export const LIVE_STALE_MS = 30_000;
 export const LIVE_BEAT_MS = 5_000;
@@ -33,7 +42,6 @@ export const SERVER_ID_RE = /^srv-[0-9a-hjkmnp-tv-z]{8}$/;
 export const REQUEST_ID_RE = /^stop-[0-9a-hjkmnp-tv-z]{12}$/;
 /** Session ids are `<prefix>-<8 base32>` (see ids.ts newId), 2 to 64 characters in all. */
 export const SESSION_ID_RE = /^[a-z][a-z0-9-]{1,63}$/;
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$/;
 
 export const usageDir = (home = ROUNDTABLE_HOME): string => join(home, "usage");
 
@@ -331,13 +339,13 @@ export function readStopRequests(server: string, home = ROUNDTABLE_HOME, opts: {
       if (text.length > REQUEST_MAX) throw new Error("too large");
       const o = JSON.parse(text) as Record<string, unknown>;
       const surface = o.surface;
-      if (o.id !== m[1] || typeof o.session !== "string" || !SESSION_ID_RE.test(o.session) || typeof o.agent !== "string" || !NAME_RE.test(o.agent) ||
+      if (o.id !== m[1] || typeof o.session !== "string" || !SESSION_ID_RE.test(o.session) || typeof o.agent !== "string" ||
           typeof o.by !== "string" || !o.by.trim() || (surface !== "dashboard" && surface !== "cli" && surface !== "tool") ||
           typeof o.at !== "string" || !Number.isFinite(Date.parse(o.at))) {
         throw new Error("not a stop request");
       }
       out.push({
-        id: m[1], session: o.session, agent: o.agent, by: clean(o.by, 64), surface, at: o.at,
+        id: m[1], session: o.session, agent: clean(o.agent, 64), by: clean(o.by, 64), surface, at: o.at,
         ...(typeof o.reason === "string" && o.reason.trim() && { reason: clean(o.reason, 500) }),
       });
     } catch {

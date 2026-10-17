@@ -20,7 +20,7 @@ import { scrub } from "../security/secrets.js";
 import { useText, usdBudget, usd } from "./format.js";
 import { collectUsage, type HostFigures } from "./model.js";
 import { usageDir } from "./table.js";
-import { moneyTotal, tokenTotal, type UsageAgent, type UsageView } from "./types.js";
+import { moneyTotal, REPORT_MAX_USD, tokenTotal, type UsageAgent, type UsageView } from "./types.js";
 
 export const CACHE_MS = 2_000;
 const STALE_OK_MS = 60_000;
@@ -104,7 +104,7 @@ export function parseHost(raw: string): HostInput {
   const seven = window(rl?.seven_day);
   if (seven) out.seven = seven;
   const cost = obj(j.cost)?.total_cost_usd;
-  if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) out.cost_usd = cost;
+  if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) out.cost_usd = Math.min(cost, REPORT_MAX_USD);
   return out;
 }
 
@@ -168,7 +168,8 @@ const noun = (n: number, one: string, many = `${one}s`): string => `${n} ${n ===
 /** Line 2, or undefined when there is nothing to show. */
 export function roundtableLine(view: UsageView, paint: Paint, cols: number): string | undefined {
   const segments: string[] = [];
-  const live = view.runs.filter((r) => r.live);
+  const spent = (r: UsageView["runs"][number]) => moneyTotal(r.money) * 1e6 + tokenTotal(r.tokens);
+  const live = view.runs.filter((r) => r.live).sort((a, b) => spent(b) - spent(a));
   const run = live[0];
   if (run) {
     const used = moneyTotal(run.money) > 0 || tokenTotal(run.tokens) > 0 ? useText(run.money, run.tokens, "abbr") : usd(0);
@@ -288,7 +289,7 @@ export function readHostFigures(home = ROUNDTABLE_HOME, now = Date.now(), maxAge
     if (!Number.isFinite(at) || now - at > maxAgeMs) return undefined;
     return {
       ...(typeof h.model === "string" && { model: label(h.model, 40) }),
-      ...(typeof h.cost_usd === "number" && Number.isFinite(h.cost_usd) && h.cost_usd >= 0 && { cost_usd: h.cost_usd }),
+      ...(typeof h.cost_usd === "number" && Number.isFinite(h.cost_usd) && h.cost_usd >= 0 && { cost_usd: Math.min(h.cost_usd, REPORT_MAX_USD) }),
       at: h.at,
     };
   } catch {

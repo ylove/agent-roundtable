@@ -13,6 +13,10 @@ export type { Provenance, ProvenanceTotals };
 
 export const PROVENANCES: readonly Provenance[] = ["measured", "reported", "estimated"];
 
+/** Most one report (a worker's, or the host's session cost) may claim: larger values are cut to these (usage-visibility.md section 9). */
+export const REPORT_MAX_USD = 10_000;
+export const REPORT_MAX_TOKENS = 1e10;
+
 /** Tokens by class, and the same tokens split by provenance. */
 export interface Tokens {
   input: number;

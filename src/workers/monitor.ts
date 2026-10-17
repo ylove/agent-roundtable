@@ -137,7 +137,8 @@ export class RunMonitor {
         drafts.push(this.usageDraft(seen, undefined));
       }
     }
-    if (!this.attestation && this.o.expected !== null) {
+    // A worker a person stopped before its init line is not an attestation failure: it was never allowed to start.
+    if (!this.attestation && this.o.expected !== null && exit.reason !== "stopped") {
       const a = this.attestation = attest(this.acc, this.o.expected ?? WORKER_ATTESTATION);
       drafts.push({ type: "agent.attested", source: this.source, payload: { agent: this.o.agent, tools: capPathList(a.tools, 3000), mcp_servers: capPathList(a.mcp_servers, 1000), ok: a.ok } });
     }

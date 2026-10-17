@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +81,25 @@ test("statusline tolerates missing fields: a missing field is left out with its 
   assert.equal(h({ model: { display_name: "X" }, rate_limits: { five_hour: { used_percentage: 3 } } }), "X | 5h 3%", "no reset time, no arrow");
   assert.equal(h({ model: 5, workspace: "x", rate_limits: { five_hour: { used_percentage: "lots" }, seven_day: null } }), "");
   assert.equal(h({ model: { display_name: "k ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8" } }).includes("ghp_"), false, "names are scrubbed");
+});
+
+test("the host's reported cost is clamped to the spec's $10,000, wherever it is read", async () => {
+  assert.equal(parseHost(JSON.stringify({ cost: { total_cost_usd: 1e300 } })).cost_usd, 10_000);
+  assert.equal(parseHost(JSON.stringify({ cost: { total_cost_usd: 3.5 } })).cost_usd, 3.5);
+  assert.equal(parseHost(JSON.stringify({ cost: { total_cost_usd: -1 } })).cost_usd, undefined);
+  const dir = mkdtempSync(join(tmpdir(), "statusline-home-"));
+  mkdirSync(join(dir, "usage"), { recursive: true });
+  writeFileSync(join(dir, "usage", "host.json"), JSON.stringify({ model: "Opus 5.5", cost_usd: 1e300, at: new Date().toISOString() }));
+  assert.equal(readHostFigures(dir).cost_usd, 10_000);
+  const v = await collectUsage({ executions: [], home: dir, host: { model: "m", cost_usd: 1e300 } });
+  assert.equal(v.agents.find((a) => a.where === "host").money.reported, 10_000);
+});
+
+test("statusline line 2 summarises the live run that has spent the most", () => {
+  const run = (id, measured) => ({ ...view().runs[0], id, money: { measured, reported: 0, estimated: 0 } });
+  const v = view({ runs: [run("exe-aaaaaaaaaaaa1111", 0.1), run("exe-bbbbbbbbbbbb2222", 5), run("exe-cccccccccccc3333", 1)] });
+  const [l2] = renderStatusline(v, {}, plain);
+  assert.match(l2, /heads-down exe-bb2222 .*\$5\.00 meas.*\(\+2 more\)/);
 });
 
 test("statusline never fails: invalid JSON, empty stdin, junk flags and a missing home all exit 0 without a stack trace", () => {

@@ -235,6 +235,11 @@ test("stop requests are files: validated, and a malformed one is renamed .bad", 
   assert.deepEqual(got.map((r) => r.id), [req.id]);
   assert.equal(existsSync(join(dir, "usage", "stops", "srv-aaaaaaaa", "stop-0123456789ab.json.bad")), true);
   assert.throws(() => T.writeStopRequest("srv-aaaaaaaa", { session: "../x", agent: "a", by: "b", surface: "cli" }, dir), /session id/);
+  // The agent name is informational: a persona such as "josé+ops" must not get a request dropped as .bad.
+  const odd = T.writeStopRequest("srv-aaaaaaaa", { session: "meeting-aaaaaaaa", agent: "josé+ops", by: "yitz", surface: "cli" }, dir);
+  assert.deepEqual(T.readStopRequests("srv-aaaaaaaa", dir).filter((r) => r.id === odd.id).map((r) => r.agent), ["josé+ops"]);
+  assert.equal(existsSync(join(dir, "usage", "stops", "srv-aaaaaaaa", `${odd.id}.json.bad`)), false);
+  T.removeStopRequest("srv-aaaaaaaa", odd.id, dir);
   assert.throws(() => T.writeStopRequest("../x", { session: "meeting-aaaaaaaa", agent: "a", by: "b", surface: "cli" }, dir), /server id/);
   T.removeStopRequest("srv-aaaaaaaa", req.id, dir);
   assert.deepEqual(T.readStopRequests("srv-aaaaaaaa", dir), []);

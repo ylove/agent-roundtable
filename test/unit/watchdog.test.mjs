@@ -215,10 +215,10 @@ const deadCases = [
     ops: [],
   },
   {
-    name: "an exited worker with a person's stop waiting is left to the runner, which settles it",
+    name: "an exited worker whose stop is waiting in the log is left to the runner, which settles it",
     state: () => {
       const s = workerState({ status: "exited" });
-      s.agents["w-t"].stop = { request: "evt-1", by: "the human (cli)", surface: "cli", at: new Date(T0 - 1000).toISOString(), seq: 5, state: "requested" };
+      s.agents["w-t"].stop = { request: "evt-1", by: "the human (cli)", surface: "cli", at: new Date(T0 - 10 * MIN).toISOString(), seq: 5, state: "requested" };
       return s;
     },
     obs: {},
@@ -226,10 +226,10 @@ const deadCases = [
     ops: [],
   },
   {
-    name: "a stop request older than a minute no longer holds the retry back",
+    name: "a settled stop no longer holds the retry back",
     state: () => {
       const s = workerState({ status: "exited" });
-      s.agents["w-t"].stop = { request: "evt-1", by: "the human (cli)", surface: "cli", at: new Date(T0 - 2 * MIN).toISOString(), seq: 5, state: "requested" };
+      s.agents["w-t"].stop = { request: "evt-1", by: "the human (cli)", surface: "cli", at: new Date(T0 - 10 * MIN).toISOString(), seq: 5, state: "stopped" };
       return s;
     },
     obs: {},

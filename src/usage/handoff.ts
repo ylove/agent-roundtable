@@ -155,7 +155,6 @@ export function buildSessionHandoff(a: ArchivedSession, now = new Date()): strin
   out.push(`Written ${now.toISOString()} from the archived session. The full transcript is archived in \`sessions/${line(a.id, 64)}.json\`.`, "");
   out.push("## The session", "");
   out.push(`- Agents: ${a.agents.map((x) => line(x, 64)).join(", ") || "none"}`);
-  out.push(`- Topic: ${line(a.topic, 500) || "none"}`);
   out.push(`- Started ${a.started}, ended ${a.ended}; ${a.turns.length} turn${a.turns.length === 1 ? "" : "s"}`);
   if (a.stopped) out.push(`- Stopped by ${line(a.stopped.by, 100)} at ${a.stopped.at}${a.stopped.reason ? ` (${line(a.stopped.reason, 300)})` : ""}`);
   out.push("");

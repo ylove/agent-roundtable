@@ -74,7 +74,7 @@ test("usage page: cards, provenance chips with words, legend, platform table; no
   for (const p of ["measured", "reported", "estimated"]) assert.match(r.body, new RegExp(`<dt><span class="chip prov-${p}">${p}</span></dt>`));
   // One card per agent, with platform, state word and share of the budget.
   assert.equal((r.body.match(/<li class="agent-card /g) ?? []).length, 3);
-  assert.match(r.body, /<h3>w-a<\/h3><span class="chip platform">claude-code · model-a<\/span>/);
+  assert.match(r.body, /<h3>w-a<\/h3><span class="chip platform">claude-code<\/span> <span class="chip platform">model-a<\/span>/);
   assert.match(r.body, /<span class="pill st-working">● working<\/span>/);
   assert.match(r.body, /<progress max="100" value="8" aria-label="Share of the budget">/);
   assert.match(r.body, /<svg class="spark" viewBox="0 0 160 36" role="img"><title>w-a: spend over time<\/title><polygon class="area"/);

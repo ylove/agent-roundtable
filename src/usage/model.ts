@@ -10,11 +10,9 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
-import { executionBudgetUsd } from "../execution/budget.js";
 import { isFreeProvider } from "../execution/pricing.js";
 import { executionDir, listExecutions, openExecutionStore } from "../execution/store.js";
 import type { AgentUsage, BlackboardState } from "../execution/types.js";
-import { redact } from "../publishers/redact.js";
 import { scrub } from "../security/secrets.js";
 import {
   day,
@@ -31,6 +29,7 @@ import {
   mergeMoney,
   mergeTokens,
   moneyTotal,
+  REPORT_MAX_USD,
   tokenTotal,
   zeroMoney,
   zeroTokens,
@@ -46,6 +45,8 @@ import {
 
 const DAY_MS = 86_400_000;
 const RUNNER_FRESH_MS = 60_000;
+/** The run's budget: the contract's usd plus every extension (as execution/budget.ts, which pulls in the watchdog; the status line must start fast). */
+const executionBudgetUsd = (state: BlackboardState): number => (state.contract ? state.contract.budget.usd + state.budget.extensions_usd : 0);
 const own = <V>(map: Readonly<Record<string, V>>, key: string): V | undefined => (Object.hasOwn(map, key) ? map[key] : undefined);
 const text = (s: unknown, max = 200): string => scrub(String(s ?? "")).replace(/[\r\n\t]+/g, " ").trim().slice(0, max);
 
@@ -289,17 +290,6 @@ export function filterView(view: UsageView, f: { execution?: string; session?: s
   };
 }
 
-/** Every string in the view, redacted (secrets and personal data): what a tool hands to a model. */
-export function redactedView(view: UsageView): UsageView {
-  const walk = (v: unknown): unknown => {
-    if (typeof v === "string") return redact(v).text;
-    if (Array.isArray(v)) return v.map(walk);
-    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
-    return v;
-  };
-  return walk(view) as UsageView;
-}
-
 export async function collectUsage(opts: CollectOptions = {}): Promise<UsageView> {
   const now = opts.now ?? Date.now();
   const since = opts.since ?? DAY_MS;
@@ -357,7 +347,7 @@ export async function collectUsage(opts: CollectOptions = {}): Promise<UsageView
   const h = opts.host;
   if (h && (h.cost_usd !== undefined || h.model)) {
     const money = zeroMoney();
-    if (h.cost_usd !== undefined && Number.isFinite(h.cost_usd) && h.cost_usd > 0) addMoney(money, h.cost_usd, "reported");
+    if (h.cost_usd !== undefined && Number.isFinite(h.cost_usd) && h.cost_usd > 0) addMoney(money, Math.min(h.cost_usd, REPORT_MAX_USD), "reported");
     agents.push({
       id: "host",
       where: "host",

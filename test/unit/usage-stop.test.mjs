@@ -57,9 +57,9 @@ const parse = (r) => {
 
 // --- heads-down: the runner -------------------------------------------------------------------------
 
-async function setup(t, contract = { tasks: [task("a")] }) {
+async function setup(t, contract = { tasks: [task("a")] }, behavior) {
   const run = await makeRun({ contract });
-  const driver = scriptedDriver(t);
+  const driver = scriptedDriver(t, behavior);
   const r = new Runner(run.store.id, { drivers: { "claude-code": driver }, sandbox: sandbox(), lockTimeoutMs: 10, tickMs: 10 });
   await r.start();
   t.after(async () => { r.stop("test cleanup"); await r.run(); });
@@ -70,10 +70,17 @@ async function tickUntil(r, predicate) {
   await waitFor(async () => { await r.tick(); return predicate(); }, 10000, "runner condition");
 }
 
-test("stop, heads-down: request -> worker stopped -> agent.exited {stopped} -> agent.stopped -> blocker escalation and a blocked task, never retried", async (t) => {
-  const { store, root, r, driver } = await setup(t);
+// "silent": the worker is stopped before it ever printed its init line (no attestation to judge it by);
+// otherwise it has printed it and the runner has attested it. Neither depends on how fast a process starts.
+for (const silent of [false, true]) test(`stop, heads-down${silent ? " (before the worker's init line)" : ""}: request -> worker stopped -> agent.exited {stopped} -> agent.stopped -> blocker escalation and a blocked task, never retried`, async (t) => {
+  const { store, root, r, driver } = await setup(t, undefined, silent ? () => ({ silent: true }) : undefined);
   await r.tick();
   assert.equal(driver.calls.length, 1);
+  if (!silent) {
+    await waitFor(() => readFileSync(driver.calls[0].outputPath, "utf8").includes("init"), 10000, "the worker's init line");
+    await r.tick();
+    assert.equal((await eventsOf(store, "agent.attested")).length, 1);
+  }
   const agent = workerAgentId("a");
   assert.equal((await store.state()).agents[agent].status, "running");
 
@@ -89,6 +96,7 @@ test("stop, heads-down: request -> worker stopped -> agent.exited {stopped} -> a
   assert.deepEqual(order, ["agent.stop_requested", "agent.exited", "agent.stopped", "escalation.raised", "task.blocked"]);
   const exited = events.find((e) => e.type === "agent.exited");
   assert.equal(exited.payload.reason, "stopped");
+  assert.ok(!events.some((e) => e.type === "agent.attested" && !e.payload.ok), "a stopped worker is never an attestation failure");
   const stopped = events.find((e) => e.type === "agent.stopped");
   const esc = events.find((e) => e.type === "escalation.raised").payload.escalation;
   assert.deepEqual(stopped.payload, { agent, task: "a", request: requested.id, escalation: esc.id });
@@ -416,8 +424,9 @@ test("a session handoff is generated from the archive: no turn text", () => {
     summary: "SUMMARY-MARKER", public: null,
   };
   const ended = buildSessionHandoff(a, new Date("2030-01-02T00:00:00Z"));
-  assert.ok(ended.includes("SUMMARY-MARKER") && ended.includes("Q3 budget") && ended.includes("1 turn"));
+  assert.ok(ended.includes("SUMMARY-MARKER") && ended.includes("1 turn"));
   assert.ok(!ended.includes("TURN-MARKER") && !ended.includes("TRANSCRIPT-MARKER") && !ended.includes("ghp_"));
+  assert.ok(!ended.includes("Q3 budget"), "the topic is close to the original request: not in the handoff");
   const stopped = buildSessionHandoff({ ...a, stopped: { by: "the human (dashboard)", at: "2030-01-01T00:05:00Z", reason: "slow" } }, new Date());
   assert.ok(stopped.includes("Stopped by the human (dashboard)") && stopped.includes("(slow)"));
   assert.ok(!stopped.includes("SUMMARY-MARKER"), "a stopped session's summary is not trusted to describe it");
@@ -431,4 +440,81 @@ test("handoff text escapes backslashes first, then pipes and backticks, after cu
   const cut = line("\\".repeat(10), 5);
   assert.equal(cut, "\\\\".repeat(4) + "…", "cut to 4 characters and an ellipsis, then escaped");
   assert.doesNotMatch(line("p|q"), /(^|[^\\])\|/, "no bare pipe survives");
+});
+
+// --- stops survive a runner that is down, or dies mid-stop (the log alone decides) -----------------------
+
+/** A first runner starts the worker, the worker prints its init line, the runner is told to stop. */
+async function firstRunner(t) {
+  const run = await makeRun({ contract: { tasks: [task("a")] } });
+  const driver = scriptedDriver(t);
+  const r = new Runner(run.store.id, { drivers: { "claude-code": driver }, sandbox: sandbox(), lockTimeoutMs: 10, tickMs: 10 });
+  await r.start();
+  await r.tick();
+  const h = driver.calls[0];
+  await waitFor(() => readFileSync(h.outputPath, "utf8").includes("init"), 10000, "the worker's init line");
+  await r.tick();
+  r.stop("restart");
+  await r.run();
+  return { ...run, driver, h, agent: workerAgentId("a") };
+}
+
+async function nextRunner(t, store, driver) {
+  const r2 = new Runner(store.id, { drivers: { "claude-code": driver }, sandbox: sandbox(), lockTimeoutMs: 10, tickMs: 10 });
+  await r2.start();
+  t.after(async () => { r2.stop("cleanup"); await r2.run(); });
+  return r2;
+}
+
+function assertSettled(events, store, state, agent, driver) {
+  const types = events.map((e) => e.type).filter((x) => ["agent.stop_requested", "agent.exited", "agent.stopped", "escalation.raised", "task.blocked"].includes(x));
+  assert.deepEqual(types, ["agent.stop_requested", "agent.exited", "agent.stopped", "escalation.raised", "task.blocked"]);
+  assert.equal(state.agents[agent].stop.state, "stopped");
+  assert.equal(state.tasks.a.state, "blocked");
+  assert.equal(driver.calls.length, 1, "the agent was not resumed");
+  assert.equal(events.filter((e) => e.type === "agent.registered").length, 1, "and not re-registered");
+}
+
+test("a stop asked for while no runner runs and the worker is dead is settled by the next runner, not undone by resuming the agent", async (t) => {
+  const { store, driver, h, agent } = await firstRunner(t);
+  await driver.stop(h);
+  await requestAgentStop(store, { agent, by: "the human (command line)", surface: "cli" });
+  const r2 = await nextRunner(t, store, driver);
+  await tickUntil(r2, async () => (await store.state()).agents[agent].stop?.state === "stopped");
+  for (let i = 0; i < 5; i++) await r2.tick();
+  const events = await store.events();
+  assertSettled(events, store, await store.state(), agent, driver);
+  assert.equal(events.find((e) => e.type === "agent.exited" && e.payload.agent === agent).payload.reason, "lost", "its process was already gone");
+});
+
+test("a runner that killed the worker and died before committing the exit leaves the stop to its successor", async (t) => {
+  const { store, driver, h, agent } = await firstRunner(t);
+  const asked = await requestAgentStop(store, { agent, by: "the human (dashboard)", surface: "dashboard" });
+  await driver.stop(h); // the first runner's kill landed; it died before the exit was in the log
+  const r2 = await nextRunner(t, store, driver);
+  await tickUntil(r2, async () => (await store.state()).agents[agent].stop?.state === "stopped");
+  const events = await store.events();
+  assertSettled(events, store, await store.state(), agent, driver);
+  assert.equal(events.find((e) => e.type === "agent.stopped").payload.request, asked.request);
+});
+
+test("a stop for a worker that is still alive is applied by the successor runner too (adopted, then stopped)", async (t) => {
+  const { store, driver, agent } = await firstRunner(t);
+  await requestAgentStop(store, { agent, by: "the human (dashboard)", surface: "dashboard" });
+  const r2 = await nextRunner(t, store, driver);
+  await tickUntil(r2, async () => (await store.state()).agents[agent].stop?.state === "stopped");
+  assertSettled(await store.events(), store, await store.state(), agent, driver);
+});
+
+test("the log decides: any exit after a waiting stop settles it, and the reducer keeps a waiting stop across re-registration", async () => {
+  const { store } = await frozenRun();
+  await emit(store, "agent.registered", { agent: "w-a", persona: "dev", driver: "claude-code", token_sha256: "t1", external: false });
+  await emit(store, "agent.spawned", { agent: "w-a", task: "a", attempt: 1, pid: process.pid });
+  await emit(store, "agent.stop_requested", { agent: "w-a", by: "the human (cli)", surface: "cli" });
+  await emit(store, "agent.registered", { agent: "w-a", persona: "dev", driver: "claude-code", token_sha256: "t2", external: false });
+  assert.equal((await store.state()).agents["w-a"].stop.state, "requested", "a waiting stop is not wiped by a re-registration");
+  const req = (await store.state()).agents["w-a"].stop.request;
+  await emit(store, "agent.stopped", { agent: "w-a", task: "a", request: req });
+  await emit(store, "agent.registered", { agent: "w-a", persona: "dev", driver: "claude-code", token_sha256: "t3", external: false });
+  assert.equal((await store.state()).agents["w-a"].stop, undefined, "a settled stop is cleared by the next worker");
 });

@@ -32,6 +32,7 @@ import {
   type LeaseDecision,
 } from "../execution/leases.js";
 import { estimateUsd } from "../execution/pricing.js";
+import { REPORT_MAX_TOKENS, REPORT_MAX_USD } from "../usage/types.js";
 import { openExecutionStore, type FileExecutionStore } from "../execution/store.js";
 import { buildTaskCard } from "../execution/task-card.js";
 import type {
@@ -125,8 +126,8 @@ export const BLACKBOARD_SECTIONS = [
 
 const POST_KINDS = ["progress", "note", "interface", "need", "ack", "usage"] as const;
 /** Most one usage report may claim (usage-visibility.md §9): larger values are clamped and labelled as such. */
-export const USAGE_REPORT_MAX_USD = 10_000;
-export const USAGE_REPORT_MAX_TOKENS = 1e10;
+export const USAGE_REPORT_MAX_USD = REPORT_MAX_USD;
+export const USAGE_REPORT_MAX_TOKENS = REPORT_MAX_TOKENS;
 const ESCALATION_KINDS = ["blocker", "ambiguity", "resource", "conflict", "assistance", "emergency"] as const;
 const ESCALATION_WITH = ["orchestrator", "management", "team", "agent", "path_owner"] as const;
 const EMERGENCIES = ["money", "credentials", "scope", "human_action"] as const;

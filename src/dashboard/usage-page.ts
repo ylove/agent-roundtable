@@ -72,7 +72,7 @@ function moneyHtml(m: Money, tokens: Tokens): string {
     parts.push(`<span class="amt">${p === "estimated" ? "≈" : ""}${escapeHtml(usd(m[p]))}</span> ${chip(p)}`);
   }
   if (parts.length) return parts.join(` <span class="plus">+</span> `);
-  return tokenTotal(tokens) > 0 ? `<span class="amt">no price</span> <span class="chip prov-none">tokens only</span>` : `<span class="amt">${escapeHtml(usd(0))}</span>`;
+  return m.unpriced ? `<span class="amt">no price</span> <span class="chip prov-none">tokens only</span>` : `<span class="amt">${escapeHtml(usd(0))}</span>`;
 }
 
 function tokensHtml(tk: Tokens): string {
@@ -101,8 +101,11 @@ function stopControl(a: UsageAgent): string {
 
 function card(a: UsageAgent, series: SpendSeries, budget: number | undefined): string {
   const name = a.label ?? a.id;
-  const platform = [a.provider, a.model].filter(Boolean).join(" · ");
+  // Provider and model are separate chips, so a long model id wraps between them instead of being cut.
+  const platform = [a.provider, a.model].filter(Boolean).map((x) => `<span class="chip platform">${tc(x, 60)}</span>`).join(" ");
   const share = a.budget_share !== undefined ? Math.min(100, Math.round(a.budget_share * 100)) : undefined;
+  const shareText = a.budget_share !== undefined && a.budget_share > 0 && a.budget_share < 0.005 ? "<1%" : `${share}%`;
+  const unpriced = a.money.unpriced === true;
   const points = series[a.id] ?? [];
   const note =
     a.state === "stopped"
@@ -113,14 +116,14 @@ function card(a: UsageAgent, series: SpendSeries, budget: number | undefined): s
           ? "Orchestration, not an agent"
           : "";
   return (
-    `<li class="agent-card state-${a.state}"${SAFE_ID.test(a.id) ? ` data-agent="${escapeHtml(a.id)}"` : ""} data-state="${a.stopping ? "stopping" : a.state}">` +
+    `<li class="agent-card state-${a.state}" tabindex="-1"${SAFE_ID.test(a.id) ? ` data-agent="${escapeHtml(a.id)}"` : ""} data-state="${a.stopping ? "stopping" : a.state}">` +
     `<div class="card-top"><span class="avatar ${avatarClass(a.id)}" aria-hidden="true">${escapeHtml(initials(name))}</span>` +
-    `<div class="who"><h3>${t(name)}</h3>${platform ? `<span class="chip platform">${tc(platform, 60)}</span>` : ""}</div>${pill(a)}</div>` +
+    `<div class="who"><h3>${t(name)}</h3>${platform}</div>${pill(a)}</div>` +
     `<div class="money">${moneyHtml(a.money, a.tokens)}</div>` +
     `<div class="tokens">${tokensHtml(a.tokens)}</div>` +
     (share !== undefined && budget
-      ? `<div class="share"><progress max="100" value="${share}" aria-label="Share of the budget">${share}%</progress><span>${share}% of the budget</span></div>`
-      : `<div class="share none"><span class="empty">Share of the budget appears with the first spend</span></div>`) +
+      ? `<div class="share"><progress max="100" value="${share}" aria-label="Share of the budget">${shareText}</progress><span>${shareText} of the budget</span></div>`
+      : `<div class="share none"><span class="empty">${unpriced ? "No price is known for this model, so it has no share of the budget" : "Its share of the budget appears with its first spend"}</span></div>`) +
     sparkline(points, `${name}: spend over time`) +
     `<div class="card-foot"><span class="note">${note}</span>${stopControl(a)}</div>` +
     `</li>`
@@ -167,7 +170,7 @@ export function renderUsage(c: PageContext, v: UsageView, series: SpendSeries): 
     `<section class="hero" aria-labelledby="usage-title"><h1 id="usage-title">Usage</h1>` +
     `<p class="lead">Here's who's working and what it's cost so far.</p>` +
     (hasUsage
-      ? `<div class="hero-total"><span class="big">${total > 0 ? escapeHtml(usd(total)) : tokenTotal(v.totals.tokens) > 0 ? "no price" : escapeHtml(usd(0))}</span> ` +
+      ? `<div class="hero-total"><span class="big">${total > 0 ? `${v.totals.measured + v.totals.reported === 0 ? "≈" : ""}${escapeHtml(usd(total))}` : tokenTotal(v.totals.tokens) > 0 ? "no price" : escapeHtml(usd(0))}</span> ` +
         `<span class="hero-split">${moneyHtml(v.totals, v.totals.tokens)}</span></div>` +
         `<p class="meta">${tokenTotal(v.totals.tokens) > 0 ? `${escapeHtml(tokensShort(tokenTotal(v.totals.tokens)))} tokens` : "no tokens yet"}` +
         `${budget ? ` · ${escapeHtml(usd(total))} of ${escapeHtml(usdBudget(budget))}${pct !== undefined ? ` (${Math.round(pct)}%)` : ""}` : ""}` +

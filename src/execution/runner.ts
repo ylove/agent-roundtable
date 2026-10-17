@@ -700,10 +700,10 @@ export class Runner {
     for (const rec of Object.values(state.agents)) {
       const stop = rec.stop;
       if (stop?.state !== "requested" || rec.status !== "exited" || this.busy.has(rec.id)) continue;
+      // Any exit after the request settles it, whatever its reason (stopped, or lost with a runner that died
+      // mid-stop): the log alone says so, so a restarted runner finishes what an earlier one began.
       const exit = [...this.log].reverse().find((e) => e.type === "agent.exited" && e.payload.agent === rec.id);
       if (exit?.type !== "agent.exited" || exit.seq < stop.seq) continue;
-      // Only an exit this stop caused: recorded as "stopped", or after the runner applied it.
-      if (exit.payload.reason !== "stopped" && !this.stopApplied.has(stop.request)) continue;
       const task = exit.payload.task ?? rec.task;
       const key = `agent_stopped:${stop.request}`;
       await this.store.transact(({ state: s }) => {
@@ -1276,6 +1276,8 @@ export class Runner {
     const rt = own(s.tasks, task);
     if (!rt) return `unknown task ${task}`;
     if (own(s.agents, agent)?.external) return `${agent} is an external agent`;
+    // A person asked for this agent to stop: whatever lost or resumed it must not undo that. The stop settles first.
+    if (own(s.agents, agent)?.stop?.state === "requested") return `a stop for ${agent} is waiting`;
     if (this.hasLiveWorker(task)) return `a worker already runs on ${task}`;
     const active = Object.values(s.tasks).filter((t) => t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id))).length;
     if (active >= (s.contract?.budget.max_parallel ?? 1)) return "max_parallel workers already run";

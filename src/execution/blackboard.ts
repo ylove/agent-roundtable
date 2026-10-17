@@ -414,7 +414,8 @@ const HANDLERS: Handlers = {
     };
     if (p.budget_usd !== undefined) rec.budget_reserved_usd = p.budget_usd;
     else delete rec.budget_reserved_usd;
-    delete rec.stop; // a re-registration (retry, resume) starts a worker the old stop no longer applies to
+    // A re-registration (retry, resume) starts a worker a settled stop no longer applies to; a stop still waiting is kept.
+    if (rec.stop?.state !== "requested") delete rec.stop;
     if (p.team !== undefined) rec.team = p.team;
     put(s.agents, p.agent, rec);
     if (p.team !== undefined) addMember(s, p.team, p.agent);

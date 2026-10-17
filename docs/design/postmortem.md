@@ -1,0 +1,161 @@
+# Postmortem mode: design
+
+Status: proposed for 1.1.0. Workstream WS14, issue #130, tracking issue #129. This is the spec WS14 builds against. If the implementation needs to diverge, update this file in the same pull request.
+
+## 1. What it is
+
+Postmortem mode turns the fix loop into lessons. While testing sends fixers back, the **main orchestrator** (the agent the human talks to) keeps a **running postmortem draft** of every finding. When all fixers are done, every agent that took part in the original work sits down with the main orchestrator for a **postmortem meeting** at the table. The meeting must end with **actionable artifacts** that prevent the same failure next time. They are stored per project and read back before the next plan for that project is written.
+
+The human is told that the meeting happened and can read every turn of it, but has no seat: nothing the human types reaches the meeting.
+
+Naming: "postmortem" is one word and a lowercase common noun, like huddle. A postmortem meeting runs an existing format (collaborate or waffle-house); it is not a new format name.
+
+## 2. Opt-in
+
+Postmortem mode is off by default. It turns on for a **project** when the human asks for it, in any of these words: postmortem meetings, retrospectives, agents improving themselves, or agents improving each other during the work.
+
+- The host turns it on with `postmortem(action: "enable", project, reason)`. `reason` must quote the human's words (like `execute`'s `confirmation`), and it is recorded in the project's postmortem log and the audit log.
+- A heads-down run inherits it when its contract carries `postmortem: {enabled: true}`. `propose_contract` sets that field when the project has postmortem mode enabled, and the field is part of the consent hash like any other contract field.
+- `postmortem(action: "disable", project, reason)` turns it off. Stored postmortems are kept.
+- No tool turns postmortem mode on by itself: there is no heuristic that infers it.
+
+## 3. Projects
+
+A **project** is identified by `project_key`: the first 16 hex characters of `sha256(realpath(repo root))`. The host may pass `project` as a repository directory (resolved with `git rev-parse --show-toplevel`, refused unless it is a git work tree and contains no submodules, the same checks as `propose_contract`'s `repo_dir`) or as an existing `project_key`. A heads-down run's project is its `execution.json` `repo_root`.
+
+Store, under the existing home (`~/.agent-roundtable/`, `ROUNDTABLE_HOME`), with 0700 directories and 0600 files written atomically through `fs-safe.ts`:
+
+```
+projects/<project_key>/
+  project.json                    {key, repo_root, created, postmortem: {enabled, since, reason_sha256, by}}
+  postmortems/drafts/<pm>.json    the running draft (one open draft per scope, see §4)
+  postmortems/<pm>.json           a concluded postmortem: findings, meeting, artifacts, status
+  postmortems/<pm>.md             the readable record: findings, full dialogue, artifacts
+  lessons.json                    the active artifacts across all postmortems (§7), newest first
+  memory/<agent>.md               per-agent memory addenda (§6)
+```
+
+`<pm>` is `newId("pm-")`. Every free-text field is scrubbed (`src/security/secrets.ts`) before it is written. Retention follows `ROUNDTABLE_SESSION_RETENTION_DAYS` for drafts that were never held; concluded postmortems and `lessons.json` are kept until the human deletes them, because their purpose is long-lived.
+
+## 4. The running draft
+
+A draft has a **scope**: either a heads-down execution (`execution_id`) or an at-the-table piece of work (`work`: a short label the host chooses, such as "checkout redesign"), always within one project. There is at most one open draft per scope.
+
+A **finding** is:
+
+```ts
+interface PostmortemFinding {
+  id: string;                    // pmf-…
+  at: string;                    // ISO time
+  summary: string;               // what went wrong, ≤ 600 chars
+  detected_by: string;           // the check, test or reviewer that caught it
+  responsible: string[];         // agents whose work was sent back (persona names, or "orchestrator")
+  task?: string;                 // heads-down task id
+  category: "prompt_misread" | "project_misread" | "contract_ambiguity" | "implementation" | "test_gap" | "process";
+  evidence?: string[];           // refs only: sha256 blob refs, event ids, commit shas, file paths
+  fix?: { by: string; status: "pending" | "fixed" | "abandoned"; ref?: string };
+}
+```
+
+Findings arrive two ways:
+
+1. **By the main orchestrator**, with `postmortem(action: "record", …)`. This covers at-the-table work (subagents, reviews, the host's own tests) and anything the orchestrator learns in a heads-down run that the log does not show. `action: "fix"` updates a finding's `fix` status.
+2. **Automatically, in a heads-down run with postmortem enabled.** The runner appends one finding when a task's submission is sent back after testing: `task.rejected` that follows a `task.submitted` (failed checks or lease violations), and a `check.failed` at integration scope after a merge. The finding's summary is generated from the event (check id, signature, task), never from command output; `evidence` carries the event id and the output blob ref. A rejection that repeats an earlier finding's signature for the same task increments that finding's `repeats` instead of adding a new one. `task.retried` / `task.reassigned` set `fix.by`; the task's next `task.merged` marks the fix `fixed`; `task.failed` or `task.cancelled` marks it `abandoned`.
+
+Heads-down runs also record the draft in the event log, so the blackboard and the dashboard can show it. New events (validated in `src/execution/events.ts` like every other type; free-text scrubbed; the reducer gains a `postmortem` section and `REDUCER_VERSION` is bumped):
+
+| Type | Payload |
+|---|---|
+| `postmortem.finding_recorded` | id, summary, detected_by, responsible, task?, category, evidence?, repeats? |
+| `postmortem.fix_updated` | id, by?, status, ref? |
+| `postmortem.started` | id (pm), format, seats |
+| `postmortem.concluded` | id (pm), artifacts (count by kind), flagged (count), record (the `.md` path's blob ref) |
+
+The draft file is the source of truth for at-the-table scopes; for an execution it is rebuilt from these events, so a crash never loses a finding.
+
+## 5. The meeting
+
+**When.** `hold_postmortem(project, execution_id | work, …)` is refused while any finding's fix is `pending`, and, for an execution, while any task with a finding is not terminal (`accepted`, `failed`, `cancelled`). The error names what is still in flight. A draft with no findings is closed with no meeting ("nothing to learn"). For an execution, the watcher wakes the orchestrator with `reason: "postmortem_ready"` when the last pending fix settles, so the host does not need to poll.
+
+**Seats.** Every agent named in any finding's `responsible`, plus every agent that did the original work in the scope (for an execution: every registered non-external agent's persona; for an at-the-table scope: the host passes `participants`), plus the main orchestrator. Each persona is loaded through the normal agent resolution (`src/agents.ts`). Duplicates collapse to one seat.
+
+**The main orchestrator's seat.** The orchestrator is the host chat agent; the server cannot run it as a persona. It takes part through its own words:
+- `opening` (required): the orchestrator's account of what happened, including its own part. It is turn 0 of the meeting.
+- After the meeting's rounds, the tool returns the transcript and the proposed artifacts; the orchestrator closes with `hold_postmortem(action: "conclude", pm, closing, accept[], reject[{id, why}])`. Its closing statement is the final turn of the record, and only accepted artifacts take effect.
+
+**Format.**
+- **waffle-house** when exactly one agent is responsible for every finding (and that agent is not the orchestrator): the responsible agent is the defender; the other seats are the challengers; the orchestrator's opening is the charge. The defender must answer each finding with what it misunderstood or skipped and what rule would have stopped it.
+- **collaborate** otherwise, two rounds by default (`rounds`, 1–4).
+- `format` can force either.
+
+The meeting runs through the existing engines (`startCollaboration` / `continueCollaboration`) with `public: false`, `prototype: false`, and an activity entry with `origin: "postmortem:<pm>"`. Its context is a bounded bundle like `buildContextBundle()`: the findings, the contract summary (or the host's `work` summary), the task cards of affected tasks, and the failing check signatures. It never includes the human's chat, `confirmation` or `original_prompt` verbatim; prompt-misread findings quote the *contract's* `goal` and the relevant task text instead.
+
+**No human seat.** A postmortem session is not addressable by `nudge_collaboration`, `continue_collaboration`, `say` or `say_local`: each refuses a postmortem session id with "postmortem meetings take no outside input". The session is not listed by `list_collaborations`.
+
+**Directive.** Each seat is told: this is blameless about people and strict about mechanisms; every finding needs a cause and a prevention; propose artifacts only in the artifact block (§6). The last turn of the last round must contain the artifact block.
+
+## 6. Artifacts
+
+The meeting ends with an artifact block. Each line is parsed from the turn's own lines (never inside blockquotes or fences, as with huddle directive lines):
+
+```
+Artifact: <kind> | <target> | <finding ids> | <text>
+```
+
+| Kind | Target | Effect when accepted |
+|---|---|---|
+| `fix` | a path or task id | Recorded as a follow-up; nothing is changed automatically. |
+| `rule` | `project` | Added to the project's lessons. Shown to every future plan. |
+| `persona_addendum` | an agent name | Appended to that persona file under `## Postmortem addenda`, through the agent workshop's write path (backup first, same realpath containment, same frontmatter preservation). |
+| `agent_rule` | an agent name | Added to the lessons, scoped to that agent; shown in its task card / meeting persona while it works on this project. |
+| `contract_rule` | `project` | Added to the lessons as a rule every future contract for this project must state; `propose_contract` turns it into a contract `decisions` entry (§7). |
+| `memory` | an agent name | Appended to `projects/<key>/memory/<agent>.md`. With `memory_target: "claude"` the same text is also appended to `<repo>/.claude/agent-memory/<agent>/MEMORY.md`, refused if `.claude` or any parent along the way is a symlink or resolves outside the repository. |
+
+Limits: at most 20 artifacts per postmortem, 600 characters each, targets must name a seat (or `project`), and finding ids must exist. Malformed lines are reported back to the orchestrator as `rejected_lines`, never silently dropped. Persona addenda and memory writes happen only on conclude, only for accepted artifacts, and are audited (`postmortem.applied`, with the target path and the artifact hash).
+
+**Flags.** A finding with category `prompt_misread`, `project_misread` or `contract_ambiguity` is **flagged**: the postmortem records which contract field, task text or prompt phrase was misread and the clearer wording the meeting proposed. Flags are lessons with `flag: true` (§7).
+
+## 7. Reuse before the next plan
+
+`lessons.json` holds every accepted `rule`, `agent_rule`, `contract_rule` and flag, newest first, each with its postmortem id, finding ids and date. Superseded lessons stay with `superseded_by`.
+
+Before a new work plan for a project:
+- `propose_contract` (when `repo_dir` resolves to a project with lessons) adds a `postmortem_lessons` section to its result and the draft contract: every active `contract_rule` becomes a `decisions` entry (`by: "postmortem:<pm>"`), and every flag becomes a warning "Earlier work misread X; state it explicitly" listed in the result's `warnings`. It does not refuse the proposal.
+- `start_ultraplan` with `repo_dir` (new optional argument) appends a bounded "Lessons from past postmortems" section to the planner's context, flags first.
+- Heads-down task cards include the active `agent_rule`s for the card's persona and the project `rule`s, capped at 4 KB, under "Lessons from earlier postmortems".
+- `postmortem(action: "lessons", project)` returns them for any other planning the host does itself.
+
+This happens whether or not postmortem mode is enabled now: lessons that were learned are always read.
+
+## 8. Telling the human
+
+When a postmortem concludes:
+- The tool result says so, gives the record path (`postmortems/<pm>.md`) and a one-paragraph summary to relay.
+- In a heads-down run, `postmortem.concluded` wakes the watcher (`reason: "postmortem"`), the dashboard gains a **Postmortems** page (findings, the full dialogue, artifacts and their status; every string redacted and escaped like the rest of the dashboard), and, with GitHub sync, the parent issue gets one comment with the summary (bodies redacted and neutralized like every other sync comment).
+- `postmortem(action: "read", pm)` returns the full record for the host to show verbatim.
+
+The human can read; there is no route, tool or argument by which their words enter the meeting.
+
+## 9. Tool surface
+
+Two new orchestrator tools (worker servers unchanged), with `additionalProperties: false` and MCP annotations, bringing the orchestrator server to 39 (WS15 adds its own):
+
+| Tool | Arguments |
+|---|---|
+| `postmortem` | action\* (enable, disable, record, fix, draft, lessons, list, read), project, execution_id, work, reason, finding{summary\*, detected_by\*, responsible[]\*, category\*, task, evidence[]}, finding_id, fix{by, status, ref}, pm |
+| `hold_postmortem` | action (hold, the default, or conclude); hold: project\*, execution_id or work, opening\*, participants[], format, rounds, provider, model, base_url, memory_target; conclude: pm\*, closing\*, accept[], reject[{id, why}] |
+
+`hold_postmortem(action: "conclude")` is the closing step of §5; it is one tool with an `action` so the count stays small. README tool table, `docs/tools.md`, and a new `docs/modes/postmortem.md` guide are updated; the README entry stays one table row.
+
+## 10. Security
+
+- Free text in findings, openings, closings and artifacts is scrubbed before any write, event or blob, and redacted again on every dashboard and GitHub surface.
+- Evidence is refs only; the server never copies command output into a finding.
+- Persona and memory writes reuse the workshop's containment and backup path; nothing writes outside allowed agent roots or the project's `.claude/agent-memory`.
+- Context bundles never contain the human's chat, confirmation or original prompt verbatim.
+- New events go through the existing validators; payloads over 8 KB use blobs.
+- `enable` is audited with the human's quoted words; `applied` artifacts are audited with their hash.
+
+## 11. Tests
+
+Unit tests for: project keying and refusal of non-repos; draft record/fix/rebuild from events; automatic findings from rejections (dedupe by signature, fix status transitions); `hold_postmortem` refusals while fixes are pending; seat selection; format choice (waffle-house on a single responsible agent); artifact parsing (fences/blockquotes ignored, limits, bad targets reported); conclude applying only accepted artifacts with backups; lessons fed into `propose_contract`, ultraplan context and task cards; refusal of nudges/says on a postmortem session; watcher wakes; dashboard page escaping; redaction of findings. Provider calls are faked as in the existing collaboration tests.

@@ -49,6 +49,19 @@ export interface TokenUsage {
 
 export type BudgetSource = "worker" | "huddle" | "consent" | "lead" | "structuring";
 
+/**
+ * Where a figure comes from (usage-visibility.md §3): measured by the system that did the work and
+ * read directly, reported by an agent or host we cannot check, or estimated by us (price table,
+ * text length).
+ */
+export type Provenance = "measured" | "reported" | "estimated";
+
+/** Tokens and cost of one call can differ: tokens measured while the cost is priced from the table. */
+export interface UsageProvenance {
+  tokens: Provenance;
+  usd: Provenance;
+}
+
 export interface UsageRecord {
   source: BudgetSource;
   agent?: string;
@@ -59,6 +72,16 @@ export interface UsageRecord {
   usd: number;
   /** True when usd came from the pricing table (or is unknown) rather than a provider-reported cost. */
   estimated: boolean;
+  /**
+   * Added in WS15. Absent on older events, which read as {tokens: "measured", usd: estimated ?
+   * "estimated" : "measured"} (what 1.0 meant); see usageProvenance().
+   */
+  provenance?: UsageProvenance;
+}
+
+/** The provenance of a usage record, with the 1.0 reading for a record that carries none. */
+export function usageProvenance(u: Pick<UsageRecord, "estimated" | "provenance">): UsageProvenance {
+  return u.provenance ?? { tokens: "measured", usd: u.estimated ? "estimated" : "measured" };
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +387,7 @@ export interface EventPayloads {
     agent: string;
     task?: string;
     code: number | null;
-    reason: "completed" | "error" | "killed" | "lost" | "stalled" | "budget" | "attestation";
+    reason: "completed" | "error" | "killed" | "lost" | "stalled" | "budget" | "attestation" | "stopped";
     result_subtype?: string;
     usage?: TokenUsage;
     /**
@@ -374,6 +397,10 @@ export interface EventPayloads {
     paused?: string;
   };
   "agent.left": { agent: string; reason: string };
+  /** Added in WS15: a human (or the orchestrator for a human) asked for one agent to be stopped; the runner applies it. */
+  "agent.stop_requested": { agent: string; by: string; surface: "dashboard" | "cli" | "tool"; reason?: string };
+  /** The stopped agent's exit was recorded; `request` is the id of the agent.stop_requested event, `escalation` the one raised for its task. */
+  "agent.stopped": { agent: string; task?: string; request: string; escalation?: string };
 
   "task.ready": { task: string };
   "task.claimed": { task: string; agent: string; attempt: number; ttl_s: number };
@@ -477,6 +504,7 @@ export const EVENT_TYPES = [
   "contract.frozen", "contract.amended", "contract.superseded",
   "runner.started", "runner.takeover", "runner.stopped",
   "agent.registered", "agent.spawned", "agent.attested", "agent.exited", "agent.left",
+  "agent.stop_requested", "agent.stopped",
   "task.ready", "task.claimed", "task.released", "task.progress", "task.submitted", "task.checks_passed",
   "task.rejected", "task.merged", "task.accepted", "task.blocked", "task.unblocked", "task.retried",
   "task.reassigned", "task.split", "task.failed", "task.cancelled",
@@ -583,12 +611,41 @@ export interface AgentRecord {
   budget_reserved_usd?: number;
   session_id?: string;
   status: "registered" | "running" | "exited" | "left";
+  /** Added in WS15: the latest stop request (agent.stop_requested), settled by agent.stopped. */
+  stop?: { request: string; by: string; surface: "dashboard" | "cli" | "tool"; reason?: string; at: string; seq: number; state: "requested" | "stopped"; escalation?: string };
+}
+
+/** Tokens by class, as the ledger sums them. */
+export interface TokenTotals {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+}
+
+/** A sum split by provenance (US dollars, or tokens). */
+export interface ProvenanceTotals {
+  measured: number;
+  reported: number;
+  estimated: number;
+}
+
+/**
+ * Added in WS15: what one agent has used, by model (usage-visibility.md §4). Spend that names no
+ * agent (huddles, consent rounds, the lead, structuring) is kept under "[<source>]". `tokens_prov`
+ * splits the model's tokens by provenance.
+ */
+export interface AgentUsage {
+  provider?: string;
+  models: Record<string, { tokens: TokenTotals; tokens_prov: ProvenanceTotals; usd: ProvenanceTotals }>;
+  last_at: string;
 }
 
 export interface BudgetLedger {
   spent_usd: number;
   estimated: boolean;
   by_agent: Record<string, number>;
+  by_agent_usage: Record<string, AgentUsage>;
   by_task: Record<string, number>;
   by_team: Record<string, number>;
   thresholds_crossed: number[];

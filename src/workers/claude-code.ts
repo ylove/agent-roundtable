@@ -532,6 +532,7 @@ export class ClaudeCodeDriver implements WorkerDriver {
       tokens: claudeTokens(r.usage) ?? { inputTokens: 0, outputTokens: 0 },
       usd: cost ?? 0,
       estimated: cost === undefined,
+      provenance: { tokens: "measured", usd: cost === undefined ? "estimated" : "measured" },
     };
     return { text: r.result, usage };
   }

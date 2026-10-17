@@ -48,6 +48,7 @@ const VERDICT = "'AGREE'|'OBJECT'|'UNCLEAR'|'EXCUSED'";
 const EMERGENCY = "'money'|'credentials'|'scope'|'human_action'";
 const HUDDLE_FORMAT = "'micro'|'meeting'|'collaborate'|'debate'|'waffle-house'|'conversation'|'replan'|'ultraplan'";
 const RESOLUTION = "'decide'|'huddle'|'retry'|'reassign'|'amend'|'dismiss'|'await_human'";
+const PROVENANCE = "'measured'|'reported'|'estimated'";
 
 const SOURCE: Shape = {
   kind: "'orchestrator'|'agent'|'runner'|'watchdog'|'human'|'system'",
@@ -172,12 +173,14 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
     agent: "s",
     "task?": "id",
     code: "int|null",
-    reason: "'completed'|'error'|'killed'|'lost'|'stalled'|'budget'|'attestation'",
+    reason: "'completed'|'error'|'killed'|'lost'|'stalled'|'budget'|'attestation'|'stopped'",
     "result_subtype?": "s",
     "usage?": TOKENS,
     "paused?": "t",
   },
   "agent.left": { agent: "s", reason: "t" },
+  "agent.stop_requested": { agent: "s", by: "s", surface: "'dashboard'|'cli'|'tool'", "reason?": "t" },
+  "agent.stopped": { agent: "s", "task?": "id", request: "s", "escalation?": "s" },
 
   "task.ready": { task: "id" },
   "task.claimed": { task: "id", agent: "s", attempt: "int", ttl_s: "n" },
@@ -263,6 +266,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
     tokens: TOKENS,
     usd: "n",
     estimated: "b",
+    "provenance?": { tokens: PROVENANCE, usd: PROVENANCE },
   },
   "budget.threshold_crossed": { pct: "n", spent_usd: "n", budget_usd: "n" },
   "budget.exhausted": { scope: "'execution'|'task'|'agent'", "ref?": "s" },

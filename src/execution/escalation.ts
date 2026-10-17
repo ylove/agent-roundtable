@@ -228,6 +228,8 @@ export class UsageMeter {
       tokens,
       usd: estimateUsd(model, tokens, { provider: r.provider }).usd,
       estimated: true,
+      // The provider counted the tokens when it sent usage; the dollars always come from our table.
+      provenance: { tokens: r.usage ? "measured" : "estimated", usd: "estimated" },
     };
   }
 

@@ -28,10 +28,12 @@ import {
   type CheckState,
   type Contract,
   type EventEnvelope,
+  type EventPayloads,
   type EventType,
   type TaskRuntime,
   type TaskSpec,
   type TaskState,
+  usageProvenance,
 } from "./types.js";
 
 /**
@@ -41,8 +43,9 @@ import {
  * 4: blocked_by.needs; task.blocked keeps the other reasons; checks bound to an older submission
  *    are ignored and a bound task.checks_passed for one is refused.
  * 5: worker start identities and budget reservations; bound amendment rechecks while merging.
+ * 6: per-agent, per-model usage with provenance (budget.by_agent_usage); agent.stop_requested / agent.stopped.
  */
-export const REDUCER_VERSION = 5;
+export const REDUCER_VERSION = 6;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -74,7 +77,7 @@ export function initialState(executionId: string): BlackboardState {
     huddles: {},
     agents: {},
     teams: {},
-    budget: { spent_usd: 0, estimated: false, by_agent: {}, by_task: {}, by_team: {}, thresholds_crossed: [], extensions_usd: 0 },
+    budget: { spent_usd: 0, estimated: false, by_agent: {}, by_agent_usage: {}, by_task: {}, by_team: {}, thresholds_crossed: [], extensions_usd: 0 },
     notes: [],
     inbox: {},
     watchdog: { circuits: {}, deadlocks: [] },
@@ -160,6 +163,29 @@ function put<V>(map: Record<string, V>, key: string, value: V): V {
 
 function addUsd(map: Record<string, number>, key: string, usd: number): void {
   put(map, key, (own(map, key) ?? 0) + usd);
+}
+
+const round9 = (n: number): number => Math.round(n * 1e9) / 1e9;
+
+/** budget.by_agent_usage: the record's tokens and money under its agent (else "[<source>]") and model, by provenance. */
+function recordAgentUsage(s: BlackboardState, ts: string, p: EventPayloads["budget.usage_recorded"]): void {
+  const prov = usageProvenance(p);
+  const key = p.agent ?? `[${p.source}]`;
+  const byAgent = (s.budget.by_agent_usage ??= {});
+  const u = own(byAgent, key) ?? put(byAgent, key, { models: {}, last_at: ts });
+  if (p.provider !== undefined) u.provider = p.provider;
+  u.last_at = ts;
+  const zero = () => ({ measured: 0, reported: 0, estimated: 0 });
+  const m =
+    own(u.models, p.model) ??
+    put(u.models, p.model, { tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, tokens_prov: zero(), usd: zero() });
+  const t = p.tokens;
+  m.tokens.input += t.inputTokens;
+  m.tokens.output += t.outputTokens;
+  m.tokens.cache_read += t.cacheReadTokens ?? 0;
+  m.tokens.cache_write += t.cacheWriteTokens ?? 0;
+  m.tokens_prov[prov.tokens] += t.inputTokens + t.outputTokens + (t.cacheReadTokens ?? 0) + (t.cacheWriteTokens ?? 0);
+  m.usd[prov.usd] = round9(m.usd[prov.usd] + p.usd);
 }
 
 const TERMINAL: ReadonlySet<TaskState> = new Set(["accepted", "failed", "cancelled"]);
@@ -388,6 +414,7 @@ const HANDLERS: Handlers = {
     };
     if (p.budget_usd !== undefined) rec.budget_reserved_usd = p.budget_usd;
     else delete rec.budget_reserved_usd;
+    delete rec.stop; // a re-registration (retry, resume) starts a worker the old stop no longer applies to
     if (p.team !== undefined) rec.team = p.team;
     put(s.agents, p.agent, rec);
     if (p.team !== undefined) addMember(s, p.team, p.agent);
@@ -418,6 +445,21 @@ const HANDLERS: Handlers = {
     delete rec.pid;
     delete rec.started;
     delete rec.budget_reserved_usd;
+  },
+
+  /** The latest stop request of a live agent; unknown or finished agents are ignored (the requester refuses those). */
+  "agent.stop_requested": (s, e) => {
+    const p = e.payload;
+    const rec = own(s.agents, p.agent);
+    if (!rec || (rec.status !== "running" && rec.status !== "registered")) return;
+    rec.stop = { request: e.id, by: p.by, surface: p.surface, at: e.ts, seq: e.seq, state: "requested", ...(p.reason !== undefined && { reason: p.reason }) };
+  },
+  /** Settles the request it names. */
+  "agent.stopped": (s, { payload: p }) => {
+    const rec = own(s.agents, p.agent);
+    if (!rec?.stop || rec.stop.request !== p.request) return;
+    rec.stop.state = "stopped";
+    if (p.escalation !== undefined) rec.stop.escalation = p.escalation;
   },
 
   // --- tasks and claims (unknown or terminal tasks are refused; see liveTask) ---
@@ -768,7 +810,8 @@ const HANDLERS: Handlers = {
 
   // --- budget --------------------------------------------------------------
   /** Adds usd to the execution total and to the agent, the task, and the team (the agent's, else the task's). */
-  "budget.usage_recorded": (s, { payload: p }) => {
+  "budget.usage_recorded": (s, e) => {
+    const p = e.payload;
     const b = s.budget;
     b.spent_usd += p.usd;
     if (p.source === "worker" && p.agent !== undefined) {
@@ -776,6 +819,7 @@ const HANDLERS: Handlers = {
       if (agent) delete agent.budget_reserved_usd;
     }
     if (p.estimated) b.estimated = true;
+    recordAgentUsage(s, e.ts, p);
     if (p.agent !== undefined) addUsd(b.by_agent, p.agent, p.usd);
     if (p.task !== undefined) addUsd(b.by_task, p.task, p.usd);
     const team = own(s.agents, p.agent)?.team ?? own(s.tasks, p.task)?.spec.team;

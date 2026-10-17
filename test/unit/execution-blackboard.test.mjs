@@ -479,3 +479,59 @@ test("checks and task.checks_passed bound to an older submission change nothing"
   assert.equal(apply(s, ev("task.checks_passed", { task: "a", commands: ["test"], commit: "c2", submitted_seq: second }), {}, { strict: true }).tasks.a.state, "merging");
   assert.equal(apply(rejected, ev("task.checks_passed", { task: "a", commands: ["test"] })).tasks.a.state, "merging", "an unbound one is unchanged");
 });
+
+test("v6 dissent reducer retains first firing per task and latest advisory score across amendments and replay", async () => {
+  assert.equal(REDUCER_VERSION, 6);
+  const { readFileSync, writeFileSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");
+  const store = await newStore();
+  const spec = { id: "risk", by: "critic", source: { kind: "manual" }, claim: "Risk", predicted_failure: "Failure", tripwire: { kind: "task_state", task: "a", state: "rejected" }, on_fire: "notify" };
+  const contract = makeContract({ dissents: [spec] });
+  const blob = await store.putBlob(JSON.stringify(contract));
+  const source = { kind: "runner", id: "runner", pid: 1 };
+  const emit = (type, payload) => store.transact(() => ({ events: [{ type, payload, source }] }));
+  await emit("contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob });
+  await emit("task.rejected", { task: "a", reasons: ["check failure"] });
+  const rejectionSeq = (await store.state()).tasks.a.rejected_seq;
+  const firing = { dissent_id: "risk", task: "a", tripped_by: "worker", evidence: "first evidence" };
+  await emit("dissent.tripwire_fired", firing);
+  const firedSeq = (await store.state()).seq;
+  await emit("dissent.tripwire_fired", { ...firing, evidence: "duplicate" });
+  await emit("dissent.scored", { dissent_id: "risk", outcome: "vindicated" });
+  await store.writeSnapshot();
+  const snapshot = join(store.dir, "snapshot.json");
+  assert.equal(JSON.parse(readFileSync(snapshot, "utf8")).reducer_version, 6);
+  await emit("dissent.scored", { dissent_id: "risk", outcome: "untested" });
+  const amended = { ...contract, version: 2, dissents: [{ ...spec, claim: "Refined concern" }] };
+  await emit("contract.amended", { contract: CONTRACT_ID, version: 2, patch_blob: "patch", reason: "refine", affected_tasks: [], blob: await store.putBlob(JSON.stringify(amended)) });
+  const state = await store.state();
+  assert.equal(state.tasks.a.rejected_seq, rejectionSeq);
+  assert.deepEqual(state.dissents.risk.fires, { "tripwire:risk:a": { ...firing, seq: firedSeq } });
+  assert.equal(state.dissents.risk.score, "untested");
+  assert.equal(state.dissents.risk.spec.claim, "Refined concern");
+  assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+  // An authentic v5 snapshot must be ignored, even when its state digest is valid.
+  const old = JSON.parse(readFileSync(snapshot, "utf8"));
+  old.reducer_version = 5;
+  delete old.state.dissents;
+  delete old.state.tasks.a.rejected_seq;
+  old.state_sha256 = sha256Hex(canonicalJSON(old.state));
+  writeFileSync(snapshot, JSON.stringify(old));
+  assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+  rmSync(snapshot);
+  assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+});
+
+test("dissent events reject invalid scores and missing evidence and safely reduce prototype-like ids", () => {
+  const source = { kind: "runner", id: "runner", pid: 1 };
+  assert.throws(() => validateDraft({ type: "dissent.scored", source, payload: { dissent_id: "risk", outcome: "trusted" } }), /outcome/);
+  assert.throws(() => validateDraft({ type: "dissent.tripwire_fired", source, payload: { dissent_id: "risk", tripped_by: "worker" } }), /evidence/);
+  const s = reduce([
+    ["dissent.tripwire_fired", { dissent_id: "constructor", tripped_by: "worker", evidence: "failed" }],
+    ["dissent.scored", { dissent_id: "constructor", outcome: "refuted" }],
+  ]);
+  assert.equal(s.dissents.constructor.score, "refuted");
+  assert.equal(Object.keys(s.dissents.constructor.fires).length, 1);
+  assert.deepEqual(s, JSON.parse(JSON.stringify(s)));
+});

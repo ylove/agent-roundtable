@@ -92,6 +92,7 @@ const personaSeat = (persona: string): Seat => ({ seat: agentKey(persona), perso
 /** The raiser: its agent record, else its task's persona. */
 export function requesterSeat(state: Readonly<BlackboardState>, esc: Escalation): Seat | undefined {
   const a = seatOfAgent(state, esc.agent);
+  if (esc.dissent_id) return a ?? personaSeat(esc.agent);
   if (a) return esc.task !== undefined ? { ...a, task: esc.task } : a;
   return seatOfTask(state, esc.task);
 }
@@ -103,7 +104,7 @@ export function requesterSeat(state: Readonly<BlackboardState>, esc: Escalation)
  */
 export function counterpartSeat(state: Readonly<BlackboardState>, esc: Escalation, diag?: Pick<Diagnostics, "files">): Seat | undefined {
   const other = (s: Seat | undefined): Seat | undefined =>
-    s && (s.agent === undefined || s.agent !== esc.agent) && (s.task === undefined || s.task !== esc.task) ? s : undefined;
+    s && (s.agent === undefined || s.agent !== esc.agent) && (esc.dissent_id !== undefined || s.task === undefined || s.task !== esc.task) ? s : undefined;
   const t = esc.target;
   if (t) {
     const found = other(seatOfAgent(state, t)) ?? other(seatOfTask(state, t));
@@ -118,6 +119,7 @@ export function counterpartSeat(state: Readonly<BlackboardState>, esc: Escalatio
     if (owner) return owner;
     const byPersona = Object.values(state.agents).find((r) => r.persona === t && r.id !== esc.agent);
     if (byPersona) return other(seatOfAgent(state, byPersona.id));
+    if (esc.dissent_id && t !== esc.agent) return personaSeat(t);
   }
   for (const l of leasesInQuestion(state, esc, diag)) {
     const s = other(seatOfAgent(state, l.agent)) ?? other(seatOfTask(state, l.task));
@@ -229,7 +231,8 @@ export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOpt
     await routeToOrchestrator(ctx, id, { expect: o.expect, source: actorSource(o.actor) });
     return [];
   };
-  if (!req || !cp || remainingUsd(state) <= 0) return routeAway();
+  const budgetScope = esc.dissent_id ? { task: esc.task, agent: esc.agent } : {};
+  if (!req || !cp || remainingUsd(state, budgetScope) <= 0) return routeAway();
   const to = await scopeOrchestrator(state, esc, diag);
   const source = actorSource(o.actor);
   const hud = newId("hud");
@@ -258,7 +261,7 @@ export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOpt
     const rec = liveWorkerRecord(ctx, state, cp, o.alive ?? defaultAlive);
     if (rec) {
       // Within what is left of the run (other workers' reservations included), never above the fixed cap.
-      const capUsd = Math.min(MICRO_ANSWER_USD, remainingUsd(state));
+      const capUsd = Math.min(MICRO_ANSWER_USD, remainingUsd(state, budgetScope));
       const r = await meter.run(() => ctx.driver!.answer!(rec, `${ANSWER_INTRO}\n\n${turn0}`, capUsd));
       meter.add(r.usage);
       answer = r.text;

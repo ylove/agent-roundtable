@@ -5,10 +5,10 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { LLMProvider } from "../config.js";
 import { amendContract, fileDissent, freezeContract, proposeContract, type ContractResult } from "../execution/contract-lifecycle.js";
-import { openContractStore, describeConsent } from "../execution/contract-state.js";
+import { openContractStore, describeConsent, orchestratorSource } from "../execution/contract-state.js";
 import { renderContractMarkdown } from "../execution/contract.js";
 import { truncate } from "../sessions/workshop.js";
-import { AMEND_CONTRACT, FILE_DISSENT, FREEZE_CONTRACT, PROPOSE_CONTRACT } from "./names.js";
+import { AMEND_CONTRACT, FILE_DISSENT, FREEZE_CONTRACT, PROPOSE_CONTRACT, SCORE_DISSENT } from "./names.js";
 import { ORCHESTRATOR_ONLY, PROVIDER_PROPS, validateProviderOptions, type ToolArgs, type ToolCallContext, type ToolDefinition } from "./shared.js";
 import { resolveWorkerActor } from "./worker.js";
 
@@ -54,6 +54,21 @@ const DISSENT_PROPS = {
 } as const;
 
 export const contractTools: ToolDefinition[] = [
+  {
+    name: SCORE_DISSENT,
+    modes: ORCHESTRATOR_ONLY,
+    annotations: { title: "Score dissent", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: "Record or revise an advisory dissent outcome on a frozen contract. Only its orchestrator may score. Scores are display-only and never weight votes or consent.",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        contract_id: CONTRACT_ID, orchestrator: ORCHESTRATOR,
+        dissent_id: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" },
+        outcome: { type: "string", enum: ["vindicated", "refuted", "untested"] },
+      },
+      required: ["contract_id", "orchestrator", "dissent_id", "outcome"],
+    },
+  },
   {
     name: FILE_DISSENT,
     modes: ["orchestrator", "worker"],
@@ -206,6 +221,19 @@ export async function handleContractTool(name: string, args: ToolArgs, ctx: Tool
   const a = (args ?? {}) as Record<string, unknown>;
   let result: ContractResult;
   switch (name) {
+    case SCORE_DISSENT: {
+      if (ctx.mode !== "orchestrator") throw new Error("only an orchestrator may score a dissent");
+      const store = await openContractStore(a.contract_id as string);
+      await store.transact(({ state }) => {
+        const c = state.contract;
+        if (!c || c.id !== a.contract_id || c.status !== "frozen") throw new Error("scoring requires a frozen contract");
+        if (c.scope.orchestrator !== a.orchestrator) throw new Error("only the contract's orchestrator may score a dissent");
+        if (!(c.dissents ?? []).some((d) => d.id === a.dissent_id)) throw new Error("unknown dissent id");
+        return { events: [{ type: "dissent.scored", source: orchestratorSource(a.orchestrator as string),
+          payload: { dissent_id: a.dissent_id as string, outcome: a.outcome as "vindicated" | "refuted" | "untested" } }] };
+      });
+      return { content: [{ type: "text", text: JSON.stringify({ dissent_id: a.dissent_id, outcome: a.outcome, advisory: true }) }] };
+    }
     case FILE_DISSENT: {
       const id = a.contract_id as string;
       const asAgent = ctx.mode === "worker" || a.agent_token !== undefined || a.execution_id !== undefined;

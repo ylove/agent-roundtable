@@ -108,6 +108,7 @@ const LEASE_REQUEST: Shape = {
 const DECISION: Shape = { id: "s", scope: "s", text: "t", "rationale?": "t", by: "s", "supersedes?": "s" };
 const ESCALATION: Shape = {
   id: "s",
+  "dissent_id?": "id",
   "task?": "id",
   agent: "s",
   kind: "'blocker'|'ambiguity'|'resource'|'conflict'|'assistance'|'emergency'",
@@ -238,6 +239,8 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "decision.recorded": { decision: DECISION },
   "directive.issued": { id: "s", to: "s[]", text: "t", requires_ack: "b" },
   "directive.acknowledged": { id: "s", agent: "s" },
+  "dissent.tripwire_fired": { dissent_id: "id", "task?": "id", tripped_by: "s", evidence: "t" },
+  "dissent.scored": { dissent_id: "id", outcome: "'vindicated'|'refuted'|'untested'" },
 
   "escalation.raised": { escalation: ESCALATION },
   "escalation.routed": { id: "s", to: "s", "format?": HUDDLE_FORMAT, wake: "b" },

@@ -41,8 +41,9 @@ import {
  * 4: blocked_by.needs; task.blocked keeps the other reasons; checks bound to an older submission
  *    are ignored and a bound task.checks_passed for one is refused.
  * 5: worker start identities and budget reservations; bound amendment rechecks while merging.
+ * 6: dissent firings and advisory scores; retained task rejection evidence.
  */
-export const REDUCER_VERSION = 5;
+export const REDUCER_VERSION = 6;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -63,6 +64,7 @@ export function initialState(executionId: string): BlackboardState {
     paused_tasks: [],
     interfaces: {},
     decisions: [],
+    dissents: {},
     tasks: {},
     claims: {},
     leases: {},
@@ -250,6 +252,10 @@ function addMember(s: BlackboardState, team: string, agent: string): void {
 function adoptContract(s: BlackboardState, c: Contract): void {
   s.contract = c;
   s.goal = clone(c.goal);
+  for (const d of c.dissents ?? []) {
+    const rec = own(s.dissents, d.id) ?? put(s.dissents, d.id, { fires: {} });
+    rec.spec = clone(d);
+  }
   for (const t of c.teams) {
     const team = own(s.teams, t.id) ?? put(s.teams, t.id, { members: [] });
     for (const m of t.members) if (!team.members.includes(m)) team.members.push(m);
@@ -501,6 +507,7 @@ const HANDLERS: Handlers = {
     if (!rt) return;
     rt.state = own(s.claims, p.task) ? "in_progress" : "ready";
     rt.last_note = p.reasons.join("; ");
+    rt.rejected_seq = e.seq;
   },
   /** Accepted (claim dropped, files merged); integration streaks reset; dependents whose deps are all accepted become ready. */
   "task.merged": (s, e, x) => {
@@ -713,6 +720,18 @@ const HANDLERS: Handlers = {
     for (const item of own(s.inbox, p.agent) ?? []) {
       if (item.kind === "directive" && item.id === p.id && item.requires_ack) item.requires_ack = false;
     }
+  },
+
+  "dissent.tripwire_fired": (s, e) => {
+    const p = e.payload;
+    const rec = own(s.dissents, p.dissent_id) ?? put(s.dissents, p.dissent_id, { fires: {} });
+    const key = `tripwire:${p.dissent_id}:${p.task ?? ""}`;
+    if (!own(rec.fires, key)) put(rec.fires, key, { ...clone(p), seq: e.seq });
+  },
+  "dissent.scored": (s, e) => {
+    const rec = own(s.dissents, e.payload.dissent_id) ?? put(s.dissents, e.payload.dissent_id, { fires: {} });
+    rec.score = e.payload.outcome;
+    rec.scored_seq = e.seq;
   },
 
   // --- escalations and huddles -----------------------------------------------

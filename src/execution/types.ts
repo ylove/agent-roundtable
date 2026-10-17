@@ -254,6 +254,8 @@ export interface TaskRuntime {
   last_commit?: string;
   submitted_seq?: number;
   accepted_seq?: number;
+  /** Latest rejection, retained because rejection immediately returns the task to work. */
+  rejected_seq?: number;
   /**
    * Why a blocked task waits. needs (added in WS07) are its open interface and artifact needs:
    * dependency.requested adds one, dependency.satisfied removes it. Task needs are in deps.
@@ -292,6 +294,8 @@ export interface EscalationDiagnostics {
 
 export interface Escalation {
   id: string;
+  /** Dissent requester identity is independent of the affected task. */
+  dissent_id?: string;
   task?: string;
   agent: string;
   kind: EscalationKind;
@@ -458,6 +462,8 @@ export interface EventPayloads {
   "decision.recorded": { decision: Decision };
   "directive.issued": { id: string; to: string[]; text: string; requires_ack: boolean };
   "directive.acknowledged": { id: string; agent: string };
+  "dissent.tripwire_fired": { dissent_id: string; task?: string; tripped_by: string; evidence: string };
+  "dissent.scored": { dissent_id: string; outcome: "vindicated" | "refuted" | "untested" };
 
   "escalation.raised": { escalation: Escalation };
   "escalation.routed": { id: string; to: string; format?: HuddleFormat; wake: boolean };
@@ -504,6 +510,7 @@ export const EVENT_TYPES = [
   "check.started", "check.passed", "check.failed", "check.timed_out",
   "command.completed",
   "merge.succeeded", "merge.conflicted",
+  "dissent.tripwire_fired", "dissent.scored",
   "note.posted", "decision.recorded", "directive.issued", "directive.acknowledged",
   "escalation.raised", "escalation.routed", "escalation.auto_resolved", "escalation.resolved",
   "escalation.awaiting_human", "escalation.withdrawn",
@@ -619,6 +626,15 @@ export interface BudgetLedger {
   extensions_usd: number;
 }
 
+export interface DissentRuntime {
+  spec?: Dissent;
+  /** Deterministic tripwire keys retain every firing, including across amendments. */
+  fires: Record<string, EventPayloads["dissent.tripwire_fired"] & { seq: number }>;
+  /** Advisory only; never an input to consent or vote weighting. */
+  score?: EventPayloads["dissent.scored"]["outcome"];
+  scored_seq?: number;
+}
+
 export interface BlackboardState {
   execution: string;
   seq: number;
@@ -629,6 +645,7 @@ export interface BlackboardState {
   goal?: Contract["goal"];
   interfaces: Record<string, { spec?: InterfaceSpec; version: number; path?: string; blob?: string; task?: string }>;
   decisions: Decision[];
+  dissents: Record<string, DissentRuntime>;
   tasks: Record<string, TaskRuntime>;
   claims: Record<string, Claim>;
   leases: Record<string, Lease>;

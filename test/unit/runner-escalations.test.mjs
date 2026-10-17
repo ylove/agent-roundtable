@@ -4,7 +4,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeRun, nodeCommand, task } from "../fixtures/workers/run.mjs";
-import { cli, fakeClaude, killFakes, localSandboxSkip, ofType, provider, RUNNER_ENV, startRunner, waitFor } from "../fixtures/runner/harness.mjs";
+import { createServer } from "node:net";
+
+// The process harness starts a provider listener. Keep hook-only smoke tests runnable offline.
+const canListen = await new Promise((resolve) => {
+  const probe = createServer();
+  probe.once("error", (err) => {
+    if (err.code === "EPERM" || err.code === "EACCES") resolve(false);
+    else throw err;
+  });
+  probe.listen(0, "127.0.0.1", () => probe.close(() => resolve(true)));
+});
+const { cli, fakeClaude, killFakes, localSandboxSkip, provider, RUNNER_ENV, startRunner, waitFor } =
+  canListen ? await import("../fixtures/runner/harness.mjs") : {};
+const ofType = (events, type) => events.filter((e) => e.type === type);
 import { json, stubFetch } from "./helpers.mjs";
 
 const { handleToolCall } = await import("../../dist/tools.js");
@@ -13,7 +26,7 @@ const { AUDIT_DIR } = await import("../../dist/config.js");
 const { readdirSync, readFileSync, existsSync } = await import("node:fs");
 const { join } = await import("node:path");
 
-const skip = localSandboxSkip();
+const skip = canListen ? localSandboxSkip() : "localhost listeners are unavailable in this sandbox";
 
 const ESCALATE = { kind: "ambiguity", with: "orchestrator", summary: "REST or GraphQL for the API?", question: "Which API style should task a use?", blocking: true };
 const oneTask = () => ({
@@ -118,3 +131,86 @@ test("with no watcher alive, the lead fallback runs after the grace period and d
   assert.equal(decision.details.applied, "decide");
   assert.ok(fake.launches("w-a").length >= 2, "the worker ran again after the lead's decision");
 });
+
+const { createRunnerHooks } = await import("../../dist/execution/escalation.js");
+const { actionsToDrafts, evaluate, escalationId } = await import("../../dist/execution/watchdog.js");
+const { openExecutionStore } = await import("../../dist/execution/store.js");
+const { writeFileSync, rmSync } = await import("node:fs");
+const { tmpdir } = await import("node:os");
+const { mkdtempSync } = await import("node:fs");
+
+for (const funded of [true, false]) {
+  test(`runner dissent smoke: check failure delivers inbox and ${funded ? "huddle transcript plus tripper resume" : "budget fallback wake"}`, async (t) => {
+    const personas = mkdtempSync(join(tmpdir(), "rt-dissent-personas-"));
+    const critic = join(personas, "critic.md");
+    const builder = join(personas, "builder.md");
+    for (const [file, name] of [[critic, "critic"], [builder, "builder"]]) writeFileSync(file, `---\nname: ${name}\ndescription: Test persona\n---\nYou are ${name}.\n`);
+    const oldPaths = process.env.ROUNDTABLE_AGENT_PATHS;
+    process.env.ROUNDTABLE_AGENT_PATHS = `${oldPaths}:${personas}`;
+    const run = await makeRun({ contract: {
+      tasks: [task("a", { persona: builder })],
+      dissents: [{ id: "check-risk", by: critic, source: { kind: "manual" }, claim: "The unit check will fail", predicted_failure: "Regression", tripwire: { kind: "check_failed", check: "unit", task: "a" }, on_fire: "pause_and_huddle" }],
+      validation: { commands: [nodeCommand("unit", "process.exit(1)")], final: [] },
+    } });
+    t.after(() => {
+      process.env.ROUNDTABLE_AGENT_PATHS = oldPaths;
+      rmSync(personas, { recursive: true, force: true });
+      rmSync(run.root, { recursive: true, force: true });
+    });
+    const source = { kind: "runner", id: "runner", pid: process.pid };
+    const events = [
+      { type: "agent.registered", source, payload: { agent: "tripper", persona: builder, driver: "claude-code", external: false, token_sha256: "a".repeat(64) } },
+      { type: "task.claimed", source, payload: { task: "a", agent: "tripper", attempt: 1, ttl_s: 0 } },
+      { type: "check.failed", source, payload: { task: "a", scope: "task", command_id: "unit", exit: 1, signature: "regression" } },
+    ];
+    if (!funded) events.push({ type: "budget.usage_recorded", source, payload: { source: "worker", model: "test", tokens: { inputTokens: 0, outputTokens: 0 }, usd: run.contract.budget.usd, estimated: false } });
+    await run.store.transact(() => ({ events }));
+    await run.store.transact(({ state }) => ({ events: actionsToDrafts(evaluate(state, Date.now()).filter((a) => a.rule === "dissent_tripwire")) }));
+    // Reopen to exercise the runner's recovery path from the durable log.
+    const store = await openExecutionStore(run.store.id);
+    let state = await store.state();
+    const id = escalationId("tripwire:check-risk:a");
+    assert.equal(ofType(await store.events(), "dissent.tripwire_fired").length, 1);
+    assert.equal(state.inbox[critic].length, 1);
+    assert.match(state.inbox[critic][0].text, /Claim:\nThe unit check will fail/);
+    const calls = stubFetch(t, async (_url, init, index) => {
+      assert.ok(funded, "no provider call without budget");
+      const body = JSON.parse(init.body);
+      assert.match(body.messages[0].content, /You are critic/);
+      assert.equal(index, 0, "only the dissenter's conclusion uses a persona call");
+      return json(200, { model: body.model, choices: [{ message: { content: "Outcome: AGREED\nDecision: Repair the check failure" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    });
+    let answers = 0;
+    const hooks = createRunnerHooks({ llm: { provider: "openai_compatible", model: "gpt-4o-mini", baseUrl: "http://localhost:4141/v1" } });
+    const ctx = {
+      execution: store.id, store, header: store.header(), source, log() {},
+      worker: (agent) => agent === "tripper" ? { driver: "claude-code" } : undefined,
+      driver: () => ({ id: "claude-code", answer: async (_worker, prompt, cap) => {
+        answers++;
+        assert.match(prompt, /The unit check will fail/);
+        assert.ok(cap > 0 && cap <= 0.5);
+        return { text: "I will repair the regression" };
+      } }),
+    };
+    const ops = await hooks.escalationRouter(ctx, state.escalations[id]);
+    state = await store.state();
+    if (funded) {
+      assert.equal(answers, 1);
+      assert.equal(calls.length, 1);
+      const turns = ofType(await store.events(), "huddle.turn");
+      assert.deepEqual(turns.map((e) => e.payload.seat), ["critic", "tripper", "critic"]);
+      const transcript = await Promise.all(turns.map(async (e) => (await store.getBlob(e.payload.blob)).toString("utf8")));
+      assert.match(transcript.join("\n"), /Claim:\nThe unit check will fail/);
+      assert.match(transcript[2], /Outcome: AGREED/);
+      assert.equal(state.tasks.a.state, "in_progress");
+      assert.deepEqual(ops.map((op) => [op.type, op.task, op.agent]), [["resume_worker", "a", "tripper"]]);
+    } else {
+      assert.equal(answers, 0);
+      assert.equal(calls.length, 0);
+      assert.equal(state.tasks.a.state, "claimed");
+      assert.equal(state.escalations[id].routed_to, "main");
+      assert.equal(ofType(await store.events(), "escalation.routed")[0].payload.wake, true);
+    }
+    assert.equal(evaluate(state, Date.now()).filter((a) => a.rule === "dissent_tripwire").length, 0);
+  });
+}

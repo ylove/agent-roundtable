@@ -456,7 +456,16 @@ export async function commitResolution(store: ExecutionStore, id: string, plan: 
     if (plan.directive && to.length) {
       events.push(ev("directive.issued", { id: newId("dir"), to, text: cap(plan.directive, DECISION_MAX + 500), requires_ack: false }, src, id));
     }
-    if (plan.unblock !== false && wasBlocked) events.push(ev("task.unblocked", { task: e.task! }, src, id));
+    if (plan.unblock !== false && wasBlocked) {
+      // Concurrent pause tripwires keep the task blocked until every huddle is resolved.
+      const pending = Object.values(state.escalations).find((other) =>
+        other.id !== e.id && other.task === e.task && other.blocking && UNRESOLVED.includes(other.status) &&
+        (e.dissent_id !== undefined || other.dissent_id !== undefined));
+      if (pending) {
+        events.push(ev("task.blocked", { task: e.task!, escalation: pending.id }, src, id));
+        wasBlocked = false; // this resolution does not yet owe the worker a resume
+      } else events.push(ev("task.unblocked", { task: e.task! }, src, id));
+    }
     const paused = await pausedBy(store, state, id);
     if (paused.length) events.push(ev("execution.resumed", { scope: paused, reason: `escalation ${id} was resolved` }, src, id));
     return events;

@@ -59,6 +59,7 @@ export const PROPOSE_CONTRACT = "propose_contract";
 export const AMEND_CONTRACT = "amend_contract";
 export const FREEZE_CONTRACT = "freeze_contract";
 export const FILE_DISSENT = "file_dissent";
+export const SCORE_DISSENT = "score_dissent";
 
 // Run (orchestrator server only)
 export const EXECUTE = "execute";

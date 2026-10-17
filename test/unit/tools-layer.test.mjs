@@ -9,7 +9,7 @@ const HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHi
 const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
 test("every tool has a title and all four MCP hints", () => {
-  assert.equal(tools.length, 38, "22 at the table, 4 contract tools, join_execution, the 7 execution tools and the 4 run tools");
+  assert.equal(tools.length, 39, "22 at the table, 5 contract tools, join_execution, the 7 execution tools and the 4 run tools");
   assert.equal(toolsFor("worker").length, 8);
   for (const tool of tools) {
     assert.equal(typeof tool.annotations?.title, "string", tool.name);
@@ -75,7 +75,7 @@ test("a tool not offered in a mode is unknown there", async () => {
 
 test("contract tools: mode access, strict schemas, and annotations that match what they do", async () => {
   const { contractTools } = await import("../../dist/tools/contract.js");
-  assert.deepEqual(contractTools.map((d) => d.name), [names.FILE_DISSENT, names.PROPOSE_CONTRACT, names.AMEND_CONTRACT, names.FREEZE_CONTRACT]);
+  assert.deepEqual(contractTools.map((d) => d.name), [names.SCORE_DISSENT, names.FILE_DISSENT, names.PROPOSE_CONTRACT, names.AMEND_CONTRACT, names.FREEZE_CONTRACT]);
   for (const def of contractTools) {
     assert.deepEqual([...def.modes], def.name === names.FILE_DISSENT ? ["orchestrator", "worker"] : ["orchestrator"], def.name);
     assert.equal(def.inputSchema.additionalProperties, false, def.name);

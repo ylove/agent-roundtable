@@ -14,6 +14,11 @@ export type Style = "words" | "abbr";
 export const WORDS: Record<Provenance, string> = { measured: "measured", reported: "reported", estimated: "estimated" };
 export const ABBR: Record<Provenance, string> = { measured: "meas", reported: "rep", estimated: "est" };
 
+/** What a model that costs nothing (a local one) shows instead of a price. */
+export const FREE_LABEL = "free (local model)";
+/** What a model whose price is unknown shows: its tokens, and this. */
+export const NO_PRICE_LABEL = "no price";
+
 /** One-sentence meanings, for legends and help text. */
 export const MEANING: Record<Provenance, string> = {
   measured: "counted by whoever did the work and read directly",
@@ -81,6 +86,7 @@ export function useText(money: Money, tokens: Tokens, style: Style = "words"): s
   const known = money.measured + money.reported > 0;
   if (!known && tokenTotal(tokens) > 0) parts.push(tokenParts(tokens, style).join(" + "));
   if (moneyTotal(money) > 0) parts.push(moneyText(money, style));
-  else if (tokenTotal(tokens) > 0) parts.push("no price");
+  else if (money.free) parts.push(`${usd(0)} ${FREE_LABEL}`);
+  else if (tokenTotal(tokens) > 0 || money.unpriced) parts.push(NO_PRICE_LABEL);
   return parts.length ? parts.join(" ") : "no usage yet";
 }

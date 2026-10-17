@@ -96,7 +96,10 @@ function fold(u: AgentUsage | undefined, fallbackProvider?: string): { tokens: T
     }
     models.push([name, m.usd.measured + m.usd.reported + m.usd.estimated + (m.tokens.input + m.tokens.output) / 1e12]);
   }
-  if (tokenTotal(tokens) > 0 && moneyTotal(money) === 0 && !isFreeProvider(u?.provider ?? fallbackProvider)) money.unpriced = true;
+  if (tokenTotal(tokens) > 0 && moneyTotal(money) === 0) {
+    if (isFreeProvider(u?.provider ?? fallbackProvider)) money.free = true;
+    else money.unpriced = true;
+  }
   return { tokens, money, models: models.sort((a, b) => b[1] - a[1]).map(([n]) => n) };
 }
 
@@ -216,7 +219,10 @@ function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string
   for (const e of byKey.values()) {
     const l = liveSessions.get(e.session);
     const wasStopped = stopped.has(e.session);
-    if (tokenTotal(e.tokens) > 0 && moneyTotal(e.money) === 0 && !e.priced && !isFreeProvider(e.provider)) e.money.unpriced = true;
+    if (tokenTotal(e.tokens) > 0 && moneyTotal(e.money) === 0) {
+      if (isFreeProvider(e.provider)) e.money.free = true;
+      else if (!e.priced) e.money.unpriced = true;
+    }
     const models = [...e.models].sort((a, b) => b[1] - a[1]).map(([m]) => m);
     const stoppable = !!l && !wasStopped && ["meeting", "local-meeting", "collaboration", "ultraplan"].includes(e.kind);
     const stopping = pending.has(e.session);
@@ -258,9 +264,7 @@ export function rollup(agents: readonly UsageAgent[]): { totals: Money & { token
     mergeTokens(p.tokens, a.tokens);
     mergeMoney(p.money, a.money);
   }
-  if (tokenTotal(totals.tokens) > 0 && moneyTotal(totals) === 0) totals.unpriced = true;
   const platforms = [...byProvider.values()].sort((a, b) => moneyTotal(b.money) - moneyTotal(a.money) || (a.provider < b.provider ? -1 : 1));
-  for (const p of platforms) if (tokenTotal(p.tokens) > 0 && moneyTotal(p.money) === 0 && !isFreeProvider(p.provider)) p.money.unpriced = true;
   return { totals, platforms };
 }
 

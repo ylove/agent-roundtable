@@ -13,7 +13,7 @@
 
 import { createHash } from "node:crypto";
 import { escapeHtml } from "../http/secure-server.js";
-import { MEANING, moneyParts, tokensShort, usd, usdBudget } from "../usage/format.js";
+import { FREE_LABEL, MEANING, moneyParts, NO_PRICE_LABEL, tokensShort, usd, usdBudget } from "../usage/format.js";
 import { moneyTotal, tokenTotal, type Money, type Provenance, type Tokens, type UsageAgent, type UsageView } from "../usage/types.js";
 import { frame, t, tc, type PageContext } from "./render.js";
 
@@ -72,7 +72,8 @@ function moneyHtml(m: Money, tokens: Tokens): string {
     parts.push(`<span class="amt">${p === "estimated" ? "≈" : ""}${escapeHtml(usd(m[p]))}</span> ${chip(p)}`);
   }
   if (parts.length) return parts.join(` <span class="plus">+</span> `);
-  return m.unpriced ? `<span class="amt">no price</span> <span class="chip prov-none">tokens only</span>` : `<span class="amt">${escapeHtml(usd(0))}</span>`;
+  if (m.free) return `<span class="amt">${escapeHtml(usd(0))}</span> <span class="chip prov-none">${escapeHtml(FREE_LABEL)}</span>`;
+  return m.unpriced ? `<span class="amt">${NO_PRICE_LABEL}</span> <span class="chip prov-none">tokens only</span>` : `<span class="amt">${escapeHtml(usd(0))}</span>`;
 }
 
 function tokensHtml(tk: Tokens): string {
@@ -123,7 +124,7 @@ function card(a: UsageAgent, series: SpendSeries, budget: number | undefined): s
     `<div class="tokens">${tokensHtml(a.tokens)}</div>` +
     (share !== undefined && budget
       ? `<div class="share"><progress max="100" value="${share}" aria-label="Share of the budget">${shareText}</progress><span>${shareText} of the budget</span></div>`
-      : `<div class="share none"><span class="empty">${unpriced ? "No price is known for this model, so it has no share of the budget" : "Its share of the budget appears with its first spend"}</span></div>`) +
+      : `<div class="share none"><span class="empty">${a.money.free ? "A local model costs nothing, so it has no share of the budget" : unpriced ? "No price is known for this model, so it has no share of the budget" : "Its share of the budget appears with its first spend"}</span></div>`) +
     sparkline(points, `${name}: spend over time`) +
     `<div class="card-foot"><span class="note">${note}</span>${stopControl(a)}</div>` +
     `</li>`

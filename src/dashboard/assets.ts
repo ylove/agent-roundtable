@@ -52,7 +52,7 @@ a:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid var
 .hero-split{display:inline-flex;flex-wrap:wrap;align-items:center;gap:4px 8px}.hero progress{max-width:420px;display:block;margin:6px 0 12px}
 .plus{color:var(--muted)}.amt{font-weight:600;font-variant-numeric:tabular-nums}
 .chip{display:inline-block;font-size:.78rem;line-height:1.5;padding:0 8px;border-radius:999px;border:1px solid var(--line);color:var(--fg);background:var(--chip-bg);white-space:nowrap}
-.chip.platform{color:var(--muted);background:transparent;white-space:normal;overflow-wrap:anywhere;border-radius:10px;line-height:1.35;padding:1px 8px}
+.chip.platform{color:var(--muted);background:transparent;white-space:normal;overflow-wrap:break-word;min-width:0;border-radius:10px;line-height:1.35;padding:1px 8px}
 .prov-measured{color:var(--meas-fg);background:var(--meas-bg);border-color:var(--meas-line)}
 .prov-reported{color:var(--rep-fg);background:var(--rep-bg);border-color:var(--rep-line)}
 .prov-estimated{color:var(--est-fg);background:var(--est-bg);border:1px dashed var(--est-line)}

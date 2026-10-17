@@ -325,3 +325,42 @@ test("the dashboard script: a native dialog, the custom header, textContent only
   assert.match(css, /max-width:480px/);
   assert.doesNotMatch(css, /@import|url\(http/);
 });
+
+test("a free local model and a model with no known price read the same on every surface", async (t) => {
+  const { store } = await frozenRun();
+  for (const [agent, task, provider, model] of [["w-free", "a", "ollama", "llama3"], ["w-unk", "b", "provider-b", "mystery-model"]]) {
+    await emit(store, "agent.registered", { agent, persona: "dev", driver: "claude-code", token_sha256: "t" + agent, external: false });
+    await emit(store, "agent.spawned", { agent, task, attempt: 1, pid: process.pid });
+    await emit(store, "budget.usage_recorded", usage({ agent, task, provider, model, usd: 0, estimated: true, provenance: { tokens: "measured", usd: "estimated" } }));
+  }
+  const { collectUsage } = await import("../../dist/usage/model.js");
+  const { renderReport } = await import("../../dist/usage/report.js");
+  const { renderStatusline } = await import("../../dist/usage/statusline.js");
+  const { useText, FREE_LABEL, NO_PRICE_LABEL } = await import("../../dist/usage/format.js");
+  const { buildRunHandoff } = await import("../../dist/usage/handoff.js");
+  const dash = await startDashboard(store.id, { store });
+  t.after(() => dash.close());
+  const view = await collectUsage({ executions: [store.id], table: false });
+  const free = view.agents.find((a) => a.id === "w-free");
+  const unk = view.agents.find((a) => a.id === "w-unk");
+  assert.equal(free.money.free, true);
+  assert.equal(unk.money.unpriced, true);
+  assert.equal(FREE_LABEL, "free (local model)");
+  // The shared rule.
+  assert.match(useText(free.money, free.tokens, "words"), /\$0\.00 free \(local model\)$/);
+  assert.match(useText(unk.money, unk.tokens, "abbr"), /no price$/);
+  // The report, the status line and the dashboard use it.
+  const report = renderReport(view, { color: false, cols: 100 });
+  assert.match(report, /\$0\.00 free \(local model\)/);
+  assert.match(report, /tok measured no price/);
+  const line3 = renderStatusline(view, {}, { host: false, agents: 4, color: false, cols: 200 }).join("\n");
+  assert.match(line3, /w-free .*\$0\.00 free \(local model\) \[ollama\]/);
+  assert.match(line3, /w-unk .*no price \[provider-b\]/);
+  const page = (await send(`${dash.url}usage`)).body;
+  assert.match(page, /<span class="amt">\$0\.00<\/span> <span class="chip prov-none">free \(local model\)<\/span>/);
+  assert.match(page, new RegExp(`<span class="amt">${NO_PRICE_LABEL}</span> <span class="chip prov-none">tokens only</span>`));
+  assert.match(page, /A local model costs nothing, so it has no share of the budget/);
+  assert.match(page, /No price is known for this model, so it has no share of the budget/);
+  // The handoff speaks the same words for the whole run.
+  assert.match(buildRunHandoff(await store.state()), /no price known for the models used/);
+});

@@ -27,9 +27,13 @@ export interface Tokens {
   by: ProvenanceTotals;
 }
 
-/** US dollars by provenance. `unpriced` is set when tokens were used but no cost is known for them. */
+/**
+ * US dollars by provenance. With no money and tokens used, either `free` (a local model: a known price of
+ * zero) or `unpriced` (no price is known); every surface words these the same way (format.ts).
+ */
 export interface Money extends ProvenanceTotals {
   unpriced?: true;
+  free?: true;
 }
 
 export type Where = "heads-down" | "at-the-table" | "host";
@@ -144,8 +148,13 @@ export function addMoney(into: Money, usd: number, prov: Provenance): void {
 
 export function mergeMoney(into: Money, add: Money): void {
   for (const p of PROVENANCES) into[p] = round9(into[p] + add[p]);
-  if (add.unpriced && moneyTotal(into) === 0) into.unpriced = true;
-  else if (moneyTotal(into) > 0) delete into.unpriced;
+  if (moneyTotal(into) > 0) {
+    delete into.unpriced;
+    delete into.free;
+  } else if (add.unpriced || into.unpriced) {
+    into.unpriced = true; // one unknown price makes the sum unknown
+    delete into.free;
+  } else if (add.free || into.free) into.free = true;
 }
 
 /** Plain-data clamp of a number read from a file: finite, non-negative. */

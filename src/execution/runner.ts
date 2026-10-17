@@ -1697,7 +1697,8 @@ export class Runner {
         task, reasons: ["Submission checks were interrupted by process loss; submit again to rerun checks of the committed work."],
       } });
     }
-    this.say(`${agent} on ${task} is gone${wipCommit ? ` (WIP saved as ${wipCommit.slice(0, 12)})` : ""}; resuming it`);
+    const stopWaiting = own(state.agents, agent)?.stop?.state === "requested";
+    this.say(`${agent} on ${task} is gone${wipCommit ? ` (WIP saved as ${wipCommit.slice(0, 12)})` : ""}; ${stopWaiting ? "a stop for it is waiting, so it is not resumed" : "resuming it"}`);
     const why = wasRunning
       ? "The runner restarted and your worker process was gone. Your session is resumed."
       : "The runner restarted before your worker was started.";

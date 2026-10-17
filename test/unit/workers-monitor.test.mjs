@@ -219,3 +219,22 @@ test("a worker that exits without init fails attestation, including an untermina
   const bad = monitor(path).finish({ code: 1 });
   assert.equal(bad.find((d) => d.type === "agent.attested").payload.ok, false);
 });
+
+test("a stopped worker is no attestation failure, unless it printed an init line (even an unterminated last one)", () => {
+  const silent = file();
+  writeFileSync(silent, "");
+  const quiet = monitor(silent).finish({ code: null, signal: "SIGTERM", reason: "stopped" });
+  assert.ok(!quiet.some((d) => d.type === "agent.attested"), "never started: nothing to judge");
+  assert.equal(quiet.at(-1).payload.reason, "stopped");
+
+  const bad = file();
+  writeFileSync(bad, init(["Read", "Bash", "Edit"])); // a bad init as the final line, with no newline
+  const judged = monitor(bad).finish({ code: null, signal: "SIGTERM", reason: "stopped" });
+  const attested = judged.find((d) => d.type === "agent.attested");
+  assert.equal(attested.payload.ok, false, "a bad init line is judged even when the worker was stopped");
+  assert.equal(judged.at(-1).payload.reason, "stopped");
+
+  const unstopped = file();
+  writeFileSync(unstopped, "");
+  assert.equal(monitor(unstopped).finish({ code: 1 }).find((d) => d.type === "agent.attested").payload.ok, false, "any other exit without init still fails");
+});

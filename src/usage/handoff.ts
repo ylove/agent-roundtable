@@ -21,7 +21,8 @@ import type { BlackboardState } from "../execution/types.js";
 import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
 import { readArchivedSession, type ArchivedSession } from "../sessions/archive.js";
-import { totalText, usd, usdBudget } from "./format.js";
+import { isFreeProvider } from "../execution/pricing.js";
+import { FREE_LABEL, NO_PRICE_LABEL, totalText, usd, usdBudget } from "./format.js";
 import { addMoney, moneyTotal, tokenTotal, zeroMoney, zeroTokens } from "./types.js";
 
 /** One line of plain text, scrubbed and capped: safe in a heading, a list item or a table cell. */
@@ -71,7 +72,9 @@ export function buildRunHandoff(state: BlackboardState, now = new Date()): strin
   if (state.goal) out.push(`- Goal: ${line(state.goal.ultimate, 600)}`);
   const { money, tokens } = spend(state);
   const budget = executionBudgetUsd(state);
-  const used = moneyTotal(money) > 0 ? totalText(money) : tokenTotal(tokens) > 0 ? "no price known for the models used" : usd(0);
+  const providers = Object.values(state.budget.by_agent_usage ?? {}).map((u) => u.provider);
+  const free = tokenTotal(tokens) > 0 && providers.length > 0 && providers.every((p) => isFreeProvider(p));
+  const used = moneyTotal(money) > 0 ? totalText(money) : free ? `${usd(0)} ${FREE_LABEL}` : tokenTotal(tokens) > 0 ? `${NO_PRICE_LABEL} known for the models used` : usd(0);
   out.push(`- Budget: ${used}${budget > 0 ? ` of ${usdBudget(budget)}` : ""}${state.budget.extensions_usd ? ` (including ${usd(state.budget.extensions_usd)} extended)` : ""}`);
   out.push("");
 

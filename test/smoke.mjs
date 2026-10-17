@@ -339,9 +339,9 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 37 distinct tools", () => assert(tools.length === 37 && new Set(tools.map((t) => t.name)).size === 37, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 38 distinct tools", () => assert(tools.length === 38 && new Set(tools.map((t) => t.name)).size === 38, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
   check("contract and run tools are strict (additionalProperties: false)", () => {
-    for (const name of ["propose_contract", "amend_contract", "freeze_contract", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
+    for (const name of ["propose_contract", "amend_contract", "freeze_contract", "postmortem", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });
   check("the orchestrator's worker tools take execution_id and agent_token", () => {
     for (const name of WORKER_TOOLS) {

@@ -19,6 +19,7 @@
 // ============================================================================
 
 import { ID_RE, preview } from "./events.js";
+import { POSTMORTEM_HANDLERS, postmortemAfter } from "./postmortem-state.js";
 import {
   CONTRACT_SCHEMA,
   GENESIS_HASH,
@@ -41,8 +42,9 @@ import {
  * 4: blocked_by.needs; task.blocked keeps the other reasons; checks bound to an older submission
  *    are ignored and a bound task.checks_passed for one is refused.
  * 5: worker start identities and budget reservations; bound amendment rechecks while merging.
+ * 6: the postmortem section (findings, fix transitions, meetings; docs/design/postmortem.md §4).
  */
-export const REDUCER_VERSION = 5;
+export const REDUCER_VERSION = 6;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -79,6 +81,7 @@ export function initialState(executionId: string): BlackboardState {
     inbox: {},
     watchdog: { circuits: {}, deadlocks: [] },
     splits: {},
+    postmortem: { findings: {}, meetings: {} },
   };
 }
 
@@ -817,6 +820,8 @@ const HANDLERS: Handlers = {
   },
   "watchdog.stall_detected": none,
   "sandbox.degraded": none,
+
+  ...POSTMORTEM_HANDLERS,
 };
 
 /** Lease gone: removed from leases, from the queue (a withdrawn request), and from every request's blocking list. */
@@ -836,6 +841,7 @@ export function applyInPlace(state: BlackboardState, event: AnyEvent, resolved: 
   const handler = Object.hasOwn(HANDLERS, event.type) ? (HANDLERS[event.type] as Handler<EventType>) : undefined;
   if (!handler) throw new Error(`Blackboard: unknown event type ${preview(event.type)} at seq ${event.seq}`);
   handler(state, event as EventEnvelope, { resolved, strict: opts.strict === true });
+  postmortemAfter(state, event);
   state.seq = event.seq;
   state.hash = event.hash;
   return state;

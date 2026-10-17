@@ -417,7 +417,7 @@ export function findCycle(tasks: ReadonlyArray<Pick<TaskSpec, "id" | "depends_on
 function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   const c = isObj(input) ? input : (ck.err("", "the contract must be a JSON object"), {} as Obj);
   ck.known(c, ["schema", "id", "version", "status", "title", "goal", "scope", "participants", "teams", "tasks", "interfaces",
-    "decisions", "validation", "budget", "authority", "sandbox", "workers", "consent", "frozen"], "");
+    "decisions", "validation", "budget", "authority", "sandbox", "workers", "postmortem", "consent", "frozen"], "");
   if (c.schema !== undefined && c.schema !== CONTRACT_SCHEMA) ck.err("schema", `must be ${q(CONTRACT_SCHEMA)}`);
   let id = "";
   if (c.id === undefined || c.id === null) ck.err("id", "is required");
@@ -466,6 +466,15 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   const fallback = ck.str(wk.fallback_model, "workers.fallback_model");
   if (model !== undefined) workers.model = model;
   if (fallback !== undefined) workers.fallback_model = fallback;
+
+  // --- postmortem mode (docs/design/postmortem.md §2): kept out of the contract unless enabled, so older hashes stand ---
+  const pm = ck.obj(c.postmortem, "postmortem");
+  let postmortem: Contract["postmortem"];
+  if (pm) {
+    ck.known(pm, ["enabled"], "postmortem");
+    if (pm.enabled !== undefined && typeof pm.enabled !== "boolean") ck.err("postmortem.enabled", "must be true or false");
+    if (pm.enabled === true) postmortem = { enabled: true };
+  }
 
   // --- validation commands (tasks reference them) ---
   const val = ck.obj(c.validation, "validation") ?? {};
@@ -747,6 +756,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     schema: CONTRACT_SCHEMA, id, version, status, title, goal, scope, participants, teams, tasks, interfaces, decisions,
     validation: { commands, final }, budget, authority, sandbox, workers, consent,
   };
+  if (postmortem) out.postmortem = postmortem;
   if (frozen) out.frozen = frozen;
   if (scope.parent) checkChild(ck, out, opts);
   return out;
@@ -962,7 +972,8 @@ export function renderContractMarkdown(c: Contract, opts: RenderOptions = {}): s
     `${b.wall_clock_min} min wall clock · max parallel ${b.max_parallel} · max attempts ${b.max_attempts}\n\n` +
     `Lead ${c.authority.lead} may: ${list(c.authority.may)} · budget extension up to ${c.authority.budget_extension_pct}%\n\n` +
     `Sandbox: ${c.sandbox.backend} (\`${c.sandbox.image}\`)${c.sandbox.install ? ` · install \`${argvText(c.sandbox.install.argv)}\` (egress ${list(c.sandbox.install.egress)})` : ""} · ` +
-    `workers: ${c.workers.driver}${c.workers.model ? ` (${c.workers.model}${c.workers.fallback_model ? `, fallback ${c.workers.fallback_model}` : ""})` : ""}`);
+    `workers: ${c.workers.driver}${c.workers.model ? ` (${c.workers.model}${c.workers.fallback_model ? `, fallback ${c.workers.fallback_model}` : ""})` : ""}` +
+    (c.postmortem?.enabled ? "\n\nPostmortem mode: on (findings are kept while testing sends fixers back; a postmortem meeting follows)" : ""));
   if (!opts.omitConsent) {
     out.push("## Consent\n\n" + (c.consent.length
       ? c.consent.map((x) => `- ${x.agent}: ${x.verdict}${x.reason ? ` — ${x.reason.split(/\r?\n/)[0].slice(0, 300)}` : ""}`).join("\n")

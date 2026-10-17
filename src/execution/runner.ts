@@ -38,6 +38,7 @@ import { agentDir, writeAgentLeases, prepareWorkerFiles } from "../workers/files
 import { RunMonitor, type ExitReason, type MonitorCheckpoint } from "../workers/monitor.js";
 import { reconcileLaunch } from "../workers/launch-intent.js";
 import { stopGroup, workerExit, type WorkerExit } from "../workers/process.js";
+import { autoFindings } from "../postmortem/auto.js";
 import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
 import { classifyFailure } from "./circuit.js";
@@ -331,6 +332,8 @@ export class Runner {
   private readonly renewed: Record<string, { renewedAt: number }> = {};
   private spawnBlocked = false;
   private snapSeq = 0;
+  /** The last event seq the postmortem pass has scanned (docs/design/postmortem.md §4). */
+  private pmScanned = 0;
   private snapAt = Date.now();
   private sandboxP?: Promise<SandboxBackend>;
   private driverChecked?: Promise<{ ok: boolean; missing: string[] }>;
@@ -643,12 +646,27 @@ export class Runner {
 
     this.routeEscalations(state);
     this.passEscalations();
+    await this.postmortemPass();
     await this.retireMerged();
     await this.schedule(state);
     this.merge.feed(await this.store.state());
     await this.checkFailure(await this.store.state());
     this.checkIdle(state);
     await this.maybeSnapshot();
+  }
+
+  /** Postmortem mode: record a finding for each submission that testing sent back (autoFindings; idempotent). */
+  private async postmortemPass(): Promise<void> {
+    try {
+      await this.refreshLog();
+      const seq = this.log.length ? this.log[this.log.length - 1].seq : 0;
+      if (seq === this.pmScanned) return;
+      const drafts = autoFindings(this.log, await this.store.state(), this.pmScanned, this.source);
+      if (drafts.length) await this.commit(drafts);
+      this.pmScanned = seq;
+    } catch (e) {
+      this.say(`postmortem pass: ${errText(e)}`);
+    }
   }
 
   /** Retry/reassignment drops a claim durably, so a lost handoff can never orphan its worker. */
@@ -665,6 +683,7 @@ export class Runner {
   }
 
   private async finish(state: BlackboardState): Promise<void> {
+    await this.postmortemPass();
     if (state.status === "failed") this.exitCode = 1;
     if (state.status === "aborted") {
       for (const t of this.workers.values()) if (!t.exit) await this.killWorker(t.agent, "killed", "the run was aborted");

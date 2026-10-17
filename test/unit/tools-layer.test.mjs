@@ -9,7 +9,7 @@ const HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHi
 const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
 test("every tool has a title and all four MCP hints", () => {
-  assert.equal(tools.length, 37, "22 at the table, 3 contract tools, join_execution, the 7 worker tools and the 4 run tools");
+  assert.equal(tools.length, 38, "22 at the table, 3 contract tools, join_execution, the 7 worker tools, the 4 run tools and postmortem");
   assert.equal(toolsFor("worker").length, 7);
   for (const tool of tools) {
     assert.equal(typeof tool.annotations?.title, "string", tool.name);

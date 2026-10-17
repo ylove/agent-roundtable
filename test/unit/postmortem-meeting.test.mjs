@@ -322,6 +322,32 @@ test("conclude applies only the accepted artifacts, with a backup, audit entries
   assert.equal((await run.store.events({ types: ["postmortem.concluded"] })).length, 1);
 });
 
+test("a persona seated by path gets its addendum in that file, and a persona addendum for a seat that cannot be written is reported", async (t) => {
+  const { WORKSPACE_DIR } = await import("../../dist/config.js");
+  const dir = join(WORKSPACE_DIR, ".claude", "agents");
+  mkdirSync(dir, { recursive: true });
+  const scout = join(dir, "scout.md");
+  writeFileSync(scout, PERSONA("Scout"));
+  const { repo, ids, work } = await atTheTable(t, { participants: [scout] });
+  provider(t, { total: 3, block: `Artifact: persona_addendum | scout | ${ids[0]} | Say what you skipped\nArtifact: persona_addendum | builder | ${ids[0]} | Read the brief twice` });
+  const held = await ok("hold_postmortem", { project: repo.root, work, opening: "x", participants: [scout], rounds: 1, ...LLM });
+  assert.deepEqual(held.seats, ["orchestrator", "builder", "scout"]);
+  // Make the builder persona unreadable as a persona (damaged frontmatter): that artifact fails, the other still lands.
+  const builder = join(AGENTS_DIR, "builder.md");
+  const good = readFileSync(builder, "utf8");
+  const copies = () => readdirSync(AGENTS_DIR).filter((n) => n.startsWith("builder.md.bak-")).length;
+  const copiesBefore = copies();
+  writeFileSync(builder, "---\ndescription:\n   indented: [unclosed\n---\nBody");
+  const done = await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "ok", accept: ["a1", "a2"] });
+  writeFileSync(builder, good);
+  assert.match(readFileSync(scout, "utf8"), /## Postmortem addenda\n\n- Say what you skipped \(postmortem pm-/);
+  assert.equal(done.warnings.length, 1);
+  assert.match(done.warnings[0], /a2 \(persona_addendum → builder\) was accepted but not applied: Claude Code cannot parse the frontmatter/);
+  assert.match(done.applied.find((a) => a.id === "a2").note, /^failed/);
+  assert.equal(copies(), copiesBefore, "nothing was copied or changed");
+  assert.match(readFileSync(recordPath(held.project, held.pm, "md"), "utf8"), /accepted, not applied/);
+});
+
 test("memory artifacts go to the project's memory, and with memory_target claude into the repository, never through a link", async (t) => {
   const { repo, ids, work } = await atTheTable(t);
   provider(t, { total: 3, block: `Artifact: memory | builder | ${ids[0]} | The nav bar lives in src/components/nav\nArtifact: memory | tester | ${ids[0]} | Resize the window` });

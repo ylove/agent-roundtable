@@ -205,7 +205,7 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
   const heldAt = new Date().toISOString();
   const rec: PostmortemRecord = {
     v: 1, pm: view.pm, project: i.project.key, scope: i.scope, status: "held", created: heldAt, held_at: heldAt,
-    format: seats.format, rounds, seats: ["orchestrator", ...seats.keys], session,
+    format: seats.format, rounds, seats: ["orchestrator", ...seats.keys], refs: Object.fromEntries(seats.keys.map((k, n) => [k, seats.refs[n]])), session,
     ...(i.memoryTarget === "claude" && { memory_target: "claude" as const }),
     opening, findings: view.findings, transcript, proposed: artifacts, rejected_lines: rejected,
   };
@@ -317,7 +317,7 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
     for (const a of rec.proposed.filter((x) => accept.includes(x.id))) {
       try {
         let done: AppliedArtifact;
-        if (a.kind === "persona_addendum") done = await applyPersonaAddendum(a, rec.pm, now);
+        if (a.kind === "persona_addendum") done = await applyPersonaAddendum(a, rec.pm, now, rec.refs?.[a.target]);
         else if (a.kind === "memory") done = applyMemory(a, rec.pm, { key: rec.project, root: proj.root }, rec.memory_target === "claude");
         else if (a.kind === "fix") done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, note: "recorded as a follow-up; nothing was changed" };
         else {

@@ -103,6 +103,8 @@ export interface PostmortemRecord {
   format: PostmortemFormat;
   rounds: number;
   seats: string[];
+  /** The persona refs the meeting loaded, by seat key: the file an accepted addendum is written to. */
+  refs?: Record<string, string>;
   /** The collaboration session the meeting ran in. */
   session: string;
   memory_target?: "claude";

@@ -7,7 +7,7 @@
 // ============================================================================
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { checkFinding, readDraft, recordFinding, scopeLabel, scopeOf, updateFix, type DraftView } from "../postmortem/draft.js";
+import { readDraft, recordFinding, scopeLabel, scopeOf, updateFix, type DraftView } from "../postmortem/draft.js";
 import { activeLessons, viewOf } from "../postmortem/lessons.js";
 import { isEnabled, requireEnabled, resolveProject, setEnabled, type ProjectRef } from "../postmortem/project.js";
 import { renderRecord } from "../postmortem/record.js";
@@ -190,7 +190,6 @@ export async function handlePostmortemTool(name: string, args: ToolArgs): Promis
     case "record": {
       requireEnabled(project);
       const scope = scopeOf(a);
-      checkFinding(a.finding as never);
       const r = await recordFinding(project, scope, a.finding as never);
       return render({ recorded: r.id, ...draftBody(r.draft) });
     }

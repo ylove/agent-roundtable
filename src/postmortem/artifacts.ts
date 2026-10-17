@@ -125,8 +125,8 @@ export function artifactCounts(list: readonly { kind: PostmortemArtifactKind }[]
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 
 /** Append a persona addendum through the workshop's write path (backup first, contained, frontmatter kept). */
-export async function applyPersonaAddendum(a: Artifact, pm: string, now = new Date()): Promise<AppliedArtifact> {
-  const agent = await loadAgent(a.target);
+export async function applyPersonaAddendum(a: Artifact, pm: string, now = new Date(), ref?: string): Promise<AppliedArtifact> {
+  const agent = await loadAgent(ref ?? a.target);
   const r = appendPersonaAddendum(agent.path, `- ${oneLine(a.text)} (postmortem ${pm})`, { timestamp: formatBackupTimestamp(now) });
   return {
     id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: r.agentPath,

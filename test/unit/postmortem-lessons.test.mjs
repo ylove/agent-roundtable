@@ -90,6 +90,25 @@ test("lessons are read when the mode is off now, and a project without lessons o
   assert.ok(!plain.warnings.some((w) => /Earlier work misread/.test(w)));
 });
 
+test("an explicit postmortem flag cannot turn the mode on; an explicit false can turn it off; amend follows the same rule", async () => {
+  const off = makeRepo();
+  const withFlag = (over) => ({ ...explicit(), postmortem: over });
+  const run = async (repo, pm) => tail(await ok("propose_contract", { goal: "Ship", orchestrator: "main", original_prompt: "ship", repo_dir: repo.root, contract: withFlag(pm), ...LLM }));
+  const dropped = await run(off, { enabled: true });
+  assert.ok(dropped.warnings.some((w) => /postmortem\(action: "enable"/.test(w)), dropped.warnings.join("\n"));
+  assert.equal(JSON.parse(readFileSync(dropped.files.json, "utf8")).postmortem, undefined);
+  // Amending a draft cannot turn it on either.
+  const amended = tail(await ok("amend_contract", { contract_id: dropped.contract_id, orchestrator: "main", reason: "try", patch: { postmortem: { enabled: true }, title: "Retitled" }, ...LLM }));
+  assert.ok(amended.warnings.some((w) => /postmortem\(action: "enable"/.test(w)));
+  assert.equal(JSON.parse(readFileSync(amended.files.json, "utf8")).postmortem, undefined);
+  // With the project on, the flag is set from the project; an explicit false keeps it off.
+  const { repo } = await projectWithLessons();
+  assert.deepEqual(JSON.parse(readFileSync((await run(repo, { enabled: true })).files.json, "utf8")).postmortem, { enabled: true });
+  assert.equal(JSON.parse(readFileSync((await run(repo, { enabled: false })).files.json, "utf8")).postmortem, undefined);
+  const audit = await ok("postmortem", { action: "list", project: off.root });
+  assert.equal(JSON.parse(audit).postmortem_mode, "off");
+});
+
 test("a contract's postmortem field is validated", () => {
   const base = { schema: "roundtable.contract/1" };
   const bad = checkContract({ ...base, postmortem: { enabled: "yes" } });

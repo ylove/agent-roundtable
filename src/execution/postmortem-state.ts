@@ -56,6 +56,7 @@ export const POSTMORTEM_HANDLERS: PostmortemHandlers = {
     const f = own(st.findings, p.id);
     if (f) {
       if (p.repeats !== undefined) f.repeats = Math.max(f.repeats ?? 0, p.repeats);
+      for (const r of p.responsible) if (!f.responsible.includes(r)) f.responsible.push(r);
       for (const ref of p.evidence ?? []) {
         if (!(f.evidence ?? []).includes(ref) && (f.evidence?.length ?? 0) < EVIDENCE_LIMIT) (f.evidence ??= []).push(ref);
       }

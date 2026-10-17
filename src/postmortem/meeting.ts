@@ -82,7 +82,8 @@ function chooseSeats(findings: readonly PostmortemFinding[], state: Readonly<Bla
     const r = ref?.trim();
     if (!r || r.toLowerCase() === "orchestrator") return;
     const k = agentKey(r);
-    if (!refs.has(k)) refs.set(k, r);
+    // A ref that names where the persona lives (a path) replaces the bare key a finding gave it.
+    if (!refs.has(k) || (refs.get(k) === k && r !== k)) refs.set(k, r);
   };
   // Responsible agents first, the most responsible first: they sit nearest the charge.
   const weight = new Map<string, number>();
@@ -324,7 +325,6 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
           lessons.push({ kind: LESSON_KIND[a.kind]!, target: a.kind === "agent_rule" ? a.target : "project", text: a.text, pm: rec.pm, findings: a.findings });
           done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: "lessons.json", note: "added to the project's lessons" };
         }
-        await appendAudit({ actor: "orchestrator", action: "postmortem.applied", target: rec.pm, details: { artifact: a.id, kind: a.kind, target: a.target, path: done.path, hash: a.hash, project: rec.project } });
         applied.push(done);
       } catch (e) {
         warnings.push(`${a.id} (${a.kind} → ${a.target}) was accepted but not applied: ${errText(e)}`);
@@ -341,6 +341,11 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
       lessons.push({ kind: "flag", target: "project", flag: true, text: `${f.misread}${f.clearer ? ` Clearer: ${f.clearer}` : ""}`.slice(0, 1200), pm: rec.pm, findings: [f.finding] });
     }
     lessonsAdded = lessons.length ? addLessons(rec.project, lessons, now.toISOString()).length : 0;
+    // Audited once everything that can fail has been written, so a retry never leaves duplicate entries.
+    for (const a of rec.proposed.filter((x) => ok.has(x.id))) {
+      const done = applied.find((x) => x.id === a.id)!;
+      await appendAudit({ actor: "orchestrator", action: "postmortem.applied", target: rec.pm, details: { artifact: a.id, kind: a.kind, target: a.target, path: done.path, hash: a.hash, project: rec.project } });
+    }
     const concluded: PostmortemRecord = {
       ...rec, status: "concluded", concluded_at: now.toISOString(), closing,
       accepted: accept, rejected: reject, applied, flagged,

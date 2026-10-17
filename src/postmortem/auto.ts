@@ -46,16 +46,23 @@ export function autoFindings(log: readonly AnyEvent[], state: Readonly<Blackboar
   for (const e of log) if (e.type === "postmortem.finding_recorded" && e.causation !== undefined) caused.add(e.causation);
 
   const out: AnyEventDraft[] = [];
-  const seen = new Map<string, number>(); // finding id → repeats so far (recorded or drafted)
-  for (const [id, f] of Object.entries(state.postmortem?.findings ?? {})) seen.set(id, f.repeats ?? 0);
+  // finding id → how often it repeated, and whether it is still open (no meeting yet, fix pending).
+  const known = new Map<string, { repeats: number; open: boolean }>();
+  for (const [id, f] of Object.entries(state.postmortem?.findings ?? {})) known.set(id, { repeats: f.repeats ?? 0, open: f.pm === undefined && f.fix.status === "pending" });
   const submitted = new Set<string>();
   const failures = new Map<string, Failure[]>();
   let lastMerged: string | undefined;
 
-  const emit = (e: AnyEvent, id: string, f: { summary: string; detected_by: string; responsible: string[]; task?: string; category: PostmortemCategory; evidence: string[] }) => {
-    const prior = seen.get(id);
-    const repeats = prior === undefined ? undefined : prior + 1;
-    seen.set(id, repeats ?? 0);
+  /**
+   * A failure repeats the open finding of the same basis. When that finding is already settled or covered by a
+   * meeting, the failure is new: a later epoch of the basis starts a finding of its own (reopening the question).
+   */
+  const emit = (e: AnyEvent, basis: string, f: { summary: string; detected_by: string; responsible: string[]; task?: string; category: PostmortemCategory; evidence: string[] }) => {
+    let id = findingId(basis);
+    for (let epoch = 1; known.get(id)?.open === false; epoch++) id = findingId(`${basis}|epoch ${epoch}`);
+    const prior = known.get(id);
+    const repeats = prior === undefined ? undefined : prior.repeats + 1;
+    known.set(id, { repeats: repeats ?? 0, open: true });
     out.push({
       type: "postmortem.finding_recorded",
       source,
@@ -89,8 +96,7 @@ export function autoFindings(log: readonly AnyEvent[], state: Readonly<Blackboar
           list.push({ command: p.command_id, timedOut: e.type === "check.timed_out", ...(e.type === "check.failed" && { signature: e.payload.signature, ...(e.payload.output_blob && { blob: e.payload.output_blob }) }) });
           failures.set(p.task, list);
         } else if (e.type === "check.failed" && p.scope === "integration" && e.seq > fromSeq && !caused.has(e.id) && lastMerged !== undefined) {
-          const id = findingId(`integration|${p.command_id}|${e.payload.signature}`);
-          emit(e, id, {
+          emit(e, `integration|${p.command_id}|${e.payload.signature}`, {
             summary: `Integration check ${p.command_id} failed after task ${lastMerged} was merged (signature ${e.payload.signature.slice(0, 16)}).`,
             detected_by: `integration check ${p.command_id}`,
             responsible: [personaOf(lastMerged)],
@@ -107,12 +113,11 @@ export function autoFindings(log: readonly AnyEvent[], state: Readonly<Blackboar
         if (!submitted.has(task) || (!fails.length && !violations) || e.seq <= fromSeq || caused.has(e.id)) break;
         const commands = [...new Set(fails.map((f) => f.command))].sort();
         const basis = [...new Set(fails.map((f) => `${f.command}:${f.signature ?? (f.timedOut ? "timed_out" : "")}`))].sort().join(",");
-        const id = findingId(`${task}|${basis}|${violations ? "lease" : ""}`);
-        const what = [
+                const what = [
           ...(commands.length ? [`${commands.length === 1 ? "check" : "checks"} ${commands.join(", ")} ${fails.every((f) => f.timedOut) ? "timed out" : "failed"}`] : []),
           ...(violations ? [`${plural(violations, "path")} changed outside its leases`] : []),
         ].join("; ");
-        emit(e, id, {
+        emit(e, `${task}|${basis}|${violations ? "lease" : ""}`, {
           summary: `Task ${task} was sent back after testing: ${what}.`,
           detected_by: commands.length ? `check ${commands.join(", ")}` : "lease check",
           responsible: [personaOf(task)],

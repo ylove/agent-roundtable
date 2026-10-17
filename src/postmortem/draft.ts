@@ -8,6 +8,7 @@
 
 import { realpathSync } from "node:fs";
 import { agentKey } from "../agents.js";
+import { ID_RE } from "../execution/events.js";
 import { EXECUTION_ID_RE, newId } from "../ids.js";
 import { orchestratorSource } from "../execution/contract-state.js";
 import { postmortemBlockers, draftFindings } from "../execution/postmortem-state.js";
@@ -75,6 +76,7 @@ export function checkFinding(input: FindingInput): Required<Pick<FindingInput, "
   if (!detected_by) throw new Error("finding.detected_by is required: the check, test or reviewer that caught it");
   if (detected_by.length > LIMITS.detectedBy) throw new Error(`finding.detected_by is longer than ${LIMITS.detectedBy} characters`);
   if (!CATEGORIES.includes(input.category)) throw new Error(`finding.category must be one of: ${CATEGORIES.join(", ")}`);
+  if (input.task !== undefined && !ID_RE.test(input.task)) throw new Error("finding.task must be a task id (lowercase letters, digits, '.', '_' or '-'; at most 64)");
   const names = (input.responsible ?? []).map((r) => clean(r)).filter(Boolean);
   if (!names.length) throw new Error("finding.responsible needs at least one agent (a persona name, or \"orchestrator\")");
   if (names.length > LIMITS.responsible || names.some((n) => n.length > LIMITS.responsibleName)) throw new Error("finding.responsible has too many or too long names");

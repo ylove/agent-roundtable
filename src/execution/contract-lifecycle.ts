@@ -70,6 +70,7 @@ import {
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+const PM_NOT_ENABLED = "postmortem.enabled was not turned on: postmortem mode is off for this project, and only the human's request turns it on (postmortem(action: \"enable\", project, reason))";
 const same = (a: unknown, b: unknown) => canonicalJSON(a ?? null) === canonicalJSON(b ?? null);
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const mode = (status: string) => (status === "created" ? "deliberation" as const : "execution" as const);
@@ -332,7 +333,13 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   // Postmortem mode (docs/design/postmortem.md §2, §7): the project's opt-in rides in the contract, and what earlier
   // postmortems taught becomes decisions and warnings. Lessons are read whether or not the mode is on now.
   const lessons = contractLessons(root);
-  const postmortemOn = projectOfRoot(root)?.postmortem.enabled === true && !(explicit && explicit.postmortem !== undefined);
+  const projectOn = projectOfRoot(root)?.postmortem.enabled === true;
+  // The mode comes from the project's state only: an explicit true while the project is off is dropped (an explicit false is allowed).
+  if (explicit && isObj(explicit.postmortem) && explicit.postmortem.enabled === true && !projectOn) {
+    delete explicit.postmortem;
+    warnings.push(PM_NOT_ENABLED);
+  }
+  const postmortemOn = projectOn && !(explicit && explicit.postmortem !== undefined);
   if (lessons) warnings.push(...lessons.warnings);
 
   const executionId = newExecutionId();
@@ -774,6 +781,10 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
   const fromSession = opts.fromSession ? sessionPatch(opts.fromSession) : undefined;
   if (fromSession?.warn) warnings.push(fromSession.warn);
   const merged = applyMergePatch<Obj>(fromSession ? applyMergePatch(c, fromSession.patch) : c, patch);
+  if (isObj(merged.postmortem) && merged.postmortem.enabled === true && c.postmortem?.enabled !== true && projectOfRoot(c.scope.repo_root)?.postmortem.enabled !== true) {
+    delete merged.postmortem;
+    warnings.push(PM_NOT_ENABLED);
+  }
   const version = rec.version + 1;
   const candidate: Obj = { ...merged, version, status: rec.frozen ? "frozen" : "draft", consent: [] };
   delete candidate.frozen;

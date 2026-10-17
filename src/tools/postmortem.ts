@@ -103,7 +103,7 @@ export const postmortemTools: ToolDefinition[] = [
             detected_by: { type: "string", maxLength: LIMITS.detectedBy, description: "The check, test or reviewer that caught it.", "x-nonblank": true },
             responsible: { type: "array", maxItems: LIMITS.responsible, items: { type: "string" }, description: "The agents whose work was sent back: persona names, or \"orchestrator\" for your own part." },
             category: { type: "string", enum: [...CATEGORIES], description: "prompt_misread, project_misread, contract_ambiguity, implementation, test_gap or process. The first three are flagged and warn future plans." },
-            task: { type: "string", description: "The heads-down task id, when the finding is about one." },
+            task: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}$", description: "The heads-down task id, when the finding is about one." },
             evidence: { type: "array", maxItems: LIMITS.evidence, items: { type: "string" }, description: "Refs only: sha256: blob refs, event ids, commit shas or repository paths. Command output is refused." },
           },
           required: ["summary", "detected_by", "responsible", "category"],

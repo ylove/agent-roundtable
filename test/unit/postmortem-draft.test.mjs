@@ -279,6 +279,52 @@ test("lease violations, conflicts and integration failures after a merge", async
   assert.equal(drafts[0].payload.task, undefined);
 });
 
+test("an integration failure that comes back after it was fixed is a new finding, with the new merger responsible, and keeps the draft from its meeting", async () => {
+  const run = await makeRun({ contract: { postmortem: { enabled: true }, tasks: [task("api"), task("ui", { persona: "tester" })] } });
+  const scan = async (from) => {
+    const drafts = autoFindings(await run.store.events(), await run.store.state(), from, runner);
+    await run.store.transact(() => ({ events: drafts }));
+    return drafts;
+  };
+  const fail = { type: "check.failed", source: runner, payload: { command_id: "build", scope: "integration", exit: 1, signature: "9".repeat(16) } };
+  await run.store.transact(() => ({ events: [{ type: "task.merged", source: runner, payload: { task: "api", integration_sha: "d".repeat(40) } }, fail] }));
+  const [first] = await scan(0);
+  await run.store.transact(() => ({ events: [{ type: "check.passed", source: runner, payload: { command_id: "build", scope: "integration", duration_ms: 1 } }] }));
+  assert.equal((await run.store.state()).postmortem.findings[first.payload.id].fix.status, "fixed");
+  const seq = (await run.store.state()).seq;
+  await run.store.transact(() => ({ events: [{ type: "task.merged", source: runner, payload: { task: "ui", integration_sha: "e".repeat(40) } }, fail] }));
+  const [second] = await scan(seq);
+  assert.notEqual(second.payload.id, first.payload.id);
+  assert.equal(second.payload.repeats, undefined, "a new finding, not a repeat");
+  assert.deepEqual(second.payload.responsible, ["tester"]);
+  let state = await run.store.state();
+  assert.equal(state.postmortem.findings[first.payload.id].fix.status, "fixed");
+  assert.equal(state.postmortem.findings[second.payload.id].fix.status, "pending");
+  assert.equal(state.postmortem.ready_seq, undefined, "integration is red: no meeting");
+  // Restart idempotency, and a further failure while it is open repeats the new finding, adding its merger.
+  assert.deepEqual(autoFindings(await run.store.events(), state, 0, runner), []);
+  const seq2 = state.seq;
+  await run.store.transact(() => ({ events: [{ type: "task.merged", source: runner, payload: { task: "api", integration_sha: "f".repeat(40) } }, fail] }));
+  const [third] = await scan(seq2);
+  assert.equal(third.payload.id, second.payload.id);
+  assert.equal(third.payload.repeats, 1);
+  state = await run.store.state();
+  assert.deepEqual(state.postmortem.findings[second.payload.id].responsible, ["tester", "builder"]);
+});
+
+test("a finding already covered by a meeting is not folded into a recurrence", async () => {
+  const run = await makeRun({ contract: { postmortem: { enabled: true }, tasks: [task("api")] } });
+  const fail = { type: "check.failed", source: runner, payload: { command_id: "build", scope: "integration", exit: 1, signature: "8".repeat(16) } };
+  await run.store.transact(() => ({ events: [{ type: "task.merged", source: runner, payload: { task: "api", integration_sha: "d".repeat(40) } }, fail] }));
+  const [a] = autoFindings(await run.store.events(), await run.store.state(), 0, runner);
+  await run.store.transact(() => ({ events: [a, { type: "postmortem.started", source: runner, payload: { id: "pm-00000001", format: "collaborate", seats: ["orchestrator", "x", "y"] } }] }));
+  const seq = (await run.store.state()).seq;
+  await run.store.transact(() => ({ events: [fail] }));
+  const [b] = autoFindings(await run.store.events(), await run.store.state(), seq, runner);
+  assert.notEqual(b.payload.id, a.payload.id);
+  assert.equal(b.payload.repeats, undefined);
+});
+
 test("automatic findings need the contract's postmortem flag", async () => {
   const run = await makeRun({ contract: { tasks: [task("api")] } });
   await run.store.transact(async () => ({

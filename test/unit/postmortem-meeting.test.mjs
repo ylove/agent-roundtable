@@ -348,6 +348,31 @@ test("a persona seated by path gets its addendum in that file, and a persona add
   assert.match(readFileSync(recordPath(held.project, held.pm, "md"), "utf8"), /accepted, not applied/);
 });
 
+test("a responsible agent that is seated by path (outside the agents directory) is loaded from that path", async (t) => {
+  const { WORKSPACE_DIR } = await import("../../dist/config.js");
+  const dir = join(WORKSPACE_DIR, ".claude", "agents");
+  mkdirSync(dir, { recursive: true });
+  const ranger = join(dir, "ranger.md");
+  writeFileSync(ranger, PERSONA("Ranger"));
+  const { repo, ids, work } = await atTheTable(t, { responsible: [["ranger"]] });
+  const requests = provider(t, { total: 3, block: `Artifact: persona_addendum | ranger | ${ids[0]} | Check the trail twice` });
+  const held = await ok("hold_postmortem", { project: repo.root, work, opening: "x", participants: [ranger, "tester"], rounds: 1, ...LLM });
+  assert.equal(held.format, "waffle-house");
+  assert.match(requests[0].system, /PERSONA-RANGER/, "the defender was loaded from its path");
+  await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "ok", accept: ["a1"] });
+  assert.match(readFileSync(ranger, "utf8"), /Check the trail twice/);
+});
+
+test("hold_postmortem refuses when the project's mode is off, and finding.task must be a task id", async (t) => {
+  const { repo, work } = await atTheTable(t);
+  await ok("postmortem", { action: "disable", project: repo.root, reason: "stop" });
+  provider(t);
+  assert.match(await fails("hold_postmortem", { project: repo.root, work, opening: "x", participants: ["tester"], ...LLM }), /Postmortem mode is off/);
+  const on = await enabled();
+  assert.match(await fails("postmortem", { action: "record", project: on.root, work: "w", finding: { ...FINDING, task: "a`b" } }), /task/);
+  assert.match(await fails("hold_postmortem", { project: on.root, work: "w", opening: "x", participants: ["x".repeat(201)], ...LLM }), /participants/);
+});
+
 test("memory artifacts go to the project's memory, and with memory_target claude into the repository, never through a link", async (t) => {
   const { repo, ids, work } = await atTheTable(t);
   provider(t, { total: 3, block: `Artifact: memory | builder | ${ids[0]} | The nav bar lives in src/components/nav\nArtifact: memory | tester | ${ids[0]} | Resize the window` });

@@ -16,6 +16,8 @@ import { newId } from "../ids.js";
 import { childEnv } from "../security/child-env.js";
 import { mkdirPrivate } from "../security/fs-safe.js";
 import { scrubAndCap } from "../security/secrets.js";
+import { StoppedError } from "../providers/usage.js";
+import { recordCliCall, sessionSignal, type SessionScope } from "../usage/session-scope.js";
 import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveMeeting } from "./archive.js";
 import { publicLabel } from "../publishers/index.js";
@@ -275,13 +277,16 @@ export async function executeClaudeCLI(
   systemPromptPath: string,
   prompt: string,
   timeoutMs: number = localTimeoutMs(),
-  appendSystemPrompt?: string  // Skills and session directives (the CLI is stateless, so pass them on every call)
+  appendSystemPrompt?: string,  // Skills and session directives (the CLI is stateless, so pass them on every call)
+  meter?: SessionScope  // The session this call belongs to: its usage is recorded and a stop ends the call
 ): Promise<string> {
   const cli = findExecutable("claude");
   if (!cli) {
     console.error("[LocalMeeting] claude CLI not found on PATH");
     throw new Error("Failed to spawn claude CLI: not found on PATH. Is claude installed and in PATH?");
   }
+  const stop = meter ? sessionSignal(meter.session) : undefined;
+  if (stop?.aborted) throw new StoppedError();
   const cwd = localMeetingCwd();
   const features = await claudeCliFeatures(cli, cwd);
   const args = buildClaudeCliArgs(systemPromptPath, appendSystemPrompt, features);
@@ -301,7 +306,14 @@ export async function executeClaudeCLI(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      stop?.removeEventListener("abort", onStop);
       fn();
+    };
+    // A stop ends the call at once: the CLI's process group gets SIGTERM, then SIGKILL after the grace period.
+    const onStop = () => {
+      signalTree(proc?.pid, "SIGTERM");
+      setTimeout(() => signalTree(proc?.pid, "SIGKILL"), KILL_GRACE_MS).unref();
+      settle(() => reject(new StoppedError()));
     };
 
     let proc: ChildProcess;
@@ -321,6 +333,7 @@ export async function executeClaudeCLI(
       return;
     }
     trackCli(proc);
+    stop?.addEventListener("abort", onStop, { once: true });
 
     let stdout = "";
     let stderr = "";
@@ -350,6 +363,7 @@ export async function executeClaudeCLI(
       settle(() => {
         if (code === 0) {
           console.error(`[LocalMeeting] CLI completed successfully, output length: ${stdout.length} chars`);
+          if (meter) recordCliCall(meter, { input: prompt.length + (appendSystemPrompt?.length ?? 0), output: stdout.length });
           resolve(stdout.trim());
           return;
         }
@@ -452,7 +466,7 @@ export async function startLocalMeeting(
   // For initial message, just pass the agenda directly
   let assistantMessage: string;
   try {
-    assistantMessage = await executeClaudeCLI(agentInfo.path, userMessage, undefined, appendSystemPrompt);
+    assistantMessage = await executeClaudeCLI(agentInfo.path, userMessage, undefined, appendSystemPrompt, { session: meetingId, kind: "local-meeting", agent });
   } catch (e) {
     if (publicChannel) void publicChannel.finalize();
     await closePrototypeTracker(prototype, "ended");
@@ -518,7 +532,7 @@ async function runLocalMeetingTurn(meetingId: string, message: string): Promise<
   await recordMeetingCallerMessage(meeting, message, record);
   const fullPrompt = buildLocalMeetingContext(meeting, undefined, meetingPrototypeStatus(meeting));
 
-  const assistantMessage = await executeClaudeCLI(meeting.agentPromptPath, fullPrompt, undefined, meeting.appendSystemPrompt);
+  const assistantMessage = await executeClaudeCLI(meeting.agentPromptPath, fullPrompt, undefined, meeting.appendSystemPrompt, { session: meeting.id, kind: "local-meeting", agent: meeting.agent });
 
   await recordMeetingAgentReply(meeting, assistantMessage, record);
 
@@ -546,7 +560,7 @@ async function closeLocalMeeting(meetingId: string, requestSummary: boolean): Pr
   if (requestSummary && meeting.messages.length > 0) {
     const summaryPrompt = buildLocalMeetingContext(meeting) +
       "\n\n---\n\n## Request\n\nPlease provide a brief summary of what we discussed and any action items or conclusions.";
-    summary = await executeClaudeCLI(meeting.agentPromptPath, summaryPrompt, undefined, meeting.appendSystemPrompt);
+    summary = await executeClaudeCLI(meeting.agentPromptPath, summaryPrompt, undefined, meeting.appendSystemPrompt, { session: meeting.id, kind: "local-meeting", agent: meeting.agent });
   }
 
   recordActivity({

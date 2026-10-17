@@ -9,6 +9,7 @@ import { agentKey, assertReadableFrontmatter, loadAgent, listAgents, listSkills,
 import { recordActivity, recentActivityForKey } from "../activity.js";
 import { newId } from "../ids.js";
 import { callLLM, type ChatCompletionOptions } from "../providers/index.js";
+import { metered, type SessionScope } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import {
   MODEL_CHOICES,
@@ -706,11 +707,16 @@ function contributionPrompt(workshop: PreparedWorkshop, participant: Participant
   });
 }
 
+/** Usage scope of a workshop's calls: the whole workshop is one session of the table ledger. */
+function workshopScope(workshop: PreparedWorkshop, agent: string): SessionScope {
+  return { session: workshop.sessionId, kind: workshop.mode === "create" ? "agent-creation" : "agent-refinement", agent };
+}
+
 async function runContributions(workshop: PreparedWorkshop): Promise<void> {
   for (let round = 1; round <= workshop.rounds; round++) {
     for (const participant of workshop.participants) {
       const prompt = contributionPrompt(workshop, participant, round);
-      const content = await callLLM(participant.system, [{ role: "user", content: prompt }], workshop.llmOptions);
+      const content = await metered(workshopScope(workshop, participant.label), () => callLLM(participant.system, [{ role: "user", content: prompt }], workshop.llmOptions));
       record(workshop.run, { phase: "contribution", agent: participant.label, content });
       const entry = { agent: participant.label, content };
       workshop.common.contributions.push(entry);
@@ -773,7 +779,7 @@ async function runArchitect(workshop: PreparedWorkshop, prompt: string): Promise
   }
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [{ role: "user", content: prompt }];
   for (let attempt = 0; attempt < 2; attempt++) {
-    const output = await callLLM(system, messages, workshop.llmOptions);
+    const output = await metered(workshopScope(workshop, "architect"), () => callLLM(system, messages, workshop.llmOptions));
     try {
       return parseSpec(output, workshop);
     } catch (error) {
@@ -803,7 +809,7 @@ async function runReviews(workshop: PreparedWorkshop, spec: AgentSpec): Promise<
       public: workshop.isPublic,
       contributions: workshop.ownContributions.get(participant.key) ?? [],
     });
-    const content = await callLLM(participant.system, [{ role: "user", content: prompt }], workshop.llmOptions);
+    const content = await metered(workshopScope(workshop, participant.label), () => callLLM(participant.system, [{ role: "user", content: prompt }], workshop.llmOptions));
     return {
       agent: participant.label,
       content,

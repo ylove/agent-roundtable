@@ -10,6 +10,7 @@ import { newId } from "../ids.js";
 import { sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveCollaboration } from "./archive.js";
 import { callLLM } from "../providers/index.js";
+import { metered } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
 import type { CollaborationMode, CollaborationRole, ConversationAngle } from "./modes.js";
@@ -429,11 +430,11 @@ async function openCollaboration(
   const firstAgent = agents[0];
   let firstMessage: string;
   try {
-    firstMessage = await callLLM(
+    firstMessage = await metered({ session: collaborationId, kind: "collaboration", agent: firstAgent.name }, () => callLLM(
       firstAgent.systemPrompt,
       [{ role: "user", content: initialPrompt }],
       { provider, model: resolvedModel, baseUrl }
-    );
+    ));
   } catch (e) {
     // Nothing was said: do not leave an orphan session, an unfinalized public topic or a board behind.
     collaborations.delete(collaborationId);
@@ -555,11 +556,11 @@ export async function advanceCollaboration(
     conversationContext += `and move toward actionable conclusions.`;
   }
 
-  const messageContent = await callLLM(
+  const messageContent = await metered({ session: collaboration.id, kind: "collaboration", agent: currentAgent.name }, () => callLLM(
     currentAgent.systemPrompt,
     [{ role: "user", content: conversationContext }],
     { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl }
-  );
+  ));
 
   const newMessage: CollaborationMessage = {
     agentIndex: collaboration.currentAgentIndex,
@@ -749,11 +750,11 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
       summaryPrompt += `**${nameFor(msg.agent, !!collaboration.publicChannel)}:** ${msg.content}\n\n`;
     }
 
-    summary = await callLLM(
+    summary = await metered({ session: collaboration.id, kind: "collaboration", agent: summarizer.name }, () => callLLM(
       summarizer.systemPrompt,
       [{ role: "user", content: summaryPrompt }],
       { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl }
-    );
+    ));
   }
 
   recordActivity({

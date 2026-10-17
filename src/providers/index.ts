@@ -15,11 +15,20 @@ import { callAnthropic } from "./anthropic.js";
 import { callOpenAI, callTogether, callOpenAICompatible } from "./openai-compatible.js";
 import { callReplicate } from "./replicate.js";
 import { callOllama, isOllamaAvailable } from "./ollama.js";
-import { reportUsage } from "./usage.js";
+import { activeAbortSignal, reportUsage, StoppedError } from "./usage.js";
 
 export type { LLMMessage, LLMCompletionResult, ProviderCall, ProviderCallOptions } from "./shared.js";
 export { isOllamaAvailable };
-export { withUsageSink, reportUsage, type UsageReport, type UsageSink } from "./usage.js";
+export {
+  withUsageSink,
+  reportUsage,
+  activeUsageSink,
+  withAbortSignal,
+  activeAbortSignal,
+  StoppedError,
+  type UsageReport,
+  type UsageSink,
+} from "./usage.js";
 
 export const PROVIDERS: Record<LLMProvider, ProviderCall> = {
   anthropic: callAnthropic,
@@ -62,18 +71,27 @@ export async function chatCompletion(
       ? resolveAnthropicModel(options.model || DEFAULT_MODELS.anthropic)
       : options.model || DEFAULT_MODELS[provider];
 
+  const stop = activeAbortSignal();
   try {
+    stop?.throwIfAborted();
+    const timeout = AbortSignal.timeout(LLM_TIMEOUT_MS);
     const result = await call(messages, {
       model,
       maxTokens: options.maxTokens || MAX_TOKENS,
       temperature: options.temperature,
-      signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+      signal: stop ? AbortSignal.any([timeout, stop]) : timeout,
       ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
     });
     // Every completion (engines via callLLM, and the chat_completion tool) reaches the active usage sink.
-    reportUsage({ provider: result.provider, model: result.model, ...(result.usage && { usage: result.usage }) });
+    reportUsage({
+      provider: result.provider,
+      model: result.model,
+      ...(result.usage && { usage: result.usage }),
+      chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: result.content.length },
+    });
     return result;
   } catch (error) {
+    if (stop?.aborted) throw new StoppedError();
     if (
       error instanceof Error &&
       (error.name === "TimeoutError" || error.name === "AbortError")

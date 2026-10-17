@@ -31,6 +31,7 @@ import {
 } from "../config.js";
 import type { LLMMessage } from "../providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "../providers/index.js";
+import { metered } from "../usage/session-scope.js";
 import { findExecutable } from "../executables.js";
 import { describeUrl } from "../security/url-guard.js";
 import {
@@ -799,13 +800,13 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         base_url?: string;
       };
 
-      const result = await chatCompletion(messages, {
+      const result = await metered({ session: "chat", kind: "chat", agent: "chat_completion" }, () => chatCompletion(messages, {
         provider,
         model,
         maxTokens: max_tokens,
         temperature,
         baseUrl: base_url,
-      });
+      }));
 
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

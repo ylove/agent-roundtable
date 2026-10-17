@@ -10,6 +10,7 @@ import { newId } from "../ids.js";
 import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveMeeting } from "./archive.js";
 import { callLLM } from "../providers/index.js";
+import { metered } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
@@ -143,11 +144,11 @@ export async function startMeeting(
 
   let assistantMessage: string;
   try {
-    assistantMessage = await callLLM(
+    assistantMessage = await metered({ session: meetingId, kind: "meeting", agent }, () => callLLM(
       systemPrompt,
       [{ role: "user", content: userMessage }],
       { provider, model: resolvedModel, baseUrl }
-    );
+    ));
   } catch (e) {
     // The meeting never started; close the channel (and the prototype board) so nothing dangles.
     if (publicChannel) void publicChannel.finalize();
@@ -228,11 +229,11 @@ async function runMeetingTurn(meetingId: string, message: string): Promise<strin
   const status = meetingPrototypeStatus(meeting);
   if (status && request.length > 0) request[request.length - 1].content += status;
 
-  const assistantMessage = await callLLM(
+  const assistantMessage = await metered({ session: meeting.id, kind: "meeting", agent: meeting.agent }, () => callLLM(
     meeting.systemPrompt,
     request,
     { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
-  );
+  ));
 
   await recordMeetingAgentReply(meeting, assistantMessage, record);
 
@@ -270,11 +271,11 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
           "Please provide a brief summary of what we discussed and any action items or conclusions.",
       },
     ];
-    summary = await callLLM(
+    summary = await metered({ session: meeting.id, kind: "meeting", agent: meeting.agent }, () => callLLM(
       meeting.systemPrompt,
       summaryMessages,
       { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
-    );
+    ));
   }
 
   recordActivity({

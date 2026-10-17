@@ -63,7 +63,10 @@ test("the chat_completion tool reports through the sink too, exactly once per ca
   const r = await withUsageSink((u) => seen.push(u), () =>
     handleToolCall("chat_completion", { messages: user, provider: "openai_compatible", model: "m", base_url: llm.baseUrl }));
   assert.ok(!r.isError, r.content[0].text);
-  assert.deepEqual(seen, [{ provider: "openai_compatible", model: "served-0", usage: { inputTokens: 10, outputTokens: 0 } }]);
+  assert.equal(seen.length, 1);
+  const { chars, ...report } = seen[0];
+  assert.deepEqual(report, { provider: "openai_compatible", model: "served-0", usage: { inputTokens: 10, outputTokens: 0 } });
+  assert.ok(chars.input > 0 && chars.output > 0, "the lengths of the request and the reply ride along (never the text)");
   const viaCallLLM = [];
   await withUsageSink((u) => viaCallLLM.push(u), () => callLLMDetailed("s", user, llm));
   assert.equal(viaCallLLM.length, 1, "callLLMDetailed does not report twice");

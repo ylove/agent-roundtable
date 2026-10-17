@@ -9,6 +9,7 @@ import { newId } from "../ids.js";
 import { SessionBusyError, isSessionBusy, lockSession, sessionBusyMessage } from "./lock.js";
 import { archiveUltraplan } from "./archive.js";
 import { callLLM } from "../providers/index.js";
+import { metered } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import { mapLimit, notFoundError, runVerdictRound, truncate } from "./workshop.js";
@@ -259,8 +260,9 @@ export function renderUltraplanDocument(u: Ultraplan, signoffs: Verdict[], colle
 // Phase computation and atomic commits
 // ----------------------------------------------------------------------------
 
-function ask(u: Ultraplan, systemPrompt: string, prompt: string): Promise<string> {
-  return callLLM(systemPrompt, [{ role: "user", content: prompt }], { provider: u.provider, model: u.model, baseUrl: u.baseUrl });
+function ask(u: Ultraplan, agent: string, systemPrompt: string, prompt: string): Promise<string> {
+  return metered({ session: u.id, kind: "ultraplan", agent }, () =>
+    callLLM(systemPrompt, [{ role: "user", content: prompt }], { provider: u.provider, model: u.model, baseUrl: u.baseUrl }));
 }
 
 function ownEntry(u: Ultraplan, phase: "input" | "review", index: number): string | undefined {
@@ -274,7 +276,7 @@ function ownEntry(u: Ultraplan, phase: "input" | "review", index: number): strin
 async function computePhase(u: Ultraplan, phase: "input" | "review" | "signoff", v?: PlanVersion): Promise<UltraplanEntry[]> {
   if (phase === "input") {
     return mapLimit(u.agents, PARALLEL_TURNS, async (agent, agentIndex) => {
-      const content = await ask(u, agent.systemPrompt, buildInputPrompt(u.task, u.agents.map((a) => label(u, a.name)), u.context));
+      const content = await ask(u, agent.name, agent.systemPrompt, buildInputPrompt(u.task, u.agents.map((a) => label(u, a.name)), u.context));
       return { phase, agentIndex, speaker: agent.name, content, timestamp: new Date() };
     });
   }
@@ -287,6 +289,7 @@ async function computePhase(u: Ultraplan, phase: "input" | "review" | "signoff",
     verdicts: review ? REVIEW_VERDICTS : SIGNOFF_VERDICTS,
     llm: { provider: u.provider, model: u.model, baseUrl: u.baseUrl },
     limit: PARALLEL_TURNS,
+    scope: (agent) => ({ session: u.id, kind: "ultraplan", agent: agent.name }),
   });
   return answers.map((a) => ({
     phase, agentIndex: a.index, speaker: a.agent.name, content: a.content, timestamp: a.at, version: v!.version, verdict: a.verdict,
@@ -355,7 +358,7 @@ function stepResult(u: Ultraplan): UltraplanStepResult {
 async function authorPlan(u: Ultraplan, prompt: string): Promise<void> {
   // Providers already reject empty replies with an actionable error (finish reason, max_tokens hint);
   // keep that message. This guard only covers a provider that lets whitespace through.
-  const content = await ask(u, u.planner!.systemPrompt, prompt);
+  const content = await ask(u, u.planner!.name, u.planner!.systemPrompt, prompt);
   if (!content.trim()) throw new Error("Planner returned an empty plan");
   commitPlan(u, nextVersion(u, content, u.planner!.name));
 }

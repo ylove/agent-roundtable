@@ -1,0 +1,210 @@
+# Dissent tripwires: design
+
+Status: approved. WS16 is split across issues #139–#142. This document specifies the contract, filing, runtime and visibility behavior those workstreams build against. It extends [Heads-down execution: design](heads-down.md).
+
+## 1. Motivation
+
+Agreement to proceed does not mean every participant thinks the plan will work. An objector may consent while still predicting a specific failure. Today, that prediction can disappear into a session transcript or a consent reason, leaving execution without a way to recognize that the concern has become relevant.
+
+A **dissent** preserves the dissenter, their claim, the predicted failure and a **tripwire**: a structured predicate over execution state. When the predicate becomes true, the watchdog notifies the dissenter and, by default, opens a micro-huddle with the participant whose work tripped it. The concern returns with evidence at the point where it can affect a decision.
+
+Dissents are part of the agreed contract. They are neither executable instructions nor an alternative voting system. Scoring records what happened for later review; it never changes a persona's voting weight.
+
+## 2. Contract field
+
+Add a top-level `dissents[]` field to `Contract` in `src/execution/types.ts`. Each armed dissent has this shape:
+
+```ts
+{
+  id: string;
+  by: string;
+  source: {
+    kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "manual";
+    ref?: string;
+  };
+  claim: string;
+  predicted_failure: string;
+  tripwire:
+    | { kind: "check_failed"; check: string; task?: string }
+    | { kind: "path_touched"; paths: string[]; task?: string }
+    | { kind: "task_state"; task: string; state: "rejected" | "blocked" };
+  on_fire: "notify" | "huddle" | "pause_and_huddle";
+}
+```
+
+`id` is stable and unique within the contract. `by` identifies the dissenter and must resolve to a participant in the contract. `source` preserves provenance; `ref`, when present, identifies the originating session or objection. The source enum uses `waffle_house`, even though the human-facing format is called waffle house.
+
+`claim` states the concern. `predicted_failure` states the observable failure the dissenter expects. Each is limited to 500 characters. A contract contains at most 16 dissents. An omitted `on_fire` normalizes to `huddle`; a contract without dissents normalizes to an empty array.
+
+For example, assuming `skeptic`, task `storage` and validation command `storage-unit` exist in the contract:
+
+```json
+{
+  "id": "dissent-storage-retry",
+  "by": "skeptic",
+  "source": { "kind": "consent" },
+  "claim": "The retry path may apply the same write twice.",
+  "predicted_failure": "The storage unit check will fail on a repeated request.",
+  "tripwire": {
+    "kind": "check_failed",
+    "check": "storage-unit",
+    "task": "storage"
+  },
+  "on_fire": "huddle"
+}
+```
+
+### Contract integration
+
+In `src/execution/contract.ts`:
+
+- Add `dissents` to the top-level `ck.known` allow-list and to the normalized return value in `normalize`.
+- Extend `CONTRACT_LIMITS` with the count and text limits, and validate the nested shape, enums and references through `checkContract`.
+- Include dissents in `renderContractMarkdown`, so consent prompts and `CONTRACT.md` expose the concern, provenance, tripwire and response policy.
+- Keep the existing hashing model. `contractHash` excludes only `consent` and `frozen`, so the new top-level field is automatically hashed. `consentHash` also includes it. Changing a dissent therefore changes the content participants agree to and follows the existing version and re-consent rules.
+
+Every referenced contract id must exist: the dissenter must be a participant, `check` must name an entry in `validation.commands`, and each `task` must name a contract task. A provenance reference is not a substitute for these checks. Duplicate dissent ids and dangling references are validation errors.
+
+## 3. Tripwire kinds and safety model
+
+Tripwires are non-executing predicates only. The watchdog reads the current `BlackboardState`; it does not run a command or inspect the filesystem to evaluate a dissent.
+
+| Kind | Predicate | Scope |
+|---|---|---|
+| `check_failed` | The named validation command has a failed result in `state.checks`. | With `task`, match that task's result. Without it, consider matching task and integration results. |
+| `path_touched` | A path recorded in `state.files` matches one of the supplied relative globs. | With `task`, require that task's recorded touch. Without it, consider any recorded task. |
+| `task_state` | The named task's current state is `rejected` or `blocked`, as specified. | Always names exactly one task. |
+
+`path_touched.paths` uses the existing relative-glob conventions. Reject absolute paths and any parent traversal (`..` path segment), including platform-specific forms. These patterns select recorded paths; they never grant filesystem access or expand a task's write scope.
+
+Dissenter text never reaches `argv`, `cwd` or `env`. A `check_failed` tripwire refers to an existing validation command; it cannot supply, change or execute that command. Claims, predictions, provenance and evidence remain data in stored records, notifications and huddle context.
+
+The state projection determines what is observable. A path tripwire observes touches already recorded on the blackboard, not unsubmitted edits. Check matching uses the reducer's submission-aware check state, retaining its protection against stale results. A matching tripwire is evidence that the concern deserves attention, not proof that the entire prediction was correct.
+
+## 4. Filing paths
+
+### Structured filing while drafting
+
+Add a tool available to the orchestrator and agents that files a structured dissent while the contract is a draft. It accepts the contract fields above, validates references and limits, and persists the dissent through the existing contract lifecycle. An agent files under its bound identity; filing must not let one participant impersonate another.
+
+Filing updates the draft content and its hash. It must not silently mutate a frozen contract. Later changes follow the existing amendment and consent rules.
+
+### Consent objections
+
+An `OBJECT` verdict can be resolved with a new `how: "dissented"` value on `contract.objection_resolved`. The objector consents to proceeding while retaining the structured dissent in the contract. This differs from withdrawing the concern or excusing the objector.
+
+Extend the event type and validator, the consent projection in `src/execution/contract-state.ts`, and the lifecycle handling in `src/execution/contract-lifecycle.ts`. Resolution must retain the dissent and apply to the version being consented to. An unresolved objection must not disappear merely because a dissent draft exists.
+
+### Ultraplan sign-offs
+
+When building a contract from an ultraplan session that was not signed off, import its `OBJECT` sign-offs as dissent drafts. The proposal hook is the existing unsigned-session branch in `proposeContract` in `src/execution/contract-lifecycle.ts`. Use the archived sign-offs produced by `src/sessions/ultraplan.ts`, retaining the objector and source reference.
+
+The existing warning that a session was not signed off is insufficient on its own: the objection must remain visible as a draft concern. Import does not invent a valid predicate or turn an `UNCLEAR` verdict into an `OBJECT` verdict.
+
+### Debate and waffle house
+
+Extend the challenger and attacker summary prompts in `src/sessions/modes.ts` to request a tagged `DISSENT` block for a remaining concern. Carry the author's identity and source session into the resulting dissent draft. The existing proponent and defender summaries do not replace the challenger's or attacker's own statement.
+
+Parse tagged blocks using `ownLines`-style rules from `src/execution/escalation.ts`: ignore content inside backtick or tilde fences and lines inside blockquotes. A quoted transcript, example or another participant's words cannot spoof a filed dissent. Parsed text still passes through structural validation; a tag alone does not arm a tripwire.
+
+### Freeze gate
+
+An imported or incomplete dissent draft needs a valid tripwire before freeze, or it must be explicitly excused with a reason. Missing predicates must not become an always-true default, silently disappear, or enter the executable contract as armed dissents.
+
+Draft handling must preserve the concern and the disposition for review. The final frozen `dissents[]` contains validated, armed entries; excusing an incomplete draft is an explicit lifecycle disposition, not an additional tripwire kind. A `dissented` resolution does not bypass this freeze gate or the existing consent blockers.
+
+## 5. Runtime
+
+### Pure watchdog rule
+
+Add `dissentTripwireRules` to `src/execution/watchdog.ts`, wire it into `evaluate`, and add the corresponding `WatchdogRule` member in `src/execution/watchdog-actions.ts`.
+
+The rule evaluates the frozen contract's dissents against `state.checks`, `state.files` and task states. It produces action drafts without filesystem access, process execution, model calls or other side effects. The existing runner applies those actions.
+
+Use the deterministic key `tripwire:<dissent>:<task>` for each match. A taskless match, such as an integration check, needs a stable taskless key component rather than an invented task reference. Persist fired keys in the dissent projection so repeated watchdog passes, replay and runner restarts cannot notify or escalate again for the same dissent/task pair. A dissent that applies across tasks can fire once for each matching task.
+
+### Response policy
+
+Every firing records evidence and issues `directive.issued` with `to: [dissenter]`. The existing `deliver` path in `src/execution/blackboard.ts` reduces that directive into `state.inbox`. Notification is required for all three policies, including when a huddle cannot run.
+
+The notification identifies the dissent, the matching task when present, the claim and the observed evidence. Scrub free text and fence the claim and evidence as data. Delimiter handling must prevent embedded text from escaping the data fence and becoming instructions in notification or huddle prompts.
+
+| `on_fire` | Action after notification |
+|---|---|
+| `notify` | Record the firing and deliver the directive. |
+| `huddle` | Raise an agent escalation and use the existing micro-huddle path. |
+| `pause_and_huddle` | Also block the task whose work tripped the predicate until the huddle resolves. |
+
+For a huddle, call `escalationAction` with `with: "agent"`. Set the escalation's `agent` to the dissenter and its counterpart target to the participant whose work tripped the predicate. Preserve the distinction between the dissenter and the tripper when selecting seats.
+
+The dissenter opens the micro-huddle and concludes it after the counterpart answers, using the existing flow in `src/execution/huddle.ts`. A `DISAGREED` outcome routes to the orchestrator. Existing handling for inconclusive outcomes, unavailable seats and budget clamps continues to apply.
+
+If no huddle budget remains, retain the firing and notification and wake the orchestrator instead of starting model calls. An integration-only match may lack a task or counterpart; route it through the existing orchestrator fallback when a micro-huddle cannot be seated.
+
+For `pause_and_huddle`, block only the affected task through the existing escalation/task lifecycle. Resolution releases that escalation's block through the normal path; it must not clear an unrelated blocker. A taskless match must not pause arbitrary tasks. When a huddle falls back to the orchestrator, any applicable block remains subject to explicit escalation resolution.
+
+## 6. Events and reducer
+
+Add these events to `EventPayloads` and `EVENT_TYPES` in `src/execution/types.ts` and to the shapes table in `src/execution/events.ts`:
+
+| Event | Payload | Meaning |
+|---|---|---|
+| `dissent.tripwire_fired` | `dissent_id, task?, tripped_by, evidence` | Records the matching dissent, affected task if any, participant responsible for the observed work, and the observed evidence. |
+| `dissent.scored` | `dissent_id, outcome: vindicated / refuted / untested` | Records the orchestrator's assessment of the prediction. |
+
+Keep evidence bounded, scrubbed and sufficient to identify the matched check, path or task state. Reuse event causation and correlation to connect the firing, directive, escalation and huddle. Use the normal transaction path so the firing marker and its required notification are durable together.
+
+Add `state.dissents` to `BlackboardState` and initialize and reduce it in `src/execution/blackboard.ts`. It must expose the contract's dissent definitions, fired keys and evidence, links to the associated escalation/huddle, and the latest recorded score. Huddle outcomes come from the existing huddle events; they are not a second, independently maintained verdict.
+
+The reducer remains pure and deterministic. Contract adoption supplies dissent definitions from resolved contract blobs. New firing and scoring events update the projection, and older logs without dissents produce an empty dissent section. Preserve runtime records for unchanged dissent ids across contract amendments so adoption cannot re-arm an already-fired pair accidentally.
+
+Bump `REDUCER_VERSION` from 5 to 6. The store will reject snapshots from the older reducer version and rebuild the projection from the event log. Do not rewrite historical events or add a separate mutable store for runtime dissent state.
+
+## 7. Scoring
+
+Add an orchestrator tool to set a dissent's outcome by emitting `dissent.scored`:
+
+- `vindicated`: the available evidence supports the predicted failure.
+- `refuted`: the available evidence contradicts the prediction.
+- `untested`: the run did not establish an outcome.
+
+The per-persona record is advisory and display-only. It must never weight votes, alter consent thresholds or change routing authority. A fired tripwire does not automatically mean `vindicated`, and an unfired one does not automatically mean `refuted`. Before scoring, display the absence of an assessment rather than manufacturing an event.
+
+WS16 supplies the event, projection and explicit scoring tool. WS14 later connects postmortem findings to this scoring path.
+
+## 8. Dashboard
+
+Add a **Dissents** page in `src/dashboard/render.ts`, a `PageKey`, a `NAV` entry, the appropriate live-update behavior and a route in `src/dashboard/server.ts`.
+
+For each dissent, show the dissenter, claim, predicted failure, source, tripwire, response policy, armed or fired status, huddle outcome when present, and score. For a dissent that fires on multiple tasks, retain the task association so the evidence and huddle outcome are understandable.
+
+Render every dynamic value through the existing `t()` helper, including claims, evidence, provenance and outcome labels. Dissent content remains escaped data. The page reads the blackboard projection and existing escalation/huddle state; it does not run predicates or set scores itself.
+
+## 9. User documentation
+
+The implementation adds `docs/dissents.md` with filing examples, the three predicates, freeze requirements, response policies, scoring semantics and the budget fallback. Link it from the escalations section of `docs/heads-down.md` and add one short index entry to `README.md`. Keep the detailed workflow in `docs/`.
+
+This design document is the first WS16 artifact. The user guide, index links and implementation changes belong to the workstreams below.
+
+## 10. Workstream split
+
+| Workstream | Issue | Scope | Dependencies |
+|---|---|---|---|
+| WS16a | #139 | Contract types, normalization, limits, reference validation, hashing coverage and Markdown rendering; define the event payloads and dissent projection contract. | Establishes the shared schema used by the other workstreams. |
+| WS16b | #140 | Draft filing tool, `dissented` consent resolution, unsigned ultraplan imports, debate/waffle house tagged summaries, safe parsing and freeze/excusal handling. | Uses WS16a's schema and validation. |
+| WS16c | #141 | Event validation and reducer implementation, version bump, pure watchdog rule, durable deduplication, notifications, huddle routing, pause behavior and budget fallback. | Uses WS16a's schema and produces the runtime state consumed by WS16d. |
+| WS16d | #142 | Orchestrator scoring tool, advisory persona display, Dissents page and route, user guide, README index entry and heads-down guide link. | Uses the schema and event/reducer interfaces from WS16a and WS16c. |
+
+Each implementation workstream adds or adjusts unit tests in `test/unit/*.test.mjs`, runs `npm run build`, and runs the specific test files it touches with `node --test` using the repository's test environment fixture where needed. The design-document task itself changes only this file.
+
+### Verification requirements for implementation
+
+| Area | Required coverage |
+|---|---|
+| Contract | Empty default, response-policy default, count and text limits, malformed shapes, duplicate ids, missing participants/checks/tasks, unsafe paths, hashing and rendered dissents. |
+| Filing | Draft-only authorization, objector consent with retained dissent, version-bound resolution, imported `OBJECT` sign-offs, incomplete-draft freeze refusal and explicit excusal. |
+| Summary parsing | Valid author-owned tags; spoofed tags inside backtick fences, tilde fences and blockquotes; invalid structured content. |
+| Events and replay | Both event validators, malformed payload rejection, empty state for older logs, deterministic replay, snapshot invalidation and durable fired keys. |
+| Watchdog | All three predicates, task filters and taskless checks, no match, repeated evaluation/restart deduplication, multiple matching tasks and evidence selection. |
+| Notification and huddles | Directive delivery, scrubbed and fenced text, dissenter/requester identity, tripper/counterpart identity, `DISAGREED` routing, budget fallback and task block/resolution behavior. |
+| Scoring and dashboard | Authorized scoring and replay, all outcomes, absence of automatic scoring or voting effects, page navigation/route, armed/fired state, huddle outcome and escaped malicious text. |

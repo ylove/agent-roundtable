@@ -74,7 +74,7 @@ async function hostileRun() {
   return store;
 }
 
-const PAGES = ["", "tasks", "tasks/a", "tasks/b", "tasks/c", "escalations", "events", "events?task=a", "events?type=task", "events?type=note.posted", "contract", "dag"];
+const PAGES = ["", "tasks", "usage", "tasks/a", "tasks/b", "tasks/c", "escalations", "events", "events?task=a", "events?type=task", "events?type=note.posted", "contract", "dag"];
 
 test("dashboard: every page escapes and redacts hostile run content, with no inline script, style or handler", async (t) => {
   const store = await hostileRun();

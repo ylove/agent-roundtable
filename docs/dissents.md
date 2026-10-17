@@ -1,6 +1,8 @@
 # Dissents and tripwires
 
-A dissent preserves a participant's concern and predicted failure in the contract. It is included in the contract hash, consent hash and rendered contract. A contract may contain at most 16 dissents; each claim and prediction is limited to 500 characters. `on_fire` defaults to `huddle`.
+A dissent preserves a participant's concern and predicted failure when the group agrees to proceed. A concern raised at the table becomes a tripwire during heads-down work: when the recorded evidence matches, the dissenter hears about it and can help reconsider the decision.
+
+Dissents are included in the contract hash, consent hash and rendered contract. A contract may contain at most 16 dissents; each claim and prediction is limited to 500 characters. `on_fire` defaults to `huddle`.
 
 ## File or update a concern
 
@@ -29,11 +31,11 @@ Authenticated agents use the same tool with `execution_id` and `agent_token` ins
 
 Tripwires are structured data, never commands:
 
-| Kind | Fields |
-|---|---|
-| `check_failed` | `check`: a validation command id; optional `task` |
-| `path_touched` | `paths`: nonempty relative globs; optional `task` |
-| `task_state` | `task` and `state`: `rejected` or `blocked` |
+| Kind | Fields | Fires when |
+|---|---|---|
+| `check_failed` | `check`: a validation command id; optional `task` | The named check has a failed result, limited to `task` if supplied. |
+| `path_touched` | `paths`: nonempty relative globs; optional `task` | A recorded touched path matches a glob, limited to `task` if supplied. |
+| `task_state` | `task` and `state`: `rejected` or `blocked` | The named task is blocked or has a recorded rejection, as specified. |
 
 Every check or task reference must exist. Globs support `**`, `*` and `?`; absolute paths and parent traversal are rejected with either path separator. Dissent text cannot supply `argv`, `cwd` or `env`.
 
@@ -67,7 +69,7 @@ predicted_failure: The order validation fails after a retry.
 
 Imports use the existing contract validator: each value must fit the 500-character limit and all explicit and imported dissents together must fit the 16-entry limit. Oversized imports fail proposal validation. Imports do not invent tripwires; use `file_dissent` to arm or explicitly excuse each draft before freeze.
 
-Frozen contracts use `amend_contract`; changing dissents requires the existing consent or audited override path. Runtime behavior follows the [design](design/dissents.md).
+Frozen contracts use `amend_contract`; changing dissents requires the existing consent or audited override path. See the [design](design/dissents.md) for implementation details.
 
 ## Runtime
 
@@ -75,7 +77,13 @@ Tripwires arm after freeze. The watchdog evaluates failed checks, recorded touch
 
 Every firing records `dissent.tripwire_fired` and delivers a directive to the dissenter's inbox. Claims and evidence are scrubbed and fenced as untrusted data. They never become commands or process settings.
 
-`notify` delivers the directive. `huddle` also opens a micro-huddle: the dissenter opens and concludes it, and the agent whose work tripped the predicate answers. `pause_and_huddle` additionally blocks the affected task until resolution. Agreement resolves the escalation and unblocks its task; disagreement or an unusable answer wakes the orchestrator for resolution. Existing budget limits apply. Without budget, notification still happens and a nonblocking escalation wakes the orchestrator without a model call.
+| `on_fire` | Response |
+|---|---|
+| `notify` | Deliver the directive to the dissenter. |
+| `huddle` | Also open a micro-huddle: the dissenter opens and concludes it, and the agent whose work tripped the predicate answers. |
+| `pause_and_huddle` | Also block the affected task until resolution. |
+
+Agreement resolves the escalation and unblocks its task; disagreement or an unusable answer wakes the orchestrator for resolution. Existing budget limits apply. Without budget, notification still happens and a nonblocking escalation wakes the orchestrator without a model call.
 
 ## Advisory scores
 
@@ -91,4 +99,10 @@ The contract's orchestrator may record or revise an outcome after freeze:
 }
 ```
 
-Outcomes are `vindicated`, `refuted`, or `untested`, recorded as `dissent.scored`. Scores stay alongside the dissent and its author for display and review. They never change voting or consent weight.
+Outcomes are `vindicated` (evidence supports the prediction), `refuted` (evidence contradicts it), or `untested` (the run did not establish an outcome), recorded as `dissent.scored`. Scores stay alongside the dissent and its author for display and review. They never change voting or consent weight. A fired tripwire does not automatically vindicate a prediction, and an unfired one does not refute it. Until the orchestrator records an outcome, the dissent is shown as not scored.
+
+## Dashboard
+
+Open **Dissents** in the run's local dashboard to see each dissenter, claim, predicted failure, source, tripwire and `on_fire` mode. An armed tripwire is waiting for matching evidence; a fired one lists each affected task (or integration check), who tripped it and the evidence. The page also shows associated huddle outcomes and decisions and the latest advisory score.
+
+The page follows new blackboard events automatically. It is read-only: file or amend concerns and set scores through the tools. Dissent text and evidence are redacted and escaped for display. See [heads-down execution](heads-down.md#escalations-and-huddles) for escalation controls.

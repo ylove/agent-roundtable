@@ -86,7 +86,7 @@ External workers register with `join_execution` and receive an `agent_token` onc
 
 ## Escalations and huddles
 
-For concerns retained during contract drafting, see [draft dissents and tripwires](dissents.md).
+Keep concerns raised at the table through [dissents and tripwires](dissents.md): notify the dissenter, huddle or pause affected work when recorded evidence matches. The dashboard's **Dissents** page shows firings, huddle outcomes and advisory scores.
 
 Only blocked work and affected dependents pause. Workers use `escalate` for blockers, ambiguity, resource needs, conflicts, assistance or emergencies. The watchdog handles expired claims/leases and transient failures, detects stalls, repeated signatures and deadlocks, and routes what remains.
 

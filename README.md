@@ -31,7 +31,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [Collaboration: conversation](docs/modes/collaborations.md#conversation-mode) | Informal colleague chat with an optional theme and private grounding. | “Let cfo and product-lead chat about the launch in conversation mode.” |
 | [Ultraplan](docs/modes/ultraplan.md) | Collect input, review revisions and record sign-offs on a plan. | “Ultraplan the launch with product-lead, cfo and skeptic; show the final document verbatim.” |
 | [Agent workshops](docs/modes/agent-workshops.md) | Specialists create or improve an agent and reusable skills. | “Have cfo and skeptic create a budget agent, then improve product-lead's escalation rules; preview both.” |
-| [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local board for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
+| [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local blackboard for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
 | [Public sessions](docs/modes/public-sessions.md) | Mirror an explicitly public session to ntfy or a webhook. | “Make that pricing debate public and give me the viewing link.” |
 
 ### Heads-down
@@ -102,7 +102,7 @@ No arguments starts the orchestrator MCP server. The **8 subcommands** are docum
 - [Getting started and registration](docs/getting-started.md)
 - [Mode guides](docs/modes/meetings.md): [collaborations](docs/modes/collaborations.md), [ultraplan](docs/modes/ultraplan.md), [agent workshops](docs/modes/agent-workshops.md), [prototypes](docs/modes/prototype-mode.md), [public sessions](docs/modes/public-sessions.md)
 - [Heads-down user guide](docs/heads-down.md) and [design specification](docs/design/heads-down.md)
-- [Draft dissents and tripwires](docs/dissents.md)
+- [Dissents and tripwires](docs/dissents.md)
 - [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)
 - [Configuration](docs/configuration.md) and [providers](docs/providers.md)
 - [Agent personas and skills](docs/agents.md) and [session archives](docs/sessions.md)

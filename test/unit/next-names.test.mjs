@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 const { tools } = await import("../../dist/tools.js");
 const workshop = await import("../../dist/sessions/agent-creation.js");
 const ultraplan = await import("../../dist/sessions/ultraplan.js");
+// The roundtable-tasks reminder names block fields (depends_on, timeout_s), not tools; the rest must be registered.
+const contractParse = await import("../../dist/execution/contract-parse.js");
 
-// These are session status values and a Claude Code Agent-tool parameter.
-const known = new Set(["awaiting_plan", "awaiting_revision", "subagent_type"]);
+// These are session status values (execute's needs_input too) and a Claude Code Agent-tool parameter.
+const known = new Set(["awaiting_plan", "awaiting_revision", "needs_input", "subagent_type"]);
 const descriptions = [];
 function schema(node) {
   if (!node || typeof node !== "object") return;
@@ -33,7 +35,7 @@ test("all workshop and ultraplan next variants and tool descriptions mention reg
     workshop.buildWorkshopNext({ written: true, agentName: "new-agent", targetPath: "target.md", backupPath: "backup.txt" }),
     workshop.buildWorkshopNext({ written: true, agentName: "new-agent" }),
     workshop.buildWorkshopNext({ written: true, agentName: "new-agent", meetingId: "meeting-1" }),
-    ultraplan.NEXT_AFTER_INPUT, ultraplan.NEXT_AFTER_REVIEW,
+    ultraplan.NEXT_AFTER_INPUT, ultraplan.NEXT_AFTER_REVIEW, contractParse.TASK_BLOCK_NEXT.replace(/\b(depends_on|timeout_s)\b/g, ""),
     ultraplan.buildUnreviewedNext(2), ultraplan.buildPlannerStoppedError("review of v2", "phase failed"),
     ...descriptions,
   ];

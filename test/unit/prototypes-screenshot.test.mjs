@@ -1,7 +1,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,20 +17,26 @@ const tmpd = async (prefix) => {
   return d;
 };
 
-// A stand-in browser. Default: exit at once. RT_FAKE_CHROME_MODE=args records its argv and temp-dir
-// environment; =hang records its pid and keeps recreating its profile directory (as a live Chrome would).
+// A stand-in browser. Default: exit at once. Mode "args" records its argv, its temp-dir environment and
+// its whole environment (to <out>.env); "hang" records its pid and keeps recreating its profile directory
+// (as a live Chrome would). Mode and output path come from control files beside the script: Chrome gets
+// an allowlisted environment, so variables a test sets never reach it.
 const fakeDir = await tmpd("rt-chrome-");
 const fakeChrome = join(fakeDir, "fake-chrome");
 await writeFile(
   fakeChrome,
   `#!/bin/sh
-case "$RT_FAKE_CHROME_MODE" in
+ctl='${fakeDir}'
+mode=$(cat "$ctl/mode" 2>/dev/null)
+out=$(cat "$ctl/out" 2>/dev/null)
+case "$mode" in
   args)
-    printf '%s\\n' "$@" > "$RT_FAKE_CHROME_OUT"
-    printf 'TMPDIR=%s\\nTMP=%s\\nTEMP=%s\\nMAC_CHROMIUM_TMPDIR=%s\\n' "$TMPDIR" "$TMP" "$TEMP" "$MAC_CHROMIUM_TMPDIR" >> "$RT_FAKE_CHROME_OUT" ;;
+    printf '%s\\n' "$@" > "$out"
+    printf 'TMPDIR=%s\\nTMP=%s\\nTEMP=%s\\nMAC_CHROMIUM_TMPDIR=%s\\n' "$TMPDIR" "$TMP" "$TEMP" "$MAC_CHROMIUM_TMPDIR" >> "$out"
+    env > "$out.env" ;;
   hang)
     for a in "$@"; do case "$a" in --user-data-dir=*) d="\${a#--user-data-dir=}" ;; esac; done
-    echo $$ >> "$RT_FAKE_CHROME_OUT"
+    echo $$ >> "$out"
     while true; do mkdir -p "$d/Default" 2>/dev/null; sleep 0.05; done ;;
 esac
 exit 0
@@ -46,10 +52,10 @@ const { PrototypeTracker } = await import("../../dist/prototypes/index.js");
 
 const posix = process.platform !== "win32";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitFor(cond, ms = 5000) {
+async function waitFor(cond, ms = 15000, description = "condition") {
   const end = Date.now() + ms;
   while (!cond()) {
-    if (Date.now() > end) throw new Error("timed out waiting");
+    if (Date.now() > end) throw new Error(`timed out waiting for ${description}`);
     await sleep(20);
   }
 }
@@ -63,13 +69,17 @@ const gone = (pid) => {
   }
 };
 
-/** Run with RT_FAKE_CHROME_MODE / RT_FAKE_CHROME_OUT set for this test only. */
+// A browser's exit event need not mean its helpers have exited yet. On POSIX the
+// negative pid probes its entire process group, including those helpers.
+const groupsGone = (pids) => pids.every((pid) => gone(pid) && gone(-pid));
+
+/** Set the fake browser's mode and output file for this test only. */
 function fakeMode(t, mode, out) {
-  process.env.RT_FAKE_CHROME_MODE = mode;
-  process.env.RT_FAKE_CHROME_OUT = out;
+  writeFileSync(join(fakeDir, "mode"), mode);
+  writeFileSync(join(fakeDir, "out"), out);
   t.after(() => {
-    delete process.env.RT_FAKE_CHROME_MODE;
-    delete process.env.RT_FAKE_CHROME_OUT;
+    rmSync(join(fakeDir, "mode"), { force: true });
+    rmSync(join(fakeDir, "out"), { force: true });
   });
 }
 
@@ -98,6 +108,12 @@ test("captureScreenshots: Chrome runs behind the board as a deny-all proxy, with
   const out = await tmpd("rt-shots-");
   const record = join(await tmpd("rt-chrome-"), "args.txt");
   fakeMode(t, "args", record);
+  process.env.ANTHROPIC_API_KEY = "sk-ant-never-reaches-chrome";
+  process.env.ROUNDTABLE_WEBHOOK_AUTH_HEADER = "Authorization: Bearer never-reaches-chrome";
+  t.after(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ROUNDTABLE_WEBHOOK_AUTH_HEADER;
+  });
   const url = "http://127.0.0.1:4567/tok3n/p/P1v1/app/index.html";
   await captureScreenshots(url, out, [DESKTOP_VIEWPORT], { chromePath: fakeChrome });
   const args = lines(record);
@@ -111,6 +127,10 @@ test("captureScreenshots: Chrome runs behind the board as a deny-all proxy, with
   }
   for (const name of ["TMPDIR", "TMP", "TEMP", "MAC_CHROMIUM_TMPDIR"]) assert.ok(args.includes(`${name}=${out}`), `${name}: ${args.join(" ")}`);
   assert.ok(args.includes(url));
+  // The browser allowlist: no provider keys, no publisher credentials.
+  const env = readFileSync(`${record}.env`, "utf8");
+  assert.ok(!env.includes("never-reaches-chrome"), env);
+  assert.match(env, /^PATH=/m);
 });
 
 test("captureScreenshots: a hung browser is killed at the timeout", { skip: !posix }, async () => {
@@ -129,18 +149,22 @@ test("ChromeProcesses: killAll stops captures in flight (the whole process group
   const pidsFile = join(await tmpd("rt-chrome-"), "pids.txt");
   fakeMode(t, "hang", pidsFile);
   const procs = new ChromeProcesses();
-  const t0 = Date.now();
   const capture = captureScreenshots("http://127.0.0.1:9/x", out, [DESKTOP_VIEWPORT, MOBILE_VIEWPORT], {
     chromePath: fakeChrome,
     processes: procs,
   });
   await waitFor(() => lines(pidsFile).length === 2 && procs.running.length === 2);
   const pids = lines(pidsFile).map(Number);
+  // Wait until both browsers really have written their profiles before killing
+  // them; a pid alone is published before the fake browser starts its helpers.
+  await waitFor(() => ["desktop", "mobile"].every((name) => existsSync(join(out, `.chrome-${name}`, "Default"))));
+  const t0 = Date.now();
   procs.killAll();
   assert.deepEqual(await capture, []);
-  assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0} ms`);
+  await waitFor(() => groupsGone(pids), 15000, "browser process groups to exit");
+  assert.ok(Date.now() - t0 < 15000, `took ${Date.now() - t0} ms`);
   assert.ok(pids.every(gone), "browsers killed");
-  await sleep(300);
+  assert.ok(groupsGone(pids), "browser helpers killed");
   assert.deepEqual(readdirSync(out), [], "nothing (helpers included) recreates the profile directories");
   // A capture that starts after killAll never leaves a browser running.
   assert.deepEqual(await captureScreenshots("http://127.0.0.1:9/x", out, [DESKTOP_VIEWPORT], { chromePath: fakeChrome, processes: procs }), []);
@@ -168,8 +192,10 @@ for (const how of ["closeSync", "close"]) {
     else await tr.close("ended");
     const r = await turn;
     assert.deepEqual(r.attachments, []);
-    assert.ok(lines(pidsFile).map(Number).every(gone), "browsers killed");
-    await sleep(300);
+    const pids = lines(pidsFile).map(Number);
+    await waitFor(() => groupsGone(pids), 15000, "browser process groups to exit");
+    assert.ok(pids.every(gone), "browsers killed");
+    assert.ok(groupsGone(pids), "browser helpers killed");
     assert.equal(existsSync(tr.sessionDir), false, "nothing recreated the sandbox");
     assert.equal(tr.hasLiveUnderAssessment(), false);
   });

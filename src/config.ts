@@ -2,11 +2,12 @@
 // Configuration (reads process.env only; imports no local modules)
 // ============================================================================
 
+import { mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 // Version (also reported by debug_env and the startup banner)
-export const VERSION = "0.4.0";
+export const VERSION = "1.0.0";
 
 // Agent meetings
 // The default is relative to the server process's cwd (whatever directory the MCP host launched it
@@ -23,9 +24,27 @@ export function defaultWorkspaceDir(): string {
 }
 
 export const WORKSPACE_DIR = process.env.ROUNDTABLE_WORKSPACE_DIR || defaultWorkspaceDir();
+
+// Local state root (built from the home directory at runtime so no literal home path appears in source).
+// Archived sessions, heads-down runs, task worktrees and the audit log live under it.
+function stateHome(): string {
+  if (process.env.ROUNDTABLE_HOME) return process.env.ROUNDTABLE_HOME;
+  if (process.env.NODE_TEST_CONTEXT !== undefined) {
+    const dir = mkdtempSync(join(tmpdir(), "roundtable-test-home-"));
+    console.error("[Roundtable] NODE_TEST_CONTEXT is set without ROUNDTABLE_HOME; using a fresh temporary state directory. Preload test/fixtures/foundation/test-env.mjs for test cleanup.");
+    return dir;
+  }
+  return join(homedir(), ".agent-roundtable");
+}
+export const ROUNDTABLE_HOME = stateHome();
+export const SESSIONS_DIR = join(ROUNDTABLE_HOME, "sessions");
+export const EXECUTIONS_DIR = join(ROUNDTABLE_HOME, "executions");
+export const WORKTREES_DIR = join(ROUNDTABLE_HOME, "worktrees");
+export const AUDIT_DIR = join(ROUNDTABLE_HOME, "audit");
+
 const activityLog = process.env.ROUNDTABLE_ACTIVITY_LOG;
 export const ACTIVITY_LOG_PATH: string | null = !activityLog
-  ? join(homedir(), ".agent-roundtable", "activity.jsonl")
+  ? join(ROUNDTABLE_HOME, "activity.jsonl")
   : /^(off|false|0|no)$/i.test(activityLog) ? null : activityLog;
 export const ACTIVITY_LOG_MAX_ENTRIES = 500;
 export const PARALLEL_TURNS = Math.max(1, parseInt(process.env.ROUNDTABLE_PARALLEL_TURNS || "4", 10) || 4);
@@ -96,9 +115,7 @@ export const WEBHOOK_URL = process.env.ROUNDTABLE_WEBHOOK_URL || "";
 export const WEBHOOK_VIEW_URL = process.env.ROUNDTABLE_WEBHOOK_VIEW_URL || "";
 export const WEBHOOK_AUTH_HEADER = process.env.ROUNDTABLE_WEBHOOK_AUTH_HEADER || "";
 export const PUBLIC_TOPIC_PREFIX = process.env.ROUNDTABLE_PUBLIC_TOPIC_PREFIX || "roundtable";
-// Built from the home directory at runtime so no literal home path appears in source.
-export const TRANSCRIPTS_DIR =
-  process.env.ROUNDTABLE_TRANSCRIPTS_DIR || join(homedir(), ".agent-roundtable", "transcripts");
+export const TRANSCRIPTS_DIR = process.env.ROUNDTABLE_TRANSCRIPTS_DIR || join(ROUNDTABLE_HOME, "transcripts");
 export const PUBLISH_FLUSH_TIMEOUT_MS = parseInt(
   process.env.ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS || "30000",
   10
@@ -145,3 +162,100 @@ export const CHROME_PATH_OVERRIDE = process.env.ROUNDTABLE_CHROME_PATH || "";
 export const PROTOTYPE_SCREENSHOTS = !/^(0|false|no|off)$/i.test(
   (process.env.ROUNDTABLE_PROTOTYPE_SCREENSHOTS || "").trim()
 );
+
+// Security controls (1.0). Read at call time, so a changed environment applies without a restart.
+// Two more are read elsewhere, because they act before this module is evaluated or inside a child:
+//   ROUNDTABLE_DOTENV=off      skip loading .env entirely (src/env.ts; worker MCP servers start keyless)
+//   ROUNDTABLE_WORKER_AUTH     "api_key" passes ANTHROPIC_API_KEY / OPENAI_API_KEY to claude and codex
+//                              children; otherwise they use their own login (src/security/child-env.ts)
+const PATH_LIST_DELIMITER = process.platform === "win32" ? ";" : ":";
+const truthy = (v: string | undefined) => /^(1|true|yes|on)$/i.test((v || "").trim());
+
+export const LOCAL_TIMEOUT_DEFAULT_MS = 300_000;
+
+/** One `claude -p` call of a local meeting; its process group is killed when it runs over. */
+export function localTimeoutMs(): number {
+  const n = Number((process.env.ROUNDTABLE_LOCAL_TIMEOUT_MS || "").trim());
+  return Number.isSafeInteger(n) && n > 0 ? n : LOCAL_TIMEOUT_DEFAULT_MS;
+}
+
+/** A per-call base_url may reach private, CGNAT, link-local and ULA addresses (metadata stays blocked). */
+export function allowPrivateBaseUrls(): boolean {
+  return truthy(process.env.ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS);
+}
+
+/** Origins besides OPENAI_COMPATIBLE_BASE_URL's that may receive OPENAI_COMPATIBLE_API_KEY (comma-separated). */
+export function openAICompatibleTrustedOrigins(): string[] {
+  return (process.env.ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+/** Directories besides the agents directories that path-like agent refs may resolve into. */
+export function agentPaths(): string[] {
+  return (process.env.ROUNDTABLE_AGENT_PATHS || "").split(PATH_LIST_DELIMITER).map((s) => s.trim()).filter(Boolean);
+}
+
+export const PROVIDER_RETRIES_DEFAULT = 2;
+
+/** Provider retries after the first attempt (408/409/429/5xx and network errors); 0 disables, at most 5. */
+export function providerRetries(): number {
+  const raw = (process.env.ROUNDTABLE_PROVIDER_RETRIES || "").trim();
+  return Math.min(5, /^\d+$/.test(raw) ? Number(raw) : PROVIDER_RETRIES_DEFAULT);
+}
+
+// Heads-down runs (1.0). Read at call time, like the security controls above.
+
+/**
+ * ROUNDTABLE_DEFAULT_VISIBILITY: how execute shows a run when the call names no channel. A comma
+ * list of dashboard, chat_only and github:<owner/name>; "" when unset. Parsed by execute.
+ */
+export function defaultVisibility(): string {
+  return (process.env.ROUNDTABLE_DEFAULT_VISIBILITY || "").trim();
+}
+
+/** ROUNDTABLE_DEFAULT_BUDGET_USD: the run budget execute uses when neither the call nor the contract sets one. */
+export function defaultBudgetUsd(): number | undefined {
+  const raw = (process.env.ROUNDTABLE_DEFAULT_BUDGET_USD || "").trim();
+  const n = Number(raw);
+  return raw && Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * The provider, model and base URL of the runner's persona calls (micro-huddles, the lead
+ * fallback, goal review): ROUNDTABLE_EXECUTION_PROVIDER, ROUNDTABLE_EXECUTION_MODEL and
+ * ROUNDTABLE_EXECUTION_BASE_URL. Like the tools, anthropic and the provider's default model when
+ * unset; `unknown` names a provider that is not one of PROVIDER_IDS (then anthropic is used).
+ */
+export function executionLLM(): { provider: LLMProvider; model: string; baseUrl?: string; unknown?: string } {
+  const raw = (process.env.ROUNDTABLE_EXECUTION_PROVIDER || "").trim();
+  const known = (PROVIDER_IDS as string[]).includes(raw);
+  const provider: LLMProvider = known ? (raw as LLMProvider) : "anthropic";
+  const model = (process.env.ROUNDTABLE_EXECUTION_MODEL || "").trim() || DEFAULT_MODELS[provider];
+  const baseUrl = (process.env.ROUNDTABLE_EXECUTION_BASE_URL || "").trim();
+  return { provider, model, ...(baseUrl && { baseUrl }), ...(raw && !known && { unknown: raw }) };
+}
+
+export const EXECUTION_RETENTION_DEFAULT_DAYS = 30;
+export const SESSION_RETENTION_DEFAULT_DAYS = 30;
+export const AUDIT_RETENTION_DEFAULT_DAYS = 365;
+
+/** Whole days from `name`: null (keep everything) for 0 or off, the default when unset or not a whole number. */
+function retentionDays(name: string, fallback: number): number | null {
+  const raw = (process.env[name] || "").trim().toLowerCase();
+  if (raw === "off" || /^0+$/.test(raw)) return null;
+  return /^\d+$/.test(raw) ? Number(raw) : fallback;
+}
+
+/** Days a completed, failed or aborted run is kept (worktrees, branches and log); null keeps them all. */
+export function executionRetentionDays(): number | null {
+  return retentionDays("ROUNDTABLE_EXECUTION_RETENTION_DAYS", EXECUTION_RETENTION_DEFAULT_DAYS);
+}
+
+/** Days an archived at-the-table session is kept after it ended; null keeps them all. */
+export function sessionRetentionDays(): number | null {
+  return retentionDays("ROUNDTABLE_SESSION_RETENTION_DAYS", SESSION_RETENTION_DEFAULT_DAYS);
+}
+
+/** Days the audit log keeps a month file after its month ended; null keeps them all. */
+export function auditRetentionDays(): number | null {
+  return retentionDays("ROUNDTABLE_AUDIT_RETENTION_DAYS", AUDIT_RETENTION_DEFAULT_DAYS);
+}

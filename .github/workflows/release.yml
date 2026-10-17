@@ -1,0 +1,42 @@
+name: Release
+
+# Publishing is manual: pushing a tag does not publish. Run this workflow from the Actions tab on
+# a v*.*.* tag whose version matches package.json, or publish locally (without provenance).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Check the tag matches the package version
+        run: |
+          test "$GITHUB_REF_TYPE" = tag || { echo "Run this workflow on a v*.*.* tag, not $GITHUB_REF_NAME"; exit 1; }
+          test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')" || { echo "Tag $GITHUB_REF_NAME does not match package.json"; exit 1; }
+
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run build
+      - run: npm test
+
+      - name: Hygiene
+        run: "! grep -riE 'v[o]uch|/U[s]ers/' --exclude-dir=node_modules --exclude-dir=.git --exclude=.git --exclude-dir=dist ."
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

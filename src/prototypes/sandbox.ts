@@ -123,6 +123,7 @@ export async function materializeFiles(
   if (!st.isDirectory() || st.isSymbolicLink()) throw new Error("prototype directory is not a plain directory");
   const written: PrototypeFile[] = [];
   for (const f of files) {
+    if (opts.redactContent && redact(f.path).text !== f.path) throw new Error("Refusing a sensitive public prototype file path");
     const err = validatePath(f.path);
     if (err) throw new Error(err);
     const target = resolve(base, ...f.path.split("/"));

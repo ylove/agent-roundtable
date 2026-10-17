@@ -27,8 +27,10 @@ const {
   REVIEW_VERDICTS, SIGNOFF_VERDICTS, NEXT_AFTER_INPUT, NEXT_AFTER_REVIEW,
   buildUltraplanParticipantDirective, buildUltraplanPlannerDirective, buildInputPrompt,
   buildReviewPrompt, buildSignoffPrompt, buildPlannerDraftPrompt, buildPlannerRevisePrompt,
-  renderUltraplanDocument, recordUltraplanEntry, tallyVerdicts,
+  renderUltraplanDocument, recordUltraplanEntry, tallyVerdicts, isSignedOff,
 } = await import("../../dist/sessions/ultraplan.js");
+const { formatUltraplanResult } = await import("../../dist/tools/shared.js");
+const { TASK_BLOCK_NEXT, TASK_BLOCK_SIGNOFF_CHECK } = await import("../../dist/execution/contract-parse.js");
 const { PublicChannel, finalizeOpenChannels } = await import("../../dist/publishers/index.js");
 const { readActivity } = await import("../../dist/activity.js");
 const { DEFAULT_MODELS } = await import("../../dist/config.js");
@@ -218,9 +220,13 @@ test("review and sign-off tallies include UNCLEAR, bold verdicts and every zero 
   assert.deepEqual(reviewed.reviews.map((r) => r.verdict), ["UNCLEAR", "OBJECT"]);
   const final = await submitPlan(first.ultraplanId, "Final", true);
   assert.deepEqual(final.tally, { APPROVE: 0, "APPROVE WITH RESERVATIONS": 0, OBJECT: 1, UNCLEAR: 1 });
-  assert.match(final.finalPlan, /Sign-off: 0 approve, 0 approve with reservations, 1 object, 1 unclear/);
+  // Sign-offs were collected, but an OBJECT or UNCLEAR one means the plan is not signed off.
+  assert.equal(final.signedOff, false);
+  assert.match(final.finalPlan, /Sign-off: 0 approve, 0 approve with reservations, 1 object, 1 unclear — not signed off/);
+  assert.match(final.finalPlan, /## Latest plan \(v2\) — not signed off/);
+  assert.match(final.finalPlan, /- v2 by orchestrator — final, not signed off: .*cfo\.md UNCLEAR, .*skeptic\.md OBJECT/);
   assert.equal(readActivity(log).find((e) => e.session === final.ultraplanId).outcome,
-    "signed off v2: 0 approve, 0 approve with reservations, 1 object, 1 unclear");
+    "not signed off at v2: 0 approve, 0 approve with reservations, 1 object, 1 unclear");
   assert.deepEqual(tallyVerdicts(["APPROVE", "unknown", "UNCLEAR"], REVIEW_VERDICTS),
     { APPROVE: 1, "APPROVE WITH CHANGES": 0, OBJECT: 0, UNCLEAR: 2 });
 });
@@ -332,8 +338,8 @@ test("validation uses exact errors, unknown ids list active ids, and all persona
   await assert.rejects(startUltraplan([cfo], " \n ", opts), { message: "task is required: describe what the plan is for" });
   await assert.rejects(startUltraplan(undefined, "Task", opts), { message: "Ultraplan requires at least 1 agent" });
   await assert.rejects(startUltraplan([cfo], undefined, opts), { message: "task is required: describe what the plan is for" });
-  for (const options of [{}, { planner: join(root, "missing.md") }]) {
-    const agents = options.planner ? [cfo] : [cfo, join(root, "missing.md")];
+  for (const options of [{}, { planner: join(root, "agents", "missing.md") }]) {
+    const agents = options.planner ? [cfo] : [cfo, join(root, "agents", "missing.md")];
     await assert.rejects(startUltraplan(agents, "Missing persona", { ...opts, ...options, public: true }), /Agent prompt not found/);
     assert.equal(calls.length, 0);
     assert.equal(ultraplans.size, 0);
@@ -606,17 +612,25 @@ test("document rendering has exact blocks, title truncation, input truncation an
   const signoffs = [
     { agent: "/private/personas/cfo.md", verdict: "APPROVE", content: "Agreed" },
     { agent: "skeptic", verdict: "APPROVE WITH RESERVATIONS", content: "Monitor" },
-    { agent: "ops", verdict: "UNCLEAR", content: "Unclear" },
   ];
   const doc = renderUltraplanDocument(u, signoffs, true);
   assert.equal(doc.split("\n")[0], "# Ultraplan: " + "T".repeat(119) + "…");
   assert.ok(!doc.includes("Private second task line"));
   assert.ok(!doc.includes("/private/personas/"));
-  assert.match(doc, /Planner: planner · Participants: cfo · Plan versions: 3 · Sign-off: 1 approve, 1 approve with reservations, 0 object, 1 unclear/);
+  assert.match(doc, /Planner: planner · Participants: cfo · Plan versions: 3 · Sign-off: 1 approve, 1 approve with reservations, 0 object\n/);
   assert.ok(doc.includes("## Final plan (v3)\n\nFinal plan text\n\n## Sign-offs\n\n### cfo — APPROVE\nAgreed"));
   assert.ok(doc.includes("## Agent input\n\n### cfo\n" + "I".repeat(6000) + "\n…[truncated]"));
   assert.ok(!doc.includes("I".repeat(6001)));
   assert.ok(doc.endsWith("## Revision history\n\n- v1 by orchestrator — reviews: cfo APPROVE WITH CHANGES\n- v2 by planner — not reviewed\n- v3 by planner — final, signed off"));
+  // Collected with an UNCLEAR (or OBJECT) sign-off: listed, but not signed off.
+  const objected = renderUltraplanDocument(u, [...signoffs, { agent: "ops", verdict: "UNCLEAR", content: "Unclear" }], true);
+  assert.match(objected, /Sign-off: 1 approve, 1 approve with reservations, 0 object, 1 unclear — not signed off/);
+  assert.ok(objected.includes("## Latest plan (v3) — not signed off\n\nFinal plan text"));
+  assert.ok(objected.includes("### ops — UNCLEAR\nUnclear"));
+  assert.ok(objected.endsWith("- v3 by planner — final, not signed off: ops UNCLEAR"));
+  assert.equal(isSignedOff(signoffs), true);
+  assert.equal(isSignedOff([...signoffs, { verdict: "OBJECT" }]), false);
+  assert.equal(isSignedOff([]), false);
   const unsigned = renderUltraplanDocument(u, [], false);
   assert.match(unsigned, /## Latest plan \(v3\) — not signed off/);
   assert.match(unsigned, /- v3 by planner — not reviewed/);
@@ -795,4 +809,77 @@ test("a replacement sent straight to sign-off keeps context after a draft start"
   const signoff = llmCalls(calls).map(c => details(c.body)).find(d => d.phase === "signoff");
   assert.ok(signoff.prompt.includes("**Context:**\n" + MARKER));
   assert.ok(signoff.prompt.includes("Replacement"));
+});
+
+// ---------------------------------------------------------------------------
+// WS04: execution_ready, the signedOff fix and the JSON trailer
+// ---------------------------------------------------------------------------
+
+test("execution_ready: planner drafts and revisions require the roundtable-tasks block and sign-offs check it", async (t) => {
+  const calls = responses(t);
+  const final = await startUltraplan([cfo], "Ready to build", { ...opts, planner, executionReady: true });
+  assert.equal(final.status, "finalized");
+  const turns = llmCalls(calls).map((c) => details(c.body));
+  const draft = turns.find((d) => d.phase === "draft");
+  const revision = turns.find((d) => d.phase === "revision");
+  for (const d of [draft, revision]) {
+    assert.ok(d.prompt.includes("## Execution-ready plan"), d.phase);
+    assert.ok(d.prompt.includes("```roundtable-tasks\n{"), d.phase);
+    for (const field of ['"depends_on"', '"paths": { "write"', '"acceptance"', '"checks"', '"commands"', '"interfaces"', '"persona"', '"team"']) {
+      assert.ok(d.prompt.includes(field), `${d.phase} prompt names ${field}`);
+    }
+  }
+  assert.ok(revision.prompt.includes("goes last, after that section"));
+  const signoff = turns.find((d) => d.phase === "signoff");
+  assert.ok(signoff.prompt.endsWith(`Watch: one thing to monitor during execution.\n\n${TASK_BLOCK_SIGNOFF_CHECK}\n\nBrief.`));
+  assert.ok(!turns.find((d) => d.phase === "review").prompt.includes("roundtable-tasks"), "reviews are unchanged");
+  assert.ok(!turns.find((d) => d.phase === "input").prompt.includes("roundtable-tasks"), "input is unchanged");
+});
+
+test("without execution_ready every prompt is byte-identical to the builders and names no task block", async (t) => {
+  const calls = responses(t);
+  const first = await startUltraplan([cfo], "Plain plan", { ...opts, context: MARKER });
+  assert.equal(first.next, NEXT_AFTER_INPUT);
+  const final = await submitPlan(first.ultraplanId, "1. Do it.", true);
+  const [input, signoff] = llmCalls(calls).map((c) => details(c.body));
+  assert.equal(input.prompt, buildInputPrompt("Plain plan", [cfo], MARKER));
+  assert.equal(signoff.prompt, buildSignoffPrompt("Plain plan", "1. Do it.", 1, first.input[0].content, MARKER));
+  assert.equal(buildSignoffPrompt("T", "P", 1, undefined, undefined, false), buildSignoffPrompt("T", "P", 1));
+  assert.ok(buildSignoffPrompt("T", "P", 1).endsWith("Watch: one thing to monitor during execution.\n\nBrief."));
+  assert.equal(buildPlannerDraftPrompt("T", undefined, ["a"], [], false), buildPlannerDraftPrompt("T", undefined, ["a"], []));
+  assert.equal(buildPlannerRevisePrompt("T", "P", 1, [], undefined, false), buildPlannerRevisePrompt("T", "P", 1, []));
+  for (const d of llmCalls(calls).map((c) => details(c.body))) assert.ok(!d.prompt.includes("roundtable-tasks"));
+  assert.equal(final.signedOff, true);
+});
+
+test("execution_ready with the orchestrator writing: next asks for the block; the trailer reports id, archive and tally", async (t) => {
+  const calls = responses(t);
+  const first = await startUltraplan([cfo, skeptic], "Orchestrated build", { ...opts, executionReady: true });
+  assert.equal(first.next, `${NEXT_AFTER_INPUT} ${TASK_BLOCK_NEXT}`);
+  assert.match(TASK_BLOCK_NEXT, /roundtable-tasks/);
+  const reviewed = await submitPlan(first.ultraplanId, "1. Build.");
+  assert.equal(reviewed.next, `${NEXT_AFTER_REVIEW} ${TASK_BLOCK_NEXT}`);
+  const final = await submitPlan(first.ultraplanId, undefined, true);
+  const signoffs = llmCalls(calls).map((c) => details(c.body)).filter((d) => d.phase === "signoff");
+  assert.equal(signoffs.length, 2);
+  for (const d of signoffs) assert.ok(d.prompt.includes(TASK_BLOCK_SIGNOFF_CHECK));
+  assert.equal(final.signedOff, true, "APPROVE and APPROVE WITH RESERVATIONS sign off");
+  assert.equal(final.archived, true);
+  const text = formatUltraplanResult(final);
+  assert.ok(text.startsWith(final.finalPlan + "\n\n```json\n"));
+  const trailer = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(text)[1]);
+  assert.deepEqual(trailer, { ultraplan_id: final.ultraplanId, archived: true, tally: final.tally });
+});
+
+test("one OBJECT sign-off means signedOff is false, and every finalized result ends with the trailer", async (t) => {
+  responses(t, (d) => (d.phase === "signoff" && d.agent === "skeptic" ? "Sign-off: OBJECT\nNot yet." : undefined));
+  const first = await startUltraplan([cfo, skeptic], "Contested", opts);
+  const final = await submitPlan(first.ultraplanId, "1. Contested step.", true);
+  assert.equal(final.signedOff, false);
+  assert.deepEqual(final.tally, { APPROVE: 1, "APPROVE WITH RESERVATIONS": 0, OBJECT: 1, UNCLEAR: 0 });
+  assert.match(final.finalPlan, /Sign-off: 1 approve, 0 approve with reservations, 1 object — not signed off/);
+  assert.match(formatUltraplanResult(final), /"ultraplan_id": "ultraplan-[0-9a-z]{8}"/);
+  const ended = await endUltraplan((await startUltraplan([cfo], "Ended", opts)).ultraplanId);
+  assert.equal(ended.signedOff, false);
+  assert.match(formatUltraplanResult(ended), /"archived": true/);
 });

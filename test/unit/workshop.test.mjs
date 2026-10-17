@@ -144,3 +144,41 @@ test("JSON extraction scans braces only, so brackets around an object cannot hid
   }
   assert.throws(() => extractJsonObject('[{"a":}]'), /Invalid JSON object/);
 });
+
+test("runVerdictRound asks each agent once, in order, and re-asks an UNCLEAR answer in the same conversation", async (t) => {
+  const { stubFetch, json } = await import("./helpers.mjs");
+  const { runVerdictRound } = await import("../../dist/sessions/workshop.js");
+  const answers = { a: ["Consent: AGREE\nFine."], b: ["I think so?", "Consent: OBJECT\nNo tests."], c: ["Hmm", "Still unsure"] };
+  const calls = stubFetch(t, async (url, init) => {
+    const body = JSON.parse(init.body);
+    const who = body.messages[0].content;
+    return json(200, { choices: [{ message: { content: answers[who].shift() } }] });
+  });
+  const agents = [{ systemPrompt: "a" }, { systemPrompt: "b" }, { systemPrompt: "c" }];
+  const llm = { provider: "openai_compatible", model: "m", baseUrl: "http://localhost:4141/v1" };
+  const out = await runVerdictRound(agents, (agent, i) => `Q${i}`, "Consent", { verdicts: ["AGREE", "OBJECT"], llm, reask: "STRICT" });
+  assert.deepEqual(out.map((x) => [x.index, x.verdict, x.reasked]), [[0, "AGREE", false], [1, "OBJECT", true], [2, "UNCLEAR", true]]);
+  assert.equal(out[1].content, "Consent: OBJECT\nNo tests.");
+  assert.equal(calls.length, 5);
+  const reask = calls.find((c) => c.body.messages.length === 4 && c.body.messages[0].content === "b").body.messages;
+  assert.deepEqual(reask.slice(1).map((m) => [m.role, m.content]), [["user", "Q1"], ["assistant", "I think so?"], ["user", "STRICT"]]);
+  // Without reask an UNCLEAR answer stays UNCLEAR and nothing is asked again.
+  answers.c.push("Unclear again");
+  const once = await runVerdictRound([agents[2]], () => "Q", "Consent", { verdicts: ["AGREE", "OBJECT"], llm });
+  assert.deepEqual([once[0].verdict, once[0].reasked, calls.length], ["UNCLEAR", false, 6]);
+});
+
+test("runVerdictRound fails the round on an error unless catchErrors reports it per agent", async (t) => {
+  const { stubFetch, json } = await import("./helpers.mjs");
+  const { runVerdictRound } = await import("../../dist/sessions/workshop.js");
+  stubFetch(t, async (url, init) => JSON.parse(init.body).messages[0].content === "bad"
+    ? json(500, { error: { message: "boom" } })
+    : json(200, { choices: [{ message: { content: "Verdict: READY" } }] }));
+  const agents = [{ systemPrompt: "ok" }, { systemPrompt: "bad" }];
+  const llm = { provider: "openai_compatible", model: "m", baseUrl: "http://localhost:4141/v1" };
+  await assert.rejects(runVerdictRound(agents, () => "Q", "Verdict", { verdicts: ["READY"], llm }), /boom/);
+  const out = await runVerdictRound(agents, () => "Q", "Verdict", { verdicts: ["READY"], llm, catchErrors: true });
+  assert.equal(out[0].verdict, "READY");
+  assert.deepEqual([out[1].verdict, out[1].content], ["UNCLEAR", ""]);
+  assert.match(out[1].error, /boom/);
+});

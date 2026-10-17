@@ -36,6 +36,7 @@ const { listLocalMeetings, localMeetings } = await import("../../dist/sessions/l
 const { createAgent } = await import("../../dist/sessions/agent-creation.js");
 const { serializeTurn } = await import("../../dist/sessions/prototype-mode.js");
 const { handleToolCall, tools } = await import("../../dist/tools.js");
+const { deliberationTools } = await import("../../dist/tools/deliberation.js");
 const prototypes = await import("../../dist/prototypes/index.js");
 const { PublicChannel, publicLabel } = await import("../../dist/publishers/index.js");
 
@@ -44,7 +45,7 @@ const fx = (n) => resolve(here, "../fixtures/agents", n);
 const A = fx("sample.md"); // "You are Sample.\n"
 const B = fx("plain.md"); // "You are Plain. No frontmatter here.\n"
 const C = fx("third.md"); // "You are Third.\n"
-const LLM = "http://llm.test/v1";
+const LLM = "http://localhost:4141/v1";
 const NTFY = "http://ntfy.test";
 const opts = { provider: "openai_compatible", model: "m", baseUrl: LLM };
 const MARK = "COUPON-MARK-4117";
@@ -113,7 +114,7 @@ after(() => prototypes.destroyAllPrototypes("shutdown"));
 
 describe("schemas", () => {
   test("the three start tools expose a boolean prototype flag; tool count unchanged", () => {
-    assert.equal(tools.length, 22);
+    assert.equal(deliberationTools.length, 22, "prototype mode adds no tool");
     for (const name of ["start_meeting", "start_local_meeting", "start_collaboration"]) {
       const p = tools.find((x) => x.name === name).inputSchema.properties.prototype;
       assert.equal(p?.type, "boolean", name);
@@ -370,17 +371,19 @@ describe("API meeting: the caller assesses", () => {
 describe("local meeting (fake claude on PATH)", () => {
   test("directive via --append-system-prompt, verdict reaches the CLI prompt, stubs in history, outcomes at end", async (t) => {
     const dir = mkdtempSync(join(tmpdir(), "fake-claude-proto-"));
-    const log = join(dir, "argv.jsonl");
+    const log = join(dir, "runs.jsonl");
     const replies = join(dir, "replies.json");
     writeFileSync(replies, JSON.stringify([webBlock(), "Decision on P1: SHORTLIST — approved", "Noted."]));
     const bin = join(dir, "claude");
+    // Records { argv, stdin } per call: the prompt arrives on stdin, never as an argument.
     writeFileSync(
       bin,
-      `#!${process.execPath}\nconst fs = require("node:fs");\n` +
-        `fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n` +
-        `const n = fs.readFileSync(${JSON.stringify(log)}, "utf8").trim().split("\\n").length - 1;\n` +
-        `const r = JSON.parse(fs.readFileSync(${JSON.stringify(replies)}, "utf8"));\n` +
-        `process.stdout.write(r[Math.min(n, r.length - 1)]);\n`
+      `#!${process.execPath}\nif (process.argv.includes("--help")) { process.stdout.write("--permission-prompts --restricted --settings --strict-mcp-config --tools --permission-mode --disable-slash-commands --no-chrome\\n"); process.exit(0); }\nconst fs = require("node:fs");\nlet input = "";\n` +
+        `process.stdin.setEncoding("utf8");\nprocess.stdin.on("data", (d) => (input += d));\nprocess.stdin.on("end", () => {\n` +
+        `  fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), stdin: input }) + "\\n");\n` +
+        `  const n = fs.readFileSync(${JSON.stringify(log)}, "utf8").trim().split("\\n").length - 1;\n` +
+        `  const r = JSON.parse(fs.readFileSync(${JSON.stringify(replies)}, "utf8"));\n` +
+        `  process.stdout.write(r[Math.min(n, r.length - 1)]);\n});\n`
     );
     chmodSync(bin, 0o755);
     const oldPath = process.env.PATH;
@@ -389,7 +392,9 @@ describe("local meeting (fake claude on PATH)", () => {
       process.env.PATH = oldPath;
       rmSync(dir, { recursive: true, force: true });
     });
-    const argvs = () => readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const runs = () => readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const argvs = () => runs().map((r) => r.argv);
+    const prompts = () => runs().map((r) => r.stdin);
     const appendOf = (a) => a[a.indexOf("--append-system-prompt") + 1];
 
     const start = JSON.parse((await handleToolCall("start_local_meeting", { agent: A, agenda: "checkout coupons", prototype: true })).content[0].text);
@@ -404,7 +409,7 @@ describe("local meeting (fake claude on PATH)", () => {
 
     const say1 = (await handleToolCall("say_local", { meeting_id: id, message: "Verdict on P1: APPROVE — clear" })).content[0].text;
     assert.equal((await httpGet(v1)).status, 410);
-    const p1 = argvs()[1].at(-1);
+    const p1 = prompts()[1];
     assert.ok(p1.includes("**User:** Verdict on P1: APPROVE — clear\n\n## Prototype status"));
     assert.ok(p1.includes("Decide now"));
     assert.ok(appendOf(argvs()[1]).includes("## Prototype mode"), "directive on every call");
@@ -413,7 +418,7 @@ describe("local meeting (fake claude on PATH)", () => {
     assert.equal(localMeetings.get(id).messages[2].content, "Verdict on P1: APPROVE — clear");
 
     await handleToolCall("say_local", { meeting_id: id, message: "Great." });
-    const p2 = argvs()[2].at(-1);
+    const p2 = prompts()[2];
     assert.ok(p2.includes("[Prototype P1 v1"), p2);
     assert.ok(!p2.includes(MARK));
     assert.ok(p2.includes("**User:** Verdict on P1: APPROVE — clear\n\n**Assistant:**"), "no stale status in the history");
@@ -757,7 +762,7 @@ describe("debug_env", () => {
   test("reports the prototype configuration", async (t) => {
     stubFetch(t, () => json(500, {}));
     const d = JSON.parse((await handleToolCall("debug_env", {})).content[0].text);
-    assert.equal(d.version, "0.4.0");
+    assert.equal(d.version, "1.0.0");
     assert.equal(d.prototypes.dir, PROTO_ROOT);
     assert.equal(typeof d.prototypes.screenshots, "boolean");
     assert.equal(d.prototypes.open_browser, false);

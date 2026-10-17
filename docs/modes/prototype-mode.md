@@ -1,0 +1,42 @@
+# Prototype mode
+
+> Run a prototype collaboration on agent-roundtable between product-lead and skeptic on the checkout redesign; have them prototype their proposals.
+
+`prototype: true` on `start_meeting`, `start_local_meeting` or `start_collaboration` lets agents show a proposal as well as describe it. It is orthogonal to `mode`: it works with standard and debate meetings and with collaborate, debate and waffle-house collaborations, and is rejected with `mode: "conversation"`, which has no deliverable. The default is `false`, and with it unset nothing changes.
+
+**What agents produce.** An agent attaches one `<prototype>` block to a turn (at most one per turn, 1-10 files, relative paths only). The hard cap is 100 KB per block, but agents are told to keep blocks compact (aim for under about 20 KB): replies have a length cap, and a block cut off mid-reply is rejected.
+
+```
+<prototype title="Inline coupon field" kind="web" entry="index.html" revises="P1">
+<file path="index.html">...</file>
+<demo>walkthroughs: impatient user, screen-reader user, expert on mobile with the network dropping</demo>
+</prototype>
+```
+
+- `web`: the proposal can be shown in a page. A scaled-down page with just the proposed page or element. It runs in a sandboxed frame (see Safety below), so it must use classic `<script>` tags (no ES modules), inline its data (no fetch or XHR of other files), and use no localStorage, sessionStorage or cookies.
+- `code`: otherwise, the artifact that would produce the proposal, such as SQL or Terraform. It is never executed.
+- `diagram`: abstract proposals, as Mermaid source.
+- `text`: text proposals, as draft 1.
+
+When the proposal involves user interaction, agents are told to include a `<demo>` walkthrough covering at least three user types or modalities: for example impatient, impaired, expert or non-technical users; mobile, desktop or an interrupted network. The directive asks for it; the parser does not enforce it. The server assigns ids (`P1`, `P2`, ...). `revises="P1"` creates a new version, `P1 v2`. Assessors reply with `Verdict on P1: APPROVE | REVISE | REJECT — reason`; the proposer then answers with `Decision on P1: REVISE | SCRAP | SHORTLIST — reason`. Only the proposer decides on a prototype; a decision line from anyone else is ignored. A block the server does not accept (invalid, an extra block in the same turn, cut off or unclosed, or arriving after the session closed) is never shown raw: agents and the public channel see `[Prototype block not accepted: …]`, and an agent whose block was rejected is told why in its next prompt.
+
+**Lifecycle.** A prototype is materialized into a sandbox, shown on the board, and assessed by every other participant. In collaborations that is every other agent; in meetings it is you, the caller, through `say` or `say_local`. It is **destroyed as soon as assessment completes**: the sandbox directory is removed and the board shows the prototype as destroyed (HTTP 410) with the verdicts. The proposer then revises (a new version), scraps, or shortlists. In a collaboration a proposal needs a turn from each other agent and then one from its proposer, so once fewer turns than that remain, agents are told not to start a new prototype or revision. A TTL cap (`ROUNDTABLE_PROTOTYPE_TTL_MS`, default 30 minutes, never less than 60000 ms) destroys anything abandoned. Everything is destroyed, and any headless Chrome is killed, when the session completes or ends or the server stops. A sweep at server start (and when a sandbox root is first used) removes leftover session directories: one whose `owner.json` names this host and a process that is no longer running, or one older than 24 hours; a directory without `owner.json` is removed once it is older than 1 hour.
+
+**The board.** Results include `prototypes.board_url`, `http://127.0.0.1:<port>/<token>/`, available from the first result. The random token is a capability: every board route lives under it, so use the `board_url` and the per-prototype `url` exactly as returned. The page refreshes itself. Web prototypes appear in desktop and mobile frames, diagrams are rendered in the browser (Mermaid 11.17.2 is loaded from the jsDelivr CDN with a Subresource Integrity hash), and code and drafts are shown as text, alongside the demos and the verdicts so far. The board is read-only: you can watch, but give feedback only after the session ends. Set `ROUNDTABLE_PROTOTYPE_OPEN=1` to open it automatically at session start. A collaboration runs several turns per call, so a prototype may be proposed and destroyed within a single `continue_collaboration`; keep the board open to watch.
+
+**What results carry.** The JSON results of `start_meeting`, `start_local_meeting`, `start_collaboration` and `continue_collaboration` carry a `prototypes` block (board URL, live prototypes, those destroyed since the last result, and a notice); `say` and `say_local` end with a trailing `Prototypes:` block of the same shape. `end_*` returns **Prototype outcomes** (per id and version: proposer, kind, verdicts, decision, status) and a **Shortlist for the human** with the final source, the diagram (with a mermaid.live link) or the draft. `list_*` rows report `prototype` and, while the board is up, `board_url`. `pause_collaboration`, `nudge_collaboration` and `get_collaboration_transcript` carry no prototype block. When the same persona takes part twice, prototype output names them `name` and `name #2`.
+
+**Feedback hold.** The notice tells the orchestrator to show you the board URL and not to relay your feedback on prototypes into the session until it ends. `nudge_collaboration` is refused while a prototype is under assessment; `continue_collaboration` resumes a paused prototype session in that state (and otherwise behaves as usual).
+
+**Agent history.** Once a prototype is resolved, its source is replaced in what agents see by a one-line stub (title, kind, file count, verdicts, decision), which keeps token use bounded. An open prototype is shown in full. Each turn prompt lists the prototypes awaiting that agent's verdict or decision; in meetings that status is added to the outgoing request only, so the stored history and the end summary hold the caller's own words. Transcripts and `get_collaboration_transcript` show the stubs, and `create_agent` or `improve_agent` with `from_session` read the same stubbed history, so destroyed source never re-enters a prompt.
+
+**Safety.**
+
+- Files live in a sandbox under the OS temp directory (`ROUNDTABLE_PROTOTYPE_DIR`). The server refuses a root inside a git work tree, a root that is a symlink, or one owned by another user; it creates the root with mode 0700 and a `.gitignore`, and nothing is committed or pushed.
+- SQL, IaC and other `code` prototypes are never executed. A `web` prototype's JavaScript runs only in a sandboxed, opaque-origin frame (CSP `sandbox`) in your browser and, in public sessions, in a headless Chrome whose only network route is a deny-all proxy (the board), so it can reach nothing but the prototype's own files.
+- The board binds to `127.0.0.1`, serves only under its capability token, checks the `Host` header, sends a restrictive Content-Security-Policy (the board and viewer run no inline script; only the sandboxed prototype pages may), refuses to be framed, and accepts only GET and HEAD.
+- Agents assess the source and the demos. Screenshots are not sent to providers.
+
+**Public prototype sessions.** The localhost board is never posted. The public channel gets a Markdown reference for each prototype: title, kind, files, demo, code capped at about 8 KB, a mermaid.live link for diagrams, and the draft for text proposals. When Chrome is available, desktop and mobile screenshots of **web** prototypes are posted as ntfy attachments (diagrams get the mermaid.live link instead); a webhook receives a text reference with attachment metadata and no bytes. Files are redacted before they are materialized, so the board, the screenshots and the posted code all come from redacted source, and the end-of-session summary is posted with any board URL removed. Public prototype agents are told they may write fresh prototype code but never reproduce existing or private source. ntfy servers limit attachments (on `ntfy.sh` they expire after a few hours and count toward anonymous visitor limits); check your ntfy server's attachment settings.
+
+See [Prototype tool calls](../tools.md#prototype-tool-calls).

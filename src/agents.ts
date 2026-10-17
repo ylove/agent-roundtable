@@ -3,11 +3,12 @@
 // ============================================================================
 
 import { readFile } from "node:fs/promises";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, relative, resolve, sep } from "node:path";
 import { parse } from "yaml";
-import { AGENTS_DIR, SKILLS_DIR } from "./config.js";
+import { AGENTS_DIR, SKILLS_DIR, WORKSPACE_DIR, agentPaths } from "./config.js";
+import { isContained } from "./security/fs-safe.js";
 
 /** Canonical, path-free agent name, including directory-style AGENT.md personas. */
 export function agentKey(ref: string): string {
@@ -153,6 +154,43 @@ export function skillSearchDirs(agentPath?: string): string[] {
   ].map(dir => resolve(dir)))];
 }
 
+/** Resolve every directory and symlink hop before reading skill text. Roots' parents are trusted. */
+function containedSkillPath(candidate: string, dirs: readonly string[]): string {
+  const roots = dirs.flatMap(dir => {
+    try {
+      // A repository cannot replace its entire skill root with an outside directory link.
+      if (lstatSync(dir).isSymbolicLink()) return [];
+      return [realpathSync.native(dir)];
+    } catch { return []; }
+  });
+  let hops = 0;
+  const secretName = (path: string) => /^(?:\.env.*|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?|.*\.(?:pem|key|p12|pfx)|credentials(?:\..*)?)$/i.test(basename(path));
+  const walk = (path: string): string => {
+    const root = roots.find(root => isContained(root, path));
+    if (!root) throw new Error("Skill path escapes approved roots");
+    let current = root;
+    const parts = relative(root, path).split(sep).filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      current = join(current, parts[i]);
+      if (secretName(current)) throw new Error("Refusing secret-shaped skill target");
+      const st = lstatSync(current); // also rejects dangling/cyclic intermediate paths
+      if (st.isSymbolicLink()) {
+        if (++hops > 40) throw new Error("Skill symlink chain exceeds 40 hops");
+        const target = walk(resolve(dirname(current), readlinkSync(current)));
+        return walk(join(target, ...parts.slice(i + 1)));
+      }
+    }
+    return current;
+  };
+  // Canonicalize only the trusted parents, never the candidate's unvalidated directories.
+  const dir = dirs.find(dir => isContained(resolve(dir), resolve(candidate)));
+  if (!dir || lstatSync(dir).isSymbolicLink()) throw new Error("Unapproved skill root");
+  const real = realpathSync.native(walk(join(realpathSync.native(dir), relative(resolve(dir), resolve(candidate)))));
+  if (!roots.some(root => isContained(root, real)) || secretName(real)) throw new Error("Unapproved skill target");
+  if (!statSync(real).isFile()) throw new Error("Skill is not a file");
+  return real;
+}
+
 export async function loadSkills(
   names: string[],
   dirs: string | readonly string[] = skillSearchDirs(),
@@ -168,7 +206,8 @@ export async function loadSkills(
     if (name && name !== "." && name !== ".." && !/[\\/]/.test(name)) {
       for (const candidate of candidates) {
         try {
-          const { data, body } = readFrontmatter(await readFile(candidate, "utf-8"));
+          const path = containedSkillPath(candidate, searchDirs);
+          const { data, body } = readFrontmatter(await readFile(path, "utf-8"));
           skills.push({ name, path: resolve(candidate), body, ...metadataDescription(data) });
           loaded = true;
           break;
@@ -221,17 +260,93 @@ export interface LoadedAgent {
   skills: LoadedSkill[];
 }
 
+/** A ref with a path separator, or ending in .md, names a file; anything else is an agent name. */
+export function isPathLikeRef(ref: string): boolean {
+  return /[\\/]/.test(ref) || /\.md$/i.test(ref);
+}
+
+/**
+ * Where a path-like ref may point: the agents directory, the workspace's and the user's
+ * .claude/agents, and every directory in ROUNDTABLE_AGENT_PATHS.
+ */
+export function allowedAgentRoots(): string[] {
+  return [...new Set([
+    AGENTS_DIR,
+    join(WORKSPACE_DIR, ".claude", "agents"),
+    join(homedir(), ".claude", "agents"),
+    ...agentPaths(),
+  ].map((dir) => resolve(dir)))];
+}
+
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a path-like ref, or throw. It must end in .md, sit (lexically) inside an allowed root
+ * before anything is read, and its realpath must be inside a root's realpath (no symlink escapes).
+ * Returns null when it is allowed but does not exist.
+ */
+function containedAgentPath(ref: string, r: AgentRoots): string | null {
+  if (!/\.md$/i.test(ref)) throw refuseRef(ref, "is a path but not a .md file", r);
+  const resolved = resolve(ref);
+  if (![...r.roots, ...r.realRoots].some((root) => isContained(root, resolved))) {
+    throw refuseRef(ref, "is outside the allowed agent directories", r);
+  }
+  if (!isFile(resolved)) return null;
+  assertRealpathContained(ref, resolved, r);
+  return resolved;
+}
+
+interface AgentRoots {
+  roots: string[];
+  realRoots: string[];
+}
+
+function agentRoots(): AgentRoots {
+  const roots = allowedAgentRoots();
+  return { roots, realRoots: roots.map(realpathOrNull).filter((root): root is string => root !== null) };
+}
+
+function refuseRef(ref: string, why: string, { roots }: AgentRoots): Error {
+  return new Error(
+    `Agent ref "${ref}" ${why}. Agent files must be .md files inside one of: ${roots.join(", ")}. ` +
+      `Add directories to ROUNDTABLE_AGENT_PATHS (separated by "${delimiter}") to allow more.`,
+  );
+}
+
+/** The file's realpath must be inside a root's realpath: a symlink may not lead out of the roots. */
+function assertRealpathContained(ref: string, file: string, r: AgentRoots): void {
+  const real = realpathOrNull(file);
+  if (!real || !r.realRoots.some((root) => isContained(root, real))) {
+    throw refuseRef(ref, "resolves (through a symlink) outside the allowed agent directories", r);
+  }
+}
+
 export async function loadAgent(ref: string): Promise<LoadedAgent> {
-  const candidates = [
-    ref,
-    join(AGENTS_DIR, `${ref}.md`),
-    join(AGENTS_DIR, `subagent-${ref}.md`),
-    join(AGENTS_DIR, ref, "AGENT.md"),
-  ];
+  const r = agentRoots();
+  let candidates: string[];
+  if (isPathLikeRef(ref)) {
+    const contained = containedAgentPath(ref, r);
+    candidates = contained ? [contained] : [resolve(ref)];
+  } else {
+    // Agent names are looked up only inside the agents directory.
+    candidates = ref === "." || ref === ".." ? [] : [
+      join(AGENTS_DIR, `${ref}.md`),
+      join(AGENTS_DIR, `subagent-${ref}.md`),
+      join(AGENTS_DIR, ref, "AGENT.md"),
+    ];
+  }
 
   for (const candidate of candidates) {
     const resolved = resolve(candidate);
     if (isFile(resolved)) {
+      // A name finds a file in the agents directory, but a symlink there may not lead out of the roots.
+      assertRealpathContained(ref, resolved, r);
       const raw = await readFile(resolved, "utf-8");
       const { data: frontmatter, body } = readFrontmatter(raw);
       const skills = await loadSkills(skillNames(frontmatter.skills), skillSearchDirs(resolved));
@@ -297,7 +412,8 @@ export function listSkills(
       const path = resolve(dir, name, "SKILL.md");
       if (!isFile(path)) continue;
       try {
-        const { data } = readFrontmatter(readFileSync(path, "utf-8"));
+        const safe = containedSkillPath(path, typeof dirs === "string" ? [dirs] : dirs);
+        const { data } = readFrontmatter(readFileSync(safe, "utf-8"));
         skills.push({ name, path, ...metadataDescription(data) });
         seen.add(name);
       } catch (e) {

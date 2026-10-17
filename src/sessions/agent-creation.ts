@@ -7,11 +7,13 @@ import { join } from "node:path";
 import { AGENTS_DIR, SKILLS_DIR, DEFAULT_MODELS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
 import { agentKey, assertReadableFrontmatter, loadAgent, listAgents, listSkills, readFrontmatter, renderSkillsSection, skillSearchDirs, type LoadedAgent } from "../agents.js";
 import { recordActivity, recentActivityForKey } from "../activity.js";
+import { newId } from "../ids.js";
 import { callLLM, type ChatCompletionOptions } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import {
   MODEL_CHOICES,
   TOOL_ALLOWLIST,
+  DEFAULT_AGENT_TOOLS,
   slugify,
   validateAgentSpec,
   renderSpecMarkdown,
@@ -27,6 +29,7 @@ import { mapLimit, extractJsonObject, truncate, parseVerdict } from "./workshop.
 import { collaborationHistoryView, collaborations, ORCHESTRATOR } from "./collaborations.js";
 import { meetingHistoryView, meetings, startMeeting } from "./meetings.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
+import { archiveSession, readArchivedSession, type ArchivedTurn } from "./archive.js";
 
 /** Inputs for designing a new agent with specialists and an architect. */
 export interface CreateAgentOptions {
@@ -171,6 +174,8 @@ export interface ArchitectRevisePromptOptions extends ArchitectPromptOptions {
 }
 
 interface Participant {
+  /** The reference as the caller passed it (a name or a path); what the archive stores. */
+  ref: string;
   key: string;
   label: string;
   system: string;
@@ -200,6 +205,7 @@ interface PreparedWorkshop {
   architectOptions: ArchitectPromptOptions;
   ownContributions: Map<string, Contribution[]>;
   run: Run;
+  startedAt: Date;
 }
 
 interface ParsedSpec {
@@ -216,9 +222,6 @@ interface SavedDefinition {
   written: boolean;
   files?: Array<{ path: string; content: string }>;
 }
-
-let createCounter = 0;
-let improveCounter = 0;
 
 // ----------------------------------------------------------------------------
 // Prompt builders (pure)
@@ -373,7 +376,9 @@ export function buildArchitectPrompt(o: ArchitectPromptOptions): string {
       "Use opus for strategic or cognitively complex work, sonnet for execution, " +
       "haiku for simple high-volume work; omit to inherit.",
     `- tools: optional array from ${TOOL_ALLOWLIST.join(", ")}. ` +
-      "Only what the agent needs; omit to inherit all.",
+      (o.mode === "improve"
+        ? "Only what the agent needs; omit to keep the current tools."
+        : `Only what the agent needs; omit for read-only ${DEFAULT_AGENT_TOOLS.join(", ")}.`),
     "- system_prompt: second person, <= 40000 characters.",
     "- skills: <= 6; each { name, description, instructions, contributed_by }. " +
       "Names are slugs <= 64; descriptions one line <= 1000; new instructions non-empty <= 20000; " +
@@ -492,11 +497,21 @@ function sourceSession(id: string | undefined, isPublic: boolean): SourceSession
       return `**${speaker}:** ${message.content}`;
     }).join("\n\n");
   } else {
-    const activeIds = [...collaborations.keys(), ...meetings.keys()].join(", ") || "none";
-    throw new Error(
-      `from_session not found: ${id}. Pass the id of a live collaboration (collab-N) or meeting (meeting-N). ` +
-        `Active sessions: ${activeIds}`,
-    );
+    const archived = readArchivedSession(id);
+    if (!archived) {
+      const activeIds = [...collaborations.keys(), ...meetings.keys()].join(", ") || "none";
+      throw new Error(
+        `from_session not found: ${id}. Pass the id of a live collaboration or meeting (collab-…, meeting-…), ` +
+          `or of an ended session in the archive. Active sessions: ${activeIds}`,
+      );
+    }
+    // Ended sessions: the archived turns are already the stubbed views agents saw.
+    refs = archived.agents;
+    topic = archived.topic.trim();
+    text = archived.turns.map(turn => {
+      const who = turn.role === "agent" && turn.agent ? display(turn.agent, isPublic) : turn.role;
+      return `**${turn.phase ? `${who} · ${turn.phase}` : who}:** ${turn.content}`;
+    }).join("\n\n");
   }
   const discussion = text.length > 20_000
     ? "…[earlier discussion truncated]\n" + text.slice(-20_000)
@@ -581,7 +596,7 @@ async function loadParticipants(refs: string[], isPublic: boolean): Promise<Part
     if (isPublic) {
       system += publicDirectiveSuffix();
     }
-    participants.push({ key: agentKey(ref), label: display(ref, isPublic), system });
+    participants.push({ ref, key: agentKey(ref), label: display(ref, isPublic), system });
   }
   return participants;
 }
@@ -616,7 +631,7 @@ async function prepareWorkshop(
   const model = options.model || DEFAULT_MODELS[provider];
   const rounds = Number.isNaN(options.rounds) ? 1 : Math.min(3, Math.max(1, Math.floor(options.rounds ?? 1)));
   const existingSkills = listSkills(skillSearchDirs(target?.path ?? join(AGENTS_DIR, "new-agent.md")));
-  const sessionId = mode === "create" ? `create-${++createCounter}` : `improve-${++improveCounter}`;
+  const sessionId = newId(mode);
   const targetLabel = target ? display(improve.agent, isPublic) : "";
   const agents = listAgents().sort((a, b) => a.key.localeCompare(b.key));
   const common: PromptContext = {
@@ -663,6 +678,7 @@ async function prepareWorkshop(
     // Associate review input with canonical keys, even if sanitized labels coincide.
     ownContributions: new Map(),
     run: { transcript: [] },
+    startedAt: new Date(),
   };
 }
 
@@ -900,7 +916,7 @@ export function renderPublicSpecSummary(
   return blocks.join("\n\n");
 }
 
-function recordWorkshopActivity(workshop: PreparedWorkshop, spec: AgentSpec, saved: SavedDefinition): void {
+function recordWorkshopActivity(workshop: PreparedWorkshop, spec: AgentSpec, saved: SavedDefinition): string {
   const { written, plan } = saved;
   let outcome: string;
   if (plan.proposedPath) {
@@ -915,13 +931,44 @@ function recordWorkshopActivity(workshop: PreparedWorkshop, spec: AgentSpec, sav
       : "(no skills)";
     outcome = `${verb} ${plan.agentName} ${skills}`;
   }
+  const summary = (written ? "" : "preview: ") + outcome;
   recordActivity({
     session: workshop.sessionId,
     kind: workshop.target ? "agent-refinement" : "agent-creation",
     agents: workshop.participants.map(participant => participant.key),
     topic: workshop.task,
-    outcome: (written ? "" : "preview: ") + outcome,
+    outcome: summary,
     public: workshop.isPublic,
+  });
+  return summary;
+}
+
+/**
+ * Archive a finished workshop: contributions and reviews as turns, the tool result as the record's result.
+ * Participants are stored as the refs the caller passed, like every other archived session, so a later
+ * from_session loads the same files (a key could resolve to a different agent in ROUNDTABLE_AGENTS_DIR).
+ */
+function archiveWorkshop(workshop: PreparedWorkshop, result: AgentWorkshopResult, outcome: string): void {
+  const { publicBlock: _publicBlock, ...stored } = result;
+  const channel = workshop.run.channel;
+  // Transcript entries carry display labels; map each back to its participant's ref.
+  const refByLabel = new Map<string, string>();
+  for (const participant of workshop.participants) {
+    if (!refByLabel.has(participant.label)) refByLabel.set(participant.label, participant.ref);
+  }
+  archiveSession({
+    id: workshop.sessionId,
+    kind: workshop.target ? "agent-refinement" : "agent-creation",
+    agents: workshop.participants.map(participant => participant.ref),
+    topic: workshop.task,
+    started: workshop.startedAt.toISOString(),
+    turns: workshop.run.transcript.map((entry): ArchivedTurn => ({
+      role: "agent", agent: refByLabel.get(entry.agent) ?? entry.agent, phase: entry.phase,
+      speaker: `${entry.agent} · ${entry.phase}`, content: entry.content,
+    })),
+    summary: outcome,
+    result: stored,
+    public: channel ? { url: channel.url, topic: channel.topic } : null,
   });
 }
 
@@ -957,7 +1004,7 @@ async function finishWorkshop(
   const saved = saveDefinition(workshop, spec);
   const { plan, written } = saved;
   const warnings = [...parsed.warnings, ...plan.warnings];
-  recordWorkshopActivity(workshop, spec, saved);
+  const outcome = recordWorkshopActivity(workshop, spec, saved);
   const meeting = await performTask(workshop, saved, warnings);
   const next = buildWorkshopNext({
     written, agentName: plan.agentName, targetPath: workshop.target?.path,
@@ -979,7 +1026,7 @@ async function finishWorkshop(
   const originalModel = workshop.target?.frontmatter.model;
   const model = spec.model ?? (typeof originalModel === "string" ? originalModel : undefined);
   const tools = effectiveTools(spec, workshop.target);
-  return {
+  const result: AgentWorkshopResult = {
     mode: workshop.mode,
     sessionId: workshop.sessionId,
     agent: {
@@ -1004,6 +1051,8 @@ async function finishWorkshop(
     next,
     ...(publicBlock && { publicBlock }),
   };
+  archiveWorkshop(workshop, result, outcome);
+  return result;
 }
 
 // ----------------------------------------------------------------------------

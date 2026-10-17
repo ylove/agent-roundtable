@@ -2,7 +2,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { delimiter, join, dirname } from "node:path";
 import { json, stubFetch } from "./helpers.mjs";
 
 const root = realpathSync.native(mkdtempSync(join(tmpdir(), "roundtable-agent-creation-")));
@@ -82,7 +82,7 @@ const { readFrontmatter } = await import("../../dist/agents.js");
 const { startCollaboration, collaborations, ORCHESTRATOR } = await import("../../dist/sessions/collaborations.js");
 const { startMeeting, meetings } = await import("../../dist/sessions/meetings.js");
 const { readActivity, recordActivity } = await import("../../dist/activity.js");
-const opts = { provider: "openai_compatible", model: "m", baseUrl: "http://llm.test/v1" };
+const opts = { provider: "openai_compatible", model: "m", baseUrl: "http://localhost:4141/v1" };
 const two = ["cfo", "marketing-coordinator"];
 const definition = (extra = {}) => ({
   name: "marketing-budget",
@@ -116,7 +116,7 @@ function harness(t, options = {}) {
     if (url.startsWith("http://publisher.test")) {
       return init.method === "POST" ? json(200, { id: "x", time: 1 }) : new Response("", { status: 200 });
     }
-    assert.equal(url, "http://llm.test/v1/chat/completions", "Unexpected network destination");
+    assert.equal(url, "http://localhost:4141/v1/chat/completions", "Unexpected network destination");
     const body = JSON.parse(init.body);
     const system = body.messages[0].content;
     const user = body.messages.at(-1).content;
@@ -186,7 +186,7 @@ test("create happy path: sequential expertise, concurrent reviews, exact calls, 
   assert.ok(h.requests.contributions[0].messages[0].content.includes("Audit step"));
   assert.ok(h.requests.architect[0].messages.at(-1).content.includes("EXPERTISE-2"));
   assert.equal(r.mode, "create");
-  assert.match(r.sessionId, /^create-\d+$/);
+  assert.match(r.sessionId, /^create-[0-9a-hjkmnp-tv-z]{8}$/);
   assert.equal(dirname(r.agent.path), agentsDir);
   assert.ok(existsSync(r.agent.path));
   const parsed = readFrontmatter(readFileSync(r.agent.path, "utf8"));
@@ -298,8 +298,8 @@ test("validation happens before any fetch, with accepted session kinds in errors
   await assert.rejects(createAgent({ ...opts, task: "Check" }), /create_agent needs at least one participant/);
   await assert.rejects(createAgent({ ...opts, agents: ["cfo"] }), /create_agent needs a task/);
   const missingSessionPattern = new RegExp(
-    "from_session not found: collab-missing.*live collaboration \\(collab-N\\) " +
-      "or meeting \\(meeting-N\\).*Active sessions:",
+    "from_session not found: collab-missing.*live collaboration or meeting \\(collab-…, meeting-…\\), " +
+      "or of an ended session in the archive.*Active sessions:",
   );
   await assert.rejects(createAgent({ ...opts, fromSession: "collab-missing" }), missingSessionPattern);
   await assert.rejects(
@@ -311,7 +311,7 @@ test("validation happens before any fetch, with accepted session kinds in errors
     /Agent prompt not found/,
   );
   const txt = fixture(join(root, "not-markdown.txt"), "You check.");
-  await assert.rejects(improveAgent({ ...opts, agent: txt }), /can only edit a .md agent file/);
+  await assert.rejects(improveAgent({ ...opts, agent: txt }), /is a path but not a \.md file/);
   assert.equal(h.calls.length, 0);
 });
 
@@ -338,7 +338,7 @@ test("improve includes self candor, activity, backup and original identity and e
   const r = await improveAgent({ ...opts, agent: "cfo", with: ["marketing-coordinator"] });
   assert.equal(h.calls.length, 5);
   assert.equal(r.mode, "improve");
-  assert.match(r.sessionId, /^improve-\d+$/);
+  assert.match(r.sessionId, /^improve-[0-9a-hjkmnp-tv-z]{8}$/);
   assert.equal(r.agent.name, "cfo-identity");
   assert.equal(r.agent.model, "sonnet");
   assert.deepEqual(r.agent.tools, ["Read", "Grep"]);
@@ -467,7 +467,7 @@ test("public mirror orders header, contributions, reviews and summary with no pr
     assert.ok(!p.body.message.includes("## Existing skills"));
     assert.ok(!p.body.title.includes(agentsDir));
   }
-  for (const call of h.calls.filter(c => c.url.startsWith("http://llm.test"))) {
+  for (const call of h.calls.filter(c => c.url.startsWith("http://localhost:4141"))) {
     assert.match(call.body.messages[0].content, /PUBLIC SESSION NOTICE/);
     assert.ok(call.body.messages.every(m => !m.content.includes(agentsDir)));
   }
@@ -790,6 +790,15 @@ test("mid-run edits produce a proposal result and preserve workshop metadata", a
   assert.equal(readActivity().find(e => e.session === r.sessionId).outcome, "proposed changes to edited-during-run (target changed during the run)");
 });
 
+test("a created agent whose definition omits tools gets an explicit read-only tools line", async (t) => {
+  const h = harness(t, { architect: () => JSON.stringify(definition({ name: "no-tools-given", tools: undefined, skills: [] })) });
+  const r = await createAgent({ ...opts, agents: ["cfo"], task: "Review budgets" });
+  assert.match(h.requests.architect[0].messages.at(-1).content, /omit for read-only Read, Grep, Glob/);
+  assert.deepEqual(r.agent.tools, ["Read", "Grep", "Glob"]);
+  assert.equal(readFrontmatter(readFileSync(r.agent.path, "utf8")).data.tools, "Read, Grep, Glob");
+  assert.ok(r.warnings.includes("tools omitted: defaulting to Read, Grep, Glob (read-only)"), r.warnings.join("; "));
+});
+
 test("workshops list and reuse personal skills by name without recreating them", async (t) => {
   const personal = fixture(join(process.env.HOME, ".claude", "skills", "personal-ledger", "SKILL.md"), "---\ndescription: Personal ledger procedure\n---\nPERSONAL PROCEDURE");
   const h = harness(t, { spec: { name: "personal-consumer", skills: [{ name: "personal-ledger" }] } });
@@ -802,6 +811,10 @@ test("workshops list and reuse personal skills by name without recreating them",
 });
 
 test("improve writes new skills alongside a target in another project", async (t) => {
+  // Another project's agents directory must be allowed explicitly.
+  const savedPaths = process.env.ROUNDTABLE_AGENT_PATHS;
+  process.env.ROUNDTABLE_AGENT_PATHS = [savedPaths, join(root, "other-project", ".claude", "agents")].filter(Boolean).join(delimiter);
+  t.after(() => { process.env.ROUNDTABLE_AGENT_PATHS = savedPaths; });
   const target = fixture(join(root, "other-project", ".claude", "agents", "external.md"), "---\nname: external\n---\nExternal persona");
   const existing = fixture(join(root, "other-project", ".claude", "skills", "external-existing", "SKILL.md"), "---\ndescription: External procedure\n---\nExisting procedure");
   const h = harness(t, { spec: { skills: [{ name: "external-existing" }, { name: "external-new", instructions: "Check external details." }] } });
@@ -846,7 +859,7 @@ test("public improve redacts the final definition and omits private activity fro
   assert.ok(summary.body.message.includes("cfo contributed expertise"));
   const transcript = readFileSync(/Saved: (.+?) ·/.exec(result.publicBlock)[1], "utf8");
   for (const text of [JSON.stringify(posts), transcript]) for (const marker of [persona, outcome, "## System prompt"]) assert.ok(!text.includes(marker), marker);
-  for (const call of h.calls.filter(c => c.url.startsWith("http://llm.test"))) assert.ok(!JSON.stringify(call.body).includes(outcome));
+  for (const call of h.calls.filter(c => c.url.startsWith("http://localhost:4141"))) assert.ok(!JSON.stringify(call.body).includes(outcome));
   for (const call of h.requests.contributions) {
     const prompt = call.messages.at(-1).content;
     assert.ok(prompt.includes("2. Corrections (point to the passage by its heading or a short paraphrase and give the replacement guidance; do not reproduce the current text)"));

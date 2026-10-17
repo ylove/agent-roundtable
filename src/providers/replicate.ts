@@ -6,10 +6,22 @@
 // keys the model declares, create a prediction, and poll it to a terminal state.
 import { setTimeout as sleep } from "node:timers/promises";
 import type { LLMMessage, ProviderCall } from "./shared.js";
-import { assertNonEmpty, stripThinkTags } from "./shared.js";
+import { assertNonEmpty, assertNotRedirect, stripThinkTags } from "./shared.js";
+import { isRateLimited, providerHttpError, withRetry } from "./retry.js";
 import { requireEnv } from "../config.js";
+import { scrubAndCap } from "../security/secrets.js";
+import { describeUrl } from "../security/url-guard.js";
 
-const API_BASE = "https://api.replicate.com/v1";
+const API_ORIGIN = "https://api.replicate.com";
+const API_BASE = `${API_ORIGIN}/v1`;
+
+function originOf(raw: string): string | null {
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return null;
+  }
+}
 
 export interface ReplicateModelRef {
   owner: string;
@@ -167,7 +179,9 @@ export function fetchReplicateInputSchema(
         method: "GET",
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: own,
+        redirect: "manual",
       });
+      assertNotRedirect("Replicate", response, url);
       body = (await readJson(response)) as ReplicateModelResponse;
     } catch (error) {
       // Report our own bound in our own words so it is not mistaken for ROUNDTABLE_LLM_TIMEOUT_MS.
@@ -180,7 +194,7 @@ export function fetchReplicateInputSchema(
     }
     if (!response.ok) {
       let message = `Replicate API error (${response.status}) fetching schema for model ${key}: ${
-        body.detail || response.statusText
+        scrubAndCap(String(body.detail || response.statusText), 300)
       }`;
       if (response.status === 404) {
         message += " — check owner/name; community models may need owner/name:version";
@@ -297,34 +311,42 @@ export function createReplicateCall({
       : `${API_BASE}/models/${ref.owner}/${ref.name}/predictions`;
     const createBody = ref.version ? { version: ref.version, input } : { input };
 
-    const response = await fetch(createUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Prefer: `wait=${waitSeconds}`,
-      },
-      body: JSON.stringify(createBody),
-      signal: o.signal,
-    });
-    let prediction = (await readJson(response)) as ReplicatePrediction;
-    if (o.signal.aborted) throw o.signal.reason;
-    if (!response.ok) {
-      let message = `Replicate API error (${response.status}) for model ${refText}: ${
-        prediction.detail || prediction.title || response.statusText
-      }`;
-      const fields = (prediction.invalid_fields ?? [])
-        .map((f) => f.field)
-        .filter((f): f is string => Boolean(f));
-      if (fields.length > 0) message += ` (invalid fields: ${fields.join(", ")})`;
-      throw new Error(message);
-    }
+    // Creating a prediction is not idempotent: after a 5xx, a timeout or a dropped connection it may
+    // exist (and bill) already. Only a 429, refused before any work, is retried. Polls are GETs and
+    // retry every transient failure.
+    let prediction = await withRetry(async () => {
+      const response = await fetch(createUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Prefer: `wait=${waitSeconds}`,
+        },
+        body: JSON.stringify(createBody),
+        signal: o.signal,
+        redirect: "manual",
+      });
+      assertNotRedirect("Replicate", response, createUrl);
+      const created = (await readJson(response)) as ReplicatePrediction;
+      if (o.signal.aborted) throw o.signal.reason;
+      if (!response.ok) {
+        let message = `Replicate API error (${response.status}) for model ${refText}: ${
+          scrubAndCap(String(created.detail || created.title || response.statusText), 300)
+        }`;
+        const fields = (created.invalid_fields ?? [])
+          .map((f) => f.field)
+          .filter((f): f is string => Boolean(f));
+        if (fields.length > 0) message += ` (invalid fields: ${scrubAndCap(fields.join(", "), 200)})`;
+        throw providerHttpError(message, response);
+      }
+      return created;
+    }, { signal: o.signal, label: "Replicate create", retryIf: isRateLimited });
 
     const terminal = (p: ReplicatePrediction): string | undefined => {
       if (p.status === "succeeded") return normalizeReplicateOutput(p.output, refText);
       if (p.status === "failed" || p.status === "canceled") {
         throw new Error(
-          `Replicate prediction ${p.status} for model ${refText}: ${p.error || "no error detail"}`
+          `Replicate prediction ${p.status} for model ${refText}: ${p.error ? scrubAndCap(String(p.error), 300) : "no error detail"}`
         );
       }
       return undefined;
@@ -334,18 +356,29 @@ export function createReplicateCall({
     if (text === undefined) {
       const getUrl = prediction.urls?.get;
       if (!getUrl) throw new Error(`Replicate returned no polling URL for model ${refText}`);
+      // The URL comes from the response body: the token goes only to Replicate's own API origin.
+      if (originOf(getUrl) !== API_ORIGIN) {
+        throw new Error(
+          `Replicate returned a polling URL outside ${API_ORIGIN} for model ${refText} (${describeUrl(getUrl)}); refusing to send the token there`
+        );
+      }
       for (let polls = 1; ; polls++) {
         // The caller's signal is the single bound: sleep rejects with AbortError when it fires.
         await sleep(pollIntervalMs, undefined, { signal: o.signal });
-        const pollResponse = await fetch(getUrl, {
-          method: "GET",
-          headers: { Authorization: `Bearer ${token}` },
-          signal: o.signal,
-        });
-        if (!pollResponse.ok) {
-          throw new Error(`Replicate API error (${pollResponse.status}) polling model ${refText}`);
-        }
-        prediction = (await readJson(pollResponse)) as ReplicatePrediction;
+        prediction = await withRetry(async () => {
+          const pollResponse = await fetch(getUrl, {
+            method: "GET",
+            headers: { Authorization: `Bearer ${token}` },
+            signal: o.signal,
+            redirect: "manual",
+          });
+          assertNotRedirect("Replicate", pollResponse, getUrl);
+          if (!pollResponse.ok) {
+            await pollResponse.body?.cancel().catch(() => {});
+            throw providerHttpError(`Replicate API error (${pollResponse.status}) polling model ${refText}`, pollResponse);
+          }
+          return (await readJson(pollResponse)) as ReplicatePrediction;
+        }, { signal: o.signal, label: "Replicate poll" });
         if (o.signal.aborted) throw o.signal.reason;
         text = terminal(prediction);
         if (text !== undefined) break;

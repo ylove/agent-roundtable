@@ -1,0 +1,13 @@
+# Ultraplan
+
+> Use agent-roundtable to ultraplan our onboarding launch with product-lead, cfo and skeptic. Collect their input, write the plan yourself, revise it from their reviews, then get sign-offs. Show me the final document verbatim.
+
+> Have product-lead act as planner with cfo and skeptic contributing. Plan a launch within our current budget, with two review/revision rounds, and show me everyone's input and sign-off.
+
+The orchestrator owns and writes the plan. `start_ultraplan` collects independent input; write v1 with contributor tags such as `[cfo]` on each step. `submit_plan` with `plan` submits a complete next version for review and leaves the session open for revision. Omit `plan` to review the latest version as-is without creating a new version, or omit it with `final: true` to sign off that version as-is. If no version exists yet, the call fails with `No plan version exists yet; pass plan.` Address amendments and explain any you reject. `submit_plan` with `final: true` collects sign-offs and closes; passing a plan allows sign-off straight after input. Show the final Markdown document verbatim: it includes the plan, every agent's input and sign-off, and revision history. A sign-off may include reservations or objections: the result's `signedOff` is true only when no sign-off is `OBJECT` or unclear, and the document otherwise says **not signed off**. The final result ends with a fenced JSON trailer `{ultraplan_id, archived, tally}`. With `execution_ready: true` every plan must end with a fenced `roundtable-tasks` JSON block (tasks, commands, interfaces) and sign-offs check it, so `propose_contract { from_session: <ultraplan_id> }` can turn the plan into a contract.
+
+Pass `draft_plan` to skip input and review it as v1. Pass a `planner` persona for the whole draft/review/revise/sign-off loop in one call; `revision_rounds` applies only to that variant (default 1, clamped to 1–3). If a planner run returns a step with an `error`, it remains open at the last committed phase. A step with `phase: "plan"` contains the unreviewed latest version, with `previousReviews` when an earlier version was reviewed. Continue with `submit_plan`: omit `plan` to review or sign off the latest version as-is, or pass a full revised plan. You can also close with `end_ultraplan`. Closing with `end_ultraplan` collects no sign-offs and marks the document **not signed off**. Participants work independently within each phase; concurrent calls are bounded by `ROUNDTABLE_PARALLEL_TURNS`.
+
+See [Ultraplan tool calls](../tools.md#ultraplan-tool-calls).
+
+See [contracts and execution](../heads-down.md) for the transition from planning to a heads-down run.

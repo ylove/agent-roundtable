@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { delimiter, join, dirname } from "node:path";
 
 const root = fs.mkdtempSync(join(tmpdir(), "rt-grounding-"));
 process.env.HOME = join(root, "home");
 process.env.ROUNDTABLE_WORKSPACE_DIR = root;
 process.env.ROUNDTABLE_ACTIVITY_LOG = join(root, "activity.jsonl");
+// Personas in this test live directly under its temp root.
+process.env.ROUNDTABLE_AGENT_PATHS = [process.env.ROUNDTABLE_AGENT_PATHS, root].filter(Boolean).join(delimiter);
 const grounding = await import("../../dist/sessions/grounding.js");
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 const put = (path, text) => { fs.mkdirSync(dirname(path), { recursive: true }); fs.writeFileSync(path, text); return path; };

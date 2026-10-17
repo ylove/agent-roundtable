@@ -1,13 +1,15 @@
 // Offline smoke test: no provider is called, zero API spend. Run: npm test
 import { startServer, assert } from "./mcp-client.mjs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
-const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent"];
+const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract", "resolve_escalation"];
 const NEW_START_TOOLS = ["start_ultraplan", "create_agent", "improve_agent"];
 const root = mkdtempSync(join(tmpdir(), "roundtable-smoke-"));
 const agentsDir = join(root, "agents");
@@ -19,6 +21,7 @@ writeFileSync(join(root, "README.md"), "Smoke project: ship the onboarding launc
 // Keys are deliberately absent/unset so no provider can be reached even by accident; a fake
 // REPLICATE_API_TOKEN is set only to prove debug_env never echoes any part of a configured key.
 const smokeEnv = {
+  ROUNDTABLE_HOME: join(root, "state"),
   ANTHROPIC_API_KEY: "",
   OPENAI_API_KEY: "",
   TOGETHER_API_KEY: "",
@@ -27,17 +30,51 @@ const smokeEnv = {
   OPENAI_COMPATIBLE_API_KEY: "",
   REPLICATE_API_TOKEN: "r8_test",
   ROUNDTABLE_AGENTS_DIR: agentsDir,
+  // Path-like agent refs are contained; fixture paths live under test/fixtures.
+  ROUNDTABLE_AGENT_PATHS: fileURLToPath(new URL("./fixtures", import.meta.url)),
   ROUNDTABLE_SKILLS_DIR: join(root, "skills"),
   ROUNDTABLE_WORKSPACE_DIR: root,
   ROUNDTABLE_ACTIVITY_LOG: join(root, "activity.jsonl"),
   ROUNDTABLE_TRANSCRIPTS_DIR: join(root, "transcripts"),
   ROUNDTABLE_PARALLEL_TURNS: "2",
+  // Scripted provider failures must fail at once, not be retried.
+  ROUNDTABLE_PROVIDER_RETRIES: "0",
   // Prototype sandboxes stay under the temp root; never spawn a browser or headless Chrome.
   ROUNDTABLE_PROTOTYPE_DIR: join(root, "prototypes"),
   ROUNDTABLE_PROTOTYPE_SCREENSHOTS: "0",
   ROUNDTABLE_PROTOTYPE_OPEN: "",
 };
 const PROTOTYPE_START_TOOLS = ["start_meeting", "start_local_meeting", "start_collaboration"];
+const RUN_TOOLS = ["execute", "execution_status", "control_execution", "resolve_escalation"];
+const WORKER_TOOLS = ["read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"];
+
+// A worker server (mcp --worker) for a registered agent lists exactly the seven worker tools.
+async function checkWorkerServer() {
+  console.log("worker server");
+  Object.assign(process.env, smokeEnv);
+  const { createExecutionStore } = await import("../dist/execution/store.js");
+  const { prepareWorkerFiles } = await import("../dist/workers/files.js");
+  const store = await createExecutionStore({ repoRoot: root, baseSha: "0".repeat(40), agentsDir });
+  const files = await prepareWorkerFiles({ store, agent: "builder-1", persona: { body: "Builder.", skills: [] }, task: "api" });
+  const source = { kind: "runner", id: "runner", pid: process.pid };
+  await store.transact(() => ({
+    events: [{ type: "agent.registered", source, payload: { agent: "builder-1", persona: "builder", driver: "claude-code", token_sha256: files.token_sha256, external: false } }],
+  }));
+  const worker = startServer({
+    args: ["mcp", "--worker", "--execution", store.id, "--agent", "builder-1", "--token-file", files.tokenPath],
+    env: { ...smokeEnv, ROUNDTABLE_DOTENV: "off" },
+  });
+  try {
+    await worker.init();
+    const listed = await worker.listTools();
+    check("worker-mode listTools returns exactly the 7 worker tools", () =>
+      assert(JSON.stringify(listed.map((t) => t.name)) === JSON.stringify(WORKER_TOOLS), listed.map((t) => t.name).join(", ")));
+    check("the worker server consumed its token file", () => assert(!existsSync(files.tokenPath), files.tokenPath));
+    check("the worker server writes only JSON-RPC to stdout", () => assert(worker.noise().length === 0, JSON.stringify(worker.noise())));
+  } finally {
+    worker.stop();
+  }
+}
 // Load .env once, then pin test config before index.js imports config.ts. Stub every child fetch,
 // including Ollama reachability; a developer's .env must never enable network or home-directory writes.
 const preload = join(root, "offline.mjs");
@@ -66,7 +103,7 @@ const check = (name, fn) => {
 async function checkDispatch() {
   Object.assign(process.env, smokeEnv, {
     ROUNDTABLE_PUBLISHER: "webhook",
-    ROUNDTABLE_WEBHOOK_URL: "http://publisher.test/post",
+    ROUNDTABLE_WEBHOOK_URL: "http://127.0.0.1:4142/post",
     ROUNDTABLE_WEBHOOK_VIEW_URL: "http://publisher.test/{channel}",
     ROUNDTABLE_WEBHOOK_AUTH_HEADER: "",
   });
@@ -75,13 +112,13 @@ async function checkDispatch() {
   const { meetings } = await import("../dist/sessions/meetings.js");
   const { collaborations } = await import("../dist/sessions/collaborations.js");
   const realFetch = globalThis.fetch;
-  const providerArgs = { provider: "openai_compatible", model: "smoke-model", base_url: "http://llm.test/v1" };
+  const providerArgs = { provider: "openai_compatible", model: "smoke-model", base_url: "http://localhost:4141/v1" };
   let calls = [];
   let replies = [];
   const script = (...outputs) => { calls = []; replies = outputs; };
   globalThis.fetch = async (url, init = {}) => {
-    if (String(url) === "http://publisher.test/post") return json(200, {});
-    assert(String(url) === "http://llm.test/v1/chat/completions", `Unexpected fetch: ${url}`);
+    if (String(url) === "http://127.0.0.1:4142/post") return json(200, {});
+    assert(String(url) === "http://localhost:4141/v1/chat/completions", `Unexpected fetch: ${url}`);
     const body = JSON.parse(init.body);
     assert(body.model === "smoke-model", JSON.stringify(body));
     calls.push(body);
@@ -124,6 +161,14 @@ async function checkDispatch() {
       assert(review.status === "awaiting_revision" && review.version === 1 && review.tally.OBJECT === 1, JSON.stringify(review));
       assert(final.startsWith("# Ultraplan: Launch") && final.includes("v2 [cfo, product-lead]") && final.includes("## Sign-offs") && final.includes("## Agent input"), final);
       assert(!ultraplans.has(start.ultraplanId) && replies.length === 0, "session did not close or calls were skipped");
+    });
+    check("dispatch archives the finalized ultraplan under ROUNDTABLE_HOME/sessions", () => {
+      const file = join(smokeEnv.ROUNDTABLE_HOME, "sessions", `${start.ultraplanId}.json`);
+      const record = JSON.parse(readFileSync(file, "utf8"));
+      assert(record.kind === "ultraplan" && record.document.signedOff === true && final.startsWith(record.document.markdown + "\n\n```json\n"), JSON.stringify(record).slice(0, 300));
+      const trailer = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(final)?.[1] ?? "null");
+      assert(trailer?.ultraplan_id === start.ultraplanId && trailer.archived === true && trailer.tally.APPROVE === 1, `trailer: ${JSON.stringify(trailer)}`);
+      assert(record.document.versions.length === 2 && record.document.tally.APPROVE === 1, JSON.stringify(record.document.tally));
     });
 
     script("Verdict: APPROVE", "Verdict: OBJECT", "Sign-off: APPROVE");
@@ -227,9 +272,57 @@ async function checkDispatch() {
       assert(readFileSync(improved.backupPath, "utf8") === original && improvedText.includes(`Backup: ${improved.backupPath}`), improvedText);
     });
     check("result formatters preserve final markdown/public blocks and workshop warnings", () => {
-      assert(formatUltraplanResult({ status: "finalized", finalPlan: "Exact markdown\n", publicBlock: "Public block" }) === "Exact markdown\n\n\nPublic block", "final document changed");
+      const trailer = '\n\n```json\n{\n  "ultraplan_id": "ultraplan-x",\n  "archived": true,\n  "tally": {}\n}\n```';
+      assert(formatUltraplanResult({ status: "finalized", ultraplanId: "ultraplan-x", archived: true, tally: {}, finalPlan: "Exact markdown\n", publicBlock: "Public block" }) === "Exact markdown\n\n\nPublic block" + trailer, "final document changed");
       const text = formatAgentWorkshopResult({ ...improved, warnings: ["Review this warning"], publicBlock: "Public block" });
       assert(text.includes("\n- Review this warning\n") && text.endsWith("\n\nPublic block"), text);
+    });
+
+    // Contracts: an explicit contract proposed offline in a throwaway git repository (no provider call).
+    script();
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    const git = (...args) => execFileSync("git", ["-c", "user.name=smoke", "-c", "user.email=smoke@example.com", "-c", "commit.gpgsign=false", ...args], { cwd: repo, encoding: "utf8" }).trim();
+    git("init", "-q");
+    writeFileSync(join(repo, "README.md"), "onboarding\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "init");
+    const proposed = await call("propose_contract", {
+      goal: "Ship the onboarding launch", orchestrator: "main", original_prompt: "ship the onboarding launch", repo_dir: repo,
+      contract: {
+        tasks: [{ id: "copy", title: "Write the launch copy", persona: "product-lead", paths: { write: ["docs/**"] }, acceptance: ["copy approved"], checks: ["lint"] }],
+        validation: { commands: [{ id: "lint", argv: ["npm", "run", "lint"], timeout_s: 120 }] },
+        budget: { usd: 5, per_task_usd: 5, wall_clock_min: 30 },
+      },
+    });
+    check("dispatch propose_contract proposes an explicit contract offline in a temp git repository", () => {
+      const summary = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(proposed)?.[1] ?? "null");
+      assert(summary && summary.status === "draft" && /^ctr-[0-9a-z]{6}-1$/.test(summary.contract_id) && summary.source === "explicit", proposed.slice(0, 400));
+      const header = JSON.parse(readFileSync(join(smokeEnv.ROUNDTABLE_HOME, "executions", summary.execution_id, "execution.json"), "utf8"));
+      assert(header.base_sha === git("rev-parse", "HEAD"), JSON.stringify(header));
+      assert(existsSync(summary.files.markdown) && proposed.includes("# Contract: Ship the onboarding launch"), summary.files.markdown);
+      assert(calls.length === 0 && git("status", "--porcelain") === "", "a provider was called or the repository changed");
+    });
+    const refused = await handleToolCall("freeze_contract", { contract_id: /"contract_id": "([^"]+)"/.exec(proposed)[1], orchestrator: "main" });
+    check("dispatch freeze_contract refuses a contract nobody consented to", () =>
+      assert(refused.isError && /Cannot freeze .*\n- product-lead has not consented/.test(refused.content[0].text), refused.content[0].text));
+
+    // execute over stdio, offline: freeze v1 directly (consent needs a provider), then call without visibility.
+    const summary = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(proposed)[1]);
+    const { openExecutionStore } = await import("../dist/execution/store.js");
+    const store = await openExecutionStore(summary.execution_id);
+    const [v1] = await store.events({ types: ["contract.proposed"], limit: 1 });
+    const hash = createHash("sha256").update(await store.getBlob(v1.payload.blob)).digest("hex");
+    await store.transact(() => ({
+      events: [{ type: "contract.frozen", source: { kind: "orchestrator", id: "main", pid: process.pid }, payload: { contract: summary.contract_id, version: 1, by: "main", hash, blob: v1.payload.blob } }],
+    }));
+    const executed = await server.callTool("execute", { contract_id: summary.contract_id, confirmation: "Go ahead and build it." });
+    const after = await store.state();
+    check("execute without visibility returns needs_input over stdio and starts nothing", () => {
+      const r = JSON.parse(executed.text);
+      assert(!executed.isError && r.status === "needs_input" && r.questions[0]?.topic === "visibility" && /dashboard/.test(r.questions[0].question), executed.text.slice(0, 600));
+      assert(!r.questions.some((q) => q.topic === "budget"), "the contract set a budget");
+      assert(after.status === "created" && after.contract?.id === summary.contract_id, "the run started, or the freeze did not apply");
     });
   } finally {
     globalThis.fetch = realFetch;
@@ -246,7 +339,26 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 22 distinct tools", () => assert(tools.length === 22 && new Set(tools.map((t) => t.name)).size === 22, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 37 distinct tools", () => assert(tools.length === 37 && new Set(tools.map((t) => t.name)).size === 37, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("contract and run tools are strict (additionalProperties: false)", () => {
+    for (const name of ["propose_contract", "amend_contract", "freeze_contract", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
+  });
+  check("the orchestrator's worker tools take execution_id and agent_token", () => {
+    for (const name of WORKER_TOOLS) {
+      const req = byName[name]?.inputSchema?.required ?? [];
+      assert(req[0] === "execution_id" && req[1] === "agent_token", `${name}: ${JSON.stringify(req)}`);
+    }
+    assert(byName.join_execution, "join_execution is listed");
+  });
+  check("every tool carries MCP annotations (a title and four hints) and no internal fields", () => {
+    for (const t of tools) {
+      const a = t.annotations ?? {};
+      const hints = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"];
+      assert(typeof a.title === "string" && hints.every((h) => typeof a[h] === "boolean"), `${t.name}: ${JSON.stringify(a)}`);
+      assert(!("modes" in t), `${t.name} leaks modes`);
+    }
+    assert(byName.debug_env.annotations.readOnlyHint === true && byName.improve_agent.annotations.readOnlyHint === false, "annotation values");
+  });
   for (const name of PROVIDER_TOOLS) {
     check(`${name}.provider enum = ${EXPECTED_PROVIDERS.join("|")}`, () => {
       const e = byName[name]?.inputSchema?.properties?.provider?.enum;
@@ -307,6 +419,13 @@ try {
     ["end_ultraplan", ["ultraplan_id"]],
     ["create_agent", []],
     ["improve_agent", ["agent"]],
+    ["propose_contract", ["goal", "orchestrator"]],
+    ["amend_contract", ["contract_id", "patch", "reason", "orchestrator"]],
+    ["freeze_contract", ["contract_id", "orchestrator"]],
+    ["execute", ["contract_id", "confirmation"]],
+    ["execution_status", []],
+    ["control_execution", ["execution_id", "action"]],
+    ["resolve_escalation", ["execution_id", "escalation_id", "action"]],
   ]) {
     check(`${name} required arguments = ${required.join(", ") || "none (runtime validated)"}`, () =>
       assert(JSON.stringify(byName[name]?.inputSchema?.required || []) === JSON.stringify(required), JSON.stringify(byName[name]?.inputSchema)));
@@ -411,11 +530,12 @@ try {
     assert(ollama.isError && /Ollama is not reachable at http:\/\/127\.0\.0\.1:9/.test(ollama.text), ollama.text));
 
   const debug = await server.callTool("debug_env");
-  check("debug_env reports version 0.4.0", () => assert(/"version": "0\.4\.0"/.test(debug.text), debug.text.slice(0, 200)));
+  check("debug_env reports version 1.0.0", () => assert(/"version": "1\.0\.0"/.test(debug.text), debug.text.slice(0, 200)));
   check("debug_env reports integration config and active ultraplans", () => {
     const d = JSON.parse(debug.text);
     assert(d.skills_dir === smokeEnv.ROUNDTABLE_SKILLS_DIR && d.workspace_dir === root, debug.text);
     assert(d.activity_log === smokeEnv.ROUNDTABLE_ACTIVITY_LOG && d.parallel_turns === 2 && d.active_ultraplans === 0, debug.text);
+    assert(d.sessions_dir === join(smokeEnv.ROUNDTABLE_HOME, "sessions"), debug.text);
   });
   check("startup banner includes skills, workspace and activity paths", () => {
     const banner = server.stderr();
@@ -445,6 +565,7 @@ try {
     assert(noise.length === 0, `non-JSON stdout lines: ${JSON.stringify(noise)}`);
   });
   await checkDispatch();
+  await checkWorkerServer();
 } catch (e) {
   failures++;
   console.log(`  FAIL harness: ${e.message}`);

@@ -1,0 +1,67 @@
+{
+  "schema": "roundtable.contract/1",
+  "id": "ctr-abc123-1",
+  "version": 1,
+  "status": "draft",
+  "title": "Accessible project navigation",
+  "goal": {
+    "ultimate": "Ship accessible navigation backed by a stable API and documented for maintainers",
+    "original_prompt": "Build a nav bar, a navigation API endpoint and a docs page.",
+    "artifacts": []
+  },
+  "scope": {
+    "orchestrator": "main",
+    "repo_root": "/srv/example-project",
+    "base_ref": "HEAD",
+    "paths": ["src/api/navigation/**", "src/components/nav/**", "docs/navigation.md"]
+  },
+  "participants": [{ "agent": "product-lead" }, { "agent": "skeptic" }],
+  "tasks": [
+    {
+      "id": "navigation-api",
+      "title": "Add the navigation endpoint and response tests",
+      "persona": "product-lead",
+      "depends_on": [],
+      "paths": { "write": ["src/api/navigation/**"] },
+      "acceptance": ["GET /api/navigation returns stable ids, labels and local hrefs", "Tests cover empty navigation and reject unsafe hrefs"],
+      "checks": ["test-api"],
+      "budget_usd": 6
+    },
+    {
+      "id": "nav",
+      "title": "Build an accessible primary nav using the endpoint",
+      "persona": "product-lead",
+      "depends_on": ["navigation-api"],
+      "paths": { "write": ["src/components/nav/**"], "read": ["src/api/navigation/**"] },
+      "acceptance": ["Navigation works with keyboard and screen readers", "Loading, empty and error states have tests"],
+      "checks": ["test-nav"],
+      "budget_usd": 8
+    },
+    {
+      "id": "navigation-docs",
+      "title": "Document the API shape and nav behavior",
+      "persona": "skeptic",
+      "depends_on": ["navigation-api", "nav"],
+      "paths": { "write": ["docs/navigation.md"], "read": ["src/api/navigation/**", "src/components/nav/**"] },
+      "acceptance": ["Document endpoint examples, keyboard behavior and failure states", "Examples agree with the implemented response shape"],
+      "checks": ["check-docs"],
+      "budget_usd": 4
+    }
+  ],
+  "interfaces": [
+    { "name": "navigation-response", "kind": "api", "owner": "navigation-api", "consumers": ["nav", "navigation-docs"], "path": "src/api/navigation/types.ts", "description": "An items array of stable id, label and local href strings" }
+  ],
+  "validation": {
+    "commands": [
+      { "id": "test-api", "argv": ["npm", "run", "test:api"], "timeout_s": 120 },
+      { "id": "test-nav", "argv": ["npm", "run", "test:nav"], "timeout_s": 120 },
+      { "id": "check-docs", "argv": ["npm", "run", "check:docs"], "timeout_s": 60 },
+      { "id": "build", "argv": ["npm", "run", "build"], "timeout_s": 120 }
+    ],
+    "final": ["test-api", "test-nav", "check-docs", "build"]
+  },
+  "budget": { "usd": 20, "per_task_usd": 8, "wall_clock_min": 60, "max_parallel": 2, "max_attempts": 3 },
+  "authority": { "lead": "product-lead", "may": ["retry", "reassign", "resolve_merge"], "budget_extension_pct": 0 },
+  "sandbox": { "backend": "docker", "image": "node:22-bookworm-slim" },
+  "workers": { "driver": "claude-code" }
+}

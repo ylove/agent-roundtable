@@ -6,6 +6,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path";
 import { agentKey } from "./agents.js";
 import { ACTIVITY_LOG_PATH, ACTIVITY_LOG_MAX_ENTRIES } from "./config.js";
+import { scrub } from "./security/secrets.js";
 
 export type ActivityKind = "meeting" | "local-meeting" | "collaboration" | "ultraplan" | "agent-creation" | "agent-refinement";
 
@@ -18,6 +19,8 @@ export interface ActivityEntry {
   topic: string;
   outcome?: string;
   public: boolean;
+  /** Set for sessions run on behalf of something else, e.g. a heads-down huddle ("huddle:<exe>:<escalation>"). */
+  origin?: string;
 }
 
 function excerpt(text: string, max: number): string {
@@ -36,9 +39,11 @@ export function recordActivity(entry: Omit<ActivityEntry, "at"> & { at?: string 
       // Callers supply canonical keys. Only path arguments need conversion; a key may
       // itself start with "subagent-" when its source had that prefix twice.
       agents: entry.agents.map((key) => /[\\/]/.test(key) ? agentKey(key) : key.toLowerCase()),
-      topic: excerpt(entry.topic, 300),
-      ...(entry.outcome !== undefined && { outcome: excerpt(entry.outcome, 600) }),
+      // Topics and outcomes come from callers and agents: secrets never reach the log (or grounding).
+      topic: excerpt(scrub(entry.topic), 300),
+      ...(entry.outcome !== undefined && { outcome: excerpt(scrub(entry.outcome), 600) }),
       public: entry.public,
+      ...(entry.origin !== undefined && { origin: entry.origin }),
     };
     mkdirSync(dirname(path), { recursive: true });
     appendFileSync(path, JSON.stringify(normalized) + "\n", { mode: 0o600 });
@@ -59,7 +64,8 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
     && Array.isArray(e.agents) && e.agents.every((key) => typeof key === "string" && !/[\\/]/.test(key) && key.toLowerCase() === key)
     && typeof e.topic === "string" && typeof e.public === "boolean"
     && (e.mode === undefined || typeof e.mode === "string")
-    && (e.outcome === undefined || typeof e.outcome === "string");
+    && (e.outcome === undefined || typeof e.outcome === "string")
+    && (e.origin === undefined || typeof e.origin === "string");
 }
 
 export function readActivity(path: string | null = ACTIVITY_LOG_PATH): ActivityEntry[] {

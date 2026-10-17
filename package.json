@@ -1,6 +1,6 @@
 {
   "name": "agent-roundtable",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "description": "MCP server for meetings and collaborations between AI agents — Anthropic, OpenAI, Together AI, Replicate, Ollama, or any OpenAI-compatible endpoint",
   "type": "module",
   "main": "dist/index.js",
@@ -8,12 +8,24 @@
     "agent-roundtable": "dist/index.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ylove/agent-roundtable.git"
+  },
+  "homepage": "https://github.com/ylove/agent-roundtable#readme",
+  "bugs": {
+    "url": "https://github.com/ylove/agent-roundtable/issues"
+  },
   "files": [
     "dist",
     "examples",
+    "docs",
+    ".env.example",
+    "SECURITY.md",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],
@@ -36,7 +48,7 @@
     "test:live": "node test/live-smoke.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "dotenv": "^17.2.3",
     "yaml": "^2.9.1"
   },

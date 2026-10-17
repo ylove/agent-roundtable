@@ -1,6 +1,6 @@
 # Postmortem mode: design
 
-Status: proposed for 1.1.0. Workstream WS14, issue #130, tracking issue #129. This is the spec WS14 builds against. If the implementation needs to diverge, update this file in the same pull request.
+Status: implemented in 1.1.0. Workstream WS14, issue #130, tracking issue #129. This was the spec WS14 built against; where the implementation went further or differently, the text below says so, and §12 lists those points together. User guide: [docs/modes/postmortem.md](../modes/postmortem.md).
 
 ## 1. What it is
 
@@ -28,6 +28,7 @@ Store, under the existing home (`~/.agent-roundtable/`, `ROUNDTABLE_HOME`), with
 ```
 projects/<project_key>/
   project.json                    {key, repo_root, created, postmortem: {enabled, since, reason_sha256, by}}
+  log.jsonl                       the project's postmortem log: enable and disable with the human's quoted words (scrubbed)
   postmortems/drafts/<pm>.json    the running draft (one open draft per scope, see §4)
   postmortems/<pm>.json           a concluded postmortem: findings, meeting, artifacts, status
   postmortems/<pm>.md             the readable record: findings, full dialogue, artifacts
@@ -96,7 +97,7 @@ The meeting runs through the existing engines (`startCollaboration` / `continueC
 
 ## 6. Artifacts
 
-The meeting ends with an artifact block. Each line is parsed from the turn's own lines (never inside blockquotes or fences, as with huddle directive lines):
+The meeting ends with an artifact block. Each line is parsed from the own lines of the last turn (never inside blockquotes or fences, as with huddle directive lines):
 
 ```
 Artifact: <kind> | <target> | <finding ids> | <text>
@@ -158,4 +159,15 @@ Two new orchestrator tools (worker servers unchanged), with `additionalPropertie
 
 ## 11. Tests
 
-Unit tests for: project keying and refusal of non-repos; draft record/fix/rebuild from events; automatic findings from rejections (dedupe by signature, fix status transitions); `hold_postmortem` refusals while fixes are pending; seat selection; format choice (waffle-house on a single responsible agent); artifact parsing (fences/blockquotes ignored, limits, bad targets reported); conclude applying only accepted artifacts with backups; lessons fed into `propose_contract`, ultraplan context and task cards; refusal of nudges/says on a postmortem session; watcher wakes; dashboard page escaping; redaction of findings. Provider calls are faked as in the existing collaboration tests.
+Unit tests for: project keying and refusal of non-repos; draft record/fix/rebuild from events; automatic findings from rejections (dedupe by signature, fix status transitions); `hold_postmortem` refusals while fixes are pending; seat selection; format choice (waffle-house on a single responsible agent); artifact parsing (fences/blockquotes ignored, limits, bad targets reported); conclude applying only accepted artifacts with backups; lessons fed into `propose_contract`, ultraplan context and task cards; refusal of nudges/says on a postmortem session; watcher wakes; dashboard page escaping; redaction of findings. Provider calls are faked as in the existing collaboration tests. The tests are `test/unit/postmortem-draft.test.mjs`, `postmortem-meeting.test.mjs`, `postmortem-lessons.test.mjs` and `postmortem-visibility.test.mjs`.
+
+## 12. Implementation notes (where the build went further or differently)
+
+- **Reducer.** `REDUCER_VERSION` is 6. The `postmortem` section of the blackboard lives in `src/execution/postmortem-state.ts` (handlers and a hook run after every event). Fix transitions are derived by the reducer from the task and check events, so `postmortem.fix_updated` is written only by the orchestrator's `fix` action. A retry sets `fix.by` to the task's persona, a reassignment to the new agent. The meeting covers every finding recorded before `postmortem.started` (each finding then names its `pm`); later findings start the next draft. `ready_seq` is the seq of the event that made the draft ready (no pending fix, every task with a finding terminal), and the watcher wakes on exactly that event.
+- **Automatic findings.** A finding's id is derived from the task, the check ids and their signatures, so a repeat has the same id and carries `repeats`. Each finding's envelope names the event that caused it (`causation`), which keeps the runner's pass idempotent across restarts. A failure at integration scope has no `task` (the merged task is already accepted); its fix is settled when the same integration check passes again. A rejection that only asks a worker to resolve a merge conflict is not a finding.
+- **Meeting.** At least two agents besides the orchestrator are needed for the engine; the host passes `participants` otherwise. `postmortem.started` is written after the meeting has run, so a meeting that fails leaves the draft unchanged and can be held again. In a run the meeting's provider usage is recorded on the budget ledger (source `huddle`) but not enforced, since the human opted in and the run is usually over. The directive of §5 is part of the context every turn carries.
+- **Human's words.** Task cards in the context are built without the original request; the orchestrator's opening and closing have any verbatim stretch of the contract's `original_prompt` or the run's `confirmation` replaced by a marker before they are used.
+- **Artifacts.** Only the last turn is read. Flags (§6) are recorded automatically when the meeting concludes, one per flagged finding, with the clearer wording taken from the accepted artifacts that name it. An accepted artifact that fails to apply (a missing persona, a symlinked memory path) is reported with its reason and does not stop the others.
+- **Lessons.** A lesson restates an active one when kind, target and wording (ignoring case and whitespace) match; the older one gets `superseded_by`. `start_ultraplan` gains the optional `repo_dir`. `execution_status` reports the draft (`postmortem`) once a run has findings or meetings.
+- **Telling the human.** The dashboard page, the watcher wake and the GitHub comment need the run's runner (and, for GitHub, its sync) to be alive, so they appear when a meeting concludes before the run ends. The record is always available through `postmortem(action: "read")`. `postmortem.concluded.record` is the blob ref of the record's markdown, which the dashboard renders.
+- **Retention.** Drafts that were never held are removed with the session retention sweep at server start (`src/postmortem/retention.ts`).

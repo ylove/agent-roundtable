@@ -62,7 +62,7 @@ test("a directory outside a git work tree, an unknown key and a repository with 
 
 test("enable stores the project privately, keeps only a hash of the human's words in project.json and audits them", async () => {
   const repo = makeRepo();
-  const words = "Let's have a retrospective after the work. My key is sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
+  const words = "Let's have a retrospective after the work. My key is tk_Abcdefghij0123456789";
   const out = await pm({ action: "enable", project: repo.root, reason: words });
   assert.equal(out.postmortem_mode, "on");
   const dir = projectDir(out.project);
@@ -75,10 +75,10 @@ test("enable stores the project privately, keeps only a hash of the human's word
   assert.ok(!readFileSync(join(dir, "project.json"), "utf8").includes("retrospective"), "the words are not in project.json");
   const log = readFileSync(join(dir, "log.jsonl"), "utf8");
   assert.match(log, /retrospective after the work/);
-  assert.ok(!log.includes("sk-ant-api03"), "the log is scrubbed");
+  assert.ok(!log.includes("tk_Abcdefghij"), "the log is scrubbed");
   const audit = readdirSync(AUDIT_DIR).map((f) => readFileSync(join(AUDIT_DIR, f), "utf8")).join("\n");
   assert.match(audit, /"action":"postmortem.enabled"/);
-  assert.ok(!audit.includes("sk-ant-api03"));
+  assert.ok(!audit.includes("tk_Abcdefghij"));
   assert.match(await fails("postmortem", { action: "enable", project: repo.root }), /"reason" is required/);
   const off = await pm({ action: "disable", project: repo.root, reason: "no more postmortems" });
   assert.equal(off.postmortem_mode, "off");
@@ -89,10 +89,10 @@ test("record keeps one draft per scope, scrubs every field and takes refs as evi
   const repo = await enabled();
   const out = await pm({
     action: "record", project: repo.root, work: "checkout redesign",
-    finding: { ...FINDING, summary: "The cart lost items; token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 leaked in the log", evidence: ["src/cart.js", "abc1234", `sha256:${"a".repeat(64)}`] },
+    finding: { ...FINDING, summary: "The cart lost items; token tk_Abcdefghij0123456789 leaked in the log", evidence: ["src/cart.js", "abc1234", `sha256:${"a".repeat(64)}`] },
   });
   assert.match(out.recorded, /^pmf-/);
-  assert.ok(!JSON.stringify(out).includes("sk-ant-api03"));
+  assert.ok(!JSON.stringify(out).includes("tk_Abcdefghij"));
   assert.equal(out.ready, false);
   assert.deepEqual(out.pending_fixes, [out.recorded]);
   const second = await pm({ action: "record", project: repo.root, work: "Checkout Redesign", finding: { ...FINDING, summary: "A second thing", responsible: ["Builder", "orchestrator"], category: "test_gap" } });
@@ -105,7 +105,7 @@ test("record keeps one draft per scope, scrubs every field and takes refs as evi
   assert.match(await fails("postmortem", { action: "record", project: repo.root, work: "w", execution_id: "exe-0123456789abcdef", finding: FINDING }), /exactly one of execution_id|execution_id/);
   const draftFile = loadDraft(second.project, out.pm);
   assert.equal(draftFile.findings.length, 2);
-  assert.ok(!JSON.stringify(draftFile).includes("sk-ant-api03"));
+  assert.ok(!JSON.stringify(draftFile).includes("tk_Abcdefghij"));
 });
 
 test("fix updates a finding's fix; the draft is ready once nothing is pending", async () => {
@@ -299,9 +299,9 @@ test("the new events reject unknown fields and scrub free text", async () => {
   const extra = await run.store.transact(() => ({ events: [{ type: "postmortem.started", source: runner, payload: { id: "pm-x", format: "collaborate", seats: ["a"], extra: 1 } }] })).catch((e) => e);
   assert.match(String(extra.message), /not a known field/);
   const [e] = (await run.store.transact(() => ({
-    events: [{ type: "postmortem.finding_recorded", source: runner, payload: { id: "pmf-1", summary: "key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", detected_by: "t", responsible: ["a"], category: "process" } }],
+    events: [{ type: "postmortem.finding_recorded", source: runner, payload: { id: "pmf-1", summary: "key tk_Abcdefghij0123456789", detected_by: "t", responsible: ["a"], category: "process" } }],
   }))).events;
-  assert.ok(!e.payload.summary.includes("sk-ant-api03"));
+  assert.ok(!e.payload.summary.includes("tk_Abcdefghij"));
 });
 
 test("files are private and the draft survives as JSON a reader can parse", async () => {

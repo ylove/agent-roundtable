@@ -1,5 +1,5 @@
 // Postmortem mode (WS14): seats, formats, the bounded context, artifacts, conclude and the no-outside-input rule.
-// Provider calls are faked through fetch (an OpenAI-compatible endpoint), as in the collaboration tests.
+// Provider calls are faked through fetch (an openai_compatible endpoint), as in the collaboration tests.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -415,7 +415,7 @@ test("artifact parsing: limits, targets and findings", () => {
   assert.equal(ok1.artifacts[0].text, "use a | b");
   assert.match(ok1.artifacts[0].hash, /^[0-9a-f]{64}$/);
   // Secrets are scrubbed out of the text.
-  assert.ok(!parseArtifactBlock(line("key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"), seats, ids).artifacts[0].text.includes("sk-ant-api03"));
+  assert.ok(!parseArtifactBlock(line("key tk_Abcdefghij0123456789"), seats, ids).artifacts[0].text.includes("tk_Abcdefghij"));
 });
 
 test("the human's words are withheld wherever the orchestrator's text repeats them", () => {

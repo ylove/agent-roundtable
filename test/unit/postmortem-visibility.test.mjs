@@ -19,7 +19,7 @@ const { saveDraft, listDrafts, loadDraft, projectDir } = await import("../../dis
 
 const XSS = "<script>alert(1)</script>";
 const EMAIL = "dana.private@example.com";
-const KEY = "sk-ant-" + "api03-abcdefghijklmnopqrstuvwx";
+const KEY = "tk_" + "Abcdefghij0123456789";
 const FAKE = fileURLToPath(new URL("../fixtures/github/fake-gh.mjs", import.meta.url));
 
 function get(url) {

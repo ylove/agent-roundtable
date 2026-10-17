@@ -68,6 +68,8 @@ agent-roundtable watch <execution-id> --as main --timeout-min 50
 agent-roundtable status <execution-id> --json
 ```
 
+The watcher's wake `reason` is one of `escalation`, `awaiting_human`, `budget`, `completed`, `failed`, `aborted`, `timeout`, and, with [postmortem mode](modes/postmortem.md), `postmortem_ready` (every fix has settled; hold the meeting) and `postmortem` (a meeting concluded; tell the human).
+
 Use `execution_status` for natural questions such as “how close is the nav?”:
 
 ```json

@@ -1,6 +1,6 @@
 # MCP tool reference
 
-Generated from the registered definitions in `src/tools/*.ts` after building: **37 orchestrator tools**, of which **7** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
+Generated from the registered definitions in `src/tools/*.ts` after building: **39 orchestrator tools**, of which **7** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
 
 Use these through your MCP client; Claude Code names them `mcp__agent-roundtable__<tool>`. Omitted optional fields use the behavior described below. A nested field marked required is required only when its enclosing object/item is supplied. Null optional values are treated as absent. New contract, run and worker tools reject unknown arguments.
 
@@ -303,6 +303,7 @@ Plan with specialist agents: you (the orchestrator) own and write the plan; agen
 | `context` | string | no | Optional background shared with the agents; never posted publicly. |
 | `draft_plan` | string | no | Optional full draft: becomes v1 by orchestrator and skips the input phase. Whitespace-only counts as absent. |
 | `planner` | string | no | Optional persona that owns drafting and revision server-side; runs the whole loop in one call. |
+| `repo_dir` | string | no | A directory inside the repository the plan is for. When earlier postmortems of that project left lessons, a bounded "Lessons from past postmortems" section (misreadings first) is added to the context the agents plan with. Never posted publicly. |
 | `revision_rounds` | number | no | Planner only: review/revise cycles before sign-off, default 1, clamped to 1..3. |
 | `execution_ready` | boolean | no | Default false. True when the plan will be executed heads-down: planner drafts and revisions (and your next steps) must end with a fenced roundtable-tasks JSON block of tasks, commands and interfaces, and sign-offs check it. |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
@@ -655,6 +656,99 @@ Example: `join_execution`
 }
 ```
 
+## Postmortem
+
+[Postmortem mode](modes/postmortem.md) is off by default. Both tools reject unknown arguments and exist only on the orchestrator server.
+
+### postmortem
+
+Postmortem mode: while testing sends fixers back, you keep a running draft of every finding; when all fixers are done the agents that did the work meet with you (hold_postmortem) and leave actionable artifacts, kept per project and read back before the next plan. Off by default: action enable turns it on for a project ONLY when the human asked for postmortem meetings, retrospectives, or agents improving themselves or each other; reason quotes their words verbatim (recorded in the project's log and the audit log). Nothing infers it. A heads-down run inherits it from its contract (propose_contract sets it); the runner then records a finding by itself when a submission is sent back after testing. disable turns it off and keeps stored postmortems. record adds a finding to the draft of a scope (execution_id for a run, or work for at-the-table work): {summary, detected_by, responsible[] (persona names, or "orchestrator"), category, task?, evidence[] (refs only: sha256: blob refs, event ids, commit shas, paths)}. fix sets a finding's fix {status: pending|fixed|abandoned, by?, ref?}; in a run, retries, merges and failures update fixes by themselves. draft returns the findings, what is still pending and whether the meeting can be held. lessons returns the active lessons of a project (always, whether or not the mode is on); list shows its drafts and postmortems; read returns a postmortem's full record (every turn) for you to show the human verbatim.
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `action` | string | yes | enable, disable, record, fix, draft, lessons, list or read. Values: `enable`, `disable`, `record`, `fix`, `draft`, `lessons`, `list`, `read`. |
+| `project` | string | no | The project: a directory inside its git repository (resolved with git rev-parse --show-toplevel; refused outside a git work tree or with submodules), or a project key returned earlier. maxLength: `1000`. |
+| `execution_id` | string | no | The heads-down run (exe-…) the draft belongs to. Give this or work. pattern: `^exe-[0-9a-hjkmnp-tv-z]{16}$`. |
+| `work` | string | no | A short label for at-the-table work (for example "checkout redesign") when there is no run. Give this or execution_id. maxLength: `200`. |
+| `reason` | string | no | enable / disable: the human's own words asking for it (or for turning it off), quoted verbatim. Never invent it. maxLength: `2000`. |
+| `finding` | object | no | record: the finding. No unknown fields. |
+| `finding.summary` | string | yes | What went wrong, in at most 600 characters. maxLength: `600`. |
+| `finding.detected_by` | string | yes | The check, test or reviewer that caught it. maxLength: `300`. |
+| `finding.responsible` | array of string | yes | The agents whose work was sent back: persona names, or "orchestrator" for your own part. maxItems: `20`. |
+| `finding.category` | string | yes | prompt_misread, project_misread, contract_ambiguity, implementation, test_gap or process. The first three are flagged and warn future plans. Values: `prompt_misread`, `project_misread`, `contract_ambiguity`, `implementation`, `test_gap`, `process`. |
+| `finding.task` | string | no | The heads-down task id, when the finding is about one. |
+| `finding.evidence` | array of string | no | Refs only: sha256: blob refs, event ids, commit shas or repository paths. Command output is refused. maxItems: `20`. |
+| `finding_id` | string | no | fix: the finding (pmf-…). maxLength: `40`. |
+| `fix` | object | no | fix: the finding's fix. No unknown fields. |
+| `fix.by` | string | no | Who fixes it (an agent, a task, or yourself). maxLength: `200`. |
+| `fix.status` | string | yes | pending, fixed or abandoned. Values: `pending`, `fixed`, `abandoned`. |
+| `fix.ref` | string | no | A ref to the fix: a commit sha, an event id or a path. maxLength: `300`. |
+| `pm` | string | no | read: the postmortem (pm-…) hold_postmortem returned. pattern: `^pm-[0-9a-hjkmnp-tv-z]{8}$`. |
+
+Example: `postmortem`
+
+```json
+{
+  "action": "record",
+  "project": "/work/checkout",
+  "execution_id": "exe-0123456789abcdef",
+  "finding": {
+    "summary": "The nav bar ignored the mobile breakpoint",
+    "detected_by": "check unit",
+    "responsible": ["builder"],
+    "category": "implementation",
+    "task": "build-nav-bar"
+  }
+}
+```
+
+### hold_postmortem
+
+Hold the postmortem meeting for a draft, then conclude it. Refused while any finding's fix is pending or a task with a finding is still running (the error names what); a draft with no findings closes with no meeting. action hold (default): every agent named in a finding, every agent that did the original work in the run (or the participants you pass), and you sit at the table. opening is your account of what happened, including your own part: turn 0. The format is waffle-house when exactly one agent is responsible for every finding (it defends, the others challenge, your opening is the charge), otherwise collaborate for rounds (default 2, 1-4); format forces either. The meeting is private and takes no outside input: the human has no seat, nothing they type reaches it, and its context never carries their chat, confirmation or original request. It ends with an artifact block, one line each: Artifact: <kind> | <target> | <finding ids> | <text>. Kinds: fix (follow-up), rule and contract rule (project lessons, read before the next plan and contract), persona addendum (appended to an agent's persona file under ## Postmortem addenda, with a backup), agent rule (shown in that agent's task card), memory (the agent's memory file; memory_target: "claude" also writes the repository's .claude/agent-memory). The result has the transcript, the proposed artifacts and any lines that could not be used. action conclude: pm, your closing statement, and accept[] (artifact ids) / reject[{id, why}]. Only accepted artifacts take effect, each audited. The result has a summary and the record path to relay to the human, who can read every turn (postmortem read).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `action` | string | no | hold (default) or conclude. Values: `hold`, `conclude`. |
+| `project` | string | no | The project: a directory inside its repository (resolved with git rev-parse --show-toplevel; refused outside a git work tree or with submodules), or a project key returned earlier. maxLength: `1000`. |
+| `execution_id` | string | no | The heads-down run (exe-…) the draft belongs to. Give this or work. pattern: `^exe-[0-9a-hjkmnp-tv-z]{16}$`. |
+| `work` | string | no | A short label for at-the-table work (for example "checkout redesign") when there is no run. Give this or execution_id. maxLength: `200`. |
+| `opening` | string | no | hold: your account of what happened, including your own part. Do not paste the human's words. maxLength: `8000`. |
+| `participants` | array of string | no | hold: agents to seat in addition to those named in findings (for at-the-table work: everyone who did it). maxItems: `12`. |
+| `format` | string | no | hold: force a format (default: waffle-house for a single responsible agent, else collaborate). Values: `collaborate`, `waffle-house`. |
+| `rounds` | integer | no | hold: rounds (default 2). minimum: `1`. maximum: `4`. |
+| `memory_target` | string | no | hold: with "claude", accepted memory artifacts are also appended to `<repo>/.claude/agent-memory/<agent>/MEMORY.md` (refused through symlinks). Values: `claude`. |
+| `pm` | string | no | conclude: the postmortem (pm-…) hold returned. pattern: `^pm-[0-9a-hjkmnp-tv-z]{8}$`. |
+| `closing` | string | no | conclude: your closing statement, the last turn of the record. maxLength: `4000`. |
+| `accept` | array of string | no | conclude: ids of the artifacts to apply (a1, a2, …). maxItems: `20`. |
+| `reject` | array of object | no | conclude: artifacts you turn down, each with why. maxItems: `20`. |
+| `reject[].id` | string | yes | The artifact id. maxLength: `16`. |
+| `reject[].why` | string | yes | Why not. maxLength: `400`. |
+| `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
+| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
+
+Example: `hold_postmortem`
+
+```json
+{
+  "project": "/work/checkout",
+  "execution_id": "exe-0123456789abcdef",
+  "opening": "I wrote the brief loosely and the builder read it as desktop only; I also merged without a layout check."
+}
+```
+
+Then conclude it:
+
+```json
+{
+  "action": "conclude",
+  "pm": "pm-0123abcd",
+  "closing": "Agreed: breakpoints go into every acceptance list from now on.",
+  "accept": ["a1", "a2"],
+  "reject": [{ "id": "a3", "why": "the tester already does this" }]
+}
+```
+
 ## Workers (both servers)
 
 ### read_blackboard
@@ -893,7 +987,7 @@ One turn runs per session at a time. While a turn is in flight, `continue_collab
 A contract is what a heads-down run builds: the goal and the human's request verbatim, tasks (persona, dependencies, write paths, acceptance criteria, checks), interfaces, decisions, validation commands (structured argv), budget and the lead's authority. Every participant must answer `Consent: AGREE` or `Consent: OBJECT` on its current version before the orchestrator that proposed it can freeze it: an agreement to an earlier version does not count. Contracts live under `ROUNDTABLE_HOME/executions/<exe>/contracts/<ctr>/` (`v<N>.json` and `CONTRACT.md`); nothing is written to the repository. These tools take no unknown arguments.
 
 
-- `propose_contract` takes the structure from an explicit `contract` object with tasks, then from the last `roundtable-tasks` block in `plan` or in the archived `from_session`, then from a structuring call on the plan (one retry quoting the errors). It resolves `repo_dir` to its git top level and `base_ref` (default `HEAD`) to a commit. `consent: true` asks every participant right away; an unclear answer is re-asked once, then counts as an objection.
+- `propose_contract` takes the structure from an explicit `contract` object with tasks, then from the last `roundtable-tasks` block in `plan` or in the archived `from_session`, then from a structuring call on the plan (one retry quoting the errors). It resolves `repo_dir` to its git top level and `base_ref` (default `HEAD`) to a commit. `consent: true` asks every participant right away; an unclear answer is re-asked once, then counts as an objection. When the repository's project has [postmortem](modes/postmortem.md) lessons, the result gains a `postmortem_lessons` section, every active contract rule becomes a `decisions` entry (`by: "postmortem:<pm>"`) and every flag a warning; with the mode on, the draft contract carries `postmortem: {enabled: true}`.
 - `amend_contract` applies an RFC 7396 merge patch and makes v(N+1). Amending a draft makes a new proposal that everyone must consent to again (`consent: true` asks them all). Amending a frozen contract cancels the tasks it removes and tells the agents of affected tasks to re-read the contract; a change to its budget, scope, sandbox, authority, validation, workers or goal needs `consent: true` (everyone is asked first, and it applies only if all agree) or `override_consent: true` (audited). `patch: {}` with `consent: true` asks everyone who has not agreed to the current version.
 - `freeze_contract` lists every reason it refuses: an unresolved objection or unclear answer, a participant who has not answered about the current version, a consent round in flight, a busy source session, or, for a child contract, a parent that is not frozen. `excuse` sets these aside with a reason, and `abandon_round` ends a consent round whose process died. Excusals, abandoned rounds and the frozen sha256 are written to the audit log. Freezing starts nothing.
 
@@ -905,6 +999,10 @@ A contract is what a heads-down run builds: the goal and the human's request ver
 - `resolve_escalation` answers an escalation: decide, huddle, retry, reassign, amend, dismiss or await_human.
 
 Arguments and behaviour: [heads-down design, §13 and §15](design/heads-down.md#13-orchestrator-experience).
+
+### Postmortem
+
+- `postmortem` turns the mode on for a project (only when the human asks, quoting their words), keeps the running draft of findings, and returns lessons, listings and records. `hold_postmortem` runs the meeting once every fix has settled and concludes it with your decisions. A postmortem session takes no outside input: `nudge_collaboration`, `continue_collaboration`, `say` and `say_local` refuse it and `list_collaborations` does not show it. See [Postmortem mode](modes/postmortem.md).
 
 ### LLM
 

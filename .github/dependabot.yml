@@ -8,6 +8,11 @@ updates:
     groups:
       npm-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # Types track the oldest supported Node (engines >=22): newer majors would type-check
+      # APIs that Node 22 lacks. Bump this by hand when the engines floor moves.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /

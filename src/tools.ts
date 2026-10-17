@@ -8,6 +8,7 @@ import { deliberationTools, handleDeliberationTool } from "./tools/deliberation.
 import { contractTools, handleContractTool } from "./tools/contract.js";
 import { executionTools, handleExecutionTool } from "./tools/execution.js";
 import { handleWorkerTool, workerTools } from "./tools/worker.js";
+import { handleUsageTool, usageTools } from "./tools/usage.js";
 import { schemaFor, type ToolArgs, type ToolCallContext, type ToolDefinition, type ToolGroup, type ToolMode } from "./tools/shared.js";
 import { scrub } from "./security/secrets.js";
 
@@ -19,6 +20,7 @@ const groups: ToolGroup[] = [
   { definitions: contractTools, handle: handleContractTool },
   { definitions: executionTools, handle: handleExecutionTool },
   { definitions: workerTools, handle: handleWorkerTool },
+  { definitions: usageTools, handle: handleUsageTool },
 ];
 
 const routes = new Map<string, { definition: ToolDefinition; group: ToolGroup }>();

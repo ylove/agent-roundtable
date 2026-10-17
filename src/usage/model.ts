@@ -14,6 +14,7 @@ import { executionBudgetUsd } from "../execution/budget.js";
 import { isFreeProvider } from "../execution/pricing.js";
 import { executionDir, listExecutions, openExecutionStore } from "../execution/store.js";
 import type { AgentUsage, BlackboardState } from "../execution/types.js";
+import { redact } from "../publishers/redact.js";
 import { scrub } from "../security/secrets.js";
 import {
   day,
@@ -241,6 +242,64 @@ function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string
 // The view
 // ---------------------------------------------------------------------------
 
+/** The totals and the platforms of some agents. The host agent is reported by the host and never part of either. */
+export function rollup(agents: readonly UsageAgent[]): { totals: Money & { tokens: Tokens }; platforms: UsagePlatform[] } {
+  const totals: Money & { tokens: Tokens } = { ...zeroMoney(), tokens: zeroTokens() };
+  const byProvider = new Map<string, UsagePlatform>();
+  for (const a of agents) {
+    if (a.where === "host") continue;
+    mergeMoney(totals, a.money);
+    mergeTokens(totals.tokens, a.tokens);
+    const provider = a.provider ?? "unknown";
+    let p = byProvider.get(provider);
+    if (!p) byProvider.set(provider, (p = { provider, models: [], tokens: zeroTokens(), money: zeroMoney() }));
+    for (const m of a.models) if (!p.models.includes(m)) p.models.push(m);
+    mergeTokens(p.tokens, a.tokens);
+    mergeMoney(p.money, a.money);
+  }
+  if (tokenTotal(totals.tokens) > 0 && moneyTotal(totals) === 0) totals.unpriced = true;
+  const platforms = [...byProvider.values()].sort((a, b) => moneyTotal(b.money) - moneyTotal(a.money) || (a.provider < b.provider ? -1 : 1));
+  for (const p of platforms) if (tokenTotal(p.tokens) > 0 && moneyTotal(p.money) === 0 && !isFreeProvider(p.provider)) p.money.unpriced = true;
+  return { totals, platforms };
+}
+
+/** The view narrowed to one run, session or agent (the totals follow). */
+export function filterView(view: UsageView, f: { execution?: string; session?: string; agent?: string }): UsageView {
+  const agents = view.agents.filter(
+    (a) => (f.execution === undefined || a.scope === f.execution) && (f.session === undefined || a.scope === f.session) && (f.agent === undefined || a.id === f.agent)
+  );
+  const scopes = new Set(agents.map((a) => a.scope));
+  const table: UsageTable = { sessions: 0, agents: 0, money: zeroMoney(), tokens: zeroTokens() };
+  const sessions = new Set<string>();
+  for (const a of agents) {
+    if (a.where !== "at-the-table") continue;
+    sessions.add(a.scope);
+    table.agents++;
+    mergeMoney(table.money, a.money);
+    mergeTokens(table.tokens, a.tokens);
+  }
+  table.sessions = sessions.size;
+  return {
+    ...view,
+    ...rollup(agents),
+    agents,
+    stops: view.stops.filter((s) => scopes.has(s.scope) || (f.agent === undefined && f.execution === undefined && f.session === undefined)),
+    runs: view.runs.filter((r) => (f.execution === undefined || r.id === f.execution) && (f.session === undefined && f.agent === undefined ? true : scopes.has(r.id))),
+    table,
+  };
+}
+
+/** Every string in the view, redacted (secrets and personal data): what a tool hands to a model. */
+export function redactedView(view: UsageView): UsageView {
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") return redact(v).text;
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(view) as UsageView;
+}
+
 export async function collectUsage(opts: CollectOptions = {}): Promise<UsageView> {
   const now = opts.now ?? Date.now();
   const since = opts.since ?? DAY_MS;
@@ -314,28 +373,13 @@ export async function collectUsage(opts: CollectOptions = {}): Promise<UsageView
     });
   }
 
-  const totals: Money & { tokens: Tokens } = { ...zeroMoney(), tokens: zeroTokens() };
-  const platforms = new Map<string, UsagePlatform>();
-  for (const a of agents) {
-    if (a.where === "host") continue;
-    mergeMoney(totals, a.money);
-    mergeTokens(totals.tokens, a.tokens);
-    const provider = a.provider ?? "unknown";
-    let p = platforms.get(provider);
-    if (!p) platforms.set(provider, (p = { provider, models: [], tokens: zeroTokens(), money: zeroMoney() }));
-    for (const m of a.models) if (!p.models.includes(m)) p.models.push(m);
-    mergeTokens(p.tokens, a.tokens);
-    mergeMoney(p.money, a.money);
-  }
-  if (tokenTotal(totals.tokens) > 0 && moneyTotal(totals) === 0) totals.unpriced = true;
-  const platformList = [...platforms.values()].sort((a, b) => moneyTotal(b.money) - moneyTotal(a.money) || (a.provider < b.provider ? -1 : 1));
-  for (const p of platformList) if (tokenTotal(p.tokens) > 0 && moneyTotal(p.money) === 0 && !isFreeProvider(p.provider)) p.money.unpriced = true;
+  const { totals, platforms } = rollup(agents);
 
   stops.sort((a, b) => (a.at < b.at ? 1 : -1));
   return {
     generated_at: new Date(now).toISOString(),
     totals,
-    platforms: platformList,
+    platforms,
     agents,
     stops: stops.slice(0, 20),
     runs,

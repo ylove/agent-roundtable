@@ -8,6 +8,8 @@
 //   status <exe> [--json]                                               the run at a glance
 //   verify <exe>                                                        the event chain and the audit chain
 //   purge <exe> --confirm                                               remove a finished run
+//   statusline [--agents N] [--plain] [--no-host]                       a Claude Code status line; always exits 0
+//   usage [--json] [--watch]                                            who is using what, on which platform
 //   help                                                                this text
 //
 // Modules load lazily, so the hook (which Claude Code runs before every edit) never loads the
@@ -30,6 +32,9 @@ export const USAGE = [
   "  agent-roundtable status <exe> [--json]          tasks, budget, escalations, runner and watchers",
   "  agent-roundtable verify <exe>                   verify the event chain and the audit chain",
   "  agent-roundtable purge <exe> --confirm          remove a finished run's worktrees, branches and log",
+  "  agent-roundtable statusline [--agents N] [--plain] [--no-host]",
+  "                                                  a Claude Code statusLine command (host JSON on stdin)",
+  "  agent-roundtable usage [--json] [--watch]       who is using what, on which platform, measured or estimated",
   "  agent-roundtable help                           this text",
 ].join("\n");
 
@@ -182,6 +187,24 @@ async function purge(args: string[]): Promise<void> {
   }
 }
 
+async function statusline(args: string[]): Promise<void> {
+  const { runStatusline } = await import("./usage/commands.js");
+  return runStatusline(args);
+}
+
+async function usageReport(args: string[]): Promise<void> {
+  process.umask(0o077);
+  const flags = parseFlags(args, { values: [], flags: ["json", "watch"] });
+  if (typeof flags === "string") return usage(flags);
+  const { runUsage } = await import("./usage/commands.js");
+  try {
+    await runUsage(flags);
+  } catch (e) {
+    console.error(`agent-roundtable usage: ${errText(e)}`);
+    process.exitCode = 1;
+  }
+}
+
 /** Run one subcommand. Exit codes: 0 ok, 1 a refusal or failed check, 2 usage (and a denied hook). */
 export async function runCli(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
@@ -202,6 +225,10 @@ export async function runCli(argv: string[]): Promise<void> {
       return verify(rest);
     case "purge":
       return purge(rest);
+    case "statusline":
+      return statusline(rest);
+    case "usage":
+      return usageReport(rest);
     case "help":
       if (rest.length) return usage("help takes no arguments");
       process.stdout.write(USAGE + "\n");

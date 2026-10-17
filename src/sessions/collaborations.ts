@@ -10,7 +10,7 @@ import { newId } from "../ids.js";
 import { sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveCollaboration } from "./archive.js";
 import { callLLM } from "../providers/index.js";
-import { metered } from "../usage/session-scope.js";
+import { metered, stoppedOutcome, type StoppedInfo } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
 import type { CollaborationMode, CollaborationRole, ConversationAngle } from "./modes.js";
@@ -87,6 +87,8 @@ export interface Collaboration {
   prototype?: PrototypeTracker;
   /** Who it runs for, e.g. a heads-down huddle; tags its activity entry and archive record. */
   origin?: string;
+  /** Set when a person stopped the collaboration (usage visibility): it then ends without a summary. */
+  stopped?: StoppedInfo;
 }
 
 export const collaborations = new Map<string, Collaboration>();
@@ -763,7 +765,7 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
     mode: collaboration.mode,
     agents: collaboration.agents.map((agent) => agentKey(agent.name)),
     topic: collaboration.topic,
-    outcome: summary || messages.slice().reverse().find((m) => m.agent !== ORCHESTRATOR)?.content,
+    outcome: collaboration.stopped ? stoppedOutcome(collaboration.stopped) : summary || messages.slice().reverse().find((m) => m.agent !== ORCHESTRATOR)?.content,
     public: collaboration.publicChannel !== undefined,
     ...(collaboration.origin !== undefined && { origin: collaboration.origin }),
   });

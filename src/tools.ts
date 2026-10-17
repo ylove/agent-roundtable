@@ -11,6 +11,8 @@ import { handleWorkerTool, workerTools } from "./tools/worker.js";
 import { handleUsageTool, usageTools } from "./tools/usage.js";
 import { schemaFor, type ToolArgs, type ToolCallContext, type ToolDefinition, type ToolGroup, type ToolMode } from "./tools/shared.js";
 import { scrub } from "./security/secrets.js";
+import { stoppedResult, stoppedSessionNamed } from "./usage/session-scope.js";
+import { USAGE } from "./tools/names.js";
 
 export { formatUltraplanResult, formatAgentWorkshopResult } from "./tools/shared.js";
 export type { ToolCallContext, ToolMode } from "./tools/shared.js";
@@ -76,6 +78,9 @@ export async function handleToolCall(
     const route = routes.get(name);
     if (!route || !route.definition.modes.includes(mode)) throw new Error(`Unknown tool: ${name}`);
     validateToolArgs(route.definition, args, mode);
+    // A session a person stopped has ended: say so, and what to do next (usage-visibility.md §6).
+    const stopped = mode === "orchestrator" && name !== USAGE ? stoppedSessionNamed(args) : undefined;
+    if (stopped) return { content: [{ type: "text", text: JSON.stringify(stoppedResult(stopped), null, 2) }] };
     return await route.group.handle(name, args as ToolArgs, { ...ctx, mode });
   } catch (error) {
     const message = scrub(error instanceof Error ? error.message : String(error));

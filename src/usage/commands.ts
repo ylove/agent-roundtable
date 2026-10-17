@@ -3,6 +3,7 @@
 //
 //   statusline [--agents N] [--plain] [--no-host]   a Claude Code statusLine command; always exits 0
 //   usage [--json] [--watch]                        who is using what, on which platform
+//   stop <agent> [--execution <exe> | --session <id>] [--reason <text>]   stop one agent
 // ============================================================================
 
 import { setTimeout as sleep } from "node:timers/promises";
@@ -52,5 +53,22 @@ export async function runUsage(flags: Record<string, string | true>, env: NodeJS
     const frame = await once();
     process.stdout.write((tty ? CLEAR : "") + frame + "\n" + (flags.json ? "" : "\n  Refreshing every 2 s. Press Ctrl+C to stop watching.\n"));
     await sleep(2000);
+  }
+}
+
+/** `stop <agent>`: ask the owner of the agent to stop it. Exit 1 with a plain message when it cannot be stopped. */
+export async function runStop(agent: string, flags: Record<string, string | true>): Promise<void> {
+  const { stopAgent, StopRefusal } = await import("./control.js");
+  try {
+    const r = await stopAgent(
+      agent,
+      { ...(typeof flags.execution === "string" && { execution: flags.execution }), ...(typeof flags.session === "string" && { session: flags.session }) },
+      { surface: "cli", ...(typeof flags.reason === "string" && { reason: flags.reason }) }
+    );
+    process.stdout.write(`${r.message}\n`);
+    for (const w of r.warnings) process.stderr.write(`note: ${w}\n`);
+  } catch (e) {
+    process.stderr.write(`agent-roundtable stop: ${e instanceof StopRefusal ? e.message : e instanceof Error ? e.message : String(e)}\n`);
+    process.exitCode = 1;
   }
 }

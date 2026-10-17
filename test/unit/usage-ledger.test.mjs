@@ -19,6 +19,7 @@ const { metered, lineFor, setLedgerHome, setServerId, busySessions, abortSession
 const T = await import("../../dist/usage/table.js");
 const { collectUsage } = await import("../../dist/usage/model.js");
 const { openExecutionStore } = await import("../../dist/execution/store.js");
+const { UsageMeter } = await import("../../dist/execution/escalation.js");
 
 afterEach(() => W.resetWorkerTools());
 
@@ -296,4 +297,18 @@ test("a model with no price shows tokens, flagged unpriced, instead of $0.00", a
   const v = await collectUsage({ executions: [], home: dir });
   assert.equal(v.agents.find((a) => a.id === "cfo").money.unpriced, true);
   assert.equal(v.agents.find((a) => a.id === "local").money.unpriced, undefined, "a free provider costs $0.00");
+});
+
+test("huddle and consent usage: tokens the provider counted are measured, the dollars are ours (estimated)", () => {
+  const meter = new UsageMeter("huddle", "a");
+  // Drive the meter's own sink the way a provider call does.
+  return meter.run(async () => {
+    reportUsage({ provider: "provider-a", model: "claude-sonnet-5-5", usage: { inputTokens: 1000, outputTokens: 100 } });
+    reportUsage({ provider: "provider-a", model: "claude-sonnet-5-5" });
+    const [counted, uncounted] = meter.take(src, "corr").map((d) => d.payload);
+    assert.deepEqual(counted.provenance, { tokens: "measured", usd: "estimated" });
+    assert.equal(counted.estimated, true);
+    assert.deepEqual(uncounted.provenance, { tokens: "estimated", usd: "estimated" }, "no usage from the provider: nothing was counted");
+    for (const p of [counted, uncounted]) validateDraft({ type: "budget.usage_recorded", source: src, payload: p });
+  });
 });

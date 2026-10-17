@@ -81,6 +81,8 @@ export interface ArchivedSession {
   public: { url: string | null; topic: string } | null;
   /** Sessions run on behalf of something else, e.g. a heads-down huddle ("huddle:<exe>:<escalation>"). */
   origin?: string;
+  /** Set when a person stopped the session (usage visibility): who and when. */
+  stopped?: { by: string; at: string; reason?: string };
 }
 
 export type ArchiveInput = Omit<ArchivedSession, "schema" | "ended" | "transcript"> & { ended?: string; transcript?: string };
@@ -119,6 +121,7 @@ function scrubRecord(r: ArchivedSession): ArchivedSession {
     transcript: scrub(r.transcript),
     turns: r.turns.map((turn) => ({ ...turn, content: scrub(turn.content) })),
     ...(r.summary !== undefined && { summary: scrub(r.summary) }),
+    ...(r.stopped && { stopped: { ...r.stopped, by: scrub(r.stopped.by), ...(r.stopped.reason !== undefined && { reason: scrub(r.stopped.reason) }) } }),
     ...(r.document && {
       document: {
         ...r.document,
@@ -189,6 +192,7 @@ export function archiveMeeting(kind: "meeting" | "local-meeting", meeting: Meeti
     }),
     ...(summary && { summary }),
     public: publicOf(meeting.publicChannel),
+    ...(meeting.stopped && { stopped: meeting.stopped }),
   }));
 }
 
@@ -208,6 +212,7 @@ export function archiveCollaboration(c: Collaboration, transcript: Collaboration
     ...(summary && { summary }),
     public: publicOf(c.publicChannel),
     ...(c.origin !== undefined && { origin: c.origin }),
+    ...(c.stopped && { stopped: c.stopped }),
   }));
 }
 
@@ -254,6 +259,7 @@ export function archiveUltraplan(
     },
     public: publicOf(u.publicChannel),
     ...(u.origin !== undefined && { origin: u.origin }),
+    ...(u.stopped && { stopped: u.stopped }),
   }));
 }
 
@@ -336,6 +342,7 @@ export function pruneArchivedSessions(retentionDays = 30, now = Date.now()): str
     if (!Number.isFinite(ended) || ended >= cutoff) continue;
     try {
       rmSync(archivePath(session.id), { force: true });
+      rmSync(join(SESSIONS_DIR, `${session.id}.handoff.md`), { force: true });
       removed.push(session.id);
     } catch (e) {
       console.error(`[Archive] Could not prune session ${session.id}: ${e instanceof Error ? e.message : String(e)}`);

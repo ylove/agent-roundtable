@@ -11,6 +11,7 @@
 // table), the call is left to it: the heads-down ledger owns that spend, so it is never counted twice.
 // ============================================================================
 
+import { agentKey } from "../agents.js";
 import { estimateUsd } from "../execution/pricing.js";
 import { activeUsageSink, withAbortSignal, withUsageSink, type UsageReport, type UsageSink } from "../providers/usage.js";
 import { appendTableLine, newServerId, type TableLine } from "./table.js";
@@ -25,6 +26,16 @@ export interface SessionScope {
   agent: string;
 }
 
+/** Set on a session that was stopped by a person (usage-visibility.md §6): its end records it. */
+export interface StoppedInfo {
+  by: string;
+  at: string;
+  reason?: string;
+}
+
+/** The activity-log outcome of a stopped session. */
+export const stoppedOutcome = (s: StoppedInfo): string => `Stopped by ${s.by} at ${s.at.slice(11, 16)} UTC`;
+
 export interface StoppedSession {
   session: string;
   kind: string;
@@ -38,6 +49,36 @@ const controllers = new Map<string, AbortController>();
 const turns = new Map<string, number>();
 /** Sessions this process stopped, so the next tool call that names one can say what happened. */
 export const stoppedSessions = new Map<string, StoppedSession>();
+
+/** Tool arguments that name a live session. */
+const SESSION_ARGS = ["meeting_id", "collaboration_id", "ultraplan_id"] as const;
+
+/** The stopped session a tool call names, if it names one. */
+export function stoppedSessionNamed(args: Record<string, unknown> | undefined): StoppedSession | undefined {
+  if (!args || stoppedSessions.size === 0) return undefined;
+  for (const key of SESSION_ARGS) {
+    const v = args[key];
+    if (typeof v === "string" && stoppedSessions.has(v)) return stoppedSessions.get(v);
+  }
+  return undefined;
+}
+
+/** What the next call on a stopped session answers (usage-visibility.md §6). */
+export function stoppedResult(s: StoppedSession): Record<string, unknown> {
+  return {
+    status: "stopped",
+    session: s.session,
+    kind: s.kind,
+    agent: s.agent,
+    by: s.by,
+    at: s.at,
+    ...(s.reason && { reason: s.reason }),
+    next:
+      `${s.session} was stopped by ${s.by}; it has ended and its transcript is archived. Two ways forward: ` +
+      `continue without ${s.agent || "the agent"} (start a new session with the others), or write a handoff with usage(action: "handoff", session_id: "${s.session}"). ` +
+      'usage(action: "report") lists recent stops.',
+  };
+}
 
 let serverId: string | undefined;
 let ledgerHome = ROUNDTABLE_HOME;
@@ -106,7 +147,8 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
     server,
     session: scope.session,
     kind: scope.kind,
-    agent: scope.agent,
+    // A persona given as a path reads as its name ("cfo"), as everywhere else (agentKey).
+    agent: agentKey(scope.agent),
     provider: r.provider,
     model: r.model,
     tokens,

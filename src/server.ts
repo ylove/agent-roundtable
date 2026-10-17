@@ -20,6 +20,7 @@ import { stopLocalMeetingProcesses } from "./sessions/local-meetings.js";
 import { destroyAllPrototypes, prototypeDiagnostics, sweepStaleSessionDirs } from "./prototypes/index.js";
 import { killAllSandboxed } from "./sandbox/index.js";
 import { bindWorkerIdentity } from "./tools/worker.js";
+import { startTableService } from "./usage/table-service.js";
 import { consumeWorkerToken } from "./workers/token.js";
 
 // ============================================================================
@@ -104,10 +105,13 @@ async function startOrchestrator(): Promise<void> {
   // own process groups, so they get no signal of ours: stop them (SIGTERM, then SIGKILL); an exit hook in
   // local-meetings.ts SIGKILLs any still left when the process exits. Sandboxed commands of external
   // workers' run_command and submit_work calls are killed too.
+  // Usage visibility: the live file other processes read, and the stop requests they leave for this server's sessions.
+  const table = startTableService();
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    table.close();
     Promise.allSettled([finalizeOpenChannels(), destroyAllPrototypes("shutdown"), stopLocalMeetingProcesses(), killAllSandboxed()])
       .finally(() => process.exit(0));
   };

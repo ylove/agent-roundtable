@@ -17,7 +17,7 @@ import { childEnv } from "../security/child-env.js";
 import { mkdirPrivate } from "../security/fs-safe.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { StoppedError } from "../providers/usage.js";
-import { recordCliCall, sessionSignal, type SessionScope } from "../usage/session-scope.js";
+import { recordCliCall, sessionSignal, stoppedOutcome, type SessionScope, type StoppedInfo } from "../usage/session-scope.js";
 import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveMeeting } from "./archive.js";
 import { publicLabel } from "../publishers/index.js";
@@ -54,6 +54,8 @@ export interface LocalMeeting {
   publicChannel?: PublicChannel;
   /** Set when the meeting was started with prototype: true (the caller assesses the agent's prototypes). */
   prototype?: PrototypeTracker;
+  /** Set when a person stopped the meeting (usage visibility): it then ends without a summary. */
+  stopped?: StoppedInfo;
 }
 
 export const localMeetings = new Map<string, LocalMeeting>();
@@ -569,7 +571,7 @@ async function closeLocalMeeting(meetingId: string, requestSummary: boolean): Pr
     mode: meeting.mode,
     agents: [agentKey(meeting.agent)],
     topic: meeting.agenda ?? "",
-    outcome: summary || lastAgentReply(meeting),
+    outcome: meeting.stopped ? stoppedOutcome(meeting.stopped) : summary || lastAgentReply(meeting),
     public: meeting.publicChannel !== undefined,
   });
   archiveMeeting("local-meeting", meeting, summary);

@@ -10,7 +10,7 @@ import { newId } from "../ids.js";
 import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveMeeting } from "./archive.js";
 import { callLLM } from "../providers/index.js";
-import { metered } from "../usage/session-scope.js";
+import { metered, stoppedOutcome, type StoppedInfo } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
@@ -49,6 +49,8 @@ export interface Meeting {
   publicChannel?: PublicChannel;
   /** Set when the meeting was started with prototype: true (the caller assesses the agent's prototypes). */
   prototype?: PrototypeTracker;
+  /** Set when a person stopped the meeting (usage visibility): it then ends without a summary. */
+  stopped?: StoppedInfo;
 }
 
 export const meetings = new Map<string, Meeting>();
@@ -284,7 +286,7 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
     mode: meeting.mode,
     agents: [agentKey(meeting.agent)],
     topic: meeting.agenda ?? "",
-    outcome: summary || history.slice().reverse().find((m) => m.role === "assistant")?.content,
+    outcome: meeting.stopped ? stoppedOutcome(meeting.stopped) : summary || history.slice().reverse().find((m) => m.role === "assistant")?.content,
     public: meeting.publicChannel !== undefined,
   });
   archiveMeeting("meeting", meeting, summary);

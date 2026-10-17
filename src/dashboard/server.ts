@@ -61,6 +61,8 @@ export interface DashboardOptions {
   pollMs?: number;
   /** Write executions/<exe>/dashboard.json {url, pid, host, started_at} (default true); removed on close. */
   writeInfo?: boolean;
+  /** Called after a stop request was recorded: the runner this dashboard lives in runs its next tick at once. */
+  onStopRequested?: () => void;
 }
 
 export interface Dashboard {

@@ -9,7 +9,7 @@ import { newId } from "../ids.js";
 import { SessionBusyError, isSessionBusy, lockSession, sessionBusyMessage } from "./lock.js";
 import { archiveUltraplan } from "./archive.js";
 import { callLLM } from "../providers/index.js";
-import { metered } from "../usage/session-scope.js";
+import { metered, stoppedOutcome, type StoppedInfo } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import { mapLimit, notFoundError, runVerdictRound, truncate } from "./workshop.js";
@@ -47,6 +47,8 @@ export interface Ultraplan {
   executionReady?: boolean;
   /** Who it runs for, e.g. a heads-down huddle; tags its activity entry and archive record. */
   origin?: string;
+  /** Set when a person stopped the ultraplan (usage visibility): it then ends as it stands. */
+  stopped?: StoppedInfo;
 }
 
 type Input = { agent: string; content: string };
@@ -370,7 +372,7 @@ async function finalize(u: Ultraplan, signoffs: Verdict[], collected: boolean): 
   const signedOff = collected && isSignedOff(signoffs);
   const document = renderUltraplanDocument(u, signoffs, collected);
   u.status = "finalized";
-  const outcome = signedOff ? `signed off v${version}: ${signoffCounts(tally)}`
+  const outcome = u.stopped ? `${stoppedOutcome(u.stopped)}${version !== null ? ` at v${version}` : ""}` : signedOff ? `signed off v${version}: ${signoffCounts(tally)}`
     : collected ? `not signed off at v${version}: ${signoffCounts(tally)}`
       : version !== null ? `ended without sign-off at v${version}` : "ended without a plan";
   recordActivity({

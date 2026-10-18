@@ -100,6 +100,31 @@ test("resolving a dissent removes only its source; dependency b and interface ne
   assert.equal(state.tasks.a.blocked_by, undefined);
 });
 
+test("watchdog and reducer clear nested split dependencies once, with task state taking precedence over a same-name interface", async (t) => {
+  const { store } = await setup(t, null);
+  await emit(store, "task.blocked", { task: "a", deps: ["b"] });
+  await emit(store, "task.split", { task: "b", into: [task("b1"), task("b2")] });
+  await emit(store, "task.split", { task: "b1", into: [task("b1x")] });
+  await emit(store, "task.accepted", { task: "b1x" });
+  await emit(store, "artifact.published", { name: "b2", kind: "interface", task: "a", blob: "published" });
+  await emit(store, "task.unblocked", { task: "a" });
+  let state = await store.state();
+  assert.equal(state.tasks.a.state, "blocked");
+  assert.deepEqual(state.tasks.a.blocked_by.deps, ["b2"], "accepted split parts clear, but a published interface cannot satisfy an unfinished task");
+  assert.ok(!actionsToDrafts(evaluate(state, Date.now())).some((e) => e.type === "task.unblocked" && e.payload.task === "a"));
+  await emit(store, "task.accepted", { task: "b2" });
+  // Reintroduce the original dependency id to exercise expansion in both the watchdog and reducer.
+  await emit(store, "task.blocked", { task: "a", deps: ["b"] });
+  const actions = evaluate(await store.state(), Date.now()).filter((a) => a.rule === "dependency_wait");
+  assert.equal(actionsToDrafts(actions).filter((e) => e.type === "task.unblocked" && e.payload.task === "a").length, 1);
+  await store.transact(() => ({ events: actionsToDrafts(actions) }));
+  state = await store.state();
+  assert.equal(state.tasks.a.state, "in_progress");
+  assert.equal(state.tasks.a.blocked_by, undefined);
+  assert.equal(evaluate(state, Date.now()).filter((a) => a.rule === "dependency_wait").length, 0, "the next tick has no ineffective unblock to repeat");
+  assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+});
+
 test("runner persona dissent delivery reaches live worker ids, persona inbox and the dashboard", async (t) => {
   const { store } = await setup(t);
   await failed(store);

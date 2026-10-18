@@ -702,6 +702,88 @@ async function fireDissent(f, { dissent_id = "api-risk", on_fire = "huddle", by 
   return escalationId(`tripwire:${dissent_id}:b`);
 }
 
+for (const action of ["retry", "reassign"]) {
+  test(`dissent ${action}: resolving one of two holds preserves the other hold, dependencies and needs`, async (t) => {
+    const f = await setup(t, { contract: { validation: { commands: [{ id: "unit", argv: ["node", "-e", "process.exit(1)"], timeout_s: 60 }], final: [] } } });
+    const first = await fireDissent(f, { by: f.personas.requester, on_fire: "pause_and_huddle" });
+    const second = await fireDissent(f, { by: f.personas.requester, dissent_id: "second-risk", on_fire: "pause_and_huddle" });
+    const need = { task: "b", need: { kind: "interface", ref: "Api" } };
+    await f.emit([
+      { type: "dependency.requested", payload: need },
+      { type: "task.blocked", payload: { task: "b", deps: ["independent"] } },
+    ]);
+    const result = await resolveEscalation(f.ctx, first, { action, resolved_by: "main", decision: "Try a fresh attempt", persona: f.personas.replacement });
+    const { blockingIds, taskHeld } = await import("../../dist/execution/task-holds.js");
+    const { Runner } = await import("../../dist/execution/runner.js");
+    const { openExecutionStore } = await import("../../dist/execution/store.js");
+    let state = await f.store.state();
+    assert.equal(state.escalations[first].status, "resolved");
+    assert.equal(state.escalations[second].status, "open");
+    assert.deepEqual(blockingIds(state.tasks.b), [second]);
+    assert.ok(taskHeld(state, "b"));
+    assert.equal(state.tasks.b.state, "blocked");
+    assert.equal(state.tasks.b.attempt, 2);
+    assert.equal(state.claims.b, undefined);
+    assert.deepEqual(state.tasks.b.blocked_by.deps, ["independent"]);
+    assert.deepEqual(state.tasks.b.blocked_by.needs, [{ kind: "interface", ref: "Api" }]);
+    assert.ok(result.ops.some((op) => op.type === "spawn_retry"));
+    assert.match(Runner.prototype.startProblem.call({}, state, "b", "w-b", true), /held by an escalation/);
+    assert.deepEqual(dissentTripwireRules(state), [], "recorded firings do not need to reconstruct the remaining hold");
+    if (action === "reassign") assert.equal(state.tasks.b.spec.persona, f.personas.replacement);
+    const unblocks = (await f.events("task.unblocked")).filter((e) => e.payload.task === "b");
+    assert.equal(unblocks.at(-1).payload.escalation, first);
+    await resolveEscalation(f.ctx, second, { action: "decide", resolved_by: "main", decision: "Proceed after dependencies are ready" });
+    state = await f.store.state();
+    assert.equal(taskHeld(state, "b"), false);
+    assert.equal(state.tasks.b.state, "blocked", "clearing both escalations still preserves independent waits");
+    assert.deepEqual(state.tasks.b.blocked_by, { deps: ["independent"], needs: [{ kind: "interface", ref: "Api" }] });
+    await f.emit([
+      { type: "task.accepted", payload: { task: "independent" } },
+      { type: "dependency.satisfied", payload: { ...need, by_event: "published" } },
+      { type: "task.unblocked", payload: { task: "b" } },
+    ]);
+    state = await f.store.state();
+    assert.equal(state.tasks.b.state, "ready");
+    assert.equal(state.tasks.b.blocked_by, undefined);
+    assert.deepEqual(await (await openExecutionStore(f.store.id)).state(), state);
+  });
+}
+
+for (const provider of ["openai_compatible", "replicate"]) {
+  for (const missingTurn of [0, 1]) {
+    test(`micro-huddle: ${provider} missing usage on turn ${missingTurn + 1} consumes its reservation and cannot fund later calls`, async (t) => {
+      const f = await setup(t);
+      const c = { ...(await f.store.state()).contract, budget: { ...f.contract.budget, per_agent_usd: 0.1 } };
+      await f.emit([{ type: "contract.amended", payload: { contract: c.id, version: c.version, blob: await f.store.putBlob(JSON.stringify(c)), reason: "Set huddle cap", patch_blob: "patch", affected_tasks: [] } }]);
+      const id = await fireDissent(f);
+      const { PROVIDERS } = await import("../../dist/providers/index.js");
+      let requests = 0;
+      const call = t.mock.method(PROVIDERS, provider, async (_messages, options) => {
+        const turn = requests++;
+        assert.ok(options.maxTokens > 0 && options.maxTokens <= 8192);
+        return { provider, model: options.model, content: turn ? "Outcome: AGREED\nDecision: Repair the regression" : "I can repair it",
+          ...(turn !== missingTurn && { usage: { inputTokens: 100, outputTokens: 100 } }) };
+      });
+      const ctx = { ...f.ctx, llm: { provider, model: "claude-haiku-4-5" } };
+      await runMicroHuddle(ctx, id);
+      let state = await f.store.state();
+      assert.equal(call.mock.callCount(), missingTurn + 1);
+      assert.ok(Math.abs(state.budget.by_agent.wa - 0.1) < 1e-9);
+      assert.ok(Math.abs(state.budget.by_task.b - 0.1) < 1e-9);
+      const usage = await f.events("budget.usage_recorded");
+      assert.ok(usage.at(-1).payload.usd > 0 && usage.at(-1).payload.estimated);
+      assert.equal(usage.at(-1).payload.agent, "wa");
+      assert.equal(state.huddles[(await f.events("huddle.started"))[0].payload.id].outcome, missingTurn ? "AGREED" : "NO_OUTCOME");
+      if (!missingTurn) assert.equal(state.escalations[id].routed_to, "main");
+      const next = await fireDissent(f, { dissent_id: "later-risk" });
+      await routeEscalation(ctx, next);
+      state = await f.store.state();
+      assert.equal(call.mock.callCount(), missingTurn + 1, "later huddles cannot reuse unreported spend");
+      assert.equal(state.escalations[next].routed_to, "main");
+    });
+  }
+}
+
 for (const dissent of [true, false]) {
   test(`micro-huddle budget exhaustion between turns charges the requester and stops the conclusion (${dissent ? "dissent" : "ordinary escalation"})`, async (t) => {
     const f = await setup(t);

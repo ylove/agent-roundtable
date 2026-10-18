@@ -263,6 +263,38 @@ test("amending away a fired dissent withdraws its escalation, releases its own h
   assert.ok(auditEntries().some((e) => e.action === "contract.amended" && e.target === r.contractId && e.details.removed_dissents?.includes("empty-state-risk")));
 });
 
+test("removing an unscoped dissent after an earlier amendment cancelled its affected task still withdraws the escalation", async (t) => {
+  provider(t, () => "Consent: AGREE\nfine");
+  const d = concern({ by: cfo, tripwire: { kind: "check_failed", check: "test" }, on_fire: "pause_and_huddle" });
+  const r = await propose({ consent: true, contract: explicit({ dissents: [d] }) });
+  await freezeContract(r.contractId, { orchestrator: "main" });
+  const store = await openContractStore(r.contractId);
+  const source = { kind: "runner", id: "runner", pid: process.pid };
+  await store.transact(() => ({ events: [{ type: "check.failed", source, payload: { task: "ui", scope: "task", command_id: "test", exit: 1, signature: "empty state" } }] }));
+  const { dissentTripwireRules, actionsToDrafts } = await import("../../dist/execution/watchdog.js");
+  await store.transact(({ state }) => ({ events: actionsToDrafts(dissentTripwireRules(state)) }));
+  const id = Object.values((await store.state()).escalations).find((e) => e.dissent_id)?.id;
+  assert.ok(id);
+  await amendContract(store, { tasks: [baseTasks()[0]], interfaces: [{ ...explicit().interfaces[0], consumers: [] }] },
+    { by: "main", reason: "Remove the UI task", overrideConsent: true });
+  let state = await store.state();
+  assert.equal(state.tasks.ui.state, "cancelled");
+  assert.equal(state.escalations[id].status, "open");
+  assert.ok(state.dissents[d.id]);
+  const sinceSeq = state.seq;
+  await amendContract(store, { dissents: [] }, { by: "main", reason: "Remove the obsolete concern", overrideConsent: true });
+  state = await store.state();
+  assert.equal(state.tasks.ui.state, "cancelled");
+  assert.equal(state.escalations[id].status, "withdrawn");
+  assert.deepEqual(state.dissents, {});
+  const events = await store.events({ sinceSeq });
+  assert.ok(events.some((e) => e.type === "escalation.withdrawn" && e.payload.id === id));
+  assert.ok(!events.some((e) => e.type === "task.unblocked" && e.payload.task === "ui"));
+  assert.ok(auditEntries().some((e) => e.action === "contract.amended" && e.target === r.contractId && e.details.removed_dissents?.includes(d.id)));
+  const { openExecutionStore } = await import("../../dist/execution/store.js");
+  assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+});
+
 test("incomplete dissents block freeze despite consent excusals; explicit dissent excusal preserves history and requires re-consent", async (t) => {
   provider(t, () => "Consent: AGREE");
   const r = await propose({ contract: explicit({ dissents: [concern({ tripwire: undefined })] }) });

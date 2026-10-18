@@ -218,21 +218,22 @@ export class UsageMeter {
 
   constructor(readonly source: BudgetSource, readonly task?: string, readonly agent?: string, readonly bounded = false) {}
 
-  run<T>(fn: () => Promise<T>): Promise<T> {
-    return withUsageSink((r) => this.records.push(this.price(r)), fn);
+  run<T>(fn: () => Promise<T>, missingUsageUsd?: number): Promise<T> {
+    return withUsageSink((r) => this.records.push(this.price(r, missingUsageUsd)), fn);
   }
 
   add(u: UsageRecord | undefined): void {
     if (u) this.records.push({ ...u, source: this.source, ...(this.task !== undefined && { task: this.task }), ...(this.agent !== undefined && { agent: this.agent }) });
   }
 
-  private price(r: UsageReport): UsageRecord {
+  private price(r: UsageReport, missingUsageUsd?: number): UsageRecord {
     const tokens: TokenUsage = { inputTokens: r.usage?.inputTokens ?? 0, outputTokens: r.usage?.outputTokens ?? 0 };
     if (r.usage?.cacheReadTokens !== undefined) tokens.cacheReadTokens = r.usage.cacheReadTokens;
     if (r.usage?.cacheWriteTokens !== undefined) tokens.cacheWriteTokens = r.usage.cacheWriteTokens;
     const model = r.model || "unknown";
     const estimate = estimateUsd(model, tokens, { provider: r.provider });
     const rates = this.bounded && estimate.estimated ? microRates(model, r.provider) : undefined;
+    const reserved = this.bounded && r.usage === undefined && r.provider !== "ollama" ? missingUsageUsd : undefined;
     return {
       source: this.source,
       ...(this.task !== undefined && { task: this.task }),
@@ -240,7 +241,7 @@ export class UsageMeter {
       ...(r.provider && { provider: r.provider }),
       model,
       tokens,
-      usd: rates ? ((tokens.inputTokens + (tokens.cacheReadTokens ?? 0) + (tokens.cacheWriteTokens ?? 0)) * rates.input + tokens.outputTokens * rates.output) / 1_000_000 : estimate.usd,
+      usd: reserved ?? (rates ? ((tokens.inputTokens + (tokens.cacheReadTokens ?? 0) + (tokens.cacheWriteTokens ?? 0)) * rates.input + tokens.outputTokens * rates.output) / 1_000_000 : estimate.usd),
       estimated: true,
     };
   }
@@ -261,6 +262,7 @@ export function callOptions(llm: HuddleLLM): { provider: LLMProvider; model: str
 
 /** One stateless persona call: the persona (body and skills) plus `directive` as the system prompt. */
 export async function askPersona(meter: UsageMeter, llm: HuddleLLM, persona: string, directive: string, prompt: string, allowance?: number): Promise<string> {
+  if (meter.bounded && allowance === undefined) throw new Error("A bounded persona call requires a budget allowance");
   const a = await loadAgent(persona);
   const system = a.body + renderSkillsSection(a.skills) + directive;
   let maxTokens: number | undefined;
@@ -273,7 +275,7 @@ export async function askPersona(meter: UsageMeter, llm: HuddleLLM, persona: str
     maxTokens = outputRate ? Math.min(8192, Math.floor(left * 1_000_000 / outputRate)) : 8192;
     if (maxTokens < 1) throw new Error("Micro-huddle budget is exhausted");
   }
-  return meter.run(() => callLLM(system, [{ role: "user", content: prompt }], { ...callOptions(llm), ...(maxTokens !== undefined && { maxTokens }) }));
+  return meter.run(() => callLLM(system, [{ role: "user", content: prompt }], { ...callOptions(llm), ...(maxTokens !== undefined && { maxTokens }) }), allowance);
 }
 
 // ============================================================================
@@ -970,7 +972,7 @@ function retryPlan(state: Readonly<BlackboardState>, esc: Escalation, text: stri
   }
   ops.push({ type: "spawn_retry", rule: "escalation", key: `${esc.id}:retry:${attempt}`, target: esc.task, task: esc.task, attempt });
   return {
-    action: "retry", decision: text, by, source, unblock: false, resume: false, ops,
+    action: "retry", decision: text, by, source, resume: false, ops,
     before: [ev("task.retried", { task: esc.task, attempt, why: cap(text, 1000) }, source, esc.id)],
   };
 }
@@ -992,7 +994,7 @@ function reassignPlan(state: Readonly<BlackboardState>, esc: Escalation, persona
     }
     ops.push({ type: "spawn_retry", rule: "escalation", key: `${esc.id}:reassign:${attempt}`, target: task, task, attempt });
   }
-  return { action: "reassign", decision: text, by, source, unblock: !started, resume: false, before, ops, directive: started ? `Task ${task} was reassigned to ${persona}: stop working on it.` : undefined };
+  return { action: "reassign", decision: text, by, source, resume: false, before, ops, directive: started ? `Task ${task} was reassigned to ${persona}: stop working on it.` : undefined };
 }
 
 /** The huddle action: a micro-huddle, or a format run through the engines and concluded by the lead. */

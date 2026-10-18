@@ -304,7 +304,10 @@ function releaseBlock(s: BlackboardState, task: string, escalation?: string): vo
   delete by.escalations;
   if (ids.length) by.escalation = ids[0];
   if (ids.length > 1) by.escalations = ids;
-  const deps = (by.deps ?? []).filter((id) => own(s.tasks, id)?.state !== "accepted" && !(own(s.interfaces, id)?.version));
+  const deps = expandSplits(s, by.deps ?? []).filter((id) => {
+    const dep = own(s.tasks, id);
+    return dep ? dep.state !== "accepted" : !((own(s.interfaces, id)?.version ?? 0) >= 1);
+  });
   if (deps.length) by.deps = deps;
   else delete by.deps;
   if (by.needs?.length === 0) delete by.needs;
@@ -591,7 +594,7 @@ const HANDLERS: Handlers = {
     if (!rt) return;
     releaseBlock(s, e.payload.task, e.payload.escalation);
   },
-  /** New attempt: ready again (also from failed), claim dropped. */
+  /** New attempt (also from failed), claim dropped; unrelated blocking sources survive. */
   "task.retried": (s, e, x) => {
     const p = e.payload;
     const rt = liveTask(s, e, x, ["failed"]);
@@ -601,8 +604,9 @@ const HANDLERS: Handlers = {
     rt.last_note = p.why;
     delete rt.agent;
     delete rt.finished_at;
-    delete rt.blocked_by;
     dropClaim(s, p.task);
+    releaseBlock(s, p.task);
+    rt.state = rt.blocked_by ? "blocked" : "ready";
   },
   "task.reassigned": (s, e, x) => {
     const p = e.payload;

@@ -954,7 +954,10 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
         for (const e of Object.values(state.escalations)) {
           if (e.dissent_id !== dissent.id || e.status === "resolved" || e.status === "withdrawn") continue;
           events.push({ type: "escalation.withdrawn", source, payload: { id: e.id, reason: `Dissent ${dissent.id} removed by amendment v${version}` } });
-          if (e.task && e.blocking) events.push({ type: "task.unblocked", source, payload: { task: e.task, escalation: e.id } });
+          const rt = e.task && Object.hasOwn(state.tasks, e.task) ? state.tasks[e.task] : undefined;
+          if (e.task && e.blocking && rt && !["accepted", "failed", "cancelled"].includes(rt.state)) {
+            events.push({ type: "task.unblocked", source, payload: { task: e.task, escalation: e.id } });
+          }
         }
       }
       for (const task of affected.removed) {

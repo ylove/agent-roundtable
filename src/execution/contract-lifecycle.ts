@@ -25,6 +25,7 @@ import { readArchivedSession, type ArchivedSession } from "../sessions/archive.j
 import { sessionDissentDrafts } from "../sessions/dissents.js";
 import { isSessionBusy } from "../sessions/lock.js";
 import { scrubbedJSON } from "./blobs.js";
+import { pausedBy } from "./escalation.js";
 import { canonicalJSON } from "./chain.js";
 import {
   affectedTasks,
@@ -950,6 +951,8 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
         payload: { contract: contractId, version, patch_blob: patchBlob, reason, affected_tasks: affected.all, blob },
       }];
       const removedDissents = (c.dissents ?? []).filter((d) => !final.dissents.some((next) => next.id === d.id));
+      const withdrawing = Object.values(state.escalations).filter((e) =>
+        removedDissents.some((d) => d.id === e.dissent_id) && e.status !== "resolved" && e.status !== "withdrawn").map((e) => e.id);
       for (const dissent of removedDissents) {
         for (const e of Object.values(state.escalations)) {
           if (e.dissent_id !== dissent.id || e.status === "resolved" || e.status === "withdrawn") continue;
@@ -958,6 +961,9 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
           if (e.task && e.blocking && rt && !["accepted", "failed", "cancelled"].includes(rt.state)) {
             events.push({ type: "task.unblocked", source, payload: { task: e.task, escalation: e.id } });
           }
+          const paused = await pausedBy(store, state, e.id, withdrawing);
+          if (paused.length) events.push({ type: "execution.resumed", source, correlation: e.id,
+            payload: { scope: paused, reason: `Dissent ${dissent.id} removed by amendment v${version}` } });
         }
       }
       for (const task of affected.removed) {

@@ -483,8 +483,8 @@ test("checks and task.checks_passed bound to an older submission change nothing"
   assert.equal(apply(rejected, ev("task.checks_passed", { task: "a", commands: ["test"] })).tasks.a.state, "merging", "an unbound one is unchanged");
 });
 
-test("v7 dissent reducer retains first firing per task and latest advisory score across amendments and replay", async () => {
-  assert.equal(REDUCER_VERSION, 7);
+test("v8 dissent reducer retains first firing per task and latest advisory score across amendments and replay", async () => {
+  assert.equal(REDUCER_VERSION, 8);
   const { readFileSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");
@@ -504,7 +504,7 @@ test("v7 dissent reducer retains first firing per task and latest advisory score
   await emit("dissent.scored", { dissent_id: "risk", outcome: "vindicated" });
   await store.writeSnapshot();
   const snapshot = join(store.dir, "snapshot.json");
-  assert.equal(JSON.parse(readFileSync(snapshot, "utf8")).reducer_version, 7);
+  assert.equal(JSON.parse(readFileSync(snapshot, "utf8")).reducer_version, 8);
   await emit("dissent.scored", { dissent_id: "risk", outcome: "untested" });
   const amended = { ...contract, version: 2, dissents: [{ ...spec, claim: "Refined concern" }] };
   await emit("contract.amended", { contract: CONTRACT_ID, version: 2, patch_blob: "patch", reason: "refine", affected_tasks: [], blob: await store.putBlob(JSON.stringify(amended)) });
@@ -525,6 +525,62 @@ test("v7 dissent reducer retains first firing per task and latest advisory score
   rmSync(snapshot);
   assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
 });
+
+for (const action of ["retry", "reassign"]) {
+  for (const otherHold of [false, true]) {
+    test(`v8 replays historical ${action} without task.unblocked (${otherHold ? "another hold remains" : "replacement can start"})`, async () => {
+      const { blockingIds, taskHeld } = await import("../../dist/execution/task-holds.js");
+      const { readFileSync, writeFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");
+      const states = [];
+      for (const explicitUnblock of [false, true]) {
+        const store = await newStore();
+        const c = makeContract({ tasks: [taskSpec("a")] });
+        const source = { kind: "runner", id: "runner", pid: 1 };
+        const emit = (events) => store.transact(() => ({ events: events.map(([type, payload]) => ({ type, payload, source })) }));
+        const raise = (id) => ["escalation.raised", { escalation: { id, task: "a", agent: "critic", kind: "assistance", with: "orchestrator", summary: "Risk", blocking: true, dissent_id: id, status: "open", raised_seq: 0 } }];
+        await emit([
+          [...frozenEvent(await store.putBlob(JSON.stringify(c)))],
+          ["execution.paused", { scope: "all", reason: "Stopped before replacement claim" }],
+          raise("first"), ["task.blocked", { task: "a", escalation: "first" }],
+          ...(otherHold ? [raise("second"), ["task.blocked", { task: "a", escalation: "second", deps: ["external"] }],
+            ["dependency.requested", { task: "a", need: { kind: "interface", ref: "Api" } }]] : []),
+        ]);
+        if (action === "reassign") {
+          const changed = { ...c, version: 2, tasks: [{ ...c.tasks[0], persona: "replacement" }] };
+          await emit([["contract.amended", { contract: c.id, version: 2, blob: await store.putBlob(JSON.stringify(changed)), patch_blob: "patch", reason: "Reassign", affected_tasks: ["a"] }]]);
+        }
+        await emit([
+          ["task.retried", { task: "a", attempt: 2, why: action }],
+          ["escalation.resolved", { id: "first", action, decision: "Try again", by: "main" }],
+          ...(explicitUnblock ? [["task.unblocked", { task: "a", escalation: "first" }]] : []),
+        ]);
+        const state = await store.state();
+        assert.equal(state.status, "paused");
+        assert.equal(state.tasks.a.state, otherHold ? "blocked" : "ready");
+        assert.equal(state.tasks.a.attempt, 2);
+        assert.equal(state.claims.a, undefined);
+        assert.equal(taskHeld(state, "a"), otherHold);
+        assert.deepEqual(blockingIds(state.tasks.a), otherHold ? ["second"] : []);
+        if (otherHold) assert.deepEqual(state.tasks.a.blocked_by, { escalation: "second", deps: ["external"], needs: [{ kind: "interface", ref: "Api" }] });
+        states.push({ tasks: state.tasks, claims: state.claims, escalations: state.escalations, status: state.status });
+        assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+        // A valid v7 snapshot can contain the stranded hold; the version bump must force replay.
+        await store.writeSnapshot();
+        const path = join(store.dir, "snapshot.json");
+        const stale = JSON.parse(readFileSync(path, "utf8"));
+        stale.reducer_version = 7;
+        stale.state.tasks.a.state = "blocked";
+        stale.state.tasks.a.blocked_by = { escalation: "first" };
+        stale.state_sha256 = sha256Hex(canonicalJSON(stale.state));
+        writeFileSync(path, JSON.stringify(stale));
+        assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+      }
+      assert.deepEqual(states[0], states[1], "historical and explicit-unblock logs derive identical runtime projections");
+    });
+  }
+}
 
 test("dissent events reject invalid scores and missing evidence and safely reduce prototype-like ids", () => {
   const source = { kind: "runner", id: "runner", pid: 1 };

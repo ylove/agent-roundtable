@@ -295,6 +295,49 @@ test("removing an unscoped dissent after an earlier amendment cancelled its affe
   assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
 });
 
+test("withdrawing dissents releases their dependent-task human pauses after cancellation, preserving manual and other-escalation pauses", async (t) => {
+  provider(t, () => "Consent: AGREE");
+  const dependents = ["followup", "manual", "other"].map((id) => ({ ...baseTasks()[1], id, depends_on: ["ui"], paths: { write: [`src/${id}/**`] } }));
+  const dissents = ["first-risk", "second-risk"].map((id) => concern({ id, by: cfo, tripwire: { kind: "check_failed", check: "test" }, on_fire: "pause_and_huddle" }));
+  const r = await propose({ consent: true, contract: explicit({ tasks: [...baseTasks(), ...dependents], dissents }) });
+  await freezeContract(r.contractId, { orchestrator: "main" });
+  const store = await openContractStore(r.contractId);
+  const source = { kind: "runner", id: "runner", pid: process.pid };
+  const emit = (events) => store.transact(() => ({ events: events.map((e) => ({ source, ...e })) }));
+  await emit([{ type: "check.failed", payload: { task: "ui", scope: "task", command_id: "test", exit: 1, signature: "empty state" } }]);
+  const { dissentTripwireRules, actionsToDrafts } = await import("../../dist/execution/watchdog.js");
+  const { awaitHuman, resolveEscalation } = await import("../../dist/execution/escalation.js");
+  await store.transact(({ state }) => ({ events: actionsToDrafts(dissentTripwireRules(state)) }));
+  const ids = Object.values((await store.state()).escalations).filter((e) => e.dissent_id).map((e) => e.id);
+  assert.equal(ids.length, 2);
+  const ctx = { store, state: await store.state(), llm };
+  for (const id of ids) await awaitHuman(ctx, id, { actor: { kind: "runner" } });
+  await emit([
+    { type: "execution.paused", payload: { scope: ["manual"], reason: "Manual inspection" } },
+    { type: "escalation.raised", payload: { escalation: { id: "other-emergency", agent: cfo, task: "other", kind: "emergency", with: "orchestrator", summary: "Separate human action", blocking: false, status: "open", raised_seq: 0 } } },
+  ]);
+  await awaitHuman(ctx, "other-emergency", { actor: { kind: "runner" } });
+  assert.deepEqual((await store.state()).paused_tasks.sort(), ["followup", "manual", "other", "ui"]);
+  await amendContract(store, { tasks: [baseTasks()[0], ...dependents.map((task) => ({ ...task, depends_on: [] }))], interfaces: [{ ...explicit().interfaces[0], consumers: [] }] },
+    { by: "main", reason: "Cancel UI and make followups independent", overrideConsent: true });
+  assert.equal((await store.state()).tasks.ui.state, "cancelled");
+  const sinceSeq = (await store.state()).seq;
+  await amendContract(store, { dissents: [] }, { by: "main", reason: "Withdraw obsolete concerns", overrideConsent: true });
+  let state = await store.state();
+  assert.equal(state.tasks.ui.state, "cancelled");
+  assert.equal(state.tasks.followup.state, "ready");
+  assert.deepEqual(state.paused_tasks.sort(), ["manual", "other"]);
+  for (const id of ids) assert.equal(state.escalations[id].status, "withdrawn");
+  const resumes = (await store.events({ sinceSeq, types: ["execution.resumed"] }));
+  assert.ok(resumes.some((e) => ids.includes(e.correlation) && e.payload.scope.includes("followup")));
+  assert.ok(resumes.every((e) => !e.payload.scope.includes("manual") && !e.payload.scope.includes("other")));
+  await resolveEscalation(ctx, "other-emergency", { action: "decide", decision: "Continue", resolved_by: "main" });
+  state = await store.state();
+  assert.deepEqual(state.paused_tasks, ["manual"]);
+  const { openExecutionStore } = await import("../../dist/execution/store.js");
+  assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+});
+
 test("incomplete dissents block freeze despite consent excusals; explicit dissent excusal preserves history and requires re-consent", async (t) => {
   provider(t, () => "Consent: AGREE");
   const r = await propose({ contract: explicit({ dissents: [concern({ tripwire: undefined })] }) });

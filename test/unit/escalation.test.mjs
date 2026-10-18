@@ -784,6 +784,66 @@ for (const provider of ["openai_compatible", "replicate"]) {
   }
 }
 
+for (const failure of ["empty completion", "timeout"]) {
+  for (const failedTurn of [0, 1]) {
+    test(`micro-huddle: paid ${failure} on turn ${failedTurn + 1} retains its reservation without a usage report`, async (t) => {
+      const f = await setup(t);
+      const c = { ...(await f.store.state()).contract, budget: { ...f.contract.budget, per_agent_usd: 0.1 } };
+      await f.emit([{ type: "contract.amended", payload: { contract: c.id, version: c.version, blob: await f.store.putBlob(JSON.stringify(c)), reason: "Set huddle cap", patch_blob: "patch", affected_tasks: [] } }]);
+      const id = await fireDissent(f);
+      const calls = f.provider((_body, index) => {
+        if (index !== failedTurn) return "I can repair it";
+        if (failure === "timeout") throw new DOMException("Dispatched request timed out", "TimeoutError");
+        return json(200, { choices: [{ message: { content: "" }, finish_reason: "length" }] });
+      });
+      const ctx = { ...f.ctx, llm: { ...llm, model: "claude-haiku-4-5" } };
+      await runMicroHuddle(ctx, id);
+      const state = await f.store.state();
+      assert.equal(calls.length, failedTurn + 1);
+      assert.ok(Math.abs(state.budget.by_agent.wa - 0.1) < 1e-9);
+      assert.ok(Math.abs(state.budget.by_task.b - 0.1) < 1e-9);
+      const usage = await f.events("budget.usage_recorded");
+      assert.equal(usage.length, failedTurn + 1, "failed call is charged once, in addition to any successful answer");
+      const charge = usage.at(-1).payload;
+      assert.equal(charge.provider, "openai_compatible");
+      assert.equal(charge.model, ctx.llm.model);
+      assert.equal(charge.agent, "wa");
+      assert.equal(charge.estimated, true);
+      assert.ok(charge.usd > 0);
+      assert.deepEqual(charge.tokens, { inputTokens: 0, outputTokens: 0 });
+      const huddle = state.huddles[(await f.events("huddle.started"))[0].payload.id];
+      assert.equal(huddle.outcome, "NO_OUTCOME");
+      assert.match(huddle.decision, failure === "timeout" ? /timed out/ : /returned no text/);
+      assert.equal(state.escalations[id].routed_to, "main");
+      const next = await fireDissent(f, { dissent_id: "later-risk" });
+      await routeEscalation(ctx, next);
+      assert.equal(calls.length, failedTurn + 1, "a later huddle cannot reuse the failed request's allowance");
+      assert.equal((await f.store.state()).escalations[next].routed_to, "main");
+      const { openExecutionStore } = await import("../../dist/execution/store.js");
+      assert.deepEqual(await (await openExecutionStore(f.store.id)).state(), await f.store.state());
+    });
+  }
+}
+
+test("bounded usage reserves before dispatch and settles reported spend even if the call then fails", async () => {
+  const { UsageMeter } = await import("../../dist/execution/escalation.js");
+  const { reportUsage } = await import("../../dist/providers/index.js");
+  const reservation = { provider: "openai_compatible", model: "claude-haiku-4-5", usd: 0.1 };
+  for (const reported of [false, true]) {
+    const meter = new UsageMeter("huddle", "b", "wa", true);
+    await assert.rejects(meter.run(async () => {
+      assert.equal(meter.pendingUsd, reservation.usd);
+      if (reported) reportUsage({ provider: reservation.provider, model: reservation.model, usage: { inputTokens: 10, outputTokens: 5 } });
+      throw new Error("Request failed");
+    }, reservation), /Request failed/);
+    assert.ok(meter.pendingUsd > 0);
+    if (reported) assert.ok(meter.pendingUsd < reservation.usd, "reported spend replaces the reservation");
+    else assert.equal(meter.pendingUsd, reservation.usd);
+    assert.equal(meter.take(runner, "risk").length, 1, "settlement never double charges");
+    assert.equal(meter.pendingUsd, 0);
+  }
+});
+
 for (const dissent of [true, false]) {
   test(`micro-huddle budget exhaustion between turns charges the requester and stops the conclusion (${dissent ? "dissent" : "ordinary escalation"})`, async (t) => {
     const f = await setup(t);

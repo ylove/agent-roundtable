@@ -218,8 +218,19 @@ export class UsageMeter {
 
   constructor(readonly source: BudgetSource, readonly task?: string, readonly agent?: string, readonly bounded = false) {}
 
-  run<T>(fn: () => Promise<T>, missingUsageUsd?: number): Promise<T> {
-    return withUsageSink((r) => this.records.push(this.price(r, missingUsageUsd)), fn);
+  run<T>(fn: () => Promise<T>, reservation?: { provider: string; model: string; usd: number }): Promise<T> {
+    // Reserve before dispatch: a timeout or empty completion may throw before reportUsage runs.
+    // The first report settles this record; without a report the conservative charge survives.
+    let reserved = this.bounded && reservation && reservation.provider !== "ollama"
+      ? this.price(reservation, reservation.usd) : undefined;
+    if (reserved) this.records.push(reserved);
+    return withUsageSink((r) => {
+      const priced = this.price(r, reservation?.usd);
+      if (reserved) {
+        Object.assign(reserved, priced);
+        reserved = undefined;
+      } else this.records.push(priced);
+    }, fn);
   }
 
   add(u: UsageRecord | undefined): void {
@@ -275,7 +286,8 @@ export async function askPersona(meter: UsageMeter, llm: HuddleLLM, persona: str
     maxTokens = outputRate ? Math.min(8192, Math.floor(left * 1_000_000 / outputRate)) : 8192;
     if (maxTokens < 1) throw new Error("Micro-huddle budget is exhausted");
   }
-  return meter.run(() => callLLM(system, [{ role: "user", content: prompt }], { ...callOptions(llm), ...(maxTokens !== undefined && { maxTokens }) }), allowance);
+  return meter.run(() => callLLM(system, [{ role: "user", content: prompt }], { ...callOptions(llm), ...(maxTokens !== undefined && { maxTokens }) }),
+    allowance === undefined ? undefined : { provider: llm.provider, model: llm.model, usd: allowance });
 }
 
 // ============================================================================
@@ -373,7 +385,7 @@ export function fencedJson(text: string): Record<string, unknown> | undefined {
 // ============================================================================
 
 /** Resume only pauses owned by this escalation, preserving other emergencies and manual pauses. */
-async function pausedBy(store: ExecutionStore, state: Readonly<BlackboardState>, id: string): Promise<string[]> {
+export async function pausedBy(store: ExecutionStore, state: Readonly<BlackboardState>, id: string, releasing: readonly string[] = [id]): Promise<string[]> {
   const owners = new Map<string, Set<string>>();
   for (const e of await store.events({ types: ["execution.paused", "execution.resumed"] })) {
     if (e.type === "execution.paused" && Array.isArray(e.payload.scope)) {
@@ -393,7 +405,7 @@ async function pausedBy(store: ExecutionStore, state: Readonly<BlackboardState>,
   return state.paused_tasks.filter((task) => {
     const set = owners.get(task);
     if (!set?.has(id)) return false;
-    return ![...set].some((other) => other !== id &&
+    return ![...set].some((other) => !releasing.includes(other) &&
       (other.startsWith("manual:") || UNRESOLVED.includes(own(state.escalations, other)?.status ?? "resolved")));
   });
 }

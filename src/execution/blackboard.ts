@@ -44,8 +44,9 @@ import {
  * 5: worker start identities and budget reservations; bound amendment rechecks while merging.
  * 6: dissent firings and advisory scores; retained task rejection evidence.
  * 7: source-specific holds, pipeline-safe dissent pauses, amendment generations and delivery records.
+ * 8: escalation resolution releases its own hold, including historical retries without an unblock.
  */
-export const REDUCER_VERSION = 7;
+export const REDUCER_VERSION = 8;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -808,6 +809,7 @@ const HANDLERS: Handlers = {
     if (!esc) return;
     esc.status = "resolved";
     esc.resolution = { action: p.action, decision: p.decision, by: p.by };
+    if (esc.task && own(s.tasks, esc.task)) releaseBlock(s, esc.task, esc.id);
   },
   "escalation.awaiting_human": (s, { payload: p }) => {
     const esc = own(s.escalations, p.id);

@@ -119,7 +119,7 @@ test("the scripted run produces the expected blackboard", async () => {
 
   // Diffs, files, checks
   assert.deepEqual(s.diffs.a, { stat: "1 file changed", blob, commit: "c2" });
-  assert.deepEqual(s.files["src/a/x.ts"], { task: "a", agent: "w1", last_commit: "c2", merged: true });
+  assert.deepEqual(s.files["src/a/x.ts"], { task: "a", agent: "w1", last_commit: "c2", merged: true, at_seq: seqs.submitted2 });
   const check = s.checks.task[checkKey("task", "test", "a")];
   assert.equal(checkKey("task", "test", "a"), "a/test");
   assert.equal(check.status, "failed");
@@ -446,7 +446,10 @@ test("blocked_by.needs follows dependency.requested and dependency.satisfied; ta
   assert.deepEqual(s.tasks.a.blocked_by, { escalation: "E1", deps: ["b"], needs: [{ kind: "interface", ref: "NavProps" }, { kind: "artifact", ref: "Theme" }] }, "kept, and no duplicate need");
   s = reduce([["dependency.satisfied", { ...need("NavProps"), by_event: "evt-x" }], ["dependency.satisfied", { ...need("Theme", "artifact"), by_event: "evt-y" }]], s);
   assert.deepEqual([s.tasks.a.state, s.tasks.a.blocked_by], ["blocked", { escalation: "E1", deps: ["b"] }], "satisfying needs never unblocks by itself");
-  s = reduce([["task.unblocked", { task: "a" }], ["dependency.requested", need("NavProps")], ["dependency.satisfied", { ...need("NavProps"), by_event: "evt-z" }]], s);
+  s = reduce([["task.unblocked", { task: "a", escalation: "E1" }]], s);
+  assert.equal(s.tasks.a.state, "blocked", "unblocking an escalation preserves the dependency");
+  assert.deepEqual(s.tasks.a.blocked_by, { deps: ["b"] });
+  s = reduce([["task.accepted", { task: "b" }], ["task.unblocked", { task: "a" }], ["dependency.requested", need("NavProps")], ["dependency.satisfied", { ...need("NavProps"), by_event: "evt-z" }]], s);
   assert.equal(s.tasks.a.state, "in_progress");
   assert.equal("blocked_by" in s.tasks.a, false, "an unblocked task drops an emptied blocked_by");
 });
@@ -478,4 +481,116 @@ test("checks and task.checks_passed bound to an older submission change nothing"
   assert.throws(() => apply(rejected, ev("task.checks_passed", { task: "a", commands: ["test"], commit: "c2", submitted_seq: second }), {}, { strict: true }), /in_progress, not checking/);
   assert.equal(apply(s, ev("task.checks_passed", { task: "a", commands: ["test"], commit: "c2", submitted_seq: second }), {}, { strict: true }).tasks.a.state, "merging");
   assert.equal(apply(rejected, ev("task.checks_passed", { task: "a", commands: ["test"] })).tasks.a.state, "merging", "an unbound one is unchanged");
+});
+
+test("v8 dissent reducer retains first firing per task and latest advisory score across amendments and replay", async () => {
+  assert.equal(REDUCER_VERSION, 8);
+  const { readFileSync, writeFileSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");
+  const store = await newStore();
+  const spec = { id: "risk", by: "critic", source: { kind: "manual" }, claim: "Risk", predicted_failure: "Failure", tripwire: { kind: "task_state", task: "a", state: "rejected" }, on_fire: "notify" };
+  const contract = makeContract({ dissents: [spec] });
+  const blob = await store.putBlob(JSON.stringify(contract));
+  const source = { kind: "runner", id: "runner", pid: 1 };
+  const emit = (type, payload) => store.transact(() => ({ events: [{ type, payload, source }] }));
+  await emit("contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob });
+  await emit("task.rejected", { task: "a", reasons: ["check failure"] });
+  const rejectionSeq = (await store.state()).tasks.a.rejected_seq;
+  const firing = { dissent_id: "risk", task: "a", tripped_by: "worker", evidence: "first evidence" };
+  await emit("dissent.tripwire_fired", firing);
+  const firedSeq = (await store.state()).seq;
+  await emit("dissent.tripwire_fired", { ...firing, evidence: "duplicate" });
+  await emit("dissent.scored", { dissent_id: "risk", outcome: "vindicated" });
+  await store.writeSnapshot();
+  const snapshot = join(store.dir, "snapshot.json");
+  assert.equal(JSON.parse(readFileSync(snapshot, "utf8")).reducer_version, 8);
+  await emit("dissent.scored", { dissent_id: "risk", outcome: "untested" });
+  const amended = { ...contract, version: 2, dissents: [{ ...spec, claim: "Refined concern" }] };
+  await emit("contract.amended", { contract: CONTRACT_ID, version: 2, patch_blob: "patch", reason: "refine", affected_tasks: [], blob: await store.putBlob(JSON.stringify(amended)) });
+  const state = await store.state();
+  assert.equal(state.tasks.a.rejected_seq, rejectionSeq);
+  assert.deepEqual(state.dissents.risk.fires, { "tripwire:risk:a": { ...firing, seq: firedSeq } });
+  assert.equal(state.dissents.risk.score, "untested");
+  assert.equal(state.dissents.risk.spec.claim, "Refined concern");
+  assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+  // An authentic v6 snapshot must be ignored, even when its state digest is valid.
+  const old = JSON.parse(readFileSync(snapshot, "utf8"));
+  old.reducer_version = 6;
+  delete old.state.dissents;
+  delete old.state.tasks.a.rejected_seq;
+  old.state_sha256 = sha256Hex(canonicalJSON(old.state));
+  writeFileSync(snapshot, JSON.stringify(old));
+  assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+  rmSync(snapshot);
+  assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+});
+
+for (const action of ["retry", "reassign"]) {
+  for (const otherHold of [false, true]) {
+    test(`v8 replays historical ${action} without task.unblocked (${otherHold ? "another hold remains" : "replacement can start"})`, async () => {
+      const { blockingIds, taskHeld } = await import("../../dist/execution/task-holds.js");
+      const { readFileSync, writeFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");
+      const states = [];
+      for (const explicitUnblock of [false, true]) {
+        const store = await newStore();
+        const c = makeContract({ tasks: [taskSpec("a")] });
+        const source = { kind: "runner", id: "runner", pid: 1 };
+        const emit = (events) => store.transact(() => ({ events: events.map(([type, payload]) => ({ type, payload, source })) }));
+        const raise = (id) => ["escalation.raised", { escalation: { id, task: "a", agent: "critic", kind: "assistance", with: "orchestrator", summary: "Risk", blocking: true, dissent_id: id, status: "open", raised_seq: 0 } }];
+        await emit([
+          [...frozenEvent(await store.putBlob(JSON.stringify(c)))],
+          ["execution.paused", { scope: "all", reason: "Stopped before replacement claim" }],
+          raise("first"), ["task.blocked", { task: "a", escalation: "first" }],
+          ...(otherHold ? [raise("second"), ["task.blocked", { task: "a", escalation: "second", deps: ["external"] }],
+            ["dependency.requested", { task: "a", need: { kind: "interface", ref: "Api" } }]] : []),
+        ]);
+        if (action === "reassign") {
+          const changed = { ...c, version: 2, tasks: [{ ...c.tasks[0], persona: "replacement" }] };
+          await emit([["contract.amended", { contract: c.id, version: 2, blob: await store.putBlob(JSON.stringify(changed)), patch_blob: "patch", reason: "Reassign", affected_tasks: ["a"] }]]);
+        }
+        await emit([
+          ["task.retried", { task: "a", attempt: 2, why: action }],
+          ["escalation.resolved", { id: "first", action, decision: "Try again", by: "main" }],
+          ...(explicitUnblock ? [["task.unblocked", { task: "a", escalation: "first" }]] : []),
+        ]);
+        const state = await store.state();
+        assert.equal(state.status, "paused");
+        assert.equal(state.tasks.a.state, otherHold ? "blocked" : "ready");
+        assert.equal(state.tasks.a.attempt, 2);
+        assert.equal(state.claims.a, undefined);
+        assert.equal(taskHeld(state, "a"), otherHold);
+        assert.deepEqual(blockingIds(state.tasks.a), otherHold ? ["second"] : []);
+        if (otherHold) assert.deepEqual(state.tasks.a.blocked_by, { escalation: "second", deps: ["external"], needs: [{ kind: "interface", ref: "Api" }] });
+        states.push({ tasks: state.tasks, claims: state.claims, escalations: state.escalations, status: state.status });
+        assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+        // A valid v7 snapshot can contain the stranded hold; the version bump must force replay.
+        await store.writeSnapshot();
+        const path = join(store.dir, "snapshot.json");
+        const stale = JSON.parse(readFileSync(path, "utf8"));
+        stale.reducer_version = 7;
+        stale.state.tasks.a.state = "blocked";
+        stale.state.tasks.a.blocked_by = { escalation: "first" };
+        stale.state_sha256 = sha256Hex(canonicalJSON(stale.state));
+        writeFileSync(path, JSON.stringify(stale));
+        assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
+      }
+      assert.deepEqual(states[0], states[1], "historical and explicit-unblock logs derive identical runtime projections");
+    });
+  }
+}
+
+test("dissent events reject invalid scores and missing evidence and safely reduce prototype-like ids", () => {
+  const source = { kind: "runner", id: "runner", pid: 1 };
+  assert.throws(() => validateDraft({ type: "dissent.scored", source, payload: { dissent_id: "risk", outcome: "trusted" } }), /outcome/);
+  assert.throws(() => validateDraft({ type: "dissent.tripwire_fired", source, payload: { dissent_id: "risk", tripped_by: "worker" } }), /evidence/);
+  const s = reduce([
+    ["dissent.tripwire_fired", { dissent_id: "constructor", tripped_by: "worker", evidence: "failed" }],
+    ["dissent.scored", { dissent_id: "constructor", outcome: "refuted" }],
+  ]);
+  assert.equal(s.dissents.constructor.score, "refuted");
+  assert.equal(Object.keys(s.dissents.constructor.fires).length, 1);
+  assert.deepEqual(s, JSON.parse(JSON.stringify(s)));
 });

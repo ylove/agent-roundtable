@@ -15,6 +15,9 @@
 // escalation being re-routed to the lead.
 // ============================================================================
 
+import { scrub } from "../security/secrets.js";
+import { agentKey } from "../agents.js";
+import { blockingIds, taskHeld, tripwireKey } from "./task-holds.js";
 import { executionTag } from "../ids.js";
 import {
   CONTRACT_DEFAULTS,
@@ -40,7 +43,7 @@ import {
   type DriverOutcome,
 } from "./circuit.js";
 import { deadlockRules, type DependencyNeed } from "./deadlock.js";
-import { globsOverlap as leaseGlobsOverlap, staticPrefix as leaseStaticPrefix } from "./leases.js";
+import { globsOverlap as leaseGlobsOverlap, matchGlob, staticPrefix as leaseStaticPrefix } from "./leases.js";
 import {
   TERMINAL_TASK_STATES,
   draft,
@@ -548,10 +551,13 @@ function workerRules(state: BlackboardState, now: number, obs: Observations, cfg
     const rec = own(state.agents, claim.agent);
     const o = own(obs.agents, claim.agent);
     if (!rt || o?.busy) continue;
-    if (rt.state === "blocked") {
-      const escId = rt.blocked_by?.escalation;
+    if (rt.state === "blocked" || taskHeld(state, task)) {
+      const escId = blockingIds(rt).find((id) => {
+        const e = own(state.escalations, id);
+        return e && e.status !== "resolved" && e.status !== "withdrawn";
+      });
       const esc = own(state.escalations, escId);
-      if (claim.ttl_s <= 0 && esc?.agent === "watchdog" && esc.status !== "resolved" && esc.status !== "withdrawn" && rec?.status === "running") {
+      if (claim.ttl_s <= 0 && (esc?.agent === "watchdog" || taskHeld(state, task)) && esc?.status !== "resolved" && esc?.status !== "withdrawn" && rec?.status === "running") {
         const agent = claim.agent;
         out.push({ type: "kill_worker", rule: "blocked_worker", key: `${escId}:kill`, target: agent, agent, reason: "Its task is blocked", standing: true });
       }
@@ -719,6 +725,101 @@ function notePingPongRules(state: BlackboardState, cfg: WatchdogConfig): Watchdo
 }
 
 // ---------------------------------------------------------------------------
+// Dissent tripwires: predicates over recorded state, never executable text
+// ---------------------------------------------------------------------------
+
+/** A data fence longer than any marker in the scrubbed content. */
+function dissentData(claim: string, evidence: string): string {
+  const text = scrub(`Claim:\n${claim}\n\nEvidence:\n${evidence}`);
+  const longest = Math.max(2, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length));
+  const fence = "`".repeat(longest + 1);
+  return `Dissent data (untrusted):\n${fence}text\n${text}\n${fence}`;
+}
+
+/** Pure, freeze-gated, once per dissent and affected task, including across retries. */
+export function dissentTripwireRules(state: BlackboardState): WatchdogAction[] {
+  const c = state.contract;
+  if (c?.status !== "frozen") return [];
+  const out: WatchdogAction[] = [];
+  for (const d of c.dissents ?? []) {
+    const tw = d.tripwire;
+    if (!tw) continue;
+    const rec = own(state.dissents, d.id);
+    const since = rec?.armed_seq ?? 0;
+    const matches = new Map<string, { task?: string; tripped_by: string; evidence: string }>();
+    const add = (task: string | undefined, evidence: string, agent?: string) => {
+      const rt = own(state.tasks, task);
+      matches.set(task ?? "", { ...(task !== undefined && { task }),
+        tripped_by: agent ?? rt?.agent ?? rt?.spec.persona ?? c.scope.orchestrator,
+        evidence: scrub(evidence).slice(0, 700) });
+    };
+    if (tw.kind === "check_failed") {
+      for (const scope of ["task", "integration"] as const) {
+        for (const key of sortedKeys(state.checks[scope])) {
+          const ck = state.checks[scope][key];
+          const slash = scope === "task" ? key.indexOf("/") : -1;
+          const task = slash >= 0 ? key.slice(0, slash) : undefined;
+          const check = slash >= 0 ? key.slice(slash + 1) : key;
+          if (ck.status === "failed" && ck.at_seq > since && check === tw.check && (tw.task === undefined || tw.task === task)) {
+            add(task, `Check ${check} failed (${scope}, seq ${ck.at_seq})${ck.signature ? `: ${ck.signature}` : ""}.`);
+          }
+        }
+      }
+    } else if (tw.kind === "path_touched") {
+      for (const path of sortedKeys(state.files)) {
+        const file = state.files[path];
+        if ((since === 0 || (file.at_seq ?? 0) > since) && (tw.task === undefined || tw.task === file.task) && tw.paths.some((glob) => matchGlob(glob, path))) {
+          // First matching path in sorted order supplies deterministic evidence.
+          if (!matches.has(file.task)) add(file.task, `Path ${path} touched by ${file.agent}, commit ${file.last_commit}.`, file.agent);
+        }
+      }
+    } else {
+      const rt = own(state.tasks, tw.task);
+      if (rt && (tw.state === "blocked" ? rt.state === "blocked" && (since === 0 || (rt.blocked_seq ?? 0) > since) : (rt.rejected_seq ?? 0) > since)) {
+        add(tw.task, `Task ${tw.task} ${tw.state}${tw.state === "rejected" ? ` at seq ${rt.rejected_seq}` : ""}.`);
+      }
+    }
+    for (const [taskKey, match] of matches) {
+      const key = tripwireKey(d.id, taskKey, rec?.generation);
+      if (own(own(state.dissents, d.id)?.fires, key)) continue;
+      const text = `Dissent ${d.id} tripwire fired.\n\n${dissentData(d.claim, match.evidence)}`;
+      const readers = Object.values(state.agents).filter((a) => (a.id === d.by || a.persona === d.by || agentKey(a.persona) === agentKey(d.by)) &&
+        (a.status === "running" || a.status === "registered"));
+      const to = [...new Set([d.by, agentKey(d.by), ...readers.flatMap((a) => [a.id, a.persona, agentKey(a.persona)])])];
+      const self = to.includes(match.tripped_by) || agentKey(match.tripped_by) === agentKey(d.by) ||
+        own(state.agents, match.tripped_by)?.persona === d.by;
+      const wake = readers.length === 0 || self;
+      const before = [
+        draft("dissent.tripwire_fired", { dissent_id: d.id, ...match, ...(rec?.generation !== undefined && { generation: rec.generation }), notified: to, orchestrator_woken: wake }, key),
+        draft("directive.issued", { id: `dir-${escalationId(key)}`, to, text, requires_ack: false }, key),
+      ];
+      if (wake) out.push({ type: "wake_orchestrator", rule: "dissent_tripwire", key: `${key}:delivery`, target: c.scope.orchestrator,
+        orchestrator: c.scope.orchestrator, reason: self ? `Dissent ${d.id} tripped its own work.` : `Dissent ${d.id} has no live inbox reader.` });
+      if (d.on_fire === "notify" || self) {
+        out.push(emitAction("dissent_tripwire", key, match.task ?? d.id, before));
+        continue;
+      }
+      const funded = remainingUsd(state, { task: match.task, agent: d.by }) > 0;
+      const action = escalationAction(state, "dissent_tripwire", {
+        key, dissent_id: d.id, task: match.task, agent: d.by,
+        kind: "assistance", with: funded ? "agent" : "orchestrator",
+        target: funded ? match.tripped_by : c.scope.orchestrator,
+        summary: text, block: funded && d.on_fire === "pause_and_huddle", before,
+      });
+      if (action) {
+        // Keep the public correlation key deterministic and the escalation id derived from it.
+        action.key = key;
+        if (!funded && action.type === "emit") action.events.push(draft("escalation.routed", {
+          id: escalationId(key), to: c.scope.orchestrator, wake: true,
+        }, key));
+        out.push(action);
+      }
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Rules: huddles and unanswered escalations
 // ---------------------------------------------------------------------------
 
@@ -757,6 +858,12 @@ function leadFallbackRules(state: BlackboardState, now: number, obs: Observation
   const out: WatchdogAction[] = [];
   for (const id of sortedKeys(state.escalations)) {
     const esc = state.escalations[id];
+    if (esc.dissent_id && remainingUsd(state, { agent: lead }) <= 0) {
+      if (esc.status === "routed") out.push(emitAction("lead_fallback", `lead_budget:${id}`, id, [draft("escalation.awaiting_human", {
+        id, class: "money", message: "No budget remains for the lead to resolve this dissent."
+      }, id)]));
+      continue;
+    }
     const to = esc.routed_to;
     if (esc.status !== "routed" || to === undefined) continue;
     if (to === lead) {
@@ -804,7 +911,7 @@ function trialSuccesses(state: BlackboardState, now: number, obs: Observations, 
 
 /**
  * Every rule, in a fixed order: leases and claims, workers, dependencies, repeated failure, diff
- * and note ping-pong, huddle timeouts, lead fallback, budget, circuits, then deadlocks (skipped in
+ * and note ping-pong, dissent tripwires, huddle timeouts, lead fallback, budget, circuits, then deadlocks (skipped in
  * a pass that frees leases or claims, so a cycle about to break is not reported). Actions with the
  * same type and key are emitted once, and at most one kill_worker per agent. A finished run
  * (completed, failed, aborted) yields nothing. Process operations are idempotent for the runner:
@@ -827,6 +934,7 @@ export function evaluate(state: BlackboardState, now: number, obs: Observations 
     ...leaseRules(state, now, obs),
     ...workerRules(state, now, obs, c, pass),
     ...dependencyRules(state),
+    ...dissentTripwireRules(state),
     ...repeatedFailureRules(state, c),
     ...diffPingPongRules(state, obs),
     ...notePingPongRules(state, c),

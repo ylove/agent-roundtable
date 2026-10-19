@@ -41,7 +41,7 @@ export interface WatchFile {
   reason?: WatchReason;
 }
 
-export type WatchReason = "escalation" | "awaiting_human" | "budget" | "completed" | "failed" | "aborted" | "timeout";
+export type WatchReason = "escalation" | "dissent" | "awaiting_human" | "budget" | "completed" | "failed" | "aborted" | "timeout";
 
 /** The one line `watch` prints. */
 export interface WatchResult {
@@ -133,6 +133,9 @@ const own = <T>(rec: Record<string, T>, key: string): T | undefined => (Object.h
 export function wakeFor(state: Readonly<BlackboardState>, e: AnyEvent, orchestrator: string): WatchResult | null {
   const base = { execution: state.execution, seq: e.seq };
   switch (e.type) {
+    case "dissent.tripwire_fired":
+      if (!e.payload.orchestrator_woken || state.contract?.scope.orchestrator !== orchestrator) return null;
+      return { ...base, reason: "dissent", message: `Dissent ${e.payload.dissent_id} needs attention: ${cap(e.payload.evidence, 600)}` };
     case "escalation.routed": {
       const esc = own(state.escalations, e.payload.id);
       if (e.payload.to !== orchestrator || !e.payload.wake) return null;

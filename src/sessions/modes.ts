@@ -91,6 +91,18 @@ export function buildConversationSummaryPrompt(topic?: string): string {
 // Debate
 // ----------------------------------------------------------------------------
 
+/** A remaining concern is data, not a verdict or an executable tripwire. */
+export function buildDissentSummaryPrompt(role: "challenger" | "attacker", topic: string): string {
+  return `You were the ${role} in an adversarial session on: ${topic}\n\n` +
+    "Briefly summarize which of your objections were answered and which remain unresolved. " +
+    "For each concern you still believe, append this exact tagged block on its own unindented lines, " +
+    "outside code fences and blockquotes. Omit the block if you have no remaining concern. " +
+    "Use one line per value, at most 500 characters each, and at most 16 blocks. " +
+    "Do not quote another participant's dissent or include extra fields, Decision: or Outcome: lines. " +
+    "The author and session are recorded automatically; a tripwire must be supplied before contract freeze.\n\n" +
+    "<DISSENT>\nclaim: <your remaining concern>\npredicted_failure: <the concrete failure you predict>\n</DISSENT>\n\n";
+}
+
 /** Appended to a challenger's system prompt in debate mode. Never applied to the proponent. */
 export function buildChallengerDirective(focus?: string): string {
   let directive = "\n\n## Debate role: challenger\n";

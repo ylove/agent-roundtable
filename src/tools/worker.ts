@@ -66,6 +66,7 @@ import {
   tailForTool,
 } from "../sandbox/index.js";
 import { localSandboxAllowed } from "../sandbox/common.js";
+import { taskHeld } from "../execution/task-holds.js";
 import { appendAudit } from "../security/audit.js";
 import { normalizeRelPath, writeFileAtomic } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
@@ -362,6 +363,9 @@ async function resolveActor(args: Record<string, unknown>, mode: ToolMode): Prom
   throw new Error(`agent_token does not belong to any agent of ${execution}`);
 }
 
+/** Reuse the token-bound identity for draft contract tools; never accept a caller-supplied agent id. */
+export { resolveActor as resolveWorkerActor };
+
 function sourceOf(state: Readonly<BlackboardState>, a: Actor, task?: string): EventSource {
   const team = own(state.agents, a.agent)?.team ?? own(state.tasks, task)?.spec.team;
   return { kind: "agent", id: a.agent, ...(team !== undefined && { team }), ...(task !== undefined && { task }), pid: process.pid };
@@ -381,6 +385,7 @@ function requireActive(state: Readonly<BlackboardState>, task?: string): void {
   if (TERMINAL_RUN.has(state.status)) throw new Refusal(`The run is ${state.status}`);
   if (state.status === "paused") throw new Refusal("The run is paused; wait for it to resume");
   if (task && state.paused_tasks.includes(task)) throw new Refusal(`Task ${task} is paused; wait for it to resume`);
+  if (taskHeld(state, task, true)) throw new Refusal(`Task ${task} is held by an escalation; wait for resolution`);
 }
 
 // ============================================================================
@@ -1281,6 +1286,7 @@ async function submitLocked(a: Actor, args: Record<string, unknown>, ctx: ToolCa
   const sum = await taskDiffSummary(wt, integration, head);
   let attempt = 0;
   const recorded = await a.store.transact(({ state: s }) => {
+    requireActive(s, task);
     const claim = own(s.claims, task);
     if (!claim || claim.agent !== a.agent) throw new Refusal(`You no longer hold the claim on ${task}; nothing was submitted`);
     const rec = own(s.agents, a.agent);

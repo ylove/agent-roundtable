@@ -45,9 +45,13 @@ const MERGE_TIMEOUT_MS = 10 * 60_000;
 
 export type MergeResult =
   | { ok: true; sha: string; /** The branch was already merged (a retry after a crash): no new commit. */ already: boolean }
-  | { ok: false; reason: "conflict" | "violation"; conflicts: string[]; violations: string[] };
+  | { ok: false; reason: "conflict" | "violation" | "held"; conflicts: string[]; violations: string[] };
 
 export interface MergeTaskOptions {
+  /** Rechecked under git.lock immediately before changing the integration branch. */
+  canMerge?: () => Promise<boolean>;
+  /** Commit the acceptance under git.lock; false rolls the merge back if a hold won the race. */
+  onMerged?: (sha: string) => Promise<boolean>;
   /** Immutable checked commit. Resolved before coverage and merge, never a moving ref. */
   commit?: string;
   /**
@@ -104,13 +108,22 @@ export async function mergeTask(header: ExecutionHeader, taskId: string, opts: M
       }
       const before = await resolveCommit(t, "HEAD");
       const identity = opts.identity ?? (await gitIdentity(repo));
+      if (opts.canMerge && !await opts.canMerge()) return { ok: false, reason: "held", conflicts: [], violations: [] };
       const r = await runGit(
         t,
         ["merge", "--no-ff", "--no-edit", "--no-verify", "--no-stat", "-q", "-m", `rt: merge task ${taskId}`, "-m", trailers(header, taskId), commit],
         { identity, allowExit: [1], timeoutMs: MERGE_TIMEOUT_MS }
       );
       if (r.exit === 0) {
+        if (opts.canMerge && !await opts.canMerge()) {
+          await resetIntegration(t, before);
+          return { ok: false, reason: "held", conflicts: [], violations: [] };
+        }
         const sha = await resolveCommit(t, "HEAD");
+        if (opts.onMerged && !await opts.onMerged(sha)) {
+          await resetIntegration(t, before);
+          return { ok: false, reason: "held", conflicts: [], violations: [] };
+        }
         return { ok: true, sha, already: sha === before };
       }
       const conflicts = await unmergedPaths(t);

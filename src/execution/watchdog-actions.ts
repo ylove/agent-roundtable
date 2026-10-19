@@ -29,6 +29,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 export type WatchdogRule =
+  | "dissent_tripwire"
   | "claim_expiry"
   | "lease_orphan"
   | "lease_withdraw"
@@ -126,6 +127,7 @@ export function emitAction(rule: WatchdogRule, key: string, target: string, even
 }
 
 export interface EscalationSpec {
+  dissent_id?: string;
   /** Dedupe key; the escalation id is escalationId(key). */
   key: string;
   task?: string;
@@ -163,6 +165,7 @@ export function escalationAction(state: BlackboardState, rule: WatchdogRule, spe
     status: "open",
     raised_seq: 0,
   };
+  if (spec.dissent_id !== undefined) esc.dissent_id = spec.dissent_id;
   if (spec.task !== undefined) esc.task = spec.task;
   if (spec.target !== undefined) esc.target = spec.target;
   if (spec.question !== undefined) esc.question = spec.question;
@@ -171,7 +174,7 @@ export function escalationAction(state: BlackboardState, rule: WatchdogRule, spe
 
   const before = (spec.before ?? []).map((d) => (d.correlation === undefined ? { ...d, correlation: id } : d));
   const events = [...before, draft("escalation.raised", { escalation: esc }, id)];
-  if (block && rt!.state !== "blocked") events.push(draft("task.blocked", { task: spec.task!, escalation: id }, id));
+  if (block && (rt!.state !== "blocked" || spec.dissent_id !== undefined)) events.push(draft("task.blocked", { task: spec.task!, escalation: id }, id));
   if (spec.emergency) {
     const p: EventPayloads["escalation.awaiting_human"] = { id, class: spec.emergency.class, message: spec.emergency.message };
     if (spec.emergency.alternatives?.length) p.alternatives = [...spec.emergency.alternatives];

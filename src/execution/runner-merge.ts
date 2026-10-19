@@ -24,6 +24,7 @@ import { leaseDrafts, leasesFor, releaseLeases } from "./leases.js";
 import { classifyConflict, mergeDrafts, mergeTask, prepareConflictResolution, type MergeResult } from "./merge.js";
 import { runnerEscalation, type RunnerEscalationSpec } from "./runner-hooks.js";
 import { conflictContext } from "./task-card.js";
+import { taskHeld } from "./task-holds.js";
 import type { AnyEventDraft, BlackboardState, CommandSpec } from "./types.js";
 import { ensureIntegrationWorktree, integrationWorktreePath, snapshotWip, taskWorktreePath, withCommitCheckout } from "./worktrees.js";
 import type { Runner } from "./runner.js";
@@ -91,7 +92,7 @@ export class MergeQueue {
     const now = Date.now();
     for (const rt of Object.values(state.tasks)) {
       const id = rt.spec.id;
-      if (rt.state !== "merging" || state.paused_tasks.includes(id)) continue;
+      if (rt.state !== "merging" || state.paused_tasks.includes(id) || taskHeld(state, id)) continue;
       if ((this.failures.get(id)?.retryAt ?? 0) > now) continue;
       return () => this.mergeOne(id);
     }
@@ -129,7 +130,7 @@ export class MergeQueue {
     const src = r.source;
     let state = await r.store.state();
     const rt = own(state.tasks, task);
-    if (rt?.state !== "merging") return;
+    if (rt?.state !== "merging" || taskHeld(state, task)) return;
 
     const history = await r.store.events();
     const checked = [...history].reverse().find((e) => e.type === "task.checks_passed" &&
@@ -157,9 +158,19 @@ export class MergeQueue {
     }
 
     const leases = leasesFor(state, task);
+    if (taskHeld(await r.store.state(), task)) return;
     let m: MergeResult;
     try {
-      m = await mergeTask(r.header, task, { leases, commit });
+      m = await mergeTask(r.header, task, { leases, commit, canMerge: async () => !taskHeld(await r.store.state(), task), onMerged: async (sha) => {
+        const result = await r.store.transact(({ state: s }) => {
+          if (taskHeld(s, task) || own(s.tasks, task)?.state !== "merging" || s.tasks[task].submitted_seq !== submission.submitted_seq || s.tasks[task].last_commit !== commit) return { events: [] };
+          return { events: [
+            mergeDrafts.succeeded(task, sha, src), mergeDrafts.taskMerged(task, sha, src),
+            { type: "task.accepted", source: src, payload: { task } },
+          ] as AnyEventDraft[] };
+        });
+        return result.events.length > 0;
+      } });
       this.failures.delete(task);
     } catch (e) {
       const f = { count: (this.failures.get(task)?.count ?? 0) + 1, retryAt: Date.now() + MERGE_RETRY_MS };
@@ -173,18 +184,9 @@ export class MergeQueue {
       return;
     }
 
+    if (!m.ok && m.reason === "held") return;
     if (m.ok) {
       const sha = m.sha;
-      await r.store.transact(({ state: s }) => {
-        if (own(s.tasks, task)?.state !== "merging" || s.tasks[task].submitted_seq !== submission.submitted_seq || s.tasks[task].last_commit !== commit) return { events: [] };
-        return {
-          events: [
-            mergeDrafts.succeeded(task, sha, src),
-            mergeDrafts.taskMerged(task, sha, src),
-            { type: "task.accepted", source: src, payload: { task } },
-          ] as AnyEventDraft[],
-        };
-      });
       r.say(`merged ${task} into ${integrationBranch(r.execution)} at ${sha.slice(0, 12)}${m.already ? " (already merged)" : ""}`);
       await this.integrationChecks(`after merging ${task}`);
       await this.releaseTaskLeases(task);

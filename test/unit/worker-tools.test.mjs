@@ -61,13 +61,14 @@ async function join_(run, agent, extra = {}) {
 
 const eventsSince = async (store, seq, types) => (await store.events({ sinceSeq: seq })).filter((e) => !types || types.includes(e.type));
 
-test("the worker server lists exactly the seven worker tools; the orchestrator also has join_execution", () => {
-  assert.deepEqual(toolsFor("worker").map((t) => t.name), ["read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"]);
+test("the worker server lists dissent filing and the seven execution tools; the orchestrator also has join_execution", () => {
+  assert.deepEqual(toolsFor("worker").map((t) => t.name), ["file_dissent", "read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"]);
   const orch = Object.fromEntries(toolsFor("orchestrator").map((t) => [t.name, t]));
   assert.ok(orch.join_execution);
   for (const t of toolsFor("worker")) {
     assert.ok(!("agent_token" in t.inputSchema.properties), `${t.name} is token-bound on the worker server`);
     assert.equal(t.inputSchema.additionalProperties, false);
+    if (t.name === "file_dissent") continue; // Also accepts orchestrator authentication.
     const o = orch[t.name].inputSchema;
     assert.deepEqual(o.required.slice(0, 2), ["execution_id", "agent_token"], t.name);
     assert.equal(o.properties.agent_token.pattern, "^[0-9a-f]{64}$");

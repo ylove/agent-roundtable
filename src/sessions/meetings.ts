@@ -9,11 +9,12 @@ import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
 import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveMeeting } from "./archive.js";
+import { withoutDissentBlocks } from "./dissent-summary.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
-import { assertMeetingMode, buildChallengerDirective, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
+import { assertMeetingMode, buildChallengerDirective, buildDissentSummaryPrompt, DEBATE_MEETING_USER_SUFFIX } from "./modes.js";
 import {
   closePrototypeTracker,
   meetingPrototypeStatus,
@@ -117,7 +118,7 @@ export async function startMeeting(
   if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic });
   const meetingId = newId("meeting");
   // Board, then public channel, both before the first LLM call so the header is the first post. Config
-  // errors fail the start (a public config error closes the board first).
+  // errors fail the start (a public config error closes the blackboard first).
   const { prototype, publicChannel } = await openSessionSurfaces(
     isPrototype
       ? {
@@ -149,7 +150,7 @@ export async function startMeeting(
       { provider, model: resolvedModel, baseUrl }
     );
   } catch (e) {
-    // The meeting never started; close the channel (and the prototype board) so nothing dangles.
+    // The meeting never started; close the channel (and the prototype blackboard) so nothing dangles.
     if (publicChannel) void publicChannel.finalize();
     await closePrototypeTracker(prototype, "ended");
     throw e;
@@ -258,6 +259,7 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
   const history = meetingHistoryView(meeting);
 
   let summary = "";
+  const dissentSummaries: Array<{ agent: string; content: string }> = [];
   if (requestSummary) {
     const summaryMessages = [
       ...history.map((m) => ({
@@ -267,14 +269,19 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
       {
         role: "user" as const,
         content:
-          "Please provide a brief summary of what we discussed and any action items or conclusions.",
+          "Please provide a brief summary of what we discussed and any action items or conclusions. Do not include DISSENT tags or extraction blocks.",
       },
     ];
-    summary = await callLLM(
+    summary = withoutDissentBlocks(await callLLM(
       meeting.systemPrompt,
       summaryMessages,
       { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
-    );
+    ));
+    if (meeting.mode === "debate") {
+      const messages = [...summaryMessages.slice(0, -1), { role: "user" as const, content: buildDissentSummaryPrompt("challenger", meeting.agenda ?? "") }];
+      const content = await callLLM(meeting.systemPrompt, messages, { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl });
+      dissentSummaries.push({ agent: meeting.agent, content });
+    }
   }
 
   recordActivity({
@@ -286,7 +293,7 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
     outcome: summary || history.slice().reverse().find((m) => m.role === "assistant")?.content,
     public: meeting.publicChannel !== undefined,
   });
-  archiveMeeting("meeting", meeting, summary);
+  archiveMeeting("meeting", meeting, summary, dissentSummaries);
   meetings.delete(meetingId);
 
   let text = summary || `Meeting ${meetingId} with ${meeting.agent} ended.`;
@@ -308,7 +315,7 @@ export function listMeetings(): Array<{
   mode: MeetingMode;
   public: boolean;
   prototype: boolean;
-  /** Prototype meetings, while the board is up. */
+  /** Prototype meetings, while the blackboard is up. */
   board_url?: string;
   baseUrl?: string;
 }> {

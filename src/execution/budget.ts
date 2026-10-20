@@ -7,7 +7,7 @@
 // a contract amendment (TaskSpec.budget_usd, ContractBudget.per_task_usd / per_agent_usd).
 // ============================================================================
 
-import type { BlackboardState } from "./types.js";
+import type { BlackboardState, UsageRecord } from "./types.js";
 import {
   TERMINAL_TASK_STATES,
   draft,
@@ -60,6 +60,16 @@ export function remainingUsd(state: BlackboardState, scope: { task?: string; age
     if (cap !== undefined) rem = Math.min(rem, cap - (own(b.by_agent, scope.agent) ?? 0));
   }
   return Math.max(0, round6(rem));
+}
+
+/** Retain uncertain dispatched huddle spend by call identity, once, after its settlement is lost. */
+export function retainHuddleReservations(state: Readonly<BlackboardState>, huddle: string): UsageRecord[] {
+  return Object.values(state.budget.calls ?? {})
+    .filter((c) => c.reservation && c.call_id?.startsWith(`${huddle}:`))
+    .map(({ at: _at, ...c }) => ({
+      ...c, reservation: false, estimated: true,
+      provenance: { tokens: c.provenance?.tokens ?? "estimated", usd: "estimated" },
+    }));
 }
 
 /** Percent of the execution budget spent (0 without a budget). */

@@ -108,7 +108,7 @@ export interface RunnerEscalationSpec {
   summary: string;
   question?: string;
   options?: string[];
-  /** Block the task (task.blocked {escalation}) unless it is finished or already blocked. */
+  /** Add this escalation's hold (task.blocked {escalation}) unless the task is finished. */
   block?: boolean;
   diagnosticsBlob?: string;
 }
@@ -139,7 +139,7 @@ export function runnerEscalation(state: Readonly<BlackboardState>, spec: RunnerE
     ...(spec.diagnosticsBlob && { diagnostics_blob: spec.diagnosticsBlob }),
   };
   const out: AnyEventDraft[] = [{ type: "escalation.raised", source, correlation: id, payload: { escalation: esc } }];
-  if (block && rt!.state !== "blocked") out.push({ type: "task.blocked", source, correlation: id, payload: { task: spec.task!, escalation: id } });
+  if (block) out.push({ type: "task.blocked", source, correlation: id, payload: { task: spec.task!, escalation: id } });
   return out;
 }
 

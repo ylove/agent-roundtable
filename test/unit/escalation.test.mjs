@@ -1256,6 +1256,81 @@ test("dissent Stop integration: Stop during conclusion retains both charges and 
   assert.equal(state.tasks.b.state, "blocked");
 });
 
+test("dissent Stop integration: resolving every dissent hold cannot release an unresolved Stop hold", async (t) => {
+  const f = await setup(t);
+  const first = await fireDissent(f, { on_fire: "pause_and_huddle" });
+  const second = await fireDissent(f, { dissent_id: "second-risk", on_fire: "pause_and_huddle" });
+  const { requestAgentStop } = await import("../../dist/usage/stop.js");
+  const { Runner } = await import("../../dist/execution/runner.js");
+  const { owedResumeOps } = await import("../../dist/execution/escalation.js");
+  await requestAgentStop(f.store, { agent: "wb", by: "human", surface: "cli" });
+  await f.emit([{ type: "agent.exited", payload: { agent: "wb", task: "b", code: null, reason: "stopped" } }]);
+  // Exercise the runner's durable settlement without starting workers or visibility services.
+  const r = new Runner(f.store.id);
+  r.store = f.store;
+  await r.settleStops();
+  await r.settleStops();
+  const stopId = (await f.events("agent.stopped"))[0].payload.escalation;
+  assert.ok(stopId);
+  for (const id of [first, second]) {
+    const result = await resolveEscalation(f.ctx, id, { action: "decide", decision: "Concern addressed", resolved_by: "main" });
+    assert.ok(!result.ops.some((op) => op.type === "resume_worker"));
+  }
+  const state = await f.store.state();
+  assert.equal(state.escalations[stopId].status, "open");
+  assert.equal(state.escalations[stopId].blocking, true);
+  assert.equal(state.tasks.b.state, "blocked");
+  assert.equal(state.tasks.b.blocked_by.escalation, stopId);
+  assert.deepEqual(await owedResumeOps(f.ctx), []);
+  assert.equal((await f.events("agent.stopped")).length, 1, "Stop is settled once");
+});
+
+for (const recovery of ["timeout", "concluded", "routed", "stop after timeout"]) {
+  test(`dissent usage recovery: runner loss then ${recovery} retains orphaned spend once and activates budget enforcement`, async (t) => {
+    const f = await setup(t, { contract: { budget: { usd: 0.5, per_task_usd: 0.5, wall_clock_min: 60, max_parallel: 3, max_attempts: 3 } } });
+    const id = await fireDissent(f, { on_fire: "pause_and_huddle" });
+    const huddle = "hud-orphan";
+    const reservation = { source: "dissent micro-huddle", call_id: `${huddle}:1`, dissent_id: "api-risk", agent: "wa", task: "b", provider: "paid", model: "unknown", tokens: { inputTokens: 0, outputTokens: 0 }, usd: 0.5, estimated: true, reservation: true, provenance: { tokens: "estimated", usd: "estimated" } };
+    await f.emit([
+      { type: "huddle.started", payload: { id: huddle, escalation: id, format: "micro", seats: ["wa", "wb"] } },
+      { type: "budget.usage_recorded", payload: reservation },
+      ...(recovery === "timeout" ? [] : [{ type: "huddle.concluded", payload: { id: huddle, outcome: "NO_OUTCOME" } }]),
+      ...(["routed", "stop after timeout"].includes(recovery) ? [{ type: "escalation.routed", payload: { id, to: "main", wake: true } }] : []),
+    ]);
+    // The previous runner's meter is gone; recover entirely from the durable log.
+    const { openExecutionStore } = await import("../../dist/execution/store.js");
+    const { evaluate, observeEvents } = await import("../../dist/execution/watchdog.js");
+    const { budgetRules, remainingUsd } = await import("../../dist/execution/budget.js");
+    const { stopMicroHuddles } = await import("../../dist/execution/huddle.js");
+    const store = await openExecutionStore(f.store.id);
+    assert.equal(remainingUsd(await store.state()), 0);
+    assert.deepEqual(budgetRules(await store.state()), [], "outstanding reservations defer durable money actions");
+    const before = await store.state();
+    const obs = observeEvents(await store.events());
+    const now = obs.huddles[huddle].startedAt + (recovery === "timeout" ? 21 * 60_000 : 0);
+    for (let i = 0; i < 2; i++) {
+      if (recovery === "stop after timeout") await stopMicroHuddles(store, "wb", runner);
+      else await store.transact(({ state }) => ({ events: actionsToDrafts(evaluate(state, now, obs).filter((a) => a.rule === "huddle_timeout")) }));
+    }
+    const state = await store.state();
+    assert.deepEqual(state.budget.calls[reservation.call_id], { ...reservation, reservation: false, at: state.budget.calls[reservation.call_id].at });
+    assert.equal(state.budget.spent_usd, 0.5);
+    assert.equal(state.budget.by_task.b, 0.5);
+    assert.equal(state.budget.by_agent.wa, 0.5);
+    assert.equal(state.tasks.b.state, "blocked");
+    assert.deepEqual(state.tasks.b.blocked_by, before.tasks.b.blocked_by);
+    assert.equal(state.huddles[huddle].outcome, "NO_OUTCOME");
+    assert.equal(state.escalations[id].status, recovery === "concluded" ? "in_huddle" : "routed");
+    assert.equal((await store.events({ types: ["huddle.concluded"] })).length, 1, "settlement does not conclude the huddle twice");
+    const records = await store.events({ types: ["budget.usage_recorded"] });
+    assert.equal(records.filter((e) => e.payload.call_id === reservation.call_id).length, 2, "one reservation and one retained estimate");
+    const budget = budgetRules(state);
+    assert.ok(budget.some((a) => a.type === "stop_spawning"), "retained spend must stop scheduling at the cap");
+    assert.ok(actionsToDrafts(budget).some((e) => e.type === "budget.exhausted"));
+    assert.equal((await openExecutionStore(store.id).then((s) => s.state())).budget.spent_usd, 0.5);
+  });
+}
+
 test("dissent Stop integration: a restarted runner settles an orphaned reservation and preserves the hold", async (t) => {
   const f = await setup(t);
   const id = await fireDissent(f, { on_fire: "pause_and_huddle" });

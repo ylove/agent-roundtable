@@ -32,7 +32,7 @@ import {
   type TaskRuntime,
   type TaskState,
 } from "./types.js";
-import { budgetRules, remainingUsd } from "./budget.js";
+import { budgetRules, remainingUsd, retainHuddleReservations } from "./budget.js";
 import {
   classifyFailure,
   circuitRules,
@@ -826,18 +826,24 @@ export function dissentTripwireRules(state: BlackboardState): WatchdogAction[] {
 // Rules: huddles and unanswered escalations
 // ---------------------------------------------------------------------------
 
-/** A huddle with no outcome after huddleTimeoutMs concludes NO_OUTCOME and its escalation goes to the orchestrator. */
+/** Time out unfinished huddles and retain unsettled calls, including recovery of concluded huddles. */
 function huddleTimeoutRules(state: BlackboardState, now: number, obs: Observations, cfg: WatchdogConfig): WatchdogAction[] {
   const orchestrator = state.contract?.scope.orchestrator;
   if (!orchestrator) return [];
   const out: WatchdogAction[] = [];
   for (const id of sortedKeys(state.huddles)) {
     const h = state.huddles[id];
-    if (h.outcome !== undefined) continue;
-    const startedAt = own(obs.huddles, id)?.startedAt;
-    if (startedAt === undefined || now - startedAt < cfg.huddleTimeoutMs) continue;
+    if (h.outcome === undefined) {
+      const startedAt = own(obs.huddles, id)?.startedAt;
+      if (startedAt === undefined || now - startedAt < cfg.huddleTimeoutMs) continue;
+    }
     const key = `huddle_timeout:${id}`;
-    const events = [draft("huddle.concluded", { id, outcome: "NO_OUTCOME" }, key)];
+    const events = retainHuddleReservations(state, id).map((c) => draft("budget.usage_recorded", c, key));
+    if (h.outcome !== undefined) {
+      if (events.length) out.push(emitAction("huddle_timeout", key, id, events));
+      continue;
+    }
+    events.push(draft("huddle.concluded", { id, outcome: "NO_OUTCOME" }, key));
     const esc = own(state.escalations, h.escalation);
     if (esc && (esc.status === "in_huddle" || esc.status === "open" || esc.status === "routed")) {
       events.push(draft("escalation.routed", { id: esc.id, to: orchestrator, wake: true }, key));

@@ -2,6 +2,8 @@
 
 ## 1.1.0 (unreleased)
 
+- Fix overlapping Stop and dissent holds: resolving dissent cannot resume a task while its Stop escalation remains unresolved. Huddle timeout and recovery settle orphaned paid reservations by call id as retained estimates, including after conclusion or routing, so budget enforcement cannot stall. `REDUCER_VERSION` remains 10.
+
 - Integrate dissent micro-huddles with usage visibility: both persona and driver calls carry dissent, execution, task and charged-requester provenance. Durable paid-call reservations are explicitly estimated on every usage surface and replaced by usage reports without double charging; free local calls remain free. Per-agent Stop cancels either huddle participant, settles reported usage or retains dispatched unreported allowance as estimated, releases unused allowance, and routes unfinished huddles while preserving source-specific dissent holds. Recover interrupted reservations and accept late usage without restarting stopped huddles. `REDUCER_VERSION` remains 10.
 
 - Usage visibility: see who is spending what, on which platform, and stop any one agent. Every figure says whether it was **measured** (counted by whoever did the work), **reported** (told to us by an agent or the host) or **estimated** (worked out by us from the price table or text length); a total that mixes them shows the split, and a model with no price shows its tokens instead of `$0.00`. See the [usage guide](docs/usage.md).

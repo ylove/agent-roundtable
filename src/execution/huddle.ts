@@ -27,7 +27,7 @@ import { collaborations, continueCollaboration, endCollaboration, startCollabora
 import type { CollaborationMode } from "../sessions/modes.js";
 import { endUltraplan, startUltraplan, ultraplans } from "../sessions/ultraplan.js";
 import { agentDir, agentTask } from "../workers/files.js";
-import { remainingUsd } from "./budget.js";
+import { remainingUsd, retainHuddleReservations } from "./budget.js";
 import { buildContextBundle, leasesInQuestion, readDiagnostics, targetPaths, type Diagnostics } from "./context-bundle.js";
 import {
   UsageMeter,
@@ -233,17 +233,24 @@ export async function stopMicroHuddles(store: ExecutionStore, agent: string, sou
   // Recover a huddle interrupted by a previous runner, too. Its durable paid reservation stays estimated.
   const state = await store.state();
   const rec = own(state.agents, agent);
-  for (const esc of Object.values(state.escalations)) {
-    const h = own(state.huddles, esc.huddle);
-    if (esc.status !== "in_huddle" || h?.format !== "micro" || h.outcome !== undefined) continue;
-    if (!h.seats.includes(agent) && !h.seats.includes(agentKey(rec?.persona ?? agent)) && (!rec?.task || esc.task !== rec.task)) continue;
-    const to = await scopeOrchestrator(state, esc);
-    await commitIf(store, esc.id, { expect: ["in_huddle"], guard: (s, e) => e.huddle === esc.huddle && own(s.huddles, e.huddle)?.outcome === undefined }, (s) => [
-      ...Object.values(s.budget.calls ?? {}).filter((c) => c.reservation && c.call_id?.startsWith(`${esc.huddle}:`)).map(({ at: _at, ...c }) =>
-        ev("budget.usage_recorded", { ...c, reservation: false }, source, esc.id)),
-      ev("huddle.concluded", { id: esc.huddle!, outcome: "NO_OUTCOME", decision: `Micro-huddle stopped with agent ${agent}` }, source, esc.id),
-      ev("escalation.routed", { id: esc.id, to, wake: true }, source, esc.id),
-    ]);
+  for (const [id, h] of Object.entries(state.huddles)) {
+    if (h.format !== "micro") continue;
+    const esc = own(state.escalations, h.escalation);
+    if (!h.seats.includes(agent) && !h.seats.includes(agentKey(rec?.persona ?? agent)) && (!rec?.task || esc?.task !== rec.task)) continue;
+    if (!retainHuddleReservations(state, id).length && !(esc?.status === "in_huddle" && esc.huddle === id && h.outcome === undefined)) continue;
+    const to = esc ? await scopeOrchestrator(state, esc) : undefined;
+    await store.transact(({ state: s }) => {
+      // Settlement belongs to the call, even if timeout already concluded or routed the huddle.
+      const events = retainHuddleReservations(s, id).map((c) => ev("budget.usage_recorded", c, source, h.escalation));
+      const current = own(s.escalations, h.escalation);
+      if (to && current?.status === "in_huddle" && current.huddle === id && own(s.huddles, id)?.outcome === undefined) {
+        events.push(
+          ev("huddle.concluded", { id, outcome: "NO_OUTCOME", decision: `Micro-huddle stopped with agent ${agent}` }, source, h.escalation),
+          ev("escalation.routed", { id: h.escalation, to, wake: true }, source, h.escalation),
+        );
+      }
+      return { events };
+    });
   }
 }
 const microAllowances = new Map<string, Map<symbol, MicroAllowance>>();

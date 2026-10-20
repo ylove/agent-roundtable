@@ -713,7 +713,7 @@ export class Runner {
         const cur = own(s.agents, rec.id);
         if (cur?.stop?.request !== stop.request || cur.stop.state !== "requested") return { events: [] };
         const taskState = task !== undefined ? own(s.tasks, task)?.state : undefined;
-        const working = taskState === "claimed" || taskState === "in_progress";
+        const working = taskState === "claimed" || taskState === "in_progress" || taskState === "blocked";
         const held = taskState !== undefined && !["accepted", "failed", "cancelled"].includes(taskState);
         const escalation = held
           ? runnerEscalation(

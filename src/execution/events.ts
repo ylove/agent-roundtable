@@ -49,6 +49,8 @@ const EMERGENCY = "'money'|'credentials'|'scope'|'human_action'";
 const HUDDLE_FORMAT = "'micro'|'meeting'|'collaborate'|'debate'|'waffle-house'|'conversation'|'replan'|'ultraplan'";
 const RESOLUTION = "'decide'|'huddle'|'retry'|'reassign'|'amend'|'dismiss'|'await_human'";
 const PROVENANCE = "'measured'|'reported'|'estimated'";
+const PM_CATEGORY = "'prompt_misread'|'project_misread'|'contract_ambiguity'|'implementation'|'test_gap'|'process'";
+const PM_FIX_STATUS = "'pending'|'fixed'|'abandoned'";
 
 const SOURCE: Shape = {
   kind: "'orchestrator'|'agent'|'runner'|'watchdog'|'human'|'system'",
@@ -285,6 +287,25 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "watchdog.stall_detected": { agent: "s", "task?": "id" },
 
   "sandbox.degraded": { backend: SANDBOX, reason: "t" },
+
+  "postmortem.finding_recorded": {
+    id: "s",
+    summary: "t",
+    detected_by: "t",
+    responsible: "t[]",
+    "task?": "id",
+    category: PM_CATEGORY,
+    "evidence?": "t[]",
+    "repeats?": "int",
+  },
+  "postmortem.fix_updated": { id: "s", "by?": "t", status: PM_FIX_STATUS, "ref?": "t" },
+  "postmortem.started": { id: "s", format: "'collaborate'|'waffle-house'", seats: "s[]" },
+  "postmortem.concluded": {
+    id: "s",
+    artifacts: { "fix?": "int", "rule?": "int", "persona_addendum?": "int", "agent_rule?": "int", "contract_rule?": "int", "memory?": "int", "dissent_score?": "int" },
+    flagged: "int",
+    record: "s",
+  },
 };
 
 const DRAFT: Shape = {

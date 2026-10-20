@@ -19,6 +19,7 @@
 // ============================================================================
 
 import { ID_RE, preview } from "./events.js";
+import { POSTMORTEM_HANDLERS, postmortemAfter } from "./postmortem-state.js";
 import { blockingIds, taskHeld, tripwireKey } from "./task-holds.js";
 import {
   CONTRACT_SCHEMA,
@@ -49,8 +50,8 @@ import {
  * 6: dissent firings and advisory scores; retained task rejection evidence.
  * 7: source-specific holds, pipeline-safe dissent pauses, amendment generations and delivery records.
  * 8: escalation resolution releases its own hold, including historical retries without an unblock.
- * 9: reserved for the other release workstream.
- * 10: per-agent, per-model usage with provenance (budget.by_agent_usage); agent.stop_requested / agent.stopped.
+ * 9: WS14 combines dissent state with postmortem findings, fix transitions and meetings.
+ * 10: WS15 per-agent, per-model usage with provenance (budget.by_agent_usage); agent.stop_requested / agent.stopped.
  */
 export const REDUCER_VERSION = 10;
 
@@ -90,6 +91,7 @@ export function initialState(executionId: string): BlackboardState {
     inbox: {},
     watchdog: { circuits: {}, deadlocks: [] },
     splits: {},
+    postmortem: { findings: {}, meetings: {} },
   };
 }
 
@@ -957,6 +959,8 @@ const HANDLERS: Handlers = {
   },
   "watchdog.stall_detected": none,
   "sandbox.degraded": none,
+
+  ...POSTMORTEM_HANDLERS,
 };
 
 /** Lease gone: removed from leases, from the queue (a withdrawn request), and from every request's blocking list. */
@@ -976,6 +980,7 @@ export function applyInPlace(state: BlackboardState, event: AnyEvent, resolved: 
   const handler = Object.hasOwn(HANDLERS, event.type) ? (HANDLERS[event.type] as Handler<EventType>) : undefined;
   if (!handler) throw new Error(`Blackboard: unknown event type ${preview(event.type)} at seq ${event.seq}`);
   handler(state, event as EventEnvelope, { resolved, strict: opts.strict === true });
+  postmortemAfter(state, event);
   state.seq = event.seq;
   state.hash = event.hash;
   return state;

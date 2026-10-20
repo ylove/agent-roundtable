@@ -33,7 +33,7 @@ agent-roundtable verify <execution-id> --json
 
 `run` is detached when started by the tools and survives MCP shutdown. It recovers state before scheduling work and exits when finished or after six hours fully paused. `status` inspects the run; the MCP `execution_status` tool provides the richer focused views and ensures runner liveness.
 
-The generated worker configuration invokes `mcp --worker`; its token file is single-use and must be in the execution's expected agent directory. You normally never invoke it manually. The worker server has 7 tools and skips dotenv. The default and explicit orchestrator `mcp` forms have 38 tools and keep the host's umask. Heads-down processes (`run`, `watch`, `status`, `verify`, `purge`, worker MCP and hook) use umask 0077 and explicit private state modes.
+The generated worker configuration invokes `mcp --worker`; its token file is single-use and must be in the execution's expected agent directory. You normally never invoke it manually. The worker server has 8 tools and skips dotenv. The default and explicit orchestrator `mcp` forms have 42 tools and keep the host's umask. Heads-down processes (`run`, `watch`, `status`, `verify`, `purge`, worker MCP and hook) use umask 0077 and explicit private state modes.
 
 Exit status is 0 for success, 1 for a refusal or failed verification, and 2 for usage errors or a denied hook. `statusline` always exits 0. The hook fails closed on errors. `verify` reports incomplete trailing writes separately from chain corruption. `purge` refuses running or paused runs; the confirmation flag authorizes deleting the terminal run and is audited. Abort or resume a live run through `control_execution` first.
 

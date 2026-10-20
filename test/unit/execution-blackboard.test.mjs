@@ -490,11 +490,12 @@ test("v10 dissent reducer retains first firing per task and latest advisory scor
   const { canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");
   const store = await newStore();
   const spec = { id: "risk", by: "critic", source: { kind: "manual" }, claim: "Risk", predicted_failure: "Failure", tripwire: { kind: "task_state", task: "a", state: "rejected" }, on_fire: "notify" };
-  const contract = makeContract({ dissents: [spec] });
+  const contract = makeContract({ postmortem: { enabled: true }, dissents: [spec] });
   const blob = await store.putBlob(JSON.stringify(contract));
   const source = { kind: "runner", id: "runner", pid: 1 };
   const emit = (type, payload) => store.transact(() => ({ events: [{ type, payload, source }] }));
   await emit("contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob });
+  await emit("postmortem.finding_recorded", { id: "finding", summary: "Failed task check", detected_by: "check test", responsible: ["worker"], task: "a", category: "implementation" });
   await emit("task.rejected", { task: "a", reasons: ["check failure"] });
   const rejectionSeq = (await store.state()).tasks.a.rejected_seq;
   const firing = { dissent_id: "risk", task: "a", tripped_by: "worker", evidence: "first evidence" };
@@ -513,12 +514,13 @@ test("v10 dissent reducer retains first firing per task and latest advisory scor
   assert.deepEqual(state.dissents.risk.fires, { "tripwire:risk:a": { ...firing, seq: firedSeq } });
   assert.equal(state.dissents.risk.score, "untested");
   assert.equal(state.dissents.risk.spec.claim, "Refined concern");
+  assert.equal(state.contract.postmortem.enabled, true);
+  assert.equal(state.postmortem.findings.finding.fix.status, "pending");
   assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);
-  // An authentic v6 snapshot must be ignored, even when its state digest is valid.
+  // A v8 snapshot without postmortem state must be ignored, even with a valid state digest.
   const old = JSON.parse(readFileSync(snapshot, "utf8"));
-  old.reducer_version = 6;
-  delete old.state.dissents;
-  delete old.state.tasks.a.rejected_seq;
+  old.reducer_version = 8;
+  delete old.state.postmortem;
   old.state_sha256 = sha256Hex(canonicalJSON(old.state));
   writeFileSync(snapshot, JSON.stringify(old));
   assert.deepEqual(await (await openExecutionStore(store.id)).state(), state);

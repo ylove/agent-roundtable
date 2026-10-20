@@ -4,7 +4,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import { startDashboard, DASHBOARD_CSP, capAtLine } from "../../dist/dashboard/server.js";
-import { completion, markdownToHtml, renderDissents, taskWeight } from "../../dist/dashboard/render.js";
+import { completion, markdownToHtml, renderDissents, renderPostmortems, taskWeight } from "../../dist/dashboard/render.js";
+import { renderUsage } from "../../dist/dashboard/usage-page.js";
+import { collectUsage } from "../../dist/usage/model.js";
 import { renderDagSvg, layers } from "../../dist/dashboard/dag-svg.js";
 import { COMMON_HEADERS, SecureServer } from "../../dist/http/secure-server.js";
 import { emit, frozenRun, makeContract, src, taskSpec } from "../fixtures/execution/run.mjs";
@@ -139,7 +141,7 @@ test("dashboard: dissents show armed and fired predicates, task evidence, huddle
   assert.match(armed, /href="[^"]+\/dissents" class="here">Dissents<\/a>/);
   assert.match(armed, /data-live="reload"/);
   assert.equal(armed.match(/Status: armed/g)?.length, 3);
-  for (const text of ["critic", "Concern checks", "Prediction paths", "consent · round-1", "check_failed", "path_touched", "task_state", "pause_and_huddle", "Not scored", "No huddles recorded."]) {
+  for (const text of ["critic", "Concern checks", "Prediction paths", "consent · round-1", "check_failed", "path_touched", "task_state", "pause_and_huddle", "not assessed", "No huddles recorded."]) {
     assert.ok(armed.includes(text), text);
   }
   for (const task of ["a", "b", undefined]) {
@@ -175,6 +177,23 @@ test("dashboard: dissents show armed and fired predicates, task evidence, huddle
     for (const secret of [EMAIL, GH_TOKEN, KEY]) assert.ok(!html.includes(secret), secret);
     assert.deepEqual(inlineProblems(html), []);
     assert.match(html, /Scores are advisory and never change voting or consent weight/);
+  }
+});
+
+test("dashboard: merged navigation keeps Usage, Dissents and Postmortems together", async () => {
+  const { store } = await frozenRun(makeContract({ postmortem: { enabled: true } }));
+  const context = { state: await store.state(), header: store.header(), base: "/test/", runner: { status: "unknown", detail: "" } };
+  const usage = await collectUsage({ executions: [store.id], table: false });
+  for (const [active, html] of [
+    ["Usage", renderUsage(context, usage, {})],
+    ["Dissents", renderDissents(context)],
+    ["Postmortems", renderPostmortems(context, {})],
+  ]) {
+    for (const label of ["Usage", "Dissents", "Postmortems"]) {
+      assert.match(html, new RegExp(`href="/test/${label.toLowerCase()}"[^>]*>${label}</a>`));
+    }
+    assert.match(html, new RegExp(`class="here">${active}</a>`));
+    assert.deepEqual(inlineProblems(html), []);
   }
 });
 

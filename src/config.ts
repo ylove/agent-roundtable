@@ -41,6 +41,7 @@ export const SESSIONS_DIR = join(ROUNDTABLE_HOME, "sessions");
 export const EXECUTIONS_DIR = join(ROUNDTABLE_HOME, "executions");
 export const WORKTREES_DIR = join(ROUNDTABLE_HOME, "worktrees");
 export const AUDIT_DIR = join(ROUNDTABLE_HOME, "audit");
+export const PROJECTS_DIR = join(ROUNDTABLE_HOME, "projects");
 
 const activityLog = process.env.ROUNDTABLE_ACTIVITY_LOG;
 export const ACTIVITY_LOG_PATH: string | null = !activityLog

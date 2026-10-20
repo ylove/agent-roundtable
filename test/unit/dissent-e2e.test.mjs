@@ -15,7 +15,7 @@ import { openExecutionStore } from "../../dist/execution/store.js";
 import { handleToolCall } from "../../dist/tools.js";
 import { resetWorkerTools } from "../../dist/tools/worker.js";
 
-test("dissent end to end: a failed submission check notifies the dissenter and opens a micro-huddle with the tripper", { timeout: 120_000 }, async (t) => {
+test("dissent and postmortem end to end: a failed submission records a finding and opens a micro-huddle", { timeout: 120_000 }, async (t) => {
   const personas = mkdtempSync(join(tmpdir(), "rt-dissent-e2e-"));
   const critic = join(personas, "critic.md");
   const builder = join(personas, "builder.md");
@@ -40,6 +40,7 @@ test("dissent end to end: a failed submission check notifies the dissenter and o
   const claim = "The unit check will reject the submitted implementation.";
   const failure = "dissent-e2e validation failure";
   run = await makeRun({ contract: {
+    postmortem: { enabled: true },
     participants: [{ agent: critic }, { agent: builder }],
     tasks: [task("a", { persona: builder, checks: ["unit"] })],
     validation: { commands: [nodeCommand("unit", `console.error(${JSON.stringify(failure)}); process.exit(1)`)], final: [] },
@@ -129,6 +130,12 @@ test("dissent end to end: a failed submission check notifies the dissenter and o
   const opener = (await run.store.getBlob(turns[0].payload.blob)).toString("utf8");
   assert.ok(opener.includes(claim), "the dissenter opens with the retained concern");
   assert.equal(state.huddles[started.payload.id].outcome, "AGREED");
+  const findings = Object.values(state.postmortem.findings);
+  assert.equal(findings.length, 1, "the same failed submission produces a postmortem finding");
+  assert.equal(findings[0].task, "a");
+  assert.equal(findings[0].detected_by, "check unit");
+  assert.equal(findings[0].fix.status, "pending");
+  assert.equal(Object.keys(state.dissents["check-risk"].fires).length, 1);
   assert.equal(answers, 1);
   assert.equal(calls.length, 1, "the dissenter makes the concluding persona call");
   // Reopening reads the same durable events and blackboard projection.

@@ -70,6 +70,9 @@ export const JOIN_EXECUTION = "join_execution";
 
 // Usage (orchestrator server only)
 export const USAGE = "usage";
+// Postmortem mode (orchestrator server only)
+export const POSTMORTEM = "postmortem";
+export const HOLD_POSTMORTEM = "hold_postmortem";
 
 // Worker tools: bound to the token on the worker server; on the orchestrator server they take agent_token
 export const READ_BLACKBOARD = "read_blackboard";

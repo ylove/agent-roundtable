@@ -38,9 +38,11 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 [Heads-down runs](docs/heads-down.md) execute an agreed, frozen contract in parallel task worktrees with leases, checks, a watchdog and escalations. Example: “Execute the approved contract with a $20 budget and a dashboard; keep me posted here.” See the [example contract](examples/contract.example.json).
 
+[Postmortem mode](docs/modes/postmortem.md) is opt-in per project: while testing sends fixers back the orchestrator keeps a draft of every finding, then the agents that did the work meet it (the human has no seat) and leave lessons that are read before the next plan. Example: “Turn on postmortem meetings for this project.”
+
 ## Tools
 
-**40 tools on the orchestrator server; 8 on worker servers.** The seven execution worker tools appear in both; the orchestrator's copies also require `execution_id` and `agent_token`. Dissent filing is also available on both servers. The table follows the registered definitions in `src/tools/*.ts`; [full arguments and examples](docs/tools.md).
+**42 tools on the orchestrator server; 8 on worker servers.** The seven execution worker tools appear in both; the orchestrator's copies also require `execution_id` and `agent_token`. Dissent filing is also available on both servers. The table follows the registered definitions in `src/tools/*.ts`; [full arguments and examples](docs/tools.md).
 
 | Group | Tool | Purpose |
 | --- | --- | --- |
@@ -74,6 +76,8 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | Runs | [`control_execution`](docs/tools.md#control_execution) | Pause, resume, steer, abort or purge a run; stop an agent; write a handoff. |
 | Runs | [`resolve_escalation`](docs/tools.md#resolve_escalation) | Decide, huddle, retry, reassign or amend after an escalation. |
 | Runs | [`join_execution`](docs/tools.md#join_execution) | Register an external worker and return its token once. |
+| Postmortem | [`postmortem`](docs/tools.md#postmortem) | Opt in per project, keep the running draft of findings, read lessons and records. |
+| Postmortem | [`hold_postmortem`](docs/tools.md#hold_postmortem) | Hold the blameless meeting after the fixes, then conclude it with accepted artifacts. |
 | Workers (both servers) | [`read_blackboard`](docs/tools.md#read_blackboard) | Read shared run state and your inbox. |
 | Workers (both servers) | [`claim_task`](docs/tools.md#claim_task) | Claim or release an external worker task. |
 | Workers (both servers) | [`lease`](docs/tools.md#lease) | Request or release path leases. |
@@ -106,8 +110,8 @@ No arguments starts the orchestrator MCP server. The **11 subcommands** are docu
 ## Docs
 
 - [Getting started and registration](docs/getting-started.md)
-- [Mode guides](docs/modes/meetings.md): [collaborations](docs/modes/collaborations.md), [ultraplan](docs/modes/ultraplan.md), [agent workshops](docs/modes/agent-workshops.md), [prototypes](docs/modes/prototype-mode.md), [public sessions](docs/modes/public-sessions.md)
-- [Heads-down user guide](docs/heads-down.md) and [design specification](docs/design/heads-down.md)
+- [Mode guides](docs/modes/meetings.md): [collaborations](docs/modes/collaborations.md), [ultraplan](docs/modes/ultraplan.md), [agent workshops](docs/modes/agent-workshops.md), [prototypes](docs/modes/prototype-mode.md), [public sessions](docs/modes/public-sessions.md), [postmortems](docs/modes/postmortem.md)
+- [Heads-down user guide](docs/heads-down.md) and [design specification](docs/design/heads-down.md); [postmortem design specification](docs/design/postmortem.md)
 - [Usage visibility](docs/usage.md): the status line, the usage report, the dashboard Usage page and stopping an agent
 - [Dissents and tripwires](docs/dissents.md)
 - [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)

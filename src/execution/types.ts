@@ -171,7 +171,7 @@ export type DissentTripwire =
 export interface Dissent {
   id: string;
   by: string;
-  source: { kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "manual"; ref?: string };
+  source: { kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "duel" | "manual"; ref?: string };
   claim: string;
   predicted_failure: string;
   /** May be absent only while drafting; freeze requires arming or explicit excusal. */

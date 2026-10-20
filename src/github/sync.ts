@@ -461,6 +461,19 @@ export class GitHubSync {
         if (url) this.comment(PARENT, ev.seq, `Pull request: ${ghLine(url, 300)}`);
         break;
       }
+      case "postmortem.concluded": {
+        // One comment on the parent issue (docs/design/postmortem.md §8); the dialogue stays in the record, not on GitHub.
+        const p = ev.payload;
+        const kinds = Object.entries(p.artifacts).map(([k, n]) => `${n} ${ghText(k.replace(/_/g, " "), 40)}`).join(", ");
+        const meeting = Object.hasOwn(state.postmortem?.meetings ?? {}, p.id) ? state.postmortem!.meetings[p.id] : undefined;
+        const lines = [
+          `**A postmortem meeting took place** (${ghCode(p.id, 40)}${meeting ? `, ${ghText(meeting.format, 40)} with ${meeting.seats.map((s) => ghText(s, 60)).join(", ")}` : ""}). The human has no seat at it.`,
+          `It ended with ${kinds ? `these accepted artifacts: ${kinds}` : "no accepted artifacts"}${p.flagged ? `, and ${p.flagged} misreading${p.flagged === 1 ? "" : "s"} flagged for the next plan` : ""}.`,
+          "The full record, every turn included, is read with the orchestrator's postmortem tool.",
+        ];
+        this.comment(PARENT, ev.seq, lines.join("\n\n"));
+        break;
+      }
       case "execution.completed": {
         f.completed = true;
         const pr = ev.payload.pr_url ? ghLine(ev.payload.pr_url, 300) : undefined;

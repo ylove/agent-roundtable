@@ -17,6 +17,8 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { AGENTS_DIR, WORKSPACE_DIR } from "../config.js";
 import { loadAgent } from "../agents.js";
+import { contractLessons, type ContractLessons } from "../postmortem/lessons.js";
+import { projectOfRoot } from "../postmortem/store.js";
 import { newExecutionId, newId } from "../ids.js";
 import { appendAudit } from "../security/audit.js";
 import { childEnv } from "../security/child-env.js";
@@ -71,6 +73,7 @@ import {
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+const PM_NOT_ENABLED = "postmortem.enabled was not turned on: postmortem mode is off for this project, and only the human's request turns it on (postmortem(action: \"enable\", project, reason))";
 const same = (a: unknown, b: unknown) => canonicalJSON(a ?? null) === canonicalJSON(b ?? null);
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const mode = (status: string) => (status === "created" ? "deliberation" as const : "execution" as const);
@@ -140,6 +143,8 @@ export interface ContractResult {
   affected?: AffectedTasks;
   /** Participants asked in a consent round run by this call. */
   asked?: string[];
+  /** propose: what earlier postmortems of the project taught (docs/design/postmortem.md §7). */
+  postmortemLessons?: ContractLessons["section"];
   paths: { json: string; markdown: string };
   next: string;
 }
@@ -332,6 +337,17 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   const repoDir = o.repoDir ?? (typeof explicitScope.repo_root === "string" ? explicitScope.repo_root : undefined) ?? parent?.contract.scope.repo_root ?? WORKSPACE_DIR;
   const baseRef = o.baseRef ?? (typeof explicitScope.base_ref === "string" ? explicitScope.base_ref : undefined) ?? parent?.contract.scope.base_ref ?? "HEAD";
   const { root, sha } = await resolveRepo(repoDir, baseRef);
+  // Postmortem mode (docs/design/postmortem.md §2, §7): the project's opt-in rides in the contract, and what earlier
+  // postmortems taught becomes decisions and warnings. Lessons are read whether or not the mode is on now.
+  const lessons = contractLessons(root);
+  const projectOn = projectOfRoot(root)?.postmortem.enabled === true;
+  // The mode comes from the project's state only: an explicit true while the project is off is dropped (an explicit false is allowed).
+  if (explicit && isObj(explicit.postmortem) && explicit.postmortem.enabled === true && !projectOn) {
+    delete explicit.postmortem;
+    warnings.push(PM_NOT_ENABLED);
+  }
+  const postmortemOn = projectOn && !(explicit && explicit.postmortem !== undefined);
+  if (lessons) warnings.push(...lessons.warnings);
 
   const executionId = newExecutionId();
   const contractId = contractIdFor(executionId, 1);
@@ -342,9 +358,14 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
     scope: { orchestrator, repo_root: root, base_ref: sha, ...(o.parentContract && o.parentTask && { parent: { contract: o.parentContract, task: o.parentTask } }) },
     ...(o.title?.trim() && { title: o.title.trim() }),
     ...(o.participants?.length && { participants: o.participants }),
+    ...(postmortemOn && { postmortem: { enabled: true } }),
   };
   const assemble = (structure: Obj): Obj => {
     const c = applyMergePatch<Obj>(applyMergePatch(structure, explicit ?? {}), fixed);
+    if (lessons) {
+      const have = Array.isArray(c.decisions) ? c.decisions : [];
+      c.decisions = [...have, ...lessons.decisions.filter((d) => !have.some((x) => isObj(x) && x.id === d.id))];
+    }
     if (c.title === undefined) c.title = firstLine(o.goal);
     if (c.participants === undefined && src && Array.isArray(c.tasks)) {
       const personas = c.tasks.map((t) => (isObj(t) && typeof t.persona === "string" ? t.persona : "")).filter(Boolean);
@@ -444,7 +465,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
       warnings.push(`the consent round failed: ${errText(e)}`);
     }
   }
-  return resultFor(store, contractId, { warnings, source, ...(asked && { asked }) });
+  return resultFor(store, contractId, { warnings, source, ...(asked && { asked }), ...(lessons && { postmortemLessons: lessons.section }) });
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +899,10 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
   const fromSession = opts.fromSession ? sessionPatch(opts.fromSession) : undefined;
   if (fromSession?.warn) warnings.push(fromSession.warn);
   const merged = applyMergePatch<Obj>(fromSession ? applyMergePatch(c, fromSession.patch) : c, patch);
+  if (isObj(merged.postmortem) && merged.postmortem.enabled === true && c.postmortem?.enabled !== true && projectOfRoot(c.scope.repo_root)?.postmortem.enabled !== true) {
+    delete merged.postmortem;
+    warnings.push(PM_NOT_ENABLED);
+  }
   const version = rec.version + 1;
   const candidate: Obj = { ...merged, version, status: rec.frozen ? "frozen" : "draft", consent: [] };
   delete candidate.frozen;

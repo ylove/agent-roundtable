@@ -177,6 +177,8 @@ export interface Contract {
   authority: { lead: string; may: AuthorityAction[]; budget_extension_pct: number };
   sandbox: { backend: SandboxBackendId; image: string; install?: { argv: string[]; egress: string[] } };
   workers: { driver: WorkerDriverId; model?: string; fallback_model?: string };
+  /** Postmortem mode (docs/design/postmortem.md §2): set by propose_contract when the project has it enabled. */
+  postmortem?: { enabled: boolean };
   consent: Array<{ agent: string; verdict: ConsentVerdict; reason?: string }>;
   frozen?: { by: string; at: string; hash: string };
 }
@@ -313,6 +315,39 @@ export interface Escalation {
   huddle?: string;
   resolution?: { action: ResolutionAction; decision: string; by: string };
   raised_seq: number;
+}
+
+// ---------------------------------------------------------------------------
+// Postmortems (docs/design/postmortem.md)
+// ---------------------------------------------------------------------------
+
+export type PostmortemCategory = "prompt_misread" | "project_misread" | "contract_ambiguity" | "implementation" | "test_gap" | "process";
+export type PostmortemFixStatus = "pending" | "fixed" | "abandoned";
+export type PostmortemFormat = "collaborate" | "waffle-house";
+export type PostmortemArtifactKind = "fix" | "rule" | "persona_addendum" | "agent_rule" | "contract_rule" | "memory" | "dissent_score";
+
+export interface PostmortemFinding {
+  id: string;
+  at: string;
+  /** What went wrong, at most 600 characters. */
+  summary: string;
+  /** The check, test or reviewer that caught it. */
+  detected_by: string;
+  /** Agents whose work was sent back (persona names, or "orchestrator"). */
+  responsible: string[];
+  task?: string;
+  category: PostmortemCategory;
+  /** References only: blob refs, event ids, commit shas, file paths. */
+  evidence?: string[];
+  fix?: { by?: string; status: PostmortemFixStatus; ref?: string };
+  /** How many times the same failure recurred after the first. */
+  repeats?: number;
+}
+
+/** A finding as the blackboard holds it: its fix is always set, and `pm` names the meeting that covered it. */
+export interface PostmortemFindingState extends PostmortemFinding {
+  fix: { by?: string; status: PostmortemFixStatus; ref?: string };
+  pm?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +525,22 @@ export interface EventPayloads {
   "watchdog.stall_detected": { agent: string; task?: string };
 
   "sandbox.degraded": { backend: SandboxBackendId; reason: string };
+
+  // Postmortem mode (docs/design/postmortem.md §4)
+  "postmortem.finding_recorded": {
+    id: string;
+    summary: string;
+    detected_by: string;
+    responsible: string[];
+    task?: string;
+    category: PostmortemCategory;
+    evidence?: string[];
+    /** A repeat of the same finding (same id): how many times it has recurred. */
+    repeats?: number;
+  };
+  "postmortem.fix_updated": { id: string; by?: string; status: PostmortemFixStatus; ref?: string };
+  "postmortem.started": { id: string; format: PostmortemFormat; seats: string[] };
+  "postmortem.concluded": { id: string; artifacts: Partial<Record<PostmortemArtifactKind, number>>; flagged: number; record: string };
 }
 
 export type EventType = keyof EventPayloads;
@@ -520,6 +571,7 @@ export const EVENT_TYPES = [
   "watchdog.action", "watchdog.circuit_opened", "watchdog.circuit_closed", "watchdog.deadlock_detected",
   "watchdog.stall_detected",
   "sandbox.degraded",
+  "postmortem.finding_recorded", "postmortem.fix_updated", "postmortem.started", "postmortem.concluded",
 ] as const satisfies readonly EventType[];
 
 // Compile-time check that EVENT_TYPES lists every key of EventPayloads.
@@ -675,6 +727,17 @@ export interface BlackboardState {
    * is adopted, dependencies on a split task are rewritten to its parts.
    */
   splits?: Record<string, string[]>;
+  /**
+   * Added in WS14: the postmortem draft of this run (docs/design/postmortem.md §4). A finding's `pm`
+   * is the meeting that covered it; findings without one are the open draft. ready_seq is the seq of
+   * the event after which the draft became ready for a meeting (every fix settled, every task with a
+   * finding terminal); the watcher wakes the orchestrator on it.
+   */
+  postmortem?: {
+    findings: Record<string, PostmortemFindingState>;
+    meetings: Record<string, { format: PostmortemFormat; seats: string[]; concluded?: { artifacts: Partial<Record<PostmortemArtifactKind, number>>; flagged: number; record: string } }>;
+    ready_seq?: number;
+  };
 }
 
 // ---------------------------------------------------------------------------

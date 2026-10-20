@@ -170,7 +170,7 @@ Add `state.dissents` to `BlackboardState` and initialize and reduce it in `src/e
 
 The reducer remains pure and deterministic. Contract adoption supplies dissent definitions from resolved contract blobs. New firing and scoring events update the projection, and older logs without dissents produce an empty dissent section. Preserve runtime records for unchanged predicates across contract amendments. Removed dissents are pruned from the current projection; their unresolved escalations are withdrawn and their own holds released. The amendment tool always appends `escalation.withdrawn` for an unresolved removed dissent and includes removed dissent ids in the amendment audit. It appends a source-specific `task.unblocked` only when the affected task exists and is nonterminal; a task cancelled by an earlier amendment stays cancelled. Withdrawal also appends correlated `execution.resumed` events for human-action pauses owned by the removed escalations, including dependent-task scopes. Compute ownership from pause/resume events, treating all escalations withdrawn in the same amendment as released while preserving overlapping manual and other unresolved-escalation pauses.
 
-The initial WS16 reducer version was 6. Version 7 added source-specific holds, pipeline-safe pauses, amendment generations and delivery records. `REDUCER_VERSION` is now 8 so replay releases resolved escalation holds even in historical retry/reassignment logs without an explicit unblock. The store rejects older snapshots and rebuilds the projection from the event log. Do not rewrite historical events or add a separate mutable store for runtime dissent state.
+The initial WS16 reducer version was 6. Version 7 added source-specific holds, pipeline-safe pauses, amendment generations and delivery records. Version 8 made replay release resolved escalation holds even in historical retry/reassignment logs without an explicit unblock. `REDUCER_VERSION` is now 9, combining those dissent semantics with postmortem findings, fix transitions and meetings. The store rejects older snapshots and rebuilds the projection from the event log. Do not rewrite historical events or add a separate mutable store for runtime dissent state.
 
 ## 7. Scoring
 
@@ -182,7 +182,7 @@ Add an orchestrator tool to set a dissent's outcome by emitting `dissent.scored`
 
 The per-persona record is advisory and display-only. It must never weight votes, alter consent thresholds or change routing authority. A fired tripwire does not automatically mean `vindicated`, and an unfired one does not automatically mean `refuted`. Before scoring, display the absence of an assessment rather than manufacturing an event.
 
-WS16 supplies the event, projection and explicit scoring tool. WS14 later connects postmortem findings to this scoring path.
+WS16 supplies the event, projection and explicit scoring tool. WS14 connects postmortem findings through accepted `dissent_score` artifacts with supporting evidence. The postmortem input and record include a **Dissents** snapshot from the existing projection. Conclude requires project opt-in, explicit artifact acceptance and the contract’s orchestrator identity, then calls the same shared scoring transaction as `score_dissent` and audits each application. Stable operation correlations deduplicate postmortem retries; repeated unchanged explicit scores are no-ops. No assessment is displayed as "not assessed" and emits no event. See [Postmortem mode: artifacts](postmortem.md#6-artifacts).
 
 ## 8. Dashboard
 

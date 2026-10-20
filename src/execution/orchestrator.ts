@@ -144,7 +144,7 @@ export function watchSpec(exe: string, orchestrator: string): { argv: string[]; 
     instructions:
       `Start the watcher now as a BACKGROUND shell command (in Claude Code: the Bash tool with run_in_background: true), exactly as given: ${command} ` +
       `(this is \`agent-roundtable watch ${exe} --as ${orchestrator}\`). It prints one JSON line and exits when you are needed: an escalation routed to you, ` +
-      `something awaiting the human, the budget past 80%, the end of the run, or ${WATCH_DEFAULT_TIMEOUT_MIN} minutes without news. ` +
+      `something awaiting the human, the budget past 80%, a postmortem ready to hold or concluded (only with postmortem mode), the end of the run, or ${WATCH_DEFAULT_TIMEOUT_MIN} minutes without news. ` +
       "When it wakes you, handle the reason (execution_status, resolve_escalation, control_execution, or ask the human), then start the same command again in the background: " +
       "re-arm it after every wake until the run has ended. While it waits, answer the human's questions about progress with execution_status (focus: \"nav\" answers \"how close is the nav?\") " +
       "instead of reading files or logs, and keep talking with the human as usual.",

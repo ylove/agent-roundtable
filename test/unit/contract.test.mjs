@@ -88,6 +88,14 @@ test("dissents normalize defaults, change both consent and contract hashes, and 
   refused({ status: "frozen", dissents: [dissent({ tripwire: undefined })] }, /tripwire is required before freeze/);
 });
 
+test("postmortem mode and dissents survive contract normalization together", () => {
+  const r = check({ postmortem: { enabled: true }, dissents: [dissent()] });
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.contract.postmortem.enabled, true);
+  assert.equal(r.contract.dissents[0].id, "retry-risk");
+  assert.deepEqual(checkContract(r.contract).contract, r.contract);
+});
+
 test("dissents reject unknown participants, commands and task references in every predicate", () => {
   refused({ dissents: [dissent({ by: "missing" })] }, /by "missing" is not a participant/);
   refused({ dissents: [dissent({ tripwire: { kind: "check_failed", check: "missing" } })] }, /check names unknown command/);

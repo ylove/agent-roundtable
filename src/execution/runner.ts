@@ -38,6 +38,8 @@ import { agentDir, writeAgentLeases, prepareWorkerFiles } from "../workers/files
 import { RunMonitor, type ExitReason, type MonitorCheckpoint } from "../workers/monitor.js";
 import { reconcileLaunch } from "../workers/launch-intent.js";
 import { stopGroup, workerExit, type WorkerExit } from "../workers/process.js";
+import { autoFindings } from "../postmortem/auto.js";
+import { cardLessons } from "../postmortem/lessons.js";
 import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
 import { classifyFailure } from "./circuit.js";
@@ -332,6 +334,8 @@ export class Runner {
   private readonly renewed: Record<string, { renewedAt: number }> = {};
   private spawnBlocked = false;
   private snapSeq = 0;
+  /** The last event seq the postmortem pass has scanned (docs/design/postmortem.md §4). */
+  private pmScanned = 0;
   private snapAt = Date.now();
   private sandboxP?: Promise<SandboxBackend>;
   private driverChecked?: Promise<{ ok: boolean; missing: string[] }>;
@@ -644,12 +648,29 @@ export class Runner {
 
     this.routeEscalations(state);
     this.passEscalations();
+    await this.postmortemPass();
     await this.retireMerged();
     await this.schedule(state);
     this.merge.feed(await this.store.state());
     await this.checkFailure(await this.store.state());
     this.checkIdle(state);
     await this.maybeSnapshot();
+  }
+
+  /** Postmortem mode: record a finding for each submission that testing sent back (autoFindings; idempotent). */
+  private async postmortemPass(): Promise<void> {
+    try {
+      // Scan a fresh, locked tail so a recovery cannot land between the scan and its findings.
+      const scanned = await this.store.transact(async ({ state }) => {
+        const tail = await this.store.events({ sinceSeq: this.log.at(-1)?.seq ?? 0 });
+        const log = [...this.log, ...tail];
+        const seq = log.at(-1)?.seq ?? 0;
+        return { events: seq === this.pmScanned ? [] : autoFindings(log, state, this.pmScanned, this.source), result: seq };
+      });
+      this.pmScanned = scanned.result!;
+    } catch (e) {
+      this.say(`postmortem pass: ${errText(e)}`);
+    }
   }
 
   /** Retry/reassignment drops a claim durably, so a lost handoff can never orphan its worker. */
@@ -666,6 +687,7 @@ export class Runner {
   }
 
   private async finish(state: BlackboardState): Promise<void> {
+    await this.postmortemPass();
     if (state.status === "failed") this.exitCode = 1;
     if (state.status === "aborted") {
       for (const t of this.workers.values()) if (!t.exit) await this.killWorker(t.agent, "killed", "the run was aborted");
@@ -1329,7 +1351,7 @@ export class Runner {
       const sinceSeq = this.lastSeq((e) => e.type === "agent.spawned" && e.payload.task === task);
       const immediate: TaskCardOptions["immediate"] | undefined =
         o.immediate ?? (sinceSeq > 0 ? respawnContext(after, task, { sinceSeq, why: o.why ?? rt.last_note ?? "Your previous worker run ended before the task was done." }) : undefined);
-      const card = buildTaskCard(after, task, { ...(immediate && { immediate }) });
+      const card = buildTaskCard(after, task, { ...(immediate && { immediate }), ...cardLessons(after, task) });
       const outputPath = join(files.runsDir, `${attempt}.jsonl`);
       const startOffset = fileSize(outputPath);
       const launch: WorkerLaunch = {

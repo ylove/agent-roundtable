@@ -9,6 +9,7 @@ import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
 import { sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveCollaboration } from "./archive.js";
+import { isPostmortemOrigin } from "../postmortem/sessions.js";
 import { callLLM } from "../providers/index.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
@@ -821,7 +822,8 @@ export function listCollaborations(): Array<{
   board_url?: string;
   baseUrl?: string;
 }> {
-  return Array.from(collaborations.values()).map((c) => ({
+  // A postmortem meeting takes no outside input and is read through postmortem(action: "read"), not listed here.
+  return Array.from(collaborations.values()).filter((c) => !isPostmortemOrigin(c.origin)).map((c) => ({
     id: c.id,
     agents: c.agents.map((a) => a.name),
     topic: c.topic || (c.mode === "conversation" ? "(open conversation)" : ""),

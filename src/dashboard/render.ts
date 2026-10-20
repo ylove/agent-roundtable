@@ -141,7 +141,7 @@ export function awaitingHuman(state: BlackboardState): Escalation[] {
 // Page frame
 // ---------------------------------------------------------------------------
 
-export type PageKey = "overview" | "tasks" | "dag" | "escalations" | "dissents" | "events" | "contract" | "task";
+export type PageKey = "overview" | "tasks" | "dag" | "escalations" | "dissents" | "events" | "contract" | "postmortems" | "task";
 
 export interface PageContext {
   state: BlackboardState;
@@ -159,7 +159,13 @@ const NAV: Array<[Exclude<PageKey, "task">, string, string]> = [
   ["dissents", "Dissents", "dissents"],
   ["events", "Events", "events"],
   ["contract", "Contract", "contract"],
+  ["postmortems", "Postmortems", "postmortems"],
 ];
+
+/** The Postmortems page is linked once the run has postmortem mode on, or any finding or meeting. */
+function hasPostmortems(s: BlackboardState): boolean {
+  return s.contract?.postmortem?.enabled === true || Object.keys(s.postmortem?.findings ?? {}).length > 0 || Object.keys(s.postmortem?.meetings ?? {}).length > 0;
+}
 
 /** "reload" pages refresh themselves on new events; the others show a notice. */
 const LIVE: Record<PageKey, "reload" | "notice"> = {
@@ -170,6 +176,7 @@ const LIVE: Record<PageKey, "reload" | "notice"> = {
   dissents: "reload",
   events: "notice",
   contract: "notice",
+  postmortems: "reload",
   task: "notice",
 };
 
@@ -195,7 +202,7 @@ function banner(c: PageContext): string {
 function frame(c: PageContext, page: PageKey, title: string, body: string): string {
   const b = escapeHtml(c.base);
   const runTitle = c.state.contract?.title ?? c.state.execution;
-  const nav = NAV.map(
+  const nav = NAV.filter(([key]) => key !== "postmortems" || page === "postmortems" || hasPostmortems(c.state)).map(
     ([key, label, path]) => `<a href="${b}${path}"${key === page || (page === "task" && key === "tasks") ? ` class="here"` : ""}>${label}</a>`
   ).join("");
   return (
@@ -376,6 +383,54 @@ export function renderEscalations(c: PageContext): string {
   return frame(c, "escalations", "Escalations", body);
 }
 
+// --- postmortems ---------------------------------------------------------------
+
+/** A concluded meeting's record, read from its blob by the server (markdown), or why it could not be. */
+export interface PostmortemRecordView {
+  markdown?: string;
+  error?: string;
+}
+
+/** Findings with their fix status, then each meeting: its dialogue, artifacts and their status (the record, redacted and escaped). */
+export function renderPostmortems(c: PageContext, records: Record<string, PostmortemRecordView>): string {
+  const st = c.state.postmortem;
+  const findings = Object.values(st?.findings ?? {});
+  const fixClass = { pending: "st-pending", fixed: "st-accepted", abandoned: "st-cancelled" } as const;
+  const rows = findings.map(
+    (f) =>
+      `<tr><td><code>${t(f.id)}</code></td><td>${t(f.category.replace(/_/g, " "))}</td>` +
+      `<td class="note">${tc(f.summary, 600)}${f.repeats ? ` <span class="meta">(repeated ${f.repeats}×)</span>` : ""}</td>` +
+      `<td>${tc(f.detected_by, 200)}</td><td>${f.responsible.map((r) => tc(r, 80)).join(", ")}</td><td>${f.task ? taskLink(c.base, f.task) : ""}</td>` +
+      `<td><span class="badge ${fixClass[f.fix.status]}">${t(f.fix.status)}</span>${f.fix.by ? ` <span class="meta">${tc(f.fix.by, 80)}</span>` : ""}</td>` +
+      `<td>${f.pm ? t(f.pm) : `<span class="empty">draft</span>`}</td></tr>`
+  );
+  const meetings = Object.entries(st?.meetings ?? {}).map(([id, m]) => {
+    const rec = Object.hasOwn(records, id) ? records[id] : undefined;
+    const done = m.concluded;
+    const counts = done ? Object.entries(done.artifacts).map(([k, n]) => `${n} ${k.replace(/_/g, " ")}`).join(", ") : "";
+    return (
+      `<section><h2>${t(id)}</h2><p class="meta">${t(m.format)} · seats ${m.seats.map((x) => tc(x, 80)).join(", ")} · ` +
+      (done
+        ? `concluded: ${t(counts || "no artifacts applied")}${done.flagged ? ` · ${done.flagged} flagged` : ""}`
+        : "held, waiting for the orchestrator's conclusion") +
+      `</p>` +
+      (rec?.markdown !== undefined
+        ? `<details open><summary>The full record: every turn, the artifacts and their status</summary><article class="contract">${markdownToHtml(red(rec.markdown))}</article></details>`
+        : `<p class="empty">${t(rec?.error ?? (done ? "The record could not be read." : "The record appears once the meeting is concluded."))}</p>`) +
+      `</section>`
+    );
+  });
+  const body =
+    `<h1>Postmortems</h1>` +
+    `<p class="meta">Read-only. The meeting has no seat for the human: nothing typed anywhere reaches it.</p>` +
+    `<h2>Findings</h2>` +
+    (rows.length
+      ? `<table><thead><tr><th>Id</th><th>Category</th><th>What went wrong</th><th>Caught by</th><th>Responsible</th><th>Task</th><th>Fix</th><th>Meeting</th></tr></thead><tbody>${rows.join("")}</tbody></table>`
+      : `<p class="empty">No findings recorded.</p>`) +
+    (meetings.length ? meetings.join("") : `<p class="empty">No postmortem meeting yet.</p>`);
+  return frame(c, "postmortems", "Postmortems", body);
+}
+
 export function renderDissents(c: PageContext): string {
   const sections = Object.entries(c.state.dissents).map(([id, rec]) => {
     const d = rec.spec;
@@ -393,7 +448,7 @@ export function renderDissents(c: PageContext): string {
       `<p class="note">Predicted failure: ${t(d?.predicted_failure ?? "Unknown")}</p>` +
       `<p>Source: ${t(d?.source.kind ?? "Unknown")}${d?.source.ref ? ` · ${t(d.source.ref)}` : ""}</p>` +
       `<p>Tripwire:</p><pre>${t(d?.tripwire ? JSON.stringify(d.tripwire, null, 2) : "Not supplied")}</pre>` +
-      `<p>On fire: ${t(d?.on_fire ?? "Unknown")} · Score: ${t(rec.score ?? "Not scored")}</p>` +
+      `<p>On fire: ${t(d?.on_fire ?? "Unknown")} · Score: ${t(rec.score ?? "not assessed")}</p>` +
       (fires.length ? `<h3>Firings</h3><table><thead><tr><th>Task</th><th>Tripped by</th><th>Evidence</th><th>Notification</th></tr></thead><tbody>` +
         fires.map((f) => `<tr><td>${t(f.task ?? "Integration")}</td><td>${t(f.tripped_by)}</td><td class="note">${t(f.evidence)}</td>` +
           `<td>${t((f.notified ?? []).join(", "))}${f.orchestrator_woken ? ` · ${t("Orchestrator woken")}` : ""}</td></tr>`).join("") +
@@ -692,5 +747,12 @@ export function publicState(state: BlackboardState, runner: RunnerHealth) {
     budget: { spent_usd: budget.spent, ...(budget.limit !== undefined && { budget_usd: budget.limit }), estimated: budget.estimated },
     runner,
     notes: state.notes.slice(-10).map((n) => ({ seq: n.seq, agent: red(n.agent), topic: red(n.topic), text: rc(n.text, 400) })),
+    ...(hasPostmortems(state) && {
+      postmortem: {
+        findings: Object.keys(state.postmortem?.findings ?? {}).length,
+        pending_fixes: Object.values(state.postmortem?.findings ?? {}).filter((f) => f.pm === undefined && f.fix.status === "pending").length,
+        meetings: Object.keys(state.postmortem?.meetings ?? {}).length,
+      },
+    }),
   };
 }

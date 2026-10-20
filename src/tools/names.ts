@@ -68,6 +68,10 @@ export const CONTROL_EXECUTION = "control_execution";
 export const RESOLVE_ESCALATION = "resolve_escalation";
 export const JOIN_EXECUTION = "join_execution";
 
+// Postmortem mode (orchestrator server only)
+export const POSTMORTEM = "postmortem";
+export const HOLD_POSTMORTEM = "hold_postmortem";
+
 // Worker tools: bound to the token on the worker server; on the orchestrator server they take agent_token
 export const READ_BLACKBOARD = "read_blackboard";
 export const CLAIM_TASK = "claim_task";

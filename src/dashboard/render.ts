@@ -1,5 +1,4 @@
-// =====================================================================}
-
+// ============================================================================
 // Execution dashboard: server-rendered pages
 //
 // Every string that comes from the run (contract, notes, escalations, diffs, event payloads,
@@ -7,8 +6,7 @@
 // Pages carry no inline script, style or event handler: the stylesheet and the live-update
 // script are static routes (assets.ts), and links are built from validated ids only. Contract
 // markdown goes through a small converter that escapes everything and passes no raw HTML.
-// =====================================================================}
-
+// ============================================================================
 
 import { escapeHtml } from "../http/secure-server.js";
 import { redact } from "../publishers/redact.js";

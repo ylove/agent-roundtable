@@ -34,3 +34,14 @@ Replay re-emits recorded events and prototype contents through the same observer
 The room binds to loopback and requires a capability token. Its page uses an external script under a strict CSP. Prototype routes serve only recorded files from memory, with the existing application CSP. Game frames allow scripts, forms, and modals with an opaque origin. The room writes model text into the DOM with `textContent`.
 
 For integration, `runDuel(opts, observer, signal, { resolveSeats })` accepts a resolver returning seats with optional persona `prompt` text. The three-argument call uses `resolveSeatsLocal`. `startRoom({ open, hold })` returns an observer, URL, and asynchronous `close()`. Pass its observer directly or through `fanout` so prototype content attachments reach the room; NDJSON remains the shared event shape. `replayDuel(path, observer, { speed, signal })` uses the same attachment mechanism. Event streams received from another process can supply bytes with the room's `setPrototypeFiles(team, files)` method before the corresponding prototype event.
+
+## From duel to contract
+
+`propose_contract(from_session: "duel-<id>")` loads the archive from `ROUNDTABLE_HOME/duels/` and feeds the Roundtable's contract flow.
+
+- **Decision.** When team A or B won, the contract gains a `duel-winner` decision naming the winning artifact's title, its kind (when archived), the team and its personas, with the judges' scrubbed APPROVE reasons as the rationale. Artifact source is never copied into the contract; it points to the duel id and the title only.
+- **No winner.** A `tie`, `none` or stopped duel imports no decision. The result says so (a warning and `duelImport.imported_decision: false`), and the orchestrator must decide which approach to build.
+- **Dissents.** Every archived `<DISSENT>` from a team or judge becomes a draft concern with `source: {kind: "duel", ref: <duel id>}`. Each needs a tripwire (`file_dissent`) or an orchestrator excusal before freeze. See [dissents](../dissents.md).
+- **Structure.** A duel carries no task list, so also pass `contract` (with tasks) or `plan`. Seats are not added as participants, except the authors of imported dissents.
+
+Archives that lack newer optional fields still import.

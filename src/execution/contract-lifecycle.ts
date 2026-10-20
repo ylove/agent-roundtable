@@ -25,6 +25,7 @@ import { childEnv } from "../security/child-env.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { readArchivedSession, type ArchivedSession } from "../sessions/archive.js";
 import { sessionDissentDrafts } from "../sessions/dissents.js";
+import { importDuel, isDuelId, type DuelImport } from "../sessions/duel-import.js";
 import { isSessionBusy } from "../sessions/lock.js";
 import { scrubbedJSON } from "./blobs.js";
 import { pausedBy } from "./escalation.js";
@@ -145,6 +146,8 @@ export interface ContractResult {
   asked?: string[];
   /** propose: what earlier postmortems of the project taught (docs/design/postmortem.md §7). */
   postmortemLessons?: ContractLessons["section"];
+  /** propose from a duel: what was imported (winner, artifact title, dissent count, or why no decision). */
+  duelImport?: DuelImport["summary"];
   paths: { json: string; markdown: string };
   next: string;
 }
@@ -302,9 +305,24 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   if ((o.parentContract === undefined) !== (o.parentTask === undefined)) throw new Error("parent_contract and parent_task go together");
   const warnings: string[] = [];
   const orchestrator = o.orchestrator.trim();
-  const session = o.fromSession ? archived(o.fromSession) : undefined;
-  const sessionDissents = session ? sessionDissentDrafts(session) : [];
-  const src: SessionSource | undefined = session && sessionSource(session);
+  const duel = isDuelId(o.fromSession) ? importDuel(o.fromSession) : undefined;
+  const session = o.fromSession && !duel ? archived(o.fromSession) : undefined;
+  if (duel) {
+    // An author who is not a loadable persona cannot be a participant: skip that dissent and say so.
+    const kept: typeof duel.dissents = [];
+    for (const d of duel.dissents) {
+      try { await loadAgent(d.by); kept.push(d); }
+      catch { warnings.push(`duel dissent by "${d.by}" was not imported: that persona does not resolve (${duel.id})`); }
+    }
+    duel.dissents = kept;
+    duel.summary.dissents = kept.length;
+  }
+  const sessionDissents = duel ? duel.dissents : session ? sessionDissentDrafts(session) : [];
+  // A duel has no plan or task block: only its topic seeds the prompt. Its seats are not contract participants.
+  const src: SessionSource | undefined = duel
+    ? { blockTexts: [], planText: "", topic: duel.topic, agents: [], kind: "duel" }
+    : session && sessionSource(session);
+  if (duel?.summary.note) warnings.push(duel.summary.note);
   if (src?.kind === "ultraplan" && src.signedOff === false) {
     warnings.push(`${o.fromSession} was not signed off: an objection or unclear sign-off stands, or it was ended without sign-off`);
     if (session?.document?.signoffs.some((s) => s.verdict === "OBJECT" && s.content.length > CONTRACT_LIMITS.dissent_claim)) {
@@ -360,11 +378,20 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
     ...(o.participants?.length && { participants: o.participants }),
     ...(postmortemOn && { postmortem: { enabled: true } }),
   };
+  let dropped: string | undefined;
   const assemble = (structure: Obj): Obj => {
     const c = applyMergePatch<Obj>(applyMergePatch(structure, explicit ?? {}), fixed);
     if (lessons) {
       const have = Array.isArray(c.decisions) ? c.decisions : [];
       c.decisions = [...have, ...lessons.decisions.filter((d) => !have.some((x) => isObj(x) && x.id === d.id))];
+    }
+    if (duel?.decision) {
+      if (c.decisions != null && !Array.isArray(c.decisions)) dropped = "decisions is not an array";
+      else {
+        const have = Array.isArray(c.decisions) ? c.decisions : [];
+        if (have.some((x) => isObj(x) && x.id === duel.decision!.id)) dropped = `the contract already has a decision with id ${duel.decision.id}`;
+        else c.decisions = [...have, duel.decision];
+      }
     }
     if (c.title === undefined) c.title = firstLine(o.goal);
     if (c.participants === undefined && src && Array.isArray(c.tasks)) {
@@ -392,6 +419,8 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
       const dissents = Array.isArray(c.dissents) ? [...c.dissents] : [];
       const participants = Array.isArray(c.participants) ? [...c.participants] : [];
       for (const d of sessionDissents) {
+        // A repeated import (or a dissent already carried in the explicit contract) is not added twice.
+        if (d.source.kind === "duel" && dissents.some((e) => isObj(e) && isObj(e.source) && e.source.ref === d.source.ref && e.source.kind === d.source.kind && e.by === d.by && e.claim === d.claim)) continue;
         let id = d.id;
         while (dissents.some((existing) => isObj(existing) && existing.id === id)) id += "-x";
         dissents.push({ ...d, id });
@@ -437,6 +466,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   const v = await validateContract(assemble(structure), checkOpts);
   if (!v.ok) throw new Error(`The contract is not valid:\n- ${listErrors(v.errors)}`);
   warnings.push(...v.warnings);
+  if (dropped) warnings.push(`the duel's winning decision was not added: ${dropped}`);
 
   const store = await createExecutionStore({ repoRoot: root, baseSha: sha, agentsDir: resolve(AGENTS_DIR), id: executionId });
   const by = orchestratorSource(orchestrator);
@@ -465,7 +495,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
       warnings.push(`the consent round failed: ${errText(e)}`);
     }
   }
-  return resultFor(store, contractId, { warnings, source, ...(asked && { asked }), ...(lessons && { postmortemLessons: lessons.section }) });
+  return resultFor(store, contractId, { warnings, source, ...(asked && { asked }), ...(lessons && { postmortemLessons: lessons.section }), ...(duel && { duelImport: duel.summary }) });
 }
 
 // ---------------------------------------------------------------------------

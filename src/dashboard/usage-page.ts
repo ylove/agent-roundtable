@@ -11,6 +11,7 @@
 // is server-rendered SVG, the avatar colour a class, and dashboard.js does the rest.
 // ============================================================================
 
+import type { AnyEvent } from "../execution/types.js";
 import { createHash } from "node:crypto";
 import { escapeHtml } from "../http/secure-server.js";
 import { FREE_LABEL, MEANING, moneyParts, NO_PRICE_LABEL, tokensShort, usd, usdBudget } from "../usage/format.js";
@@ -26,6 +27,28 @@ export interface SpendPoint {
 /** Spend over time by agent id, then for the whole run ("" key), from the run's usage events. */
 export type SpendSeries = Record<string, SpendPoint[]>;
 
+/** Reservations and settlements replace one call; a sparkline may decrease as an estimate settles. */
+export function usageSpendSeries(events: readonly AnyEvent[]): SpendSeries {
+  const out: SpendSeries = {};
+  const totals = new Map<string, number>();
+  const calls = new Map<string, number>();
+  for (const e of events) {
+    if (e.type !== "budget.usage_recorded") continue;
+    const at = Date.parse(e.ts);
+    if (!Number.isFinite(at)) continue;
+    const p = e.payload;
+    const delta = p.usd - (p.call_id ? calls.get(p.call_id) ?? 0 : 0);
+    if (p.call_id) calls.set(p.call_id, p.usd);
+    for (const key of ["", p.agent ?? `[${p.source}]`]) {
+      const total = (totals.get(key) ?? 0) + delta;
+      totals.set(key, total);
+      (Object.hasOwn(out, key) ? out[key] : (out[key] = [])).push({ at, usd: total });
+      if (out[key].length > 60) out[key].shift();
+    }
+  }
+  return out;
+}
+
 const SPARK_W = 160;
 const SPARK_H = 36;
 
@@ -36,7 +59,7 @@ export function sparkline(points: readonly SpendPoint[], label: string): string 
   }
   const t0 = points[0].at;
   const span = Math.max(1, points[points.length - 1].at - t0);
-  const top = Math.max(1e-9, points[points.length - 1].usd);
+  const top = Math.max(1e-9, ...points.map((p) => p.usd));
   const xy = points.map((p) => [Math.round(((p.at - t0) / span) * (SPARK_W - 2) + 1), Math.round((SPARK_H - 3) - (p.usd / top) * (SPARK_H - 6) + 1)]);
   const line = xy.map(([x, y]) => `${x},${y}`).join(" ");
   const area = `1,${SPARK_H - 1} ${line} ${xy[xy.length - 1][0]},${SPARK_H - 1}`;
@@ -122,6 +145,7 @@ function card(a: UsageAgent, series: SpendSeries, budget: number | undefined): s
     `<div class="who"><h3>${t(name)}</h3>${platform}</div>${pill(a)}</div>` +
     `<div class="money">${moneyHtml(a.money, a.tokens)}</div>` +
     `<div class="tokens">${tokensHtml(a.tokens)}</div>` +
+    ((a.calls?.length ?? 0) > 0 ? `<ul class="call-ledger">${a.calls!.map((r) => `<li>${t(r.source)}${r.dissent_id ? ` · dissent ${t(r.dissent_id)}` : ""} · ${t(r.execution)}${r.task ? ` · task ${t(r.task)}` : ""} · charged to ${t(r.agent ?? a.id)} · ${t(r.provider ?? "unknown")} · ${t(r.model)} · ${escapeHtml(usd(r.usd))} ${t(r.provenance.usd)}${r.reservation ? " · outstanding reservation" : ""}</li>`).join("")}</ul>` : "") +
     (share !== undefined && budget
       ? `<div class="share"><progress max="100" value="${share}" aria-label="Share of the budget">${shareText}</progress><span>${shareText} of the budget</span></div>`
       : `<div class="share none"><span class="empty">${a.money.free ? "A local model costs nothing, so it has no share of the budget" : unpriced ? "No price is known for this model, so it has no share of the budget" : "Its share of the budget appears with its first spend"}</span></div>`) +

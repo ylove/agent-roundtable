@@ -44,6 +44,7 @@ import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
 import { classifyFailure } from "./circuit.js";
 import { createRunnerHooks } from "./escalation.js";
+import { stopMicroHuddles } from "./huddle.js";
 import { integrationBranch, SubmodulesUnsupportedError } from "./git.js";
 import { acknowledgeHandoff, takeHandoffs } from "./handoff.js";
 import { decideLeaseRequest, leaseDrafts, leasesFor } from "./leases.js";
@@ -679,6 +680,7 @@ export class Runner {
     const state = await this.store.state();
     for (const rec of Object.values(state.agents)) {
       const stop = rec.stop;
+      if (stop) await stopMicroHuddles(this.store, rec.id, this.source);
       // A worker with a kill, resume or spawn in flight is tried again next tick.
       if (stop?.state !== "requested" || rec.status !== "running" || rec.external || this.stopApplied.has(stop.request) || this.busy.has(rec.id)) continue;
       this.stopApplied.add(stop.request);

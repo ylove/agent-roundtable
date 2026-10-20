@@ -11,6 +11,7 @@
 // is listed there only as "--append-system-prompt[-file]", and detect() accepts either spelling.
 // ============================================================================
 
+import { reportUsage } from "../providers/usage.js";
 import { execFile, spawn } from "node:child_process";
 import { ROUNDTABLE_HOME } from "../config.js";
 import { findExecutable } from "../executables.js";
@@ -504,8 +505,6 @@ export class ClaudeCodeDriver implements WorkerDriver {
       child.stdin!.on("error", () => {});
       child.stdin!.end(question);
     });
-    signal?.throwIfAborted();
-    if (out.timedOut) throw new Error(`answer: claude timed out after ${this.answerTimeoutMs} ms`);
     let r: Record<string, unknown> | undefined;
     for (const line of out.stdout.trim().split("\n").reverse()) {
       try {
@@ -518,21 +517,26 @@ export class ClaudeCodeDriver implements WorkerDriver {
         /* not the result line */
       }
     }
+    // A failed/stopped fork can still carry billed usage. Report it before interpreting its outcome.
+    const cost = typeof r?.total_cost_usd === "number" && Number.isFinite(r.total_cost_usd) && r.total_cost_usd >= 0 ? r.total_cost_usd : undefined;
+    const tokens = claudeTokens(r?.usage);
+    if (tokens || cost !== undefined) reportUsage({ provider: "claude-code", model: mainModel(r?.modelUsage) ?? "claude-code", ...(tokens && { usage: tokens }), ...(cost !== undefined && { usd: cost }) });
+    signal?.throwIfAborted();
+    if (out.timedOut) throw new Error(`answer: claude timed out after ${this.answerTimeoutMs} ms`);
     if (!r || out.code !== 0 || r.is_error === true || typeof r.result !== "string") {
       const detail = scrubAndCap((typeof r?.result === "string" ? r.result : "") || out.stderr.trim() || out.stdout.trim(), 500);
       throw new Error(`answer: claude exited with ${out.code ?? "a signal"}${r?.subtype ? ` (${String(r.subtype)})` : ""}: ${detail || "no output"}`);
     }
-    const cost = typeof r.total_cost_usd === "number" && Number.isFinite(r.total_cost_usd) ? r.total_cost_usd : undefined;
     const usage: UsageRecord = {
       source: "huddle",
       agent: rec.agent,
       task: rec.task,
       provider: "claude-code",
       model: mainModel(r.modelUsage) ?? "claude-code",
-      tokens: claudeTokens(r.usage) ?? { inputTokens: 0, outputTokens: 0 },
+      tokens: tokens ?? { inputTokens: 0, outputTokens: 0 },
       usd: cost ?? 0,
       estimated: cost === undefined,
-      provenance: { tokens: "measured", usd: cost === undefined ? "estimated" : "measured" },
+      provenance: { tokens: tokens ? "measured" : "estimated", usd: cost === undefined ? "estimated" : "measured" },
     };
     return { text: r.result, usage };
   }

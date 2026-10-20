@@ -24,6 +24,7 @@ import {
   CONTRACT_SCHEMA,
   GENESIS_HASH,
   type AgentRecord,
+  type AgentUsage,
   type AnyEvent,
   type BlackboardState,
   type CheckState,
@@ -34,6 +35,7 @@ import {
   type TaskRuntime,
   type TaskSpec,
   type TaskState,
+  type UsageProvenance,
   usageProvenance,
 } from "./types.js";
 
@@ -174,24 +176,34 @@ function addUsd(map: Record<string, number>, key: string, usd: number): void {
 const round9 = (n: number): number => Math.round(n * 1e9) / 1e9;
 
 /** budget.by_agent_usage: the record's tokens and money under its agent (else "[<source>]") and model, by provenance. */
-function recordAgentUsage(s: BlackboardState, ts: string, p: EventPayloads["budget.usage_recorded"]): void {
+function recordAgentUsage(s: BlackboardState, ts: string, p: EventPayloads["budget.usage_recorded"], sign = 1): void {
   const prov = usageProvenance(p);
   const key = p.agent ?? `[${p.source}]`;
   const byAgent = (s.budget.by_agent_usage ??= {});
   const u = own(byAgent, key) ?? put(byAgent, key, { models: {}, last_at: ts });
+  // Seed older version-10 snapshots from their existing aggregate before recording new calls.
+  if (!u.platforms) u.platforms = Object.keys(u.models).length ? { [u.provider ?? "unknown"]: { models: clone(u.models), last_at: u.last_at } } : {};
+  const provider = p.provider ?? u.provider ?? "unknown";
+  const platform = own(u.platforms, provider) ?? put(u.platforms, provider, { models: {}, last_at: ts });
   if (p.provider !== undefined) u.provider = p.provider;
   u.last_at = ts;
+  platform.last_at = ts;
+  for (const ledger of [u, platform]) recordModelUsage(ledger, p, prov, sign);
+}
+
+function recordModelUsage(u: AgentUsage, p: EventPayloads["budget.usage_recorded"], prov: UsageProvenance, sign: number): void {
   const zero = () => ({ measured: 0, reported: 0, estimated: 0 });
   const m =
     own(u.models, p.model) ??
     put(u.models, p.model, { tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, tokens_prov: zero(), usd: zero() });
   const t = p.tokens;
-  m.tokens.input += t.inputTokens;
-  m.tokens.output += t.outputTokens;
-  m.tokens.cache_read += t.cacheReadTokens ?? 0;
-  m.tokens.cache_write += t.cacheWriteTokens ?? 0;
-  m.tokens_prov[prov.tokens] += t.inputTokens + t.outputTokens + (t.cacheReadTokens ?? 0) + (t.cacheWriteTokens ?? 0);
-  m.usd[prov.usd] = round9(m.usd[prov.usd] + p.usd);
+  m.tokens.input += sign * t.inputTokens;
+  m.tokens.output += sign * t.outputTokens;
+  m.tokens.cache_read += sign * (t.cacheReadTokens ?? 0);
+  m.tokens.cache_write += sign * (t.cacheWriteTokens ?? 0);
+  m.tokens_prov[prov.tokens] += sign * (t.inputTokens + t.outputTokens + (t.cacheReadTokens ?? 0) + (t.cacheWriteTokens ?? 0));
+  m.usd[prov.usd] = round9(m.usd[prov.usd] + sign * p.usd);
+  if (sign < 0 && Object.values(m.tokens).every((n) => n === 0) && Object.values(m.usd).every((n) => n === 0)) delete u.models[p.model];
 }
 
 const TERMINAL: ReadonlySet<TaskState> = new Set(["accepted", "failed", "cancelled"]);
@@ -883,16 +895,27 @@ const HANDLERS: Handlers = {
 
   // --- budget --------------------------------------------------------------
   /** Adds usd to the execution total and to the agent, the task, and the team (the agent's, else the task's). */
-  "budget.usage_recorded": (s, e) => {
+  "budget.usage_recorded": (s, e, x) => {
     const p = e.payload;
     const b = s.budget;
+    const prior = p.call_id ? own(b.calls ?? {}, p.call_id) : undefined;
+    if (prior) {
+      if (prior.source !== p.source || prior.agent !== p.agent || prior.task !== p.task || prior.dissent_id !== p.dissent_id) return refuse(x, "Usage settlement must preserve call attribution");
+      b.spent_usd -= prior.usd;
+      recordAgentUsage(s, e.ts, prior, -1);
+      if (prior.agent !== undefined) addUsd(b.by_agent, prior.agent, -prior.usd);
+      if (prior.task !== undefined) addUsd(b.by_task, prior.task, -prior.usd);
+      const team = own(s.agents, prior.agent)?.team ?? own(s.tasks, prior.task)?.spec.team;
+      if (team !== undefined) addUsd(b.by_team, team, -prior.usd);
+    }
+    if (p.call_id) put(b.calls ??= {}, p.call_id, { ...clone(p), at: e.ts });
     b.spent_usd += p.usd;
     if (p.source === "worker" && p.agent !== undefined) {
       const agent = own(s.agents, p.agent);
       if (agent) delete agent.budget_reserved_usd;
     }
-    if (p.estimated) b.estimated = true;
     recordAgentUsage(s, e.ts, p);
+    b.estimated = Object.values(b.by_agent_usage).some((u) => Object.values(u.models).some((m) => m.usd.estimated > 0));
     if (p.agent !== undefined) addUsd(b.by_agent, p.agent, p.usd);
     if (p.task !== undefined) addUsd(b.by_task, p.task, p.usd);
     const team = own(s.agents, p.agent)?.team ?? own(s.tasks, p.task)?.spec.team;

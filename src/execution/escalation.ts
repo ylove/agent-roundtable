@@ -39,7 +39,7 @@ import { huddleAction, runFormatHuddle, runMicroHuddle } from "./huddle.js";
 import { leadFallback } from "./lead.js";
 import { acquireLock } from "./lock.js";
 import { normalizeGlob } from "./leases.js";
-import { estimateUsd, priceFor } from "./pricing.js";
+import { isFreeProvider, estimateUsd, priceFor } from "./pricing.js";
 import { blockingIds, taskHeld } from "./task-holds.js";
 import { buildTaskCard } from "./task-card.js";
 import type { RunnerContext, RunnerHooks } from "./runner-hook-types.js";
@@ -213,24 +213,76 @@ function microRates(model: string, provider?: string): { input: number; output: 
  * and of driver answers. take() turns what was collected into drafts, so usage spent by a call
  * that later failed is still recorded.
  */
+interface MeterLifecycle {
+  dissent_id?: string;
+  huddle?: string;
+  signal?: AbortSignal;
+  beforeDispatch?: () => Promise<void>;
+  persist?: (records: UsageRecord[]) => Promise<void>;
+}
+
 export class UsageMeter {
   private records: UsageRecord[] = [];
+  private calls = 0;
 
-  constructor(readonly source: BudgetSource, readonly task?: string, readonly agent?: string, readonly bounded = false) {}
+  constructor(readonly source: BudgetSource, readonly task?: string, readonly agent?: string, readonly bounded = false, private readonly lifecycle: MeterLifecycle = {}) {}
 
-  run<T>(fn: () => Promise<T>, reservation?: { provider: string; model: string; usd: number }): Promise<T> {
-    // Reserve before dispatch: a timeout or empty completion may throw before reportUsage runs.
-    // The first report settles this record; without a report the conservative charge survives.
-    let reserved = this.bounded && reservation && reservation.provider !== "ollama"
-      ? this.price(reservation, reservation.usd) : undefined;
-    if (reserved) this.records.push(reserved);
-    return withUsageSink((r) => {
+  async run<T>(fn: () => Promise<T>, reservation?: { provider: string; model: string; usd: number }, usageOf?: (result: T) => UsageRecord | undefined): Promise<T> {
+    const signal = this.lifecycle.signal;
+    signal?.throwIfAborted();
+    const callId = this.bounded ? this.lifecycle.huddle ? `${this.lifecycle.huddle}:${++this.calls}` : newId("call") : undefined;
+    let current: UsageRecord | undefined;
+    let finished = false;
+    let dispatched = false;
+    const accept = (record: UsageRecord) => {
+      const u = { ...record, source: this.source,
+        ...(this.task !== undefined && { task: this.task }), ...(this.agent !== undefined && { agent: this.agent }),
+        ...(callId && { call_id: callId }), ...(this.lifecycle.dissent_id && { dissent_id: this.lifecycle.dissent_id }) };
+      if (current) Object.assign(current, u);
+      else { current = u; this.records.push(u); }
+      // A stopped driver may report its final result after abort has already routed the huddle.
+      // Replace the retained estimate without resuming discussion or holding up Stop.
+      if (finished) void this.lifecycle.persist?.([{ ...current }]).catch((e) => console.error(`Micro-huddle usage settlement: ${errText(e)}`));
+    };
+    if (this.bounded && reservation && !isFreeProvider(reservation.provider)) {
+      accept({ ...this.price({ provider: reservation.provider, model: reservation.model }, reservation.usd), reservation: true });
+      // Durable before dispatch: readers and a restarted runner retain the conservative charge.
+      await this.lifecycle.persist?.([current!]);
+    }
+    const sink = (r: UsageReport) => {
+      if (finished && !this.bounded) return;
       const priced = this.price(r, reservation?.usd);
-      if (reserved) {
-        Object.assign(reserved, priced);
-        reserved = undefined;
-      } else this.records.push(priced);
-    }, fn);
+      if (this.bounded) accept({ ...priced, reservation: false });
+      else this.records.push(priced);
+    };
+    let abort: (() => void) | undefined;
+    try {
+      signal?.throwIfAborted();
+      await this.lifecycle.beforeDispatch?.();
+      signal?.throwIfAborted();
+      const work = withUsageSink(sink, async () => {
+        dispatched = true;
+        const result = await fn();
+        const u = usageOf?.(result);
+        if (u) accept({ ...u, reservation: false, provenance: u.provenance ?? { tokens: "measured", usd: u.estimated ? "estimated" : "measured" },
+          ...(u.estimated && u.usd === 0 && reservation && !isFreeProvider(reservation.provider) ? { usd: reservation.usd, provenance: { tokens: u.provenance?.tokens ?? "measured", usd: "estimated" } } : {}) });
+        return result;
+      });
+      // A driver/provider that ignores abort must not leave the huddle hanging.
+      return signal ? await Promise.race([work, new Promise<never>((_resolve, reject) => {
+        abort = () => reject(signal.reason ?? new Error("Micro-huddle stopped"));
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      })]) : await work;
+    } finally {
+      finished = true;
+      if (abort) signal?.removeEventListener("abort", abort);
+      if (current) {
+        if (!dispatched) current.usd = 0; // Stop won before dispatch: release the unused reservation.
+        current.reservation = false;
+        await this.lifecycle.persist?.([current]);
+      }
+    }
   }
 
   add(u: UsageRecord | undefined): void {
@@ -252,10 +304,10 @@ export class UsageMeter {
       ...(r.provider && { provider: r.provider }),
       model,
       tokens,
-      usd: reserved ?? (rates ? ((tokens.inputTokens + (tokens.cacheReadTokens ?? 0) + (tokens.cacheWriteTokens ?? 0)) * rates.input + tokens.outputTokens * rates.output) / 1_000_000 : estimate.usd),
-      estimated: true,
-      // The provider counted the tokens when it sent usage; the dollars always come from our table.
-      provenance: { tokens: r.usage ? "measured" : "estimated", usd: "estimated" },
+      usd: r.usd ?? reserved ?? (rates ? ((tokens.inputTokens + (tokens.cacheReadTokens ?? 0) + (tokens.cacheWriteTokens ?? 0)) * rates.input + tokens.outputTokens * rates.output) / 1_000_000 : estimate.usd),
+      estimated: r.usd === undefined,
+      // Provider tokens are measured; dollar costs are estimated unless the driver measured them.
+      provenance: { tokens: r.usage ? "measured" : "estimated", usd: r.usd === undefined ? "estimated" : "measured" },
     };
   }
 
@@ -263,7 +315,7 @@ export class UsageMeter {
 
   /** Drafts for everything collected since the last take. */
   take(source: EventSource, correlation: string): AnyEventDraft[] {
-    const out = this.records.map((u) => ev("budget.usage_recorded", u, source, correlation));
+    const out = this.lifecycle.persist ? [] : this.records.map((u) => ev("budget.usage_recorded", u, source, correlation));
     this.records = [];
     return out;
   }

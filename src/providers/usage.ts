@@ -19,6 +19,8 @@ export interface UsageReport {
   model: string;
   /** Absent when the provider reported none (Replicate, some local servers). */
   usage?: LLMCompletionResult["usage"];
+  /** A driver may report a measured cost along with provider token usage. */
+  usd?: number;
   /** Lengths (not text) of the request and the reply, so a call without usage can still be estimated. */
   chars?: { input: number; output: number };
 }

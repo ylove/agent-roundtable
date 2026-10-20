@@ -2,7 +2,7 @@
 // Wording of usage figures, shared by the status line, the usage CLI and the tool (usage-visibility.md §3)
 //
 // Words, not just symbols: a figure says whether it was measured, reported or estimated. The status
-// line abbreviates to meas / rep / est (docs/usage.md); colour is never the only signal. Estimated
+// line abbreviates measured / reported to meas / rep (docs/usage.md); colour is never the only signal. Estimated
 // money carries "≈". A total that mixes provenances shows the split, never one blended number, and a
 // cost that cannot be known shows the tokens with "no price" rather than $0.00.
 // ============================================================================
@@ -12,7 +12,7 @@ import { moneyTotal, tokenTotal, PROVENANCES, type Money, type Provenance, type 
 export type Style = "words" | "abbr";
 
 export const WORDS: Record<Provenance, string> = { measured: "measured", reported: "reported", estimated: "estimated" };
-export const ABBR: Record<Provenance, string> = { measured: "meas", reported: "rep", estimated: "est" };
+export const ABBR: Record<Provenance, string> = { measured: "meas", reported: "rep", estimated: "estimated" };
 
 /** What a model that costs nothing (a local one) shows instead of a price. */
 export const FREE_LABEL = "free (local model)";
@@ -23,7 +23,7 @@ export const NO_PRICE_LABEL = "no price";
 export const MEANING: Record<Provenance, string> = {
   measured: "counted by whoever did the work and read directly",
   reported: "told to us by an agent or the host, so we cannot check it",
-  estimated: "worked out by us, from the price table or the length of the text",
+  estimated: "worked out by us, from prices, text length or a retained paid-call allowance",
 };
 
 /** $0.92, $12.40, $1,204.00; "<$0.01" for a sliver. */

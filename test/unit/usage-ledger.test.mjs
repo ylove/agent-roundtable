@@ -326,3 +326,56 @@ test("huddle and consent usage: tokens the provider counted are measured, the do
     for (const p of [counted, uncounted]) validateDraft({ type: "budget.usage_recorded", source: src, payload: p });
   });
 });
+
+test("bounded ledger settlement replaces reservations in totals, provenance, watchdog budgets and sparklines, including replay", async () => {
+  const { store } = await frozenRun();
+  const base = usage({ source: "dissent micro-huddle", call_id: "hud-test:1", dissent_id: "risk", agent: "critic", provider: "paid",
+    model: "unknown", tokens: { inputTokens: 0, outputTokens: 0 }, usd: 0.5, estimated: true, reservation: true,
+    provenance: { tokens: "estimated", usd: "estimated" } });
+  await emit(store, "budget.usage_recorded", base);
+  const { remainingUsd } = await import("../../dist/execution/budget.js");
+  const before = await store.state();
+  const headroom = remainingUsd(before, { agent: "critic", task: "a" });
+  assert.equal(before.budget.spent_usd, 0.5);
+  assert.equal(before.budget.estimated, true);
+  await store.writeSnapshot();
+  const settled = { ...base, reservation: false, usd: 0.02, estimated: false, model: "actual-model", tokens: { inputTokens: 10, outputTokens: 5 }, provenance: { tokens: "measured", usd: "measured" } };
+  await emit(store, "budget.usage_recorded", settled);
+  await emit(store, "budget.usage_recorded", settled); // duplicate report is idempotent
+  const state = await store.state();
+  assert.equal(state.budget.spent_usd, 0.02);
+  assert.equal(state.budget.by_agent.critic, 0.02);
+  assert.equal(state.budget.by_task.a, 0.02);
+  assert.equal(state.budget.estimated, false);
+  assert.equal(remainingUsd(state, { agent: "critic", task: "a" }), headroom + 0.48);
+  assert.deepEqual(state.budget.by_agent_usage.critic.models["actual-model"].usd, { measured: 0.02, reported: 0, estimated: 0 });
+  assert.equal(state.budget.by_agent_usage.critic.models["actual-model"].tokens.input, 10);
+  assert.equal(Object.keys(state.budget.calls).length, 1);
+  assert.deepEqual((await (await openExecutionStore(store.id)).state()).budget, state.budget, "snapshot plus settlement replay");
+  const { usageSpendSeries, sparkline } = await import("../../dist/dashboard/usage-page.js");
+  const series = usageSpendSeries(await store.events());
+  assert.ok(Math.abs(series.critic.at(-1).usd - 0.02) < 1e-9);
+  assert.ok(Math.abs(series[""].at(-1).usd - state.budget.spent_usd) < 1e-9);
+  assert.doesNotMatch(sparkline([{ at: 0, usd: 0.5 }, { at: 1, usd: 0.02 }], "settlement"), /NaN|Infinity/);
+  await assert.rejects(emit(store, "budget.usage_recorded", { ...settled, agent: "someone-else" }), /preserve call attribution/);
+});
+
+test("dissent call provenance renders escaped data on the Usage page and in handoff Markdown", async () => {
+  const { store, header } = await frozenRun();
+  const hostile = 'risk\\|<script>alert(1)</script>';
+  await emit(store, "budget.usage_recorded", usage({ source: "dissent micro-huddle", call_id: "hud-x:1", dissent_id: hostile,
+    agent: 'critic\\|<img src=x onerror=alert(1)>', model: '<b>model</b>', usd: 0.5, estimated: true, reservation: true,
+    provenance: { tokens: "estimated", usd: "estimated" } }));
+  const view = await collectUsage({ executions: [store.id], table: false });
+  const { renderUsage } = await import("../../dist/dashboard/usage-page.js");
+  const { buildRunHandoff } = await import("../../dist/usage/handoff.js");
+  const html = renderUsage({ state: await store.state(), header, base: "/test/", runner: {} }, view, {});
+  assert.doesNotMatch(html, /<script>alert|<img src=x|<b>model/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /outstanding reservation/);
+  assert.match(html, /estimated/);
+  const handoffState = await store.state();
+  handoffState.tasks.a.last_note = "critic\\|evidence";
+  const md = buildRunHandoff(handoffState);
+  assert.ok(md.includes('critic\\\\\\|'), "existing handoff consumer escapes backslashes before pipes");
+});

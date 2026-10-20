@@ -29,7 +29,7 @@ import { requestAgentStop, StopRefusal, stopper } from "../usage/stop.js";
 import { writeFileAtomic } from "../security/fs-safe.js";
 import { STATIC_ASSETS } from "./assets.js";
 import { renderDagSvg } from "./dag-svg.js";
-import { renderUsage, type SpendSeries } from "./usage-page.js";
+import { renderUsage, usageSpendSeries, type SpendSeries } from "./usage-page.js";
 import {
   contractMarkdown,
   eventMatches,
@@ -67,8 +67,6 @@ const RUNNER_STALE_MS = 30_000;
 export const ACTION_HEADER = "x-roundtable-action";
 /** Most stop requests a dashboard accepts a minute. */
 export const STOPS_PER_MINUTE = 10;
-/** Most points of a sparkline. */
-const SPARK_POINTS = 60;
 
 export interface DashboardOptions {
   /** The store to read through (default: openExecutionStore(executionId)). */
@@ -197,22 +195,7 @@ class DashboardServer {
 
   /** Cumulative spend over time by agent, and for the whole run under "", from the usage events. */
   private async spendSeries(): Promise<SpendSeries> {
-    const out: SpendSeries = {};
-    let all = 0;
-    const per: Record<string, number> = {};
-    const push = (key: string, at: number, usd: number) => (Object.hasOwn(out, key) ? out[key] : (out[key] = [])).push({ at, usd });
-    for (const ev of await this.store.events({ types: ["budget.usage_recorded"] })) {
-      if (ev.type !== "budget.usage_recorded") continue;
-      const at = Date.parse(ev.ts);
-      if (!Number.isFinite(at)) continue;
-      all += ev.payload.usd;
-      push("", at, all);
-      const key = ev.payload.agent ?? `[${ev.payload.source}]`;
-      per[key] = (per[key] ?? 0) + ev.payload.usd;
-      push(key, at, per[key]);
-    }
-    for (const key of Object.keys(out)) if (out[key].length > SPARK_POINTS) out[key] = out[key].slice(-SPARK_POINTS);
-    return out;
+    return usageSpendSeries(await this.store.events({ types: ["budget.usage_recorded"] }));
   }
 
   private async usagePage(): Promise<string> {

@@ -261,7 +261,10 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   },
 
   "budget.usage_recorded": {
-    source: "'worker'|'huddle'|'consent'|'lead'|'structuring'",
+    source: "'worker'|'huddle'|'dissent micro-huddle'|'consent'|'lead'|'structuring'",
+    "call_id?": "s",
+    "dissent_id?": "s",
+    "reservation?": "b",
     "agent?": "s",
     "task?": "id",
     "provider?": "s",

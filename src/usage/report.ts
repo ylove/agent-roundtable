@@ -44,7 +44,8 @@ function agentBlock(a: UsageAgent, paint: Paint, cols: number): string[] {
   const io = a.tokens.input + a.tokens.output > 0 ? `${tokensShort(a.tokens.input)} in, ${tokensShort(a.tokens.output)} out${a.tokens.cache_read ? `, ${tokensShort(a.tokens.cache_read)} cached` : ""}` : "";
   if (io) detail.push(io);
   const money = useText(a.money, a.tokens, "words");
-  return [head, `               ${paint(BOLD, money)}  ${paint(DIM, detail.join(" · "))}`];
+  return [head, `               ${paint(BOLD, money)}  ${paint(DIM, detail.join(" · "))}`,
+    ...(a.calls ?? []).map((c) => `               ${c.source}${c.dissent_id ? ` · dissent ${c.dissent_id}` : ""} · ${c.execution}${c.task ? ` · task ${c.task}` : ""} · charged to ${c.agent ?? a.id} · ${c.provider ?? "unknown"} · ${c.model} · ${usd(c.usd)} ${c.provenance.usd}${c.reservation ? " · outstanding reservation" : ""}`)];
 }
 
 /** The report. `now` only affects the "as of" clock. */

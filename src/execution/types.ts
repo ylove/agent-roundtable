@@ -47,7 +47,7 @@ export interface TokenUsage {
   cacheWriteTokens?: number;
 }
 
-export type BudgetSource = "worker" | "huddle" | "consent" | "lead" | "structuring";
+export type BudgetSource = "worker" | "huddle" | "dissent micro-huddle" | "consent" | "lead" | "structuring";
 
 /**
  * Where a figure comes from (usage-visibility.md §3): measured by the system that did the work and
@@ -64,6 +64,11 @@ export interface UsageProvenance {
 
 export interface UsageRecord {
   source: BudgetSource;
+  /** Stable call identity: later records replace this call's reservation or prior report. */
+  call_id?: string;
+  dissent_id?: string;
+  /** True while a dispatched call has not settled; its USD is explicitly estimated. */
+  reservation?: boolean;
   agent?: string;
   task?: string;
   provider?: string;
@@ -665,6 +670,8 @@ export interface AgentUsage {
   provider?: string;
   models: Record<string, { tokens: TokenTotals; tokens_prov: ProvenanceTotals; usd: ProvenanceTotals }>;
   last_at: string;
+  /** Keep driver and persona platforms distinct when both charge the same requester. */
+  platforms?: Record<string, AgentUsage>;
 }
 
 export interface BudgetLedger {
@@ -672,6 +679,8 @@ export interface BudgetLedger {
   estimated: boolean;
   by_agent: Record<string, number>;
   by_agent_usage: Record<string, AgentUsage>;
+  /** Latest ledger entry per bounded call; optional for historical projections. */
+  calls?: Record<string, UsageRecord & { at: string }>;
   by_task: Record<string, number>;
   by_team: Record<string, number>;
   thresholds_crossed: number[];

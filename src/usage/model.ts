@@ -13,6 +13,7 @@ import { ROUNDTABLE_HOME } from "../config.js";
 import { isFreeProvider } from "../execution/pricing.js";
 import { executionDir, listExecutions, openExecutionStore } from "../execution/store.js";
 import type { AgentUsage, BlackboardState } from "../execution/types.js";
+import { usageProvenance } from "../execution/types.js";
 import { scrub } from "../security/secrets.js";
 import {
   day,
@@ -164,6 +165,10 @@ function headsDownAgents(state: BlackboardState): UsageAgent[] {
       ...((u?.provider ?? rec?.driver) && { provider: text(u?.provider ?? rec?.driver, 64) }),
       ...(models[0] && { model: text(models[0]) }),
       models: models.map((m) => text(m)),
+      ...(u?.platforms && { platforms: Object.entries(u.platforms).filter(([, value]) => Object.keys(value.models).length > 0).map(([provider, value]) => {
+        const folded = fold(value, provider);
+        return { provider: text(provider), ...folded, models: folded.models.map((m) => text(m)) };
+      }) }),
       tokens,
       money,
       state: state_,
@@ -172,6 +177,13 @@ function headsDownAgents(state: BlackboardState): UsageAgent[] {
       ...(rec?.task && { task: rec.task }),
       ...(budget > 0 && total > 0 && { budget_share: total / budget }),
       ...(u?.last_at && { last_at: u.last_at }),
+      calls: Object.values(state.budget.calls ?? {}).filter((r) => (r.agent ?? `[${r.source}]`) === id).map((r) => ({
+        call_id: text(r.call_id), source: text(r.source), execution: state.execution,
+        ...(r.dissent_id && { dissent_id: text(r.dissent_id) }), ...(r.task && { task: text(r.task) }),
+        ...(r.agent && { agent: text(r.agent) }), ...(r.provider && { provider: text(r.provider) }),
+        model: text(r.model), usd: r.usd, estimated: usageProvenance(r).usd === "estimated",
+        reservation: r.reservation === true, provenance: usageProvenance(r),
+      })),
     };
     out.push(a);
   }
@@ -257,12 +269,14 @@ export function rollup(agents: readonly UsageAgent[]): { totals: Money & { token
     if (a.where === "host") continue;
     mergeMoney(totals, a.money);
     mergeTokens(totals.tokens, a.tokens);
-    const provider = a.provider ?? "unknown";
-    let p = byProvider.get(provider);
-    if (!p) byProvider.set(provider, (p = { provider, models: [], tokens: zeroTokens(), money: zeroMoney() }));
-    for (const m of a.models) if (!p.models.includes(m)) p.models.push(m);
-    mergeTokens(p.tokens, a.tokens);
-    mergeMoney(p.money, a.money);
+    for (const part of a.platforms?.length ? a.platforms : [{ provider: a.provider ?? "unknown", models: a.models, tokens: a.tokens, money: a.money }]) {
+      const provider = part.provider;
+      let p = byProvider.get(provider);
+      if (!p) byProvider.set(provider, (p = { provider, models: [], tokens: zeroTokens(), money: zeroMoney() }));
+      for (const m of part.models) if (!p.models.includes(m)) p.models.push(m);
+      mergeTokens(p.tokens, part.tokens);
+      mergeMoney(p.money, part.money);
+    }
   }
   const platforms = [...byProvider.values()].sort((a, b) => moneyTotal(b.money) - moneyTotal(a.money) || (a.provider < b.provider ? -1 : 1));
   return { totals, platforms };

@@ -981,7 +981,7 @@ Arguments and behaviour: [heads-down design, §13 and §15](design/heads-down.md
 
 ### Usage
 
-- `usage` answers "what has cfo cost so far?" (`action: "report"`, narrowed with `agent`, `execution_id` or `session_id`), stops an agent when the human asks (`action: "stop"`) and writes a handoff for a stopped session or a run (`action: "handoff"`). Every figure is labelled measured, reported or estimated. A stopped at-the-table session answers `{status: "stopped", …}` to the next call that names it. See the [usage guide](usage.md).
+- `usage` answers "what has cfo cost so far?" (`action: "report"`, narrowed with `agent`, `execution_id` or `session_id`), stops an agent when the human asks (`action: "stop"`) and writes a handoff for a stopped session or a run (`action: "handoff"`). Every figure is labelled measured, reported or estimated. A stopped at-the-table session answers `{status: "stopped", …}` to the next call that names it. See the [usage guide](usage.md). Its `agents[].calls` entries include bounded call ids, dissent micro-huddle source, dissent id, execution/task, charged requester, provider/model, USD, `estimated`, `reservation` and provenance. `agents[].platforms` keeps driver and persona platform totals distinct. Settlements replace outstanding estimates by call id. Stop on either micro-huddle participant routes the unresolved huddle and preserves dissent holds for explicit escalation resolution.
 
 ### LLM
 

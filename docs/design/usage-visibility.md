@@ -35,7 +35,7 @@ Every token count and every cost carries its own provenance. Tokens and cost of 
 | **estimated** | Computed by us. | Cost from the price table (`src/execution/pricing.ts`, `ROUNDTABLE_PRICING_FILE`) when no cost was measured; tokens from text length (4 characters per token) when the provider reported none. |
 
 Display rules, everywhere:
-- Words, not just symbols. The full label is "measured", "reported" or "estimated". The status line may abbreviate to `meas`, `rep`, `est` (documented in `docs/usage.md`); colour is never the only signal.
+- Words, not just symbols. The full label is "measured", "reported" or "estimated". The status line may abbreviate to `meas`, `rep`; estimated remains spelled out (documented in `docs/usage.md`); colour is never the only signal.
 - Estimated money is shown with `≈`, reported with a trailing `rep`, measured plain: `$0.92`, `$0.40 rep`, `≈$0.12`.
 - A total that mixes provenances shows the split ("$1.84 = $1.62 measured + ≈$0.22 estimated"), never one blended number with no label.
 - Cost is shown whenever any cost is available. When none is (an unpriced local model, say), the figure is tokens with "no price" rather than `$0.00`.
@@ -45,7 +45,7 @@ Display rules, everywhere:
 ### Heads-down
 
 - `budget.usage_recorded` gains an optional `provenance: {tokens: "measured" | "reported" | "estimated", usd: "measured" | "reported" | "estimated"}` and an optional `provider`. Old events without it are read as `{tokens: "measured", usd: estimated ? "estimated" : "measured"}`, which is what 1.0 meant.
-- The reducer's `budget` section gains `by_agent_usage[agent] = {provider?, models: {[model]: {tokens: {input, output, cache_read, cache_write}, usd: {measured, reported, estimated}}}, last_at}`. The existing `by_agent`, `by_task` and `spent_usd` totals keep their meaning, so budgets and the watchdog are unchanged. `REDUCER_VERSION` is bumped by one from whatever the release branch has (WS14 also bumps it; whichever merges second bumps again).
+- The reducer's `budget` section gains `by_agent_usage[agent] = {provider?, models: {[model]: {tokens: {input, output, cache_read, cache_write}, usd: {measured, reported, estimated}}}, last_at}`. The existing `by_agent`, `by_task` and `spent_usd` totals keep their meaning, so budgets and the watchdog are unchanged. `REDUCER_VERSION` stays 10 for the integrated usage and dissent projection.
 - `post_update(kind: "usage", tokens, usd)` lets an external worker report its own usage. It is recorded with `provenance.tokens = provenance.usd = "reported"` and counts toward the budget like any other spend (fail toward caution). It is refused for runner-managed workers, whose usage is measured.
 
 ### At the table
@@ -107,13 +107,13 @@ model display name | project directory basename | 5-hour window used % → reset
 **Line 2, the roundtable at a glance** (only when there is something to show):
 
 ```
-◆ roundtable  heads-down exe-1a2b3c 4/7 tasks · $1.62 meas + ≈$0.22 est of $20 · table 2 agents ≈$0.05 est
+◆ roundtable  heads-down exe-1a2b3c 4/7 tasks · $1.62 meas + ≈$0.22 estimated of $20 · table 2 agents ≈$0.05 estimated
 ```
 
 **Line 3, the busiest agents** (up to `--agents N`, default 4, highest spend first, by platform):
 
 ```
-  builder $0.92 meas [claude-code] · fixer $0.40 meas [claude-code] · cfo 4.1k tok meas ≈$0.03 est [<provider>] · stop: agent-roundtable stop <agent>
+  builder $0.92 meas [claude-code] · fixer $0.40 meas [claude-code] · cfo 4.1k tok meas ≈$0.03 estimated [<provider>] · stop: agent-roundtable stop <agent>
 ```
 
 Details:
@@ -145,6 +145,28 @@ A stop is a request with a durable record, applied by the process that owns the 
 The host agent itself cannot be stopped from here (the human has their harness's own stop).
 
 **Every stop is audited** (`agent.stop_requested` in the audit log with surface, agent, scope and `by`).
+
+### Integrated micro-huddle accounting and Stop
+
+Dissent micro-huddle persona and driver calls use `budget.usage_recorded` with `source: "dissent micro-huddle"`, `dissent_id`, `task` when present, and `agent` set to the requesting identity charged for both turns. The containing execution log supplies the execution id. Each bounded call has a stable `call_id` (`<huddle>:<turn>`). Before dispatch, its paid allowance is durably recorded with `reservation: true`, `estimated: true` and estimated USD provenance. A later event with the same call id replaces that entry, including its token counts and provenance, rather than adding another charge. Historical events without call ids remain additive. The blackboard keeps current entries in `budget.calls`; execution, task, team and agent totals and per-model provenance all reflect replacement. `REDUCER_VERSION` stays 10.
+
+The usage JSON and tool expose current entries as `agents[].calls`: call id, source, dissent id, execution, task, charged agent, provider, model, USD, `estimated`, `reservation` and provenance. The CLI and dashboard Usage page show the same provenance beside each call. Totals split measured, reported and estimated spend on every surface; the status line spells out **estimated**. Outstanding reservations and retained allowances count as estimated USD even when they have zero tokens. Provider token reports are measured; a cost computed from those tokens remains estimated. A driver-reported dollar cost is measured. Settlement can lower an estimate; dashboard sparklines apply replacement deltas. Per-agent `platforms` projections and `agents[].platforms` keep driver and persona platform totals distinct even when both charge the same identity. Free local providers reserve no paid allowance and remain free. Outstanding reservations reduce admission headroom, but the watchdog defers durable budget thresholds and money escalations until settlement or retention; a temporary allowance cannot leave a permanent budget pause after a cheaper report.
+
+Stop behavior is the same for a requester, counterpart, or worker on the affected task, including Stop while the conclusion is in flight:
+
+| Case | Money release or retention | Routing and task hold |
+|---|---|---|
+| Stop before a paid call dispatches | Release its unused reservation to zero; release the unused shared allowance. | Route the unresolved escalation to the scope's orchestrator. Preserve any dissent hold. |
+| Stop after dispatch, with usage already reported | Replace the reservation with reported token usage and its measured or estimated cost; release unused allowance. | Abort the remaining discussion, conclude `NO_OUTCOME`, and route to the orchestrator. Preserve holds. |
+| Stop after dispatch, without usage; provider failure, empty completion or timeout without usage | Retain the dispatched call's allowance as estimated USD, mark it no longer outstanding, and release only unused allowance. | Conclude `NO_OUTCOME` and route. Preserve holds for explicit escalation resolution. |
+| A stopped provider or driver reports late | Replace the same call's retained estimate; never add it twice. | Keep the huddle ended; do not dispatch a conclusion or release a hold. Stop does not wait indefinitely for a provider that ignores abort. |
+| Stop after runner interruption left a huddle and reservation outstanding | Retain its durable estimated charge and mark it settled; release process-local unused allowance. | Recover the unfinished micro-huddle as `NO_OUTCOME` and route. Preserve holds. |
+| Missing seats, no available allowance, budget exhaustion between turns, disagreement or unusable outcome | Charge calls already dispatched; release unused allowance. No charge for calls never dispatched. | Route to the orchestrator. Any hold already acquired stays until explicit resolution. Initial unfunded firing retains the existing notification and nonblocking routing policy. |
+| Agreement commits before Stop | Keep settled usage; release unused allowance. | Agreement resolves only its own escalation and hold. Stop then follows the worker Stop lifecycle and may raise its own blocker. |
+| Stop commits before agreement | Settle or retain calls as above; release unused allowance. | The resolution transaction refuses agreement, concludes `NO_OUTCOME`, and routes. Preserve every existing hold. |
+| Free local call is stopped or fails | No paid reservation or charge. | Route the unresolved huddle and preserve any hold. |
+
+Holds belong to escalation ids, not to the huddle process or the agent's lifetime. Stop never emits an unscoped unblock. A fallback hold is released only by explicit resolution of that escalation (or its existing explicit withdrawal through contract amendment); other dissent holds, Stop blockers, dependencies and needs survive. Submitted, checking and merging tasks keep their pipeline state while held. Notifications and the existing orchestrator/lead fallback policy remain in force.
 
 ## 7. Dashboard Usage page
 

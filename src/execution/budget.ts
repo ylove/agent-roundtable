@@ -93,6 +93,18 @@ export function thresholdCrossings(state: BlackboardState): number[] {
  *    runner reports the agent busy).
  */
 export function budgetRules(state: BlackboardState, opts: { busy?: ReadonlySet<string> } = {}): WatchdogAction[] {
+  // Reservations constrain admission through remainingUsd, but a pending call can settle below
+  // its allowance. Do not turn that temporary allocation into a durable money escalation.
+  const pending = Object.values(state.budget.calls ?? {}).filter((c) => c.reservation);
+  if (pending.length) {
+    const b = { ...state.budget, by_task: { ...state.budget.by_task }, by_agent: { ...state.budget.by_agent } };
+    for (const c of pending) {
+      b.spent_usd = Math.max(0, b.spent_usd - c.usd);
+      if (c.task !== undefined) b.by_task[c.task] = Math.max(0, (own(b.by_task, c.task) ?? 0) - c.usd);
+      if (c.agent !== undefined) b.by_agent[c.agent] = Math.max(0, (own(b.by_agent, c.agent) ?? 0) - c.usd);
+    }
+    state = { ...state, budget: b };
+  }
   const c = state.contract;
   if (!c) return [];
   const out: WatchdogAction[] = [];

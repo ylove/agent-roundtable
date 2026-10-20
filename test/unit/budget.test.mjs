@@ -207,3 +207,14 @@ test("budget: the whole sequence on the real store, $100 extended to $200", () =
     "",
   ]);
 });
+
+test("outstanding micro-huddle reservations constrain admission without firing permanent budget escalations", () => {
+  const reservation = { source: "dissent micro-huddle", call_id: "hud-pending:1", dissent_id: "risk", task: "t", agent: "a", model: "unknown", tokens: { inputTokens: 0, outputTokens: 0 }, usd: 100, estimated: true, reservation: true, at: new Date(0).toISOString() };
+  const s = makeState({ tasks: [task("t")], budget: { spent_usd: 100, estimated: true, by_task: { t: 100 }, by_agent: { a: 100 }, calls: { [reservation.call_id]: reservation } } });
+  assert.equal(remainingUsd(s, { task: "t", agent: "a" }), 0, "the allowance is unavailable to new work");
+  assert.deepEqual(eventTypes(budgetRules(s)), [], "a reservation must not leave a permanent money escalation or threshold behind");
+  s.budget.calls[reservation.call_id].reservation = false;
+  const retained = eventTypes(budgetRules(s));
+  assert.ok(retained.includes("budget.exhausted"), "retained unreported spend enforces the cap");
+  assert.ok(retained.includes("budget.threshold_crossed"));
+});

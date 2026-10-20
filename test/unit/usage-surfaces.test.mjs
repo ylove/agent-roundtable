@@ -147,8 +147,8 @@ test("statusline line 2 and 3: the roundtable at a glance and the busiest agents
     ],
   });
   const lines = renderStatusline(v, {}, plain);
-  assert.equal(lines[0], "◆ roundtable  heads-down exe-abcdef 4/7 tasks · $1.62 meas + ≈$0.22 est of $20 · table 2 agents ≈$0.05 est");
-  assert.equal(lines[1], "  builder $0.92 meas [claude-code] · fixer $0.40 meas [claude-code] · cfo 4.1k tok meas ≈$0.03 est [provider-a]");
+  assert.equal(lines[0], "◆ roundtable  heads-down exe-abcdef 4/7 tasks · $1.62 meas + ≈$0.22 estimated of $20 · table 2 agents ≈$0.05 estimated");
+  assert.equal(lines[1], "  builder $0.92 meas [claude-code] · fixer $0.40 meas [claude-code] · cfo 4.1k tok meas ≈$0.03 estimated [provider-a]");
   // Reported money has its word too.
   const rep = renderStatusline(view({ agents: [agent({ money: { measured: 0, reported: 0.4, estimated: 0 } })] }), {}, plain);
   assert.match(rep[1], /builder \$0\.40 rep \[claude-code\]/);
@@ -251,14 +251,14 @@ test("wording: measured plain, reported with rep, estimated with ≈; mixed tota
   const t = (measured, reported, estimated) => ({ measured, reported, estimated });
   assert.equal(F.moneyText(t(0.92, 0, 0), "abbr"), "$0.92 meas");
   assert.equal(F.moneyText(t(0, 0.4, 0), "abbr"), "$0.40 rep");
-  assert.equal(F.moneyText(t(0, 0, 0.12), "abbr"), "≈$0.12 est");
+  assert.equal(F.moneyText(t(0, 0, 0.12), "abbr"), "≈$0.12 estimated");
   assert.equal(F.moneyText(t(1.62, 0, 0.22), "words"), "$1.62 measured + ≈$0.22 estimated");
   assert.equal(F.totalText(t(1.62, 0, 0.22)), "$1.84 = $1.62 measured + ≈$0.22 estimated");
   assert.equal(F.totalText(t(0.5, 0, 0)), "$0.50 measured");
   assert.equal(F.totalText(t(0, 0, 0)), "$0.00");
   const tok = (n) => ({ input: n, output: 0, cache_read: 0, cache_write: 0, by: { measured: n, reported: 0, estimated: 0 } });
   assert.equal(F.useText(t(0, 0, 0), tok(4100), "abbr"), "4.1k tok meas no price");
-  assert.equal(F.useText(t(0, 0, 0.03), tok(4100), "abbr"), "4.1k tok meas ≈$0.03 est");
+  assert.equal(F.useText(t(0, 0, 0.03), tok(4100), "abbr"), "4.1k tok meas ≈$0.03 estimated");
   assert.equal(F.useText(t(0.92, 0, 0), tok(4100), "abbr"), "$0.92 meas", "measured money needs no token count beside it");
   assert.equal(F.useText(t(0, 0, 0), tok(0), "abbr"), "no usage yet");
   assert.equal(F.usd(0.004), "<$0.01");

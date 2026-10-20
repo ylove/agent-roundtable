@@ -102,3 +102,28 @@ test('package loader and pointed loader compose in a fresh isolated package', t 
   assert.equal(child.status, 0, child.stderr);
   assert.deepEqual(JSON.parse(child.stdout), ['shell', 'package']);
 });
+test('the OpenAI-compatible endpoint and key are imported together, only when the shell set neither', t => {
+  const { home, file } = fixture(t);
+  writeFileSync(file, 'OPENAI_COMPATIBLE_BASE_URL=http://127.0.0.1:1234/v1\nOPENAI_COMPATIBLE_API_KEY=file-key\n', { mode: 0o600 });
+  const mixed = { ROUNDTABLE_ENV_FILE: file, OPENAI_COMPATIBLE_API_KEY: 'shell-key' };
+  loadUserEnvironment({ home, env: mixed, warn: () => {} });
+  assert.equal(mixed.OPENAI_COMPATIBLE_API_KEY, 'shell-key');
+  assert.equal(mixed.OPENAI_COMPATIBLE_BASE_URL, undefined);
+  const clean = { ROUNDTABLE_ENV_FILE: file };
+  loadUserEnvironment({ home, env: clean, warn: () => {} });
+  assert.equal(clean.OPENAI_COMPATIBLE_BASE_URL, 'http://127.0.0.1:1234/v1');
+  assert.equal(clean.OPENAI_COMPATIBLE_API_KEY, 'file-key');
+});
+test('an env file or config.json that others can modify is refused without naming a path', t => {
+  const { home, file } = fixture(t);
+  writeFileSync(file, 'OPENAI_API_KEY=file-key\n', { mode: 0o600 });
+  chmodSync(file, 0o666);
+  const env = { ROUNDTABLE_ENV_FILE: file }, warnings = [];
+  loadUserEnvironment({ home, env, warn: m => warnings.push(m) });
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(warnings.length, 1);
+  assert.ok(!warnings[0].includes(home));
+  writeFileSync(join(home, 'config.json'), JSON.stringify({ envFile: file }), { mode: 0o600 });
+  chmodSync(join(home, 'config.json'), 0o666);
+  assert.throws(() => readUserConfig(home), /Unable to read user configuration/);
+});

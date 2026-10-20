@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import type { PrototypeFile } from "../prototypes/parse.js";
 import { validatePath } from "../prototypes/parse.js";
 import type { DuelResult, Seat, TableEvent, TableObserver } from "./events.js";
@@ -90,6 +90,17 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024;
+/** A regular file of at most 10 MB, checked on the open handle. */
+async function readCapped(path: string): Promise<string> {
+  const handle = await open(path, "r");
+  try {
+    const st = await handle.stat();
+    if (!st.isFile() || st.size > MAX_ARCHIVE_BYTES) throw new Error("Replay archive must be a regular file of at most 10 MB.");
+    return await handle.readFile("utf8");
+  } finally { await handle.close(); }
+}
+
 /** Replays use no provider imports, credentials, sandbox directories, or provider calls. */
 export async function replayDuel(
   archivePath: string,
@@ -98,7 +109,7 @@ export async function replayDuel(
 ): Promise<DuelResult> {
   if (!Number.isFinite(speed) || speed <= 0) throw new Error("Replay speed must be positive.");
   signal?.throwIfAborted();
-  const archive = validateArchive(JSON.parse(await readFile(archivePath, "utf8")));
+  const archive = validateArchive(JSON.parse(await readCapped(archivePath)));
   const files = new Map(archive.prototypes.map(p => [p.eventIndex, p.files]));
   let previousTime: number | undefined;
   for (const [index, event] of archive.events.entries()) {

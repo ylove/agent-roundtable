@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { agentKey, listAgents, loadAgent, readFrontmatter } from "../agents.js";
 import { DEFAULT_MODELS, PARALLEL_TURNS, ROUNDTABLE_HOME } from "../config.js";
 import { callLLM } from "../providers/index.js";
 import { activeUsageSink, withAbortSignal, withUsageSink } from "../providers/usage.js";
 import { parsePrototypeBlock, type PrototypeFile } from "../prototypes/parse.js";
-import { createSessionDir, ensurePrototypeRoot, materializeFiles, releaseSessionDir, removeDirSync } from "../prototypes/sandbox.js";
-import { scrubAndCap } from "../security/secrets.js";
+import { createSessionDir, ensurePrototypeRoot, materializeFiles, releaseSessionDir, removeDirSync, sweepStaleSessionDirs } from "../prototypes/sandbox.js";
+import { scrub, scrubAndCap } from "../security/secrets.js";
+import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { parseDissentBlocks } from "../sessions/dissents.js";
 import { mapLimit } from "../sessions/workshop.js";
 import { abortSession, lineFor, metered, sessionSignal } from "../usage/session-scope.js";
@@ -65,23 +66,24 @@ export async function resolveSeatsLocal(opts: DuelOptions): Promise<ResolvedDuel
   return seats;
 }
 
+class ValidationError extends Error {}
 function validatedFiles(text: string): { title: string; files: PrototypeFile[] } {
   const parsed = parsePrototypeBlock(text);
-  if (!parsed.found) throw new Error("Missing prototype block.");
-  if (!parsed.ok) throw new Error(parsed.error);
+  if (!parsed.found) throw new ValidationError("Missing prototype block.");
+  if (!parsed.ok) throw new ValidationError(parsed.error);
   const { prototype } = parsed;
   if (prototype.kind !== "web" || prototype.files.length !== 1 || prototype.files[0].path !== "index.html" ||
-      (prototype.entry !== undefined && prototype.entry !== "index.html")) throw new Error("Return only one web file named index.html.");
+      (prototype.entry !== undefined && prototype.entry !== "index.html")) throw new ValidationError("Return only one web file named index.html.");
   const html = prototype.files[0].content;
-  if (Buffer.byteLength(html) > 40 * 1024) throw new Error("index.html exceeds 40 KB.");
+  if (Buffer.byteLength(html) > 40 * 1024) throw new ValidationError("index.html exceeds 40 KB.");
   const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script[^>]*>/gi)];
-  if (!scripts.some(m => m[2].trim())) throw new Error("index.html needs inline playable JavaScript in a script element.");
+  if (!scripts.some(m => m[2].trim())) throw new ValidationError("index.html needs inline playable JavaScript in a script element.");
   // Namespace identifiers are not network references.
   const markup = html.replace(/https?:\/\/www\.w3\.org\/(?:2000\/svg|1998\/Math\/MathML|1999\/xhtml|1999\/xlink)/gi, "");
   const external = /\b(?:src|href|action|poster|formaction)\s*=\s*["']?\s*(?:https?:|\/\/)|\burl\s*\(\s*["']?\s*(?:https?:|\/\/)|@import\b|<\s*(?:iframe|object|embed|link|base)\b|<script\b[^>]*\bsrc\s*=/i;
   const calls = /\b(?:fetch|importScripts|WebSocket|EventSource|Worker|SharedWorker|XMLHttpRequest|sendBeacon)\s*\(|\bnew\s+(?:WebSocket|EventSource|Worker|SharedWorker|XMLHttpRequest)\b|\bimport\s*(?:\(|["'{*])/;
   if (external.test(markup) || scripts.some(m => calls.test(m[2]))) {
-    throw new Error("Use inline code only, without external URLs, imports, or embedded pages.");
+    throw new ValidationError("Use inline code only, without external URLs, imports, or embedded pages.");
   }
   return { title: prototype.title, files: prototype.files };
 }
@@ -135,8 +137,8 @@ type DuelRunner = (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, d
 export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
   if (!opts.topic?.trim() || !opts.teamA.length || !opts.teamB.length || !opts.judges.length) throw new Error("A duel needs a topic, two teams, and judges.");
   if ((opts.rounds !== undefined && opts.rounds !== 1 && opts.rounds !== 2) ||
-      !Number.isFinite(opts.maxSeconds ?? 600) || (opts.maxSeconds ?? 600) < 0 ||
-      !Number.isFinite(opts.turnTimeoutMs ?? 90_000) || (opts.turnTimeoutMs ?? 90_000) <= 0) throw new Error("Invalid duel limits.");
+      !Number.isFinite(opts.maxSeconds ?? 600) || (opts.maxSeconds ?? 600) < 0 || (opts.maxSeconds ?? 600) > 3600 ||
+      !Number.isFinite(opts.turnTimeoutMs ?? 90_000) || (opts.turnTimeoutMs ?? 90_000) <= 0 || (opts.turnTimeoutMs ?? 90_000) > 3_600_000) throw new Error("Invalid duel limits.");
   const resolved = await (deps.resolveSeats ?? resolveSeatsLocal)(opts);
   const seats: Seat[] = resolved.map(({ prompt: _prompt, ...seat }) => seat);
   const teams = { A: resolved.filter(s => s.team === "A"), B: resolved.filter(s => s.team === "B") };
@@ -146,7 +148,12 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   const archive: DuelArchive = { version: 1, events: [], prototypes: [] };
   const archivePath = join(ROUNDTABLE_HOME, "duels", `${id}.json`);
   const usage = new Map(seats.map(s => [s.id, { seatId: s.id, inputTokens: 0, outputTokens: 0, costUsd: 0 }]));
-  const emit = async (event: TableEvent) => {
+  const emit = async (raw: TableEvent) => {
+    // Persisted and displayed content is scrubbed at the source.
+    const event: TableEvent = raw.type === "turn" || raw.type === "dissent" ? { ...raw, text: scrub(raw.text) }
+      : raw.type === "assessment" ? { ...raw, reason: scrub(raw.reason) }
+      : raw.type === "prototype" && raw.error ? { ...raw, error: scrub(raw.error) }
+      : raw.type === "end" && raw.archivePath ? { ...raw, archivePath: `duels/${id}.json` } : raw;
     archive.events.push(event);
     try { await obs.onEvent(event); } catch { /* An observer cannot interrupt archival. */ }
   };
@@ -223,7 +230,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
         if (!sandbox) throw new Error("Prototype sandbox unavailable.");
         const dir = join(sandbox, `submission-${++version}`);
         await mkdir(dir, { mode: 0o700 });
-        prototype.files = await materializeFiles(dir, prototype.files, { redactContent: false });
+        prototype.files = await materializeFiles(dir, prototype.files.map(f => ({ ...f, content: scrub(f.content) })), { redactContent: false });
         submissions[team] = prototype;
         const event: TableEvent = { type: "prototype", team, seat: publicSeat(seat), title: prototype.title, ok: true,
           files: prototype.files.map(f => ({ path: f.path, bytes: Buffer.byteLength(f.content) })) };
@@ -232,7 +239,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
         await emit(event);
         return;
       } catch (e) {
-        error = e instanceof Error ? e.message : "Invalid prototype.";
+        error = e instanceof ValidationError ? e.message : "The prototype could not be saved.";
         feedback = `The previous attempt failed validation: ${error}\nReturn a complete corrected prototype.`;
       }
     }
@@ -243,7 +250,9 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   await emit({ type: "start", id, topic: opts.topic, mode: "duel", seats, startedAt: new Date().toISOString() });
   try {
     if (!cancelled() && !expired()) {
-      sandbox = await createSessionDir(await ensurePrototypeRoot(), id);
+      const root = await ensurePrototypeRoot();
+      await sweepStaleSessionDirs(root);
+      sandbox = await createSessionDir(root, id);
       keepSandboxUntilExit(sandbox);
       await mapLimit(["A", "B"] as ("A" | "B")[], PARALLEL_TURNS, async team => {
         concepts[team] = (await turn(teams[team][0], "R1", conceptPrompt(opts.topic, team)))?.split(/\s+/).slice(0, 150).join(" ") ?? "";
@@ -300,12 +309,12 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
     await emitUsage();
     const result: DuelResult = { id, winner: cancelled() ? "none" as const : winner, tally, aborted: aborted || cancelled(), archivePath };
     await emit({ type: "end", winner: result.winner, tally, aborted: result.aborted, archivePath });
-    await mkdir(join(ROUNDTABLE_HOME, "duels"), { recursive: true, mode: 0o700 });
-    try { await writeFile(archivePath, JSON.stringify(archive), { mode: 0o600, flag: "wx" }); }
+    try { mkdirPrivate(join(ROUNDTABLE_HOME, "duels")); writeFileAtomic(archivePath, JSON.stringify(archive)); }
     catch { result.archivePath = undefined; }
     return result;
   } finally {
     signal.removeEventListener("abort", stop);
+    if (sandbox) { removeDirSync(sandbox); releaseSessionDir(sandbox); ownedSandboxes.delete(sandbox); }
   }
 };
 

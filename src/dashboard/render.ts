@@ -1,4 +1,5 @@
-// ============================================================================
+// =====================================================================}
+
 // Execution dashboard: server-rendered pages
 //
 // Every string that comes from the run (contract, notes, escalations, diffs, event payloads,
@@ -6,7 +7,8 @@
 // Pages carry no inline script, style or event handler: the stylesheet and the live-update
 // script are static routes (assets.ts), and links are built from validated ids only. Contract
 // markdown goes through a small converter that escapes everything and passes no raw HTML.
-// ============================================================================
+// =====================================================================}
+
 
 import { escapeHtml } from "../http/secure-server.js";
 import { redact } from "../publishers/redact.js";
@@ -141,7 +143,7 @@ export function awaitingHuman(state: BlackboardState): Escalation[] {
 // Page frame
 // ---------------------------------------------------------------------------
 
-export type PageKey = "overview" | "tasks" | "dag" | "escalations" | "events" | "contract" | "postmortems" | "task";
+export type PageKey = "overview" | "tasks" | "dag" | "escalations" | "dissents" | "events" | "contract" | "postmortems" | "task";
 
 export interface PageContext {
   state: BlackboardState;
@@ -156,6 +158,7 @@ const NAV: Array<[Exclude<PageKey, "task">, string, string]> = [
   ["tasks", "Tasks", "tasks"],
   ["dag", "Graph", "dag"],
   ["escalations", "Escalations", "escalations"],
+  ["dissents", "Dissents", "dissents"],
   ["events", "Events", "events"],
   ["contract", "Contract", "contract"],
   ["postmortems", "Postmortems", "postmortems"],
@@ -172,6 +175,7 @@ const LIVE: Record<PageKey, "reload" | "notice"> = {
   tasks: "reload",
   dag: "reload",
   escalations: "reload",
+  dissents: "reload",
   events: "notice",
   contract: "notice",
   postmortems: "reload",
@@ -427,6 +431,36 @@ export function renderPostmortems(c: PageContext, records: Record<string, Postmo
       : `<p class="empty">No findings recorded.</p>`) +
     (meetings.length ? meetings.join("") : `<p class="empty">No postmortem meeting yet.</p>`);
   return frame(c, "postmortems", "Postmortems", body);
+}
+
+export function renderDissents(c: PageContext): string {
+  const sections = Object.entries(c.state.dissents).map(([id, rec]) => {
+    const d = rec.spec;
+    const fires = Object.values(rec.fires).sort((a, b) => a.seq - b.seq);
+    const status = fires.some((f) => f.generation === rec.generation) ? "fired" : d?.tripwire ? (c.state.contract?.status === "frozen" ? "armed" : "pending freeze") : "needs tripwire";
+    const escalations = Object.values(c.state.escalations).filter((e) => e.dissent_id === id);
+    const huddles = Object.entries(c.state.huddles).flatMap(([huddleId, h]) => {
+      const e = escalations.find((e) => e.id === h.escalation);
+      return e ? [`<tr><td>${t(huddleId)}</td><td>${t(e.task ?? "Integration")}</td>` +
+        `<td>${t(h.outcome ?? "Pending")}</td><td class="note">${t(h.decision ?? "")}</td></tr>`] : [];
+    });
+    return `<section><h2>${t(id)}</h2>` +
+      `<p>Dissenter: ${t(d?.by ?? "Unknown")} · Status: ${t(status)}</p>` +
+      `<p class="note">${t(d?.claim ?? "Dissent definition unavailable.")}</p>` +
+      `<p class="note">Predicted failure: ${t(d?.predicted_failure ?? "Unknown")}</p>` +
+      `<p>Source: ${t(d?.source.kind ?? "Unknown")}${d?.source.ref ? ` · ${t(d.source.ref)}` : ""}</p>` +
+      `<p>Tripwire:</p><pre>${t(d?.tripwire ? JSON.stringify(d.tripwire, null, 2) : "Not supplied")}</pre>` +
+      `<p>On fire: ${t(d?.on_fire ?? "Unknown")} · Score: ${t(rec.score ?? "Not scored")}</p>` +
+      (fires.length ? `<h3>Firings</h3><table><thead><tr><th>Task</th><th>Tripped by</th><th>Evidence</th><th>Notification</th></tr></thead><tbody>` +
+        fires.map((f) => `<tr><td>${t(f.task ?? "Integration")}</td><td>${t(f.tripped_by)}</td><td class="note">${t(f.evidence)}</td>` +
+          `<td>${t((f.notified ?? []).join(", "))}${f.orchestrator_woken ? ` · ${t("Orchestrator woken")}` : ""}</td></tr>`).join("") +
+        `</tbody></table>` : "") +
+      `<h3>Huddles</h3>` +
+      (huddles.length ? `<table><thead><tr><th>Id</th><th>Task</th><th>Outcome</th><th>Decision</th></tr></thead><tbody>${huddles.join("")}</tbody></table>` :
+        `<p class="empty">No huddles recorded.</p>`) + `</section>`;
+  });
+  return frame(c, "dissents", "Dissents", `<h1>Dissents</h1><p>Scores are advisory and never change voting or consent weight.</p>` +
+    (sections.length ? sections.join("") : `<p class="empty">No dissents.</p>`));
 }
 
 // --- events ------------------------------------------------------------------

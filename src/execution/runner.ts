@@ -91,6 +91,7 @@ import {
 } from "./watchdog.js";
 import { ensureIntegrationWorktree, taskDiffSummary, taskStartPoint, ensureTaskWorktree, snapshotWip, taskWorktreePath } from "./worktrees.js";
 import { startDashboard, type Dashboard } from "../dashboard/server.js";
+import { taskHeld, blockingIds } from "./task-holds.js";
 import { GitHubSync } from "../github/sync.js";
 
 // ============================================================================
@@ -633,7 +634,7 @@ export class Runner {
     await this.pollWorkers();
     state = await this.store.state();
     for (const claim of Object.values(state.claims)) {
-      if (["submitted", "checking"].includes(state.tasks[claim.task]?.state) &&
+      if (!taskHeld(state, claim.task) && ["submitted", "checking"].includes(state.tasks[claim.task]?.state) &&
           !state.agents[claim.agent]?.external && !this.hasLiveWorker(claim.task) && !this.busy.has(claim.agent)) {
         await this.recoverLost(claim.agent, claim.task, readRunFile(this.execution, claim.agent), true);
       }
@@ -814,6 +815,10 @@ export class Runner {
    * its agent.exited names the pause, so the watchdog resumes it on the same attempt.
    */
   private markPaused(t: Tracked, drafts: AnyEventDraft[], state: Readonly<BlackboardState>): AnyEventDraft[] {
+    if (taskHeld(state, t.task)) {
+      const paused = blockingIds(state.tasks[t.task])[0] ?? "dissent hold";
+      return drafts.map((d) => d.type === "agent.exited" ? { ...d, payload: { ...d.payload, paused } } : d);
+    }
     if (state.status !== "paused" && !state.paused_tasks.includes(t.task)) return drafts;
     const pause = [...this.log].reverse().find((e) => e.type === "execution.paused" && (e.payload.scope === "all" || e.payload.scope.includes(t.task)));
     const paused = pause?.type === "execution.paused" ? scrubAndCap(pause.correlation ?? pause.payload.reason, 300) : "paused";
@@ -1207,6 +1212,7 @@ export class Runner {
     if (this.stopping) return "the runner is stopping";
     if (s.status !== "running") return `the run is ${s.status}`;
     if (s.paused_tasks.includes(task)) return `task ${task} is paused`;
+    if (taskHeld(s, task)) return `task ${task} is held by an escalation`;
     const rt = own(s.tasks, task);
     if (!rt) return `unknown task ${task}`;
     if (own(s.agents, agent)?.external) return `${agent} is an external agent`;

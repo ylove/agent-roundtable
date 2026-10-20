@@ -1,6 +1,6 @@
 # MCP tool reference
 
-Generated from the registered definitions in `src/tools/*.ts` after building: **39 orchestrator tools**, of which **7** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
+Generated from the registered definitions in `src/tools/*.ts` after building: **41 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
 
 Use these through your MCP client; Claude Code names them `mcp__agent-roundtable__<tool>`. Omitted optional fields use the behavior described below. A nested field marked required is required only when its enclosing object/item is supplied. Null optional values are treated as absent. New contract, run and worker tools reject unknown arguments.
 

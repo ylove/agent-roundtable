@@ -9,8 +9,8 @@ const HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHi
 const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
 test("every tool has a title and all four MCP hints", () => {
-  assert.equal(tools.length, 39, "22 at the table, 3 contract tools, join_execution, the 7 worker tools, the 4 run tools and the 2 postmortem tools");
-  assert.equal(toolsFor("worker").length, 7);
+  assert.equal(tools.length, 41, "22 at the table, 5 contract tools, join_execution, the 7 worker tools, the 4 run tools and the 2 postmortem tools");
+  assert.equal(toolsFor("worker").length, 8);
   for (const tool of tools) {
     assert.equal(typeof tool.annotations?.title, "string", tool.name);
     assert.ok(tool.annotations.title.length > 0, tool.name);
@@ -41,10 +41,10 @@ test("annotation values: read-only diagnostics and listings, file-writing worksh
   }
 });
 
-test("the mode filter: deliberation tools and join_execution are orchestrator-only; the worker server lists the seven worker tools", () => {
+test("the mode filter: deliberation tools and join_execution are orchestrator-only; the worker server also lists dissent filing", () => {
   assert.deepEqual(toolsFor("orchestrator"), tools);
   for (const def of deliberationTools) assert.deepEqual([...def.modes], ["orchestrator"], def.name);
-  assert.deepEqual(toolsFor("worker").map((t) => t.name), [...names.WORKER_TOOL_NAMES]);
+  assert.deepEqual(toolsFor("worker").map((t) => t.name), [names.FILE_DISSENT, ...names.WORKER_TOOL_NAMES]);
   for (const def of workerTools) {
     assert.deepEqual([...def.modes], def.name === "join_execution" ? ["orchestrator"] : ["worker", "orchestrator"], def.name);
   }
@@ -73,11 +73,11 @@ test("a tool not offered in a mode is unknown there", async () => {
   assert.equal((await handleToolCall("list_meetings", {})).content[0].text, "No active meetings.");
 });
 
-test("contract tools: orchestrator only, strict schemas, and annotations that match what they do", async () => {
+test("contract tools: mode access, strict schemas, and annotations that match what they do", async () => {
   const { contractTools } = await import("../../dist/tools/contract.js");
-  assert.deepEqual(contractTools.map((d) => d.name), [names.PROPOSE_CONTRACT, names.AMEND_CONTRACT, names.FREEZE_CONTRACT]);
+  assert.deepEqual(contractTools.map((d) => d.name), [names.SCORE_DISSENT, names.FILE_DISSENT, names.PROPOSE_CONTRACT, names.AMEND_CONTRACT, names.FREEZE_CONTRACT]);
   for (const def of contractTools) {
-    assert.deepEqual([...def.modes], ["orchestrator"], def.name);
+    assert.deepEqual([...def.modes], def.name === names.FILE_DISSENT ? ["orchestrator", "worker"] : ["orchestrator"], def.name);
     assert.equal(def.inputSchema.additionalProperties, false, def.name);
     assert.equal(byName[def.name].annotations.readOnlyHint, false, def.name);
   }

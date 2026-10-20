@@ -113,11 +113,14 @@ test("endMeeting records the summary or final assistant message and the agenda w
     at: undefined, session: first.meetingId, kind: "meeting", mode: "debate", agents: ["alpha"],
     topic: "meeting-agenda", outcome: "reply 2", public: false,
   });
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
+  assert.match(calls[2].body.messages.at(-1).content, /action items or conclusions/);
+  assert.match(calls[3].body.messages.at(-1).content, /<DISSENT>/);
   assert.ok(!meetings.has(first.meetingId));
   const second = await startMeeting("beta", "agenda2", undefined, "openai_compatible", "m", baseUrl);
   await endMeeting(second.meetingId);
-  assert.equal(readActivity().find((e) => e.session === second.meetingId).outcome, "reply 3");
+  assert.equal(readActivity().find((e) => e.session === second.meetingId).outcome, "reply 4");
+  assert.equal(calls.length, 5, "ending without a summary makes no extraction call");
   assert.equal(readActivity().filter((e) => e.session === second.meetingId).length, 1);
 });
 

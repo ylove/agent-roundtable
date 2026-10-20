@@ -139,7 +139,7 @@ The human can read; there is no route, tool or argument by which their words ent
 
 ## 9. Tool surface
 
-Two new orchestrator tools (worker servers unchanged), with `additionalProperties: false` and MCP annotations, bringing the orchestrator server to 39 (WS15 adds its own):
+Two new orchestrator tools (worker servers unchanged), with `additionalProperties: false` and MCP annotations, bringing the combined WS14/WS16 orchestrator server to 41:
 
 | Tool | Arguments |
 |---|---|
@@ -163,7 +163,7 @@ Unit tests for: project keying and refusal of non-repos; draft record/fix/rebuil
 
 ## 12. Implementation notes (where the build went further or differently)
 
-- **Reducer.** `REDUCER_VERSION` is 6. The `postmortem` section of the blackboard lives in `src/execution/postmortem-state.ts` (handlers and a hook run after every event). Fix transitions are derived by the reducer from the task and check events, so `postmortem.fix_updated` is written only by the orchestrator's `fix` action. A retry sets `fix.by` to the task's persona, a reassignment to the new agent. The meeting covers every finding recorded before `postmortem.started` (each finding then names its `pm`); later findings start the next draft. `ready_seq` is the seq of the event that made the draft ready (no pending fix, every task with a finding terminal), and the watcher wakes on exactly that event.
+- **Reducer.** `REDUCER_VERSION` is 9. The `postmortem` section of the blackboard lives in `src/execution/postmortem-state.ts` (handlers and a hook run after every event). Fix transitions are derived by the reducer from the task and check events, so `postmortem.fix_updated` is written only by the orchestrator's `fix` action. A retry sets `fix.by` to the task's persona, a reassignment to the new agent. The meeting covers every finding recorded before `postmortem.started` (each finding then names its `pm`); later findings start the next draft. `ready_seq` is the seq of the event that made the draft ready (no pending fix, every task with a finding terminal), and the watcher wakes on exactly that event.
 - **Automatic findings.** A finding's id is derived from the task, the check ids and their signatures, so a repeat has the same id and carries `repeats`. Each finding's envelope names the event that caused it (`causation`), which keeps the runner's pass idempotent across restarts. A failure at integration scope has no `task` (the merged task is already accepted); its fix is settled when the same integration check passes again. A rejection that only asks a worker to resolve a merge conflict is not a finding.
 - **Meeting.** At least two agents besides the orchestrator are needed for the engine; the host passes `participants` otherwise. `postmortem.started` is written after the meeting has run, so a meeting that fails leaves the draft unchanged and can be held again. In a run the meeting's provider usage is recorded on the budget ledger (source `huddle`) but not enforced, since the human opted in and the run is usually over. The directive of §5 is part of the context every turn carries.
 - **Human's words.** Task cards in the context are built without the original request; the orchestrator's opening and closing have any verbatim stretch of the contract's `original_prompt` or the run's `confirmation` replaced by a marker before they are used.

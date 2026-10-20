@@ -24,8 +24,10 @@ import { appendAudit } from "../security/audit.js";
 import { childEnv } from "../security/child-env.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { readArchivedSession, type ArchivedSession } from "../sessions/archive.js";
+import { sessionDissentDrafts } from "../sessions/dissents.js";
 import { isSessionBusy } from "../sessions/lock.js";
 import { scrubbedJSON } from "./blobs.js";
+import { pausedBy } from "./escalation.js";
 import { canonicalJSON } from "./chain.js";
 import {
   affectedTasks,
@@ -33,6 +35,7 @@ import {
   contractHash,
   contractIdFor,
   createMergePatch,
+  CONTRACT_LIMITS,
   validateContract,
   type AffectedTasks,
   type CheckOptions,
@@ -300,9 +303,13 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   const warnings: string[] = [];
   const orchestrator = o.orchestrator.trim();
   const session = o.fromSession ? archived(o.fromSession) : undefined;
+  const sessionDissents = session ? sessionDissentDrafts(session) : [];
   const src: SessionSource | undefined = session && sessionSource(session);
   if (src?.kind === "ultraplan" && src.signedOff === false) {
     warnings.push(`${o.fromSession} was not signed off: an objection or unclear sign-off stands, or it was ended without sign-off`);
+    if (session?.document?.signoffs.some((s) => s.verdict === "OBJECT" && s.content.length > CONTRACT_LIMITS.dissent_claim)) {
+      warnings.push("Imported OBJECT text was capped at 500 characters; the full sign-off remains in the source archive. Refine its prediction and tripwire before freeze.");
+    }
   }
   const originalPrompt = o.originalPrompt?.trim() ? o.originalPrompt : src?.topic?.trim() ? src.topic : undefined;
   if (!originalPrompt) throw new Error("original_prompt is required: pass the human's request verbatim (or from_session, whose task is used)");
@@ -363,6 +370,35 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
     if (c.participants === undefined && src && Array.isArray(c.tasks)) {
       const personas = c.tasks.map((t) => (isObj(t) && typeof t.persona === "string" ? t.persona : "")).filter(Boolean);
       c.participants = [...new Set([...src.agents, ...personas])];
+    }
+    if (session?.kind === "ultraplan" && session.document?.signedOff === false) {
+      if (c.dissents != null && !Array.isArray(c.dissents)) return c; // Preserve malformed input for validation.
+      const dissents = Array.isArray(c.dissents) ? [...c.dissents] : [];
+      for (const [i, s] of session.document.signoffs.entries()) {
+        if (s.verdict !== "OBJECT") continue;
+        const participants = Array.isArray(c.participants) ? [...c.participants] : [];
+        if (!participants.some((p) => p === s.agent || (isObj(p) && p.agent === s.agent))) participants.push(s.agent);
+        c.participants = participants;
+        let id = `ultraplan-object-${i + 1}`;
+        while (dissents.some((d) => isObj(d) && d.id === id)) id += "-x";
+        const text = s.content.trim() || "OBJECT sign-off: specify the predicted failure and tripwire before freeze.";
+        dissents.push({ id, by: s.agent, source: { kind: "ultraplan", ref: session.id },
+          claim: text.slice(0, CONTRACT_LIMITS.dissent_claim), predicted_failure: text.slice(0, CONTRACT_LIMITS.dissent_prediction), on_fire: "huddle" });
+      }
+      c.dissents = dissents;
+    }
+    if (sessionDissents.length) {
+      if (c.dissents != null && !Array.isArray(c.dissents)) return c;
+      const dissents = Array.isArray(c.dissents) ? [...c.dissents] : [];
+      const participants = Array.isArray(c.participants) ? [...c.participants] : [];
+      for (const d of sessionDissents) {
+        let id = d.id;
+        while (dissents.some((existing) => isObj(existing) && existing.id === id)) id += "-x";
+        dissents.push({ ...d, id });
+        if (!participants.some((p) => p === d.by || (isObj(p) && p.agent === d.by))) participants.push(d.by);
+      }
+      c.dissents = dissents;
+      c.participants = participants;
     }
     return c;
   };
@@ -433,6 +469,84 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
 }
 
 // ---------------------------------------------------------------------------
+// Draft dissents
+// ---------------------------------------------------------------------------
+
+export interface FileDissentOptions {
+  by: string;
+  contractId?: string;
+  /** Agent callers must come from the tool layer's authenticated worker identity. */
+  source?: EventSource;
+  /** The objector explicitly consents to this new version while retaining their dissent. */
+  resolveObjection?: boolean;
+  /** Orchestrator-only excusal: remove the draft by id, retaining its prior blob and this reason. */
+  excuseReason?: string;
+}
+
+/** File or replace a structured draft concern, or explicitly excuse it. Every edit creates v(N+1). */
+export async function fileDissent(store: ExecutionStore, input: Record<string, unknown>, opts: FileDissentOptions): Promise<ContractResult> {
+  const rec = await contractRecord(store, opts.contractId);
+  const source = opts.source ?? orchestratorSource(opts.by);
+  const orchestrator = source.kind === "orchestrator" && opts.by === rec.contract.scope.orchestrator;
+  const agent = source.kind === "agent" && rec.contract.participants.some((p) => p.agent === opts.by);
+  if (source.id !== opts.by || (!orchestrator && !agent)) throw new ContractRefusal("file dissent", rec.id, ["only the contract's orchestrator or an authenticated participant may file"]);
+  if (rec.frozen || rec.superseded) throw new ContractRefusal("file dissent", rec.id, ["dissents can only be filed while the contract is a draft"]);
+  if (rec.round?.inFlight) throw new ContractRefusal("file dissent", rec.id, ["a consent round is in flight; wait for it to finish"]);
+  if (!isObj(input)) throw new Error("dissent must be an object");
+  const existing = (rec.contract.dissents ?? []).find((d) => d.id === input.id);
+  const excusing = opts.excuseReason !== undefined;
+  let dissent: Record<string, unknown>;
+  let reason: string;
+  if (excusing) {
+    if (!orchestrator) throw new Error("only the contract's orchestrator may excuse a dissent");
+    if (!existing) throw new Error(`Unknown dissent ${String(input.id)}`);
+    if (typeof opts.excuseReason !== "string" || !opts.excuseReason.trim()) throw new Error("excuse_reason must be non-empty");
+    if (opts.resolveObjection) throw new Error("excusing a dissent does not resolve an objection");
+    dissent = { ...existing };
+    reason = `Excused dissent ${existing.id}: ${opts.excuseReason.trim()}`;
+  } else {
+    if (agent && ((input.by !== undefined && input.by !== opts.by) || (existing && existing.by !== opts.by))) {
+      throw new Error("an agent may file or replace only their own dissent");
+    }
+    dissent = { ...input, ...(agent && { by: opts.by }) };
+    if (opts.resolveObjection) {
+      const s = standing(rec, opts.by);
+      if (dissent.by !== opts.by || s.kind !== "objection" || s.verdict !== "OBJECT") {
+        throw new Error("how: dissented requires the objector's own unresolved OBJECT on the current version");
+      }
+      dissent.source = { kind: "consent", ref: `${rec.id}:v${rec.version}` };
+    }
+    reason = `${existing ? "Updated" : "Filed"} dissent ${String(dissent.id)} by ${String(dissent.by)}`;
+  }
+  const dissents: unknown[] = (rec.contract.dissents ?? []).filter((d) => d.id !== dissent.id);
+  if (!excusing) dissents.push(dissent);
+  const parent = rec.contract.scope.parent
+    ? await loadParent(rec.contract.scope.parent.contract, { task: rec.contract.scope.parent.task, exclude: rec.id }) : undefined;
+  const v = await validateContract({ ...rec.contract, status: "draft", version: rec.version + 1, consent: [], dissents }, parentOpt(parent));
+  if (!v.ok) throw new Error(`The dissent is not valid:\n- ${listErrors(v.errors)}`);
+  const blob = await store.putBlob(scrubbedJSON(v.contract), { redact: false });
+  const patchBlob = await store.putBlob(scrubbedJSON({ dissents: v.contract.dissents }), { redact: false });
+  await store.transact(async () => {
+    const now = await contractRecord(store, rec.id);
+    if (now.frozen || now.superseded || now.version !== rec.version || now.round?.inFlight) throw new Error("The draft changed meanwhile; review the latest version before filing");
+    if (opts.resolveObjection && now.verdicts[opts.by]?.seq !== rec.verdicts[opts.by]?.seq) throw new Error("The objection changed meanwhile; review it before resolving");
+    const events: AnyEventDraft[] = [{
+      type: "contract.proposed", source, mode: "deliberation", contract: rec.id, contract_version: v.contract.version,
+      payload: { contract: rec.id, version: v.contract.version, source: "dissent", blob, reason, patch_blob: patchBlob },
+    }];
+    if (opts.resolveObjection) events.push({
+      type: "contract.objection_resolved", source, mode: "deliberation", contract: rec.id, contract_version: v.contract.version,
+      payload: { contract: rec.id, agent: opts.by, how: "dissented", reason, dissent_id: dissent.id as string },
+    });
+    return { events };
+  });
+  const warnings = [...v.warnings];
+  if (excusing) await audit(warnings, { actor: opts.by, action: "contract.dissent_excused", target: rec.id,
+    details: { execution: store.id, version: v.contract.version, dissent_id: dissent.id, reason: opts.excuseReason!.trim() } });
+  return resultFor(store, rec.id, { warnings });
+}
+
+// ---------------------------------------------------------------------------
 // Freeze
 // ---------------------------------------------------------------------------
 
@@ -455,6 +569,9 @@ function freezeBlockers(rec: ContractRecord, excuse: Array<{ agent: string; reas
     reasons.push(`only the contract's orchestrator (${rec.contract.scope.orchestrator}) can freeze it; ${orchestrator} cannot`);
   }
   if (rec.round?.inFlight) reasons.push(`a consent round is in flight (${rec.round.pending.length} answers pending); wait, or pass abandon_round if its process died`);
+  for (const d of rec.contract.dissents ?? []) {
+    if (!d.tripwire) reasons.push(`dissent ${d.id} needs a tripwire before freeze or explicit excusal with file_dissent (excuse_reason)`);
+  }
   const participants = rec.contract.participants.map((p) => p.agent);
   const excused = new Set<string>();
   const ok = (agent: string) => ["agree", "excused"].includes(standing(rec, agent).kind);
@@ -612,7 +729,7 @@ export interface AmendOptions {
 const PROTECTED_TOP = ["schema", "id", "version", "status", "consent", "frozen"];
 const PROTECTED_SCOPE = ["orchestrator", "repo_root", "base_ref", "parent"];
 /** Changes to these touch every participant: on a frozen contract they need everyone's consent first. */
-export const RUN_WIDE_FIELDS = ["budget", "scope", "sandbox", "authority", "validation", "workers", "goal"] as const;
+export const RUN_WIDE_FIELDS = ["budget", "scope", "sandbox", "authority", "validation", "workers", "goal", "dissents"] as const;
 
 function protectedProblems(patch: Obj): string[] {
   const out = PROTECTED_TOP.filter((k) => Object.hasOwn(patch, k)).map((k) => `patch may not change ${k}`);
@@ -633,7 +750,8 @@ function protectedProblems(patch: Obj): string[] {
 
 function withoutMeta(c: Contract): Obj {
   const { version: _v, status: _s, consent: _c, frozen: _f, ...rest } = c;
-  return rest;
+  // Historical blobs predate this optional field: its empty default is not an amendment.
+  return { ...rest, dissents: c.dissents ?? [] };
 }
 
 const BUDGET_KEYS = ["usd", "per_task_usd", "per_agent_usd", "wall_clock_min"] as const;
@@ -857,6 +975,22 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
         type: "contract.amended", source, mode: m, contract: contractId, contract_version: version,
         payload: { contract: contractId, version, patch_blob: patchBlob, reason, affected_tasks: affected.all, blob },
       }];
+      const removedDissents = (c.dissents ?? []).filter((d) => !final.dissents.some((next) => next.id === d.id));
+      const withdrawing = Object.values(state.escalations).filter((e) =>
+        removedDissents.some((d) => d.id === e.dissent_id) && e.status !== "resolved" && e.status !== "withdrawn").map((e) => e.id);
+      for (const dissent of removedDissents) {
+        for (const e of Object.values(state.escalations)) {
+          if (e.dissent_id !== dissent.id || e.status === "resolved" || e.status === "withdrawn") continue;
+          events.push({ type: "escalation.withdrawn", source, payload: { id: e.id, reason: `Dissent ${dissent.id} removed by amendment v${version}` } });
+          const rt = e.task && Object.hasOwn(state.tasks, e.task) ? state.tasks[e.task] : undefined;
+          if (e.task && e.blocking && rt && !["accepted", "failed", "cancelled"].includes(rt.state)) {
+            events.push({ type: "task.unblocked", source, payload: { task: e.task, escalation: e.id } });
+          }
+          const paused = await pausedBy(store, state, e.id, withdrawing);
+          if (paused.length) events.push({ type: "execution.resumed", source, correlation: e.id,
+            payload: { scope: paused, reason: `Dissent ${dissent.id} removed by amendment v${version}` } });
+        }
+      }
       for (const task of affected.removed) {
         const rt = Object.hasOwn(state.tasks, task) ? state.tasks[task] : undefined;
         if (!rt || rt.state === "accepted" || rt.state === "cancelled") continue;
@@ -876,7 +1010,7 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
     });
     await audit(warnings, {
       actor: by, action: "contract.amended", target: contractId,
-      details: { execution: store.id, version, hash, affected_tasks: affected.all, ...(runWide.length && { run_wide: runWide }), ...(opts.authority && { within_authority: opts.authority }) },
+      details: { execution: store.id, version, hash, affected_tasks: affected.all, removed_dissents: (c.dissents ?? []).filter((d) => !final.dissents.some((next) => next.id === d.id)).map((d) => d.id), ...(runWide.length && { run_wide: runWide }), ...(opts.authority && { within_authority: opts.authority }) },
     });
     // A task-level change: the personas of the affected tasks are asked afterwards, when wanted.
     if (wantConsent && asked === undefined) {

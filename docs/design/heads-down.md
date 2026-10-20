@@ -252,7 +252,7 @@ The human's chat is never stored on the blackboard.
 - `task.split` records `splits[task] = parts`. Whenever a contract version is adopted, dependencies on a split task are rewritten to its parts, recursively.
 - Task and command ids match `^[a-z0-9][a-z0-9._-]{0,63}$` in payloads and contracts, so the `/` in a check key is unambiguous.
 - `contract.amended` marks the contract `frozen` and keeps the earlier freeze record unless the blob carries one.
-- Snapshots record `REDUCER_VERSION` (now 4) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
+- Snapshots record `REDUCER_VERSION` (now 9) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
 
 ## 7. Contract
 

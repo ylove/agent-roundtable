@@ -6,6 +6,7 @@
 // with one JSON line on stdout, {reason, execution, seq, escalation?, message}, when the
 // orchestrator is needed:
 //   escalation      an escalation.routed to this orchestrator with wake: true (still unresolved)
+//   dissent         a tripwire needs this orchestrator's attention
 //   awaiting_human  an escalation.awaiting_human (still awaiting)
 //   budget          a budget.threshold_crossed at 80% or more (of the current budget)
 //   postmortem_ready   the run's postmortem draft has no pending fix left (docs/design/postmortem.md §5)
@@ -44,7 +45,7 @@ export interface WatchFile {
   reason?: WatchReason;
 }
 
-export type WatchReason = "escalation" | "awaiting_human" | "budget" | "postmortem_ready" | "postmortem" | "completed" | "failed" | "aborted" | "timeout";
+export type WatchReason = "escalation" | "dissent" | "awaiting_human" | "budget" | "postmortem_ready" | "postmortem" | "completed" | "failed" | "aborted" | "timeout";
 
 /** The one line `watch` prints. */
 export interface WatchResult {
@@ -141,6 +142,9 @@ export function wakeFor(state: Readonly<BlackboardState>, e: AnyEvent, orchestra
     return { ...base, reason: "postmortem_ready", message: `Every fix for the run's postmortem draft has settled (${n} finding${n === 1 ? "" : "s"}): hold the postmortem meeting with hold_postmortem { project, execution_id: "${state.execution}", opening }, or leave it.` };
   }
   switch (e.type) {
+    case "dissent.tripwire_fired":
+      if (!e.payload.orchestrator_woken || state.contract?.scope.orchestrator !== orchestrator) return null;
+      return { ...base, reason: "dissent", message: `Dissent ${e.payload.dissent_id} needs attention: ${cap(e.payload.evidence, 600)}` };
     case "escalation.routed": {
       const esc = own(state.escalations, e.payload.id);
       if (e.payload.to !== orchestrator || !e.payload.wake) return null;

@@ -1,6 +1,6 @@
 import type { DuelOptions, DuelResult, Seat, TableObserver } from "./table/events.js";
 import { parseFlags } from "./cli.js";
-import { createNdjsonObserver, createTerminalObserver, type TerminalOutput } from "./table/terminal.js";
+import { clean, createNdjsonObserver, createTerminalObserver, type TerminalOutput } from "./table/terminal.js";
 import { readUserConfig, setUserConfig } from "./user-config.js";
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +29,7 @@ const list = (value: string | true | undefined): string[] => {
 };
 function positive(flags: Flags, key: string, fallback: number): number {
   const value = flags[key] === undefined ? fallback : Number(flags[key]);
-  if (!Number.isFinite(value) || value <= 0) throw new UsageError(`--${key} must be a positive number.`);
+  if (!Number.isFinite(value) || value <= 0 || (key !== "speed" && key !== "rounds" && value > 3600)) throw new UsageError(`--${key} must be a positive number${key === "speed" || key === "rounds" ? "" : " up to 3600"}.`);
   return value;
 }
 export function parseTableArgs(command: string, args: string[]): ParsedTableArgs {
@@ -159,7 +159,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
       const { prepareSeats } = await import("./table/seats.js");
       seats = await prepareSeats(
         { ...(command === "duel" ? parsed.options : { agents: parsed.agents, agentsDir: parsed.options.agentsDir }), seat: parsed.flags.seat as string | undefined, mix: parsed.options.mix },
-        { preflight: !parsed.flags["no-preflight"], signal: controller.signal, report: message => { error.write(`${message}\n`); } },
+        { preflight: !parsed.flags["no-preflight"], signal: controller.signal, report: message => { error.write(`${clean(message)}\n`); } },
       );
       parsed.options.seats = Object.fromEntries([...seats].map(([id, seat]) => [id, { agent: id, provider: seat.provider, model: seat.model }]));
     }

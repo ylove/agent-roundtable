@@ -106,6 +106,7 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
     const p = provider as LLMProvider;
     const model = override?.model ?? (override?.provider || mixed ? DEFAULT_MODELS[p] : frontmatterModel(frontmatter, p) ?? (p === (opts.provider ?? "anthropic") ? opts.model : undefined) ?? DEFAULT_MODELS[p]);
     if (typeof model !== "string" || !model.trim()) throw new SeatUsageError("Seat model must be a non-empty string.");
+    if (!/^[\x21-\x7e]{1,200}$/.test(model.trim())) throw new SeatUsageError("Seat model must be 1 to 200 printable ASCII characters with no whitespace.");
     out.set(id, { id, name: agentKey(id), ...(team && { team }), provider: p, model: p === "anthropic" ? resolveAnthropicModel(model.trim()) : model.trim(), ...(typeof frontmatter.role === "string" && { role: frontmatter.role }) });
   }
   return out;

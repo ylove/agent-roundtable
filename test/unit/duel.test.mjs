@@ -265,3 +265,15 @@ test("build turns never carry source; tolerant verdicts, preference tie-break an
   const none = await run(t, { verdicts: "no verdict lines at all" });
   assert.equal(none.result.winner, "none");
 });
+
+test("configured secrets and local paths never reach events or the archive", async t => {
+  const secret = "sk-ant-api03-ZZZZ-hardening-fixture-0123456789";
+  const original = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = secret;
+  t.after(() => { if (original === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = original; });
+  const { result, events } = await run(t, { verdicts: `VERDICT A: APPROVE — leaked ${secret}\nVERDICT B: REVISE — also ${secret}`, build: team => game(team).replace("let n=0;", `let n=0;/* ${secret} */`) });
+  assert.ok(!JSON.stringify(events).includes(secret));
+  const archive = await readFile(result.archivePath, "utf8");
+  assert.ok(!archive.includes(secret));
+  assert.ok(events.at(-1).archivePath.startsWith("duels/"));
+});

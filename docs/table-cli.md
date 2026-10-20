@@ -89,3 +89,7 @@ roundtable config show
 ```
 
 See [configuration](configuration.md#saved-cli-settings-and-env-files) for saved env-file and persona-directory settings.
+
+## Persona frontmatter chooses where session content goes
+
+A persona's `provider` and `model` frontmatter decide which provider receives that seat's prompts and replies, for the CLI and for MCP collaborations alike. `model: inherit`, an empty model, or a Claude model name aimed at another provider falls back to that provider's default. Model ids must be printable ASCII without whitespace (up to 200 characters). Duel archives under `ROUNDTABLE_HOME/duels/` are scrubbed of configured secrets, written privately, and removed with the other session archives after `ROUNDTABLE_SESSION_RETENTION_DAYS`. The env file and `config.json` are ignored unless you own them and nobody else can write to them. `OPENAI_COMPATIBLE_BASE_URL` and `OPENAI_COMPATIBLE_API_KEY` are imported from the env file only as a pair, and only when the shell sets neither.

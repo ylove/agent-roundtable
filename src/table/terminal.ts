@@ -2,7 +2,7 @@ import type { Seat, TableEvent, TableObserver } from "./events.js";
 
 export interface TerminalOutput { write(text: string): unknown; isTTY?: boolean; columns?: number }
 export interface TerminalOptions { output?: TerminalOutput; env?: NodeJS.ProcessEnv; width?: number }
-const clean = (text: string): string => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+export const clean = (text: string): string => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 const oneLine = (text: string): string => clean(text).replace(/\s+/g, " ").trim();
 function wrapped(text: string, width: number): string[] {
   const lines: string[] = [];
@@ -42,5 +42,5 @@ export function createTerminalObserver(options: TerminalOptions = {}): TableObse
   } };
 }
 export function createNdjsonObserver(output: TerminalOutput = process.stdout): TableObserver {
-  return { onEvent(event) { output.write(JSON.stringify(event) + "\n"); } };
+  return { onEvent(event) { output.write(JSON.stringify(event).replace(/[\u007f-\u009f\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`) + "\n"); } };
 }

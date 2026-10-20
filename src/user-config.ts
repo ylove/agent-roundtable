@@ -14,7 +14,7 @@ export function userConfigHome(env: Environment = process.env): string {
 }
 
 /** Validate before opening (including FIFOs); diagnostics deliberately contain no paths. */
-function readRegular(path: string): { text: string; mode: number } {
+function readRegular(path: string, owned = false): { text: string; mode: number } {
   if (!isAbsolute(path)) throw new Error("The env file must be an absolute path to a regular file.");
   let fd: number | undefined;
   try {
@@ -22,6 +22,8 @@ function readRegular(path: string): { text: string; mode: number } {
     fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
     const st = fstatSync(fd);
     if (!st.isFile()) throw new Error();
+    // Credentials and settings are read only from files that only their owner can change.
+    if (owned && ((typeof process.getuid === "function" && st.uid !== process.getuid()) || (st.mode & 0o022))) throw new Error("untrusted");
     return { text: readFileSync(fd, "utf8"), mode: st.mode };
   } catch {
     throw new Error("The env file must be an accessible regular file.");
@@ -30,7 +32,7 @@ function readRegular(path: string): { text: string; mode: number } {
 
 export function readUserConfig(home = userConfigHome()): UserConfig {
   try {
-    const data: unknown = JSON.parse(readRegular(join(home, "config.json")).text);
+    const data: unknown = JSON.parse(readRegular(join(home, "config.json"), true).text);
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error();
     const config = data as Record<string, unknown>;
     for (const key of ["envFile", "agentsDir"]) {
@@ -70,7 +72,11 @@ export function loadUserEnvironment(options: {
   const warn = options.warn ?? ((message: string) => console.error(message));
   const enabled = (env.ROUNDTABLE_DOTENV ?? "").trim().toLowerCase() !== "off";
   const apply = (data: Record<string, string>, filtered: boolean, override = false) => {
+    // The endpoint and its key travel together, and only when the shell set neither.
+    const pair = ["OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_API_KEY"];
+    const pairFree = pair.every(key => env[key] === undefined);
     for (const [key, value] of Object.entries(data)) {
+      if (filtered && pair.includes(key)) { if (pairFree && allowedEnvKey(key)) env[key] = value; continue; }
       if ((!filtered || allowedEnvKey(key)) && (override || env[key] === undefined)) env[key] = value;
     }
   };
@@ -86,9 +92,9 @@ export function loadUserEnvironment(options: {
   const envFile = env.ROUNDTABLE_ENV_FILE ?? config.envFile;
   if (envFile !== undefined) {
     try {
-      const file = readRegular(envFile);
+      const file = readRegular(envFile, true);
       if (file.mode & 0o044) warn("The configured env file allows group or world read; restrict its permissions to 0600.");
       apply(parse(file.text), true);
-    } catch { warn("Unable to load the configured env file; use an absolute path to an accessible regular file."); }
+    } catch { warn("Unable to load the configured env file; it must be an absolute path to a regular file that you own and that others cannot modify."); }
   }
 }

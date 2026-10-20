@@ -129,3 +129,10 @@ test('model inherit, empty, or a Claude name on another provider falls back to t
   assert.equal((await resolve({ provider: 'openai', model: 'fixture-model' })).model, 'fixture-model');
   assert.equal((await resolve({ model: 'sonnet' })).model, DEFAULT_MODELS.anthropic);
 });
+
+test('model ids must be printable ASCII without whitespace', async () => {
+  for (const model of ['evil\u001b]52;c;x\u0007', 'two words', 'x'.repeat(201)]) {
+    await assert.rejects(resolveSeats({ agents: ['designer'], load: async () => ({ frontmatter: { provider: 'openai', model } }) }), e => e.exitCode === 2);
+  }
+  await assert.rejects(resolveSeats({ agents: ['designer'], load, seat: 'designer=openai:bad\u001bmodel' }), e => e.exitCode === 2);
+});

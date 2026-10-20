@@ -49,3 +49,11 @@ test('NDJSON emits precisely one complete uncolored event per line', async () =>
   assert.deepEqual(output.read().trim().split('\n').map(line => JSON.parse(line)), events);
   assert.doesNotMatch(output.read(), /\x1b/);
 });
+test('NDJSON escapes C1 controls and line separators', async () => {
+  const output = sink(true), obs = createNdjsonObserver(output);
+  const text = ['a', '\u009b', 'b', ' ', 'c', '\u007f', 'd'].join('');
+  await obs.onEvent(turn(text));
+  const raw = output.read();
+  assert.doesNotMatch(raw, new RegExp('[\\u007f-\\u009f\\u2028\\u2029]'));
+  assert.equal(JSON.parse(raw).text, text);
+});

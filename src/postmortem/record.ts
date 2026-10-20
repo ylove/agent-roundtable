@@ -20,7 +20,7 @@ const quote = (s: string) => text(s).split(/\r?\n/).map((l) => `> ${l}`).join("\
 function artifactStatus(r: PostmortemRecord, id: string): string {
   if (r.status !== "concluded") return "proposed";
   const applied = r.applied?.find((a) => a.id === id);
-  if (applied) return applied.note?.startsWith("failed") ? `accepted, not applied (${cell(applied.note, 200)})` : "accepted";
+  if (applied) return applied.note?.startsWith("failed") ? `accepted, not applied (${cell(applied.note, 200)})` : applied.audit_pending ? "accepted, audit pending" : "accepted";
   const rej = r.rejected?.find((x) => x.id === id);
   return rej ? `rejected: ${cell(rej.why, 200)}` : "not accepted";
 }
@@ -60,7 +60,7 @@ export function renderRecord(r: PostmortemRecord): string {
     out.push("None were proposed.");
   }
   if (r.rejected_lines.length) out.push("", "Lines that could not be used:", ...r.rejected_lines.map((l) => `- ${text(l)}`));
-  if (r.applied?.length) out.push("", "## Applied", "", ...r.applied.map((a) => `- ${a.id} (${a.kind} → ${cell(a.target, 80)}): ${cell(a.note ?? "recorded", 300)}`));
+  if (r.applied?.length) out.push("", "## Applied", "", ...r.applied.map((a) => `- ${a.id} (${a.kind} → ${cell(a.target, 80)}): ${cell(a.note ?? "recorded", 300)}${a.audit_pending ? " (audit pending)" : ""}`));
   if (r.flagged?.length) {
     out.push("", "## Flags", "", ...r.flagged.map((f) => `- \`${f.finding}\` [${f.category}] misread: ${cell(f.misread, 300)}${f.clearer ? `; clearer wording: ${cell(f.clearer, 300)}` : ""}`));
   }

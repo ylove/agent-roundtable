@@ -215,6 +215,8 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
     opening, findings: view.findings, dissents, transcript, proposed: artifacts, rejected_lines: rejected,
   };
   await withProjectLock(i.project.key, async () => {
+    const existing = findRecord(view.pm);
+    if (existing) throw new Error(`postmortem ${view.pm} is already ${existing.status}; another hold completed first; the existing record is unchanged`);
     saveRecord(rec, renderRecord(rec));
     removeDraft(i.project.key, view.pm);
     if (store) {
@@ -277,7 +279,7 @@ function resultOf(r: PostmortemRecord, warnings: string[], lessonsAdded: number,
     applied: r.applied ?? [],
     follow_ups: r.proposed.filter((a) => a.kind === "fix" && accepted.includes(a.id)).map((a) => ({ id: a.id, target: a.target, text: a.text })),
     flagged: r.flagged ?? [], lessons_added: lessonsAdded, warnings,
-    tell_the_human: `${r.summary ?? summaryParagraph(r)} The record is at ${recordPath(r.project, r.pm, "md")}; show it verbatim if they want to read it.`,
+    tell_the_human: `${r.summary ?? summaryParagraph(r)} The record is at ${recordPath(r.project, r.pm, "md")}; show it verbatim if they want to read it.${r.applied?.some((a) => a.audit_pending) ? " A scoring audit is still pending; repeat conclude to finish it." : ""}`,
   };
 }
 
@@ -286,7 +288,7 @@ const LESSON_KIND: Partial<Record<PostmortemArtifactKind, NewLesson["kind"]>> = 
 export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResult> {
   const found = findRecord(i.pm);
   if (!found) throw new Error(`No held postmortem ${i.pm}. hold_postmortem returns its pm id; postmortem(action: "list") lists them.`);
-  if (found.status === "concluded") return resultOf(found, [], 0, true);
+  if (found.status === "concluded") return finishConclusion(found, [], 0, true);
 
   const known = new Set(found.proposed.map((a) => a.id));
   const accept = [...new Set(i.accept ?? [])];
@@ -332,8 +334,7 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
     const applied: AppliedArtifact[] = [];
     const lessons: NewLesson[] = [];
     const now = new Date();
-    const audit = (a: Artifact, done: AppliedArtifact) =>
-      appendAudit({ actor: "orchestrator", action: "postmortem.applied", target: rec.pm, details: { artifact: a.id, kind: a.kind, target: a.target, path: done.path, hash: a.hash, project: rec.project } });
+    const audit = (done: AppliedArtifact) => auditApplied(rec, done);
     for (const a of rec.proposed.filter((x) => accept.includes(x.id))) {
       try {
         let done: AppliedArtifact;
@@ -344,6 +345,7 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
           await scoreDissent(store, {
             contractId: state.contract?.id ?? "", orchestrator: i.orchestrator ?? "", dissentId: a.target, outcome: a.outcome!,
             operationKey: `postmortem:${rec.pm}:${a.id}:${a.hash}`,
+            reviewed: rec.dissents?.[a.target] ?? {},
           });
           done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: store.dir, note: `advisory assessment: ${a.outcome}` };
         } else if (a.kind === "persona_addendum") done = await applyPersonaAddendum(a, rec.pm, now, rec.refs?.[a.target]);
@@ -354,7 +356,13 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
           done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: "lessons.json", note: "added to the project's lessons" };
         }
         // File and scoring writes are audited immediately; lesson writes are audited after persistence.
-        if (a.kind === "persona_addendum" || a.kind === "memory" || a.kind === "dissent_score") await audit(a, done);
+        if (a.kind === "dissent_score") {
+          try { await audit(done); }
+          catch (e) {
+            done.audit_pending = true;
+            warnings.push(`${a.id} was applied but its audit is pending: ${errText(e)}. Repeat conclude to retry the audit.`);
+          }
+        } else if (a.kind === "persona_addendum" || a.kind === "memory") await audit(done);
         applied.push(done);
       } catch (e) {
         warnings.push(`${a.id} (${a.kind} → ${a.target}) was accepted but not applied: ${errText(e)}`);
@@ -371,7 +379,7 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
       lessons.push({ kind: "flag", target: "project", flag: true, text: `${f.misread}${f.clearer ? ` Clearer: ${f.clearer}` : ""}`.slice(0, 1200), pm: rec.pm, findings: [f.finding] });
     }
     lessonsAdded = lessons.length ? addLessons(rec.project, lessons, now.toISOString()).length : 0;
-    for (const a of rec.proposed.filter((x) => ok.has(x.id) && x.kind !== "persona_addendum" && x.kind !== "memory" && x.kind !== "dissent_score")) await audit(a, applied.find((x) => x.id === a.id)!);
+    for (const a of rec.proposed.filter((x) => ok.has(x.id) && x.kind !== "persona_addendum" && x.kind !== "memory" && x.kind !== "dissent_score")) await audit(applied.find((x) => x.id === a.id)!);
     const concluded: PostmortemRecord = {
       ...rec, status: "concluded", concluded_at: now.toISOString(), closing,
       accepted: accept, rejected: reject, applied, flagged,
@@ -381,19 +389,51 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
     record = concluded;
   });
 
-  if (store && record.status === "concluded" && record.concluded_at && !found.concluded_at) {
-    try {
-      const blob = await store.putBlob(renderRecord(record));
-      const ok = (record.applied ?? []).filter((a) => !a.note?.startsWith("failed"));
-      await store.transact(({ state }) => ({
-        events: [{
-          type: "postmortem.concluded", source: orchestratorSource(state.contract?.scope.orchestrator ?? "orchestrator"),
-          payload: { id: record.pm, artifacts: artifactCounts(ok), flagged: record.flagged?.length ?? 0, record: blob },
-        } as AnyEventDraft],
-      }));
-    } catch (e) {
-      warnings.push(`the run's log could not record the conclusion: ${errText(e)}`);
+  return finishConclusion(record, warnings, lessonsAdded);
+}
+
+/** Retry outstanding audit/publication work without applying accepted artifacts again. */
+async function finishConclusion(record: PostmortemRecord, warnings: string[], lessonsAdded: number, already = false): Promise<ConcludeResult> {
+  let current = record;
+  await withProjectLock(record.project, async () => {
+    current = findRecord(record.pm) ?? record;
+    if (already) {
+      for (const done of current.applied ?? []) {
+        if (!done.audit_pending) continue;
+        try {
+          await auditApplied(current, done);
+          delete done.audit_pending;
+          saveRecord(current, renderRecord(current));
+        } catch (e) {
+          done.audit_pending = true;
+          warnings.push(`${done.id} was applied but its audit is pending: ${errText(e)}. Repeat conclude to retry the audit.`);
+        }
+      }
     }
-  }
-  return resultOf(record, warnings, lessonsAdded);
+    // Do not publish a completed record until every successful scoring write is audited.
+    if (current.applied?.some((a) => a.audit_pending)) return;
+    if (current.scope.execution_id === undefined) return;
+    try {
+      const project = readProject(current.project);
+      if (!project) throw new Error(`project ${current.project} is gone from the postmortem store`);
+      const store = await executionOf({ key: current.project, root: project.repo_root }, current.scope);
+      const ok = (current.applied ?? []).filter((a) => !a.note?.startsWith("failed"));
+      await store.transact(async ({ state }) => {
+        const published = (await store.events({ types: ["postmortem.concluded"] })).some((e) => e.type === "postmortem.concluded" && e.payload.id === current.pm);
+        if (published) return { events: [] };
+        const blob = await store.putBlob(renderRecord(current));
+        return { events: [{
+          type: "postmortem.concluded", source: orchestratorSource(state.contract?.scope.orchestrator ?? "orchestrator"),
+          payload: { id: current.pm, artifacts: artifactCounts(ok), flagged: current.flagged?.length ?? 0, record: blob },
+        } as AnyEventDraft] };
+      });
+    } catch (e) {
+      warnings.push(`the run's log could not record the conclusion: ${errText(e)}. Repeat conclude to retry publication.`);
+    }
+  });
+  return resultOf(current, warnings, lessonsAdded, already);
+}
+
+function auditApplied(rec: PostmortemRecord, done: AppliedArtifact): Promise<unknown> {
+  return appendAudit({ actor: "orchestrator", action: "postmortem.applied", target: rec.pm, details: { artifact: done.id, kind: done.kind, target: done.target, path: done.path, hash: done.hash, project: rec.project } });
 }

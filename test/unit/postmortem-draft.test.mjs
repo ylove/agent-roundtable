@@ -391,3 +391,83 @@ test("the runner's tick records the finding for a submission testing sent back, 
   assert.equal(after.postmortem.findings[f.id].fix.status, "fixed");
   assert.equal(typeof after.postmortem.ready_seq, "number");
 });
+
+for (const terminal of ["task.merged", "task.failed", "task.cancelled"]) {
+  test(`a delayed scan persists retry/reassignment and ${terminal} settlement with the generated finding`, async () => {
+    const run = await makeRun({ contract: { postmortem: { enabled: true }, tasks: [task("api")] } });
+    const events = await run.store.transact(async () => ({ events: [
+      await submitted(run, "api"),
+      { type: "check.failed", source: runner, payload: { scope: "task", task: "api", command_id: "unit", exit: 1, signature: "late-task" } },
+      { type: "task.rejected", source: runner, payload: { task: "api", reasons: ["failed unit"] } },
+      { type: "task.retried", source: runner, payload: { task: "api", attempt: 2, why: "retry after failure" } },
+      { type: "task.reassigned", source: runner, payload: { task: "api", from: "builder", to: "tester" } },
+      { type: terminal, source: runner, payload: { task: "api", ...(terminal === "task.merged" ? { integration_sha: "f".repeat(40) } : { why: "work ended" }) } },
+    ] }));
+    const before = await run.store.state();
+    const drafts = autoFindings(await run.store.events(), before, 0, runner);
+    assert.deepEqual(await run.store.state(), before, "generation does not mutate the blackboard");
+    assert.deepEqual(drafts.map((d) => d.type), ["postmortem.finding_recorded", "postmortem.fix_updated", "postmortem.fix_updated", "postmortem.fix_updated"]);
+    assert.equal(drafts[0].causation, events.events[2].id);
+    assert.deepEqual(drafts.slice(1).map((d) => d.causation), events.events.slice(3).map((e) => e.id));
+    const batch = await run.store.transact(() => ({ events: drafts }));
+    assert.ok(batch.events.every((e) => e.batch?.n === drafts.length));
+    const state = await run.store.state();
+    const finding = state.postmortem.findings[drafts[0].payload.id];
+    assert.equal(finding.fix.status, terminal === "task.merged" ? "fixed" : "abandoned");
+    assert.equal(finding.fix.by, "tester");
+    assert.equal(finding.fix.ref, terminal === "task.merged" ? "f".repeat(40) : undefined);
+    assert.equal(state.postmortem.ready_seq, batch.events.at(-1).seq);
+    assert.deepEqual((await (await openExecutionStore(run.store.id)).state()).postmortem, state.postmortem);
+    assert.deepEqual(autoFindings(await run.store.events(), state, 0, runner), [], "a restart cannot duplicate findings or transitions");
+  });
+}
+
+test("the runner's delayed pass settles an integration failure from an already logged passing recheck", async () => {
+  const { Runner } = await import("../../dist/execution/runner.js");
+  const run = await makeRun({ contract: { postmortem: { enabled: true }, tasks: [task("api")] } });
+  const originals = await run.store.transact(() => ({ events: [
+    { type: "task.merged", source: runner, payload: { task: "api", integration_sha: "f".repeat(40) } },
+    { type: "check.failed", source: runner, payload: { scope: "integration", command_id: "build", exit: 1, signature: "delayed" } },
+    { type: "check.passed", source: runner, payload: { scope: "integration", command_id: "other", duration_ms: 1 } },
+    { type: "check.passed", source: runner, payload: { scope: "integration", command_id: "build", duration_ms: 1 } },
+  ] }));
+  // Exercise the real pass without starting workers or listeners.
+  const instance = new Runner(run.store.id);
+  instance.store = run.store;
+  await instance.postmortemPass();
+  const state = await run.store.state();
+  const [finding] = Object.values(state.postmortem.findings);
+  assert.equal(finding.fix.status, "fixed");
+  assert.equal(finding.fix.ref, originals.events.at(-1).id);
+  const generated = await run.store.events({ types: ["postmortem.finding_recorded", "postmortem.fix_updated"] });
+  assert.deepEqual(generated.map((e) => e.type), ["postmortem.finding_recorded", "postmortem.fix_updated"]);
+  assert.ok(generated.every((e) => e.batch?.n === 2));
+  assert.equal(state.postmortem.ready_seq, generated.at(-1).seq);
+  const { wakeFor } = await import("../../dist/execution/watch.js");
+  assert.equal(wakeFor(state, generated.at(-1), "main").reason, "postmortem_ready");
+  await instance.postmortemPass();
+  const restarted = new Runner(run.store.id);
+  restarted.store = await openExecutionStore(run.store.id);
+  await restarted.postmortemPass();
+  assert.deepEqual(await run.store.events({ types: ["postmortem.finding_recorded", "postmortem.fix_updated"] }), generated);
+});
+
+test("a delayed scan keeps a recovered integration failure separate from a later recurrence", async () => {
+  const run = await makeRun({ contract: { postmortem: { enabled: true }, tasks: [task("api")] } });
+  const fail = { type: "check.failed", source: runner, payload: { scope: "integration", command_id: "build", exit: 1, signature: "recurs" } };
+  await run.store.transact(() => ({ events: [
+    { type: "task.merged", source: runner, payload: { task: "api", integration_sha: "f".repeat(40) } },
+    { type: "check.passed", source: runner, payload: { scope: "integration", command_id: "build", duration_ms: 1 } },
+    fail,
+    { type: "check.passed", source: runner, payload: { scope: "integration", command_id: "build", duration_ms: 1 } },
+    fail,
+  ] }));
+  const drafts = autoFindings(await run.store.events(), await run.store.state(), 0, runner);
+  assert.deepEqual(drafts.map((d) => d.type), ["postmortem.finding_recorded", "postmortem.fix_updated", "postmortem.finding_recorded"]);
+  assert.notEqual(drafts[0].payload.id, drafts[2].payload.id);
+  await run.store.transact(() => ({ events: drafts }));
+  const state = await run.store.state();
+  assert.equal(state.postmortem.findings[drafts[0].payload.id].fix.status, "fixed");
+  assert.equal(state.postmortem.findings[drafts[2].payload.id].fix.status, "pending", "an earlier pass cannot settle a later failure");
+  assert.equal(state.postmortem.ready_seq, undefined);
+});

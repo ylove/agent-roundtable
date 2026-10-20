@@ -660,12 +660,14 @@ export class Runner {
   /** Postmortem mode: record a finding for each submission that testing sent back (autoFindings; idempotent). */
   private async postmortemPass(): Promise<void> {
     try {
-      await this.refreshLog();
-      const seq = this.log.length ? this.log[this.log.length - 1].seq : 0;
-      if (seq === this.pmScanned) return;
-      const drafts = autoFindings(this.log, await this.store.state(), this.pmScanned, this.source);
-      if (drafts.length) await this.commit(drafts);
-      this.pmScanned = seq;
+      // Scan a fresh, locked tail so a recovery cannot land between the scan and its findings.
+      const scanned = await this.store.transact(async ({ state }) => {
+        const tail = await this.store.events({ sinceSeq: this.log.at(-1)?.seq ?? 0 });
+        const log = [...this.log, ...tail];
+        const seq = log.at(-1)?.seq ?? 0;
+        return { events: seq === this.pmScanned ? [] : autoFindings(log, state, this.pmScanned, this.source), result: seq };
+      });
+      this.pmScanned = scanned.result!;
     } catch (e) {
       this.say(`postmortem pass: ${errText(e)}`);
     }

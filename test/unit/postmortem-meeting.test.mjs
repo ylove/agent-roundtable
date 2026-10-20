@@ -2,7 +2,7 @@
 // Provider calls are faked through fetch (an openai_compatible endpoint), as in the collaboration tests.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeRepo } from "../fixtures/execution/git-fixture.mjs";
 import { makeRun, runner, task } from "../fixtures/workers/run.mjs";
@@ -701,3 +701,127 @@ test("a postmortem conclusion retried after its scoring write does not duplicate
   assert.equal((await run.store.state()).dissents.fired.score, "refuted");
   assert.deepEqual(await run.store.events({ types: ["dissent.scored"] }), before);
 });
+
+for (const winnerStatus of ["held", "concluded"]) {
+  test(`overlapping holds cannot overwrite a ${winnerStatus} record`, async (t) => {
+    const { repo, ids, work } = await atTheTable(t);
+    let release;
+    let entered;
+    const blocked = new Promise((resolve) => { entered = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    provider(t, { reply: async ({ index }) => {
+      if (index === 0) { entered(); await gate; }
+      return `Mechanism reviewed.\nArtifact: rule | project | ${ids[0]} | Keep this accepted prevention rule`;
+    } });
+    const args = { project: repo.root, work, opening: "Review the mechanism", participants: ["tester"], rounds: 1, ...LLM };
+    const slower = handleToolCall("hold_postmortem", args);
+    await blocked;
+    try {
+      const winner = await ok("hold_postmortem", args);
+      if (winnerStatus === "concluded") await ok("hold_postmortem", { action: "conclude", pm: winner.pm, closing: "Preserve this closing statement", accept: ["a1"] });
+      const saved = loadRecord(winner.project, winner.pm);
+      release();
+      const loser = await slower;
+      assert.equal(loser.isError, true);
+      assert.match(loser.content[0].text, new RegExp(`already ${winnerStatus}.*another hold`));
+      assert.deepEqual(loadRecord(winner.project, winner.pm), saved, "closing and application history survive");
+    } finally { release(); await slower; }
+  });
+}
+
+for (const failure of ["blob", "event"]) {
+  test(`repeat conclude retries failed ${failure} publication once without reapplying artifacts`, async (t) => {
+    const { run, held } = await dissentMeeting(t, { outcomes: ["vindicated"] });
+    const proto = Object.getPrototypeOf(run.store);
+    let broken = true;
+    if (failure === "blob") {
+      const original = proto.putBlob;
+      t.mock.method(proto, "putBlob", async function (content, opts) {
+        if (broken && String(content).startsWith("# Postmortem")) throw new Error("record blob unavailable");
+        return original.call(this, content, opts);
+      });
+    } else {
+      const original = proto.transact;
+      t.mock.method(proto, "transact", function (fn) {
+        return original.call(this, async (ctx) => {
+          const out = await fn(ctx);
+          if (broken && out.events.some((e) => e.type === "postmortem.concluded")) throw new Error("publication event unavailable");
+          return out;
+        });
+      });
+    }
+    const args = { action: "conclude", pm: held.pm, closing: "Keep the original conclusion", accept: ["a1"], orchestrator: "main" };
+    const first = await ok("hold_postmortem", args);
+    assert.match(first.warnings.join("\n"), /Repeat conclude to retry publication/);
+    assert.equal(loadRecord(held.project, held.pm).status, "concluded");
+    assert.equal((await run.store.events({ types: ["postmortem.concluded"] })).length, 0);
+    const scores = await run.store.events({ types: ["dissent.scored"] });
+    broken = false;
+    const repeats = await Promise.all([ok("hold_postmortem", { ...args, closing: "Do not replace the original" }), ok("hold_postmortem", args)]);
+    assert.ok(repeats.every((r) => r.already_concluded && !r.warnings.length));
+    assert.deepEqual(await run.store.events({ types: ["dissent.scored"] }), scores);
+    const conclusions = await run.store.events({ types: ["postmortem.concluded"] });
+    assert.equal(conclusions.length, 1);
+    assert.equal(conclusions[0].payload.id, held.pm);
+    assert.match((await run.store.getBlob(conclusions[0].payload.record)).toString(), /Keep the original conclusion/);
+    assert.equal(loadRecord(held.project, held.pm).closing, args.closing);
+  });
+}
+
+test("a successful score with a failed audit remains applied and retries its audit before publication", async (t) => {
+  const { run, held } = await dissentMeeting(t, { outcomes: ["vindicated"] });
+  const backup = `${AUDIT_DIR}-pending-test`;
+  renameSync(AUDIT_DIR, backup);
+  writeFileSync(AUDIT_DIR, "audit storage unavailable");
+  let restored = false;
+  const restore = () => { if (!restored) { rmSync(AUDIT_DIR); renameSync(backup, AUDIT_DIR); restored = true; } };
+  t.after(restore);
+  const args = { action: "conclude", pm: held.pm, closing: "Assess the evidence", accept: ["a1"], orchestrator: "main" };
+  const result = await ok("hold_postmortem", args);
+  assert.equal(result.applied[0].audit_pending, true);
+  assert.match(result.applied[0].note, /advisory assessment: vindicated/);
+  assert.doesNotMatch(result.applied[0].note, /^failed/);
+  assert.match(result.warnings.join("\n"), /was applied but its audit is pending/);
+  assert.match(result.tell_the_human, /audit is still pending/);
+  assert.equal((await run.store.state()).dissents.fired.score, "vindicated");
+  assert.equal(loadRecord(held.project, held.pm).applied[0].audit_pending, true);
+  assert.match(await ok("postmortem", { action: "read", pm: held.pm }), /accepted, audit pending/);
+  assert.equal((await run.store.events({ types: ["postmortem.concluded"] })).length, 0);
+  const scores = await run.store.events({ types: ["dissent.scored"] });
+  const stillPending = await ok("hold_postmortem", args);
+  assert.equal(stillPending.applied[0].audit_pending, true);
+  restore();
+  const recovered = await ok("hold_postmortem", args);
+  assert.deepEqual(recovered.warnings, []);
+  assert.equal(recovered.applied[0].audit_pending, undefined);
+  assert.deepEqual(await run.store.events({ types: ["dissent.scored"] }), scores);
+  assert.equal((await run.store.events({ types: ["postmortem.concluded"] })).length, 1);
+  const entries = readdirSync(AUDIT_DIR).flatMap((n) => readFileSync(join(AUDIT_DIR, n), "utf8").split("\n")).filter((l) => l.includes("postmortem.applied") && l.includes(held.pm));
+  assert.equal(entries.length, 1);
+  await ok("hold_postmortem", args);
+  assert.equal(readdirSync(AUDIT_DIR).flatMap((n) => readFileSync(join(AUDIT_DIR, n), "utf8").split("\n")).filter((l) => l.includes("postmortem.applied") && l.includes(held.pm)).length, 1);
+});
+
+for (const field of ["claim", "predicted_failure", "tripwire", "title"]) {
+  test(`postmortem assessment checks the reviewed dissent after a ${field} amendment`, async (t) => {
+    const { run, held } = await dissentMeeting(t, { outcomes: ["vindicated"] });
+    const c = structuredClone((await run.store.state()).contract);
+    c.version++;
+    if (field === "title") c.title = "Unrelated title correction";
+    else c.dissents[0][field] = field === "tripwire" ? { kind: "task_state", task: "api", state: "rejected" } : `Changed ${field}`;
+    const blob = await run.store.putBlob(JSON.stringify(c));
+    await run.store.transact(() => ({ events: [{ type: "contract.amended", source: runner, payload: {
+      contract: c.id, version: c.version, blob, patch_blob: "patch", reason: "Amend the contract", affected_tasks: [],
+    } }] }));
+    const previous = await run.store.events({ types: ["dissent.scored"] });
+    const result = await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "Assess only the reviewed prediction", accept: ["a1"], orchestrator: "main" });
+    if (field === "title") {
+      assert.deepEqual(result.warnings, []);
+      assert.equal((await run.store.state()).dissents.fired.score, "vindicated");
+    } else {
+      assert.match(result.warnings.join("\n"), /stale dissent assessment.*review it again/);
+      assert.match(result.applied[0].note, /^failed: stale dissent assessment/);
+      assert.deepEqual(await run.store.events({ types: ["dissent.scored"] }), previous);
+    }
+  });
+}

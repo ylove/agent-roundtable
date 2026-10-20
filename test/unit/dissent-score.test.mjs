@@ -62,3 +62,22 @@ test("shared scoring validates direct callers and deduplicates retries without r
   const { validateDissentScore } = await import("../../dist/execution/dissent-scoring.js");
   assert.throws(() => validateDissentScore({ ...state, contract: { ...state.contract, status: "draft" } }, input), /frozen/);
 });
+
+test("shared scoring compares the reviewed generation inside the transaction even when the prediction returns to its old text", async (t) => {
+  const { scoreDissent } = await import("../../dist/execution/dissent-scoring.js");
+  const run = await makeRun({ contract: { tasks: [task("a")], dissents: [spec] } });
+  t.after(() => rmSync(run.root, { recursive: true, force: true }));
+  const reviewed = structuredClone((await run.store.state()).dissents.risk);
+  for (const state of ["rejected", "blocked"]) {
+    const c = structuredClone((await run.store.state()).contract);
+    c.version++;
+    c.dissents[0].tripwire.state = state;
+    const blob = await run.store.putBlob(JSON.stringify(c));
+    await run.store.transact(() => ({ events: [{ type: "contract.amended", source: { kind: "orchestrator", id: "main", pid: process.pid }, payload: {
+      contract: c.id, version: c.version, blob, patch_blob: "patch", reason: "Update the predicate", affected_tasks: [],
+    } }] }));
+  }
+  assert.deepEqual((await run.store.state()).contract.dissents[0], spec);
+  await assert.rejects(scoreDissent(run.store, { contractId: run.contract.id, orchestrator: "main", dissentId: "risk", outcome: "vindicated", reviewed }), /stale dissent assessment/);
+  assert.deepEqual(await run.store.events({ types: ["dissent.scored"] }), []);
+});

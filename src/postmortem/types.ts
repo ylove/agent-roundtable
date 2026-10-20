@@ -81,6 +81,8 @@ export interface AppliedArtifact {
   /** The file the effect landed in, when there is one. */
   path?: string;
   note?: string;
+  /** The effect succeeded, but its per-write audit must be retried before publication. */
+  audit_pending?: boolean;
 }
 
 export interface FlagRecord {

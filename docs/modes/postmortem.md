@@ -24,12 +24,12 @@ A draft belongs to one scope: a heads-down run (`execution_id`) or a piece of at
 Evidence is refs only (a `sha256:` blob ref, an event id, a commit sha or a repository path); the server never copies command output into a finding.
 
 - The orchestrator records findings with `postmortem(action: "record", ...)`, which covers at-the-table work and anything the log does not show, and settles a fix with `action: "fix"`.
-- In a heads-down run the runner records one finding when a submission is sent back after testing (failed checks or lease violations) and when a check fails at integration scope after a merge. The summary is generated from the event (check ids, how many paths, the task); the same failure for the same task counts as a repeat of the same finding. A retry or reassignment names who fixes it, the task's next merge marks the fix fixed, and a failed or cancelled task abandons it. Findings of a run live in its event log, so a crash loses none and the dashboard shows them.
+- In a heads-down run the runner records one finding when a submission is sent back after testing (failed checks or lease violations) and when a check fails at integration scope after a merge. The summary is generated from the event (check ids, how many paths, the task); the same failure for the same task counts as a repeat of the same finding. A retry or reassignment names who fixes it, the task's next merge marks the fix fixed, and a failed or cancelled task abandons it. Findings of a run live in its event log, so a crash loses none and the dashboard shows them. When a delayed scan finds that a fix already settled after the failure, it records the finding and those fix transitions together.
 - `postmortem(action: "draft")` shows the findings, what is pending and whether the meeting can be held.
 
 ## The meeting
 
-`hold_postmortem` is refused while any finding's fix is pending or a task with a finding is still running, and names what is in flight. In a run the watcher wakes the orchestrator with `reason: "postmortem_ready"` when the last pending fix settles. A draft with no findings closes with no meeting.
+`hold_postmortem` is refused while any finding's fix is pending or a task with a finding is still running, and names what is in flight. In a run the watcher wakes the orchestrator with `reason: "postmortem_ready"` when the last pending fix settles. A draft with no findings closes with no meeting. Overlapping holds cannot overwrite a held or concluded record; the later save is refused.
 
 Seats: every agent named in a finding, every agent that did the original work (in a run: each registered non-external agent's persona; at the table: the `participants` the orchestrator passes), and the orchestrator, whose `opening` is turn 0. The meeting runs through the collaboration engine with `public: false` and an activity entry with origin `postmortem:<pm>`:
 
@@ -80,7 +80,7 @@ To apply one, the orchestrator explicitly accepts its artifact id and supplies t
 }
 ```
 
-The project must still have postmortem mode on. Rejected or omitted artifacts do nothing. Accepted assessments use the same frozen-contract, identity and outcome validation as `score_dissent`, emit `dissent.scored`, and are individually audited with their artifact hash. Retrying a conclusion does not repeat an assessment or overwrite a later one. Assessments stay in the postmortem record; they never become planning rules, weight votes, change consent thresholds or affect routing. At-the-table work without a reviewed execution has no runtime dissents to score.
+The project must still have postmortem mode on. Rejected or omitted artifacts do nothing. Accepted assessments use the same frozen-contract, identity and outcome validation as `score_dissent`, emit `dissent.scored`, and are individually audited with their artifact hash. Retrying a conclusion does not repeat an assessment or overwrite a later one. If the reviewed claim, prediction or tripwire generation has changed, the assessment is refused as stale and stays unapplied for a later review. A score whose audit failed stays applied with `audit_pending: true`; repeating conclude retries its audit before publishing the conclusion. Repeating conclude also retries a failed record-blob or conclusion-event publication, without changing the closing statement or applying artifacts again. Assessments stay in the postmortem record; they never become planning rules, weight votes, change consent thresholds or affect routing. At-the-table work without a reviewed execution has no runtime dissents to score.
 
 ## Reading lessons back
 

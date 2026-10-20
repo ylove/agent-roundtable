@@ -161,23 +161,39 @@ export function draftDuelPlan(duel: DuelImport, personas: { build: string; revie
     kind: "text", title: `Winning duel artifact "${a.title}"`,
     ref: `Duel ${duel.id}, team ${a.team}${a.kind ? `, kind ${a.kind}` : ""}. Files: ${fileList}. The source is in the archive ROUNDTABLE_HOME/duels/${duel.id}.json under "prototypes" (replay it with: roundtable duel --replay <archive> --open); it is not part of this contract.`,
   }];
-  const write = ["**"];
+  const kind = a.kind ?? "code";
+  const doc = kind === "text" || kind === "diagram";
+  const web = kind === "web";
+  const write = doc ? ["docs/**"] : ["**"];
+  // Code checks with a placeholder test command; web and documents have no runnable check to invent.
+  const checks = doc || web ? [] : ["test"];
   const tasks: Array<Record<string, unknown>> = [];
   const add = (id: string, title: string, persona: string, acceptance: string[]) => {
-    tasks.push({ id, title: title.slice(0, 200), persona, depends_on: tasks.length ? [tasks.at(-1)!.id] : [], paths: { write }, acceptance: acceptance.map((x) => x.slice(0, 500)), checks: ["test"], context });
+    tasks.push({ id, title: title.slice(0, 200), persona, depends_on: tasks.length ? [tasks.at(-1)!.id] : [], paths: { write }, acceptance: acceptance.map((x) => x.slice(0, 500)), checks, context });
   };
-  add("duel-build", `Build "${a.title}" from the winning duel artifact`.concat(a.kind ? ` (${a.kind})` : ""), personas.build, [
-    `The repository contains a working version of "${a.title}", rebuilt from the archived artifact files in duel ${duel.id}`,
-    `It meets the brief: ${a.brief || duel.topic}`.slice(0, 500),
-    ...a.approvals.map((x) => `Keep what the judges approved: ${x}`),
-  ]);
-  for (const [i, fix] of a.fixes.entries()) add(`duel-fix-${i + 1}`, `Address judge feedback ${i + 1}: ${fix}`, personas.build, [`The judges' point is resolved in the code: ${fix}`]);
-  add("duel-tests", `Add tests and acceptance checks for "${a.title}"`, personas.review, [
-    "Automated tests cover the main flow of the artifact and every fix above",
-    "The test command passes",
-  ]);
+  const keep = a.approvals.map((x) => `Keep what the judges approved: ${x}`);
+  if (doc) {
+    add("duel-build", `Write up "${a.title}" as a ${kind === "diagram" ? "diagram" : "document"} under docs/`, personas.build, [
+      `A ${kind === "diagram" ? "diagram file" : "document"} for "${a.title}" exists under docs/, based on the archived artifact in duel ${duel.id}`,
+      `It meets the brief: ${a.brief || duel.topic}`.slice(0, 500), ...keep,
+    ]);
+  } else if (web) {
+    add("duel-build", `Integrate the winning page "${a.title}" into the project`, personas.build, [
+      `The page for "${a.title}" is added from the archived artifact files in duel ${duel.id}; it loads with no console errors`,
+      `It meets the brief: ${a.brief || duel.topic}`.slice(0, 500), ...keep,
+    ]);
+  } else {
+    add("duel-build", `Build "${a.title}" from the winning duel artifact`.concat(a.kind ? ` (${a.kind})` : ""), personas.build, [
+      `The repository contains a working version of "${a.title}", rebuilt from the archived artifact files in duel ${duel.id}`,
+      `It meets the brief: ${a.brief || duel.topic}`.slice(0, 500), ...keep,
+    ]);
+  }
+  for (const [i, fix] of a.fixes.entries()) add(`duel-fix-${i + 1}`, `Address judge feedback ${i + 1}: ${fix}`, personas.build, [`The judges' point is resolved${doc ? " in the revision" : web ? " on the page" : " in the code"}: ${fix}`]);
+  if (doc) add("duel-review", `Review "${a.title}" against the brief`, personas.review, ["A reviewer has read the final file and confirms it meets the brief and the judges' points"]);
+  else if (web) add("duel-review", `Review "${a.title}" in a browser`, personas.review, ["The page was opened in a browser: it loads with no console errors, works on a narrow screen and meets the brief"]);
+  else add("duel-tests", `Add tests and acceptance checks for "${a.title}"`, personas.review, ["Automated tests cover the main flow of the artifact and every fix above", "The test command passes"]);
   if (duel.dissents.length) {
     add("duel-risks", "Handle the dissents filed in the duel", personas.review, duel.dissents.map((d) => `Risk "${d.claim}" is handled or deliberately excused (predicted failure: ${d.predicted_failure})`.slice(0, 500)));
   }
-  return { tasks, commands: [{ id: "test", argv: ["npm", "test"], timeout_s: 300 }] };
+  return { tasks, ...(checks.length && { commands: [{ id: "test", argv: ["npm", "test"], timeout_s: 300 }] }) };
 }

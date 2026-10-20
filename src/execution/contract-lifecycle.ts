@@ -343,7 +343,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
       if (!usable.length) throw new Error(`No task plan could be drafted from ${duel.id}: none of the winning team's personas resolve. Pass participants (personas to do the work), contract or plan, or draft_plan: false.`);
       const plan = draftDuelPlan(duel, { build: usable[0], review: usable[1] ?? usable[0] });
       drafted = `Task plan drafted from duel ${duel.id}.\n\n\`\`\`${TASK_BLOCK_TAG}\n${JSON.stringify(plan, null, 2).replaceAll("`", "\\u0060")}\n\`\`\`\n`;
-      warnings.push(`a task plan was drafted from the winning artifact of ${duel.id} (${(plan?.tasks as unknown[]).length} tasks, sequential, write paths "**", placeholder test command "npm test" and the placeholder budget): review and refine it with amend_contract before consent. Pass draft_plan: false to skip.`);
+      warnings.push(`a task plan was drafted from the winning artifact of ${duel.id} (${(plan?.tasks as unknown[]).length} tasks, sequential, ${duel.artifact.kind === "text" || duel.artifact.kind === "diagram" ? 'write paths "docs/**", no test command' : duel.artifact.kind === "web" ? 'write paths "**", no test command' : 'write paths "**", placeholder test command "npm test"'}, placeholder budget): review and refine it with amend_contract before consent. Pass draft_plan: false to skip.`);
     }
   }
   const originalPrompt = o.originalPrompt?.trim() ? o.originalPrompt : src?.topic?.trim() ? src.topic : undefined;
@@ -893,7 +893,7 @@ function notAgreed(rec: ContractRecord, participants = rec.contract.participants
  * A duel's decision and dissents as a merge patch over the contract (decisions, dissents, participants).
  * Repeats are not added twice; a dissent whose author is not a persona is skipped. Tasks are untouched.
  */
-async function duelPatch(id: string, c: Contract): Promise<{ patch: Obj; warn?: string }> {
+async function duelPatch(id: string, c: Contract): Promise<{ patch: Obj; warn?: string; untripped?: Array<{ id: string; by: string; claim: string }> }> {
   const duel = importDuel(id);
   const notes: string[] = [];
   if (duel.summary.note) notes.push(duel.summary.note);
@@ -905,6 +905,7 @@ async function duelPatch(id: string, c: Contract): Promise<{ patch: Obj; warn?: 
   const dissents: Obj[] = c.dissents.map((x) => ({ ...x }) as unknown as Obj);
   const participants: unknown[] = [...c.participants];
   let added = 0;
+  const untripped: Array<{ id: string; by: string; claim: string }> = [];
   for (const d of duel.dissents) {
     if (dissents.some((e) => isObj(e.source) && e.source.kind === "duel" && e.source.ref === id && e.by === d.by && e.claim === d.claim)) continue;
     try { await loadAgent(d.by); } catch { notes.push(`duel dissent by "${d.by}" was not imported: that persona does not resolve (${id})`); continue; }
@@ -912,15 +913,16 @@ async function duelPatch(id: string, c: Contract): Promise<{ patch: Obj; warn?: 
     while (dissents.some((e) => e.id === did)) did += "-x";
     dissents.push({ ...d, id: did });
     added++;
+    untripped.push({ id: did, by: d.by, claim: d.claim });
     if (!participants.some((p) => isObj(p) && p.agent === d.by)) participants.push({ agent: d.by });
   }
   if (added) { patch.dissents = dissents; patch.participants = participants; }
   if (!patch.decisions && !added && !notes.length) notes.push(`nothing new to import from ${id}: its decision and dissents are already in the contract`);
-  return { patch, ...(notes.length && { warn: notes.join("; ") }) };
+  return { patch, ...(untripped.length && { untripped }), ...(notes.length && { warn: notes.join("; ") }) };
 }
 
 /** The structure in a session's roundtable-tasks block, as a merge patch over the contract. */
-async function sessionPatch(id: string, c: Contract): Promise<{ patch: Obj; warn?: string }> {
+async function sessionPatch(id: string, c: Contract): Promise<{ patch: Obj; warn?: string; untripped?: Array<{ id: string; by: string; claim: string }> }> {
   if (isDuelId(id)) return duelPatch(id, c);
   const src = sessionSource(archived(id));
   const block = locateBlock(src.blockTexts);
@@ -976,6 +978,14 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
 
   const fromSession = opts.fromSession ? await sessionPatch(opts.fromSession, c) : undefined;
   if (fromSession?.warn) warnings.push(fromSession.warn);
+  if (rec.frozen && fromSession?.untripped?.length && !Object.hasOwn(patch, "dissents")) {
+    const list = fromSession.untripped.map((d) => `${d.id} (by ${d.by}): ${d.claim.slice(0, 120)}`);
+    const tpl = fromSession.untripped.map((d) => ({ id: d.id, tripwire: { kind: "check_failed", check: "<command id>", task: "<task id>" } }));
+    throw new ContractRefusal("amend", contractId, [
+      `${opts.fromSession} brings ${list.length} dissent(s) that a frozen contract cannot hold without a tripwire:\n  - ${list.join("\n  - ")}`,
+      `Nothing was applied (the duel's decision comes with them). Next: call amend_contract again with the same from_session and a patch whose "dissents" lists those concerns (and the existing ones) each with a tripwire, e.g. ${JSON.stringify({ dissents: tpl })} (merge in each concern's full fields); an explicit excusal (file_dissent with excuse_reason) needs the concern to exist first, so it is available on a draft, or after the concern is in. Or amend from a copy of the duel archive without the dissents.`,
+    ]);
+  }
   const merged = applyMergePatch<Obj>(fromSession ? applyMergePatch(c, fromSession.patch) : c, patch);
   if (isObj(merged.postmortem) && merged.postmortem.enabled === true && c.postmortem?.enabled !== true && projectOfRoot(c.scope.repo_root)?.postmortem.enabled !== true) {
     delete merged.postmortem;

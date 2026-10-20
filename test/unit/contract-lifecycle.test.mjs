@@ -1322,6 +1322,24 @@ test("verdicts are stored as own properties, whatever the agent name", async () 
     assert.doesNotMatch(JSON.stringify(r.contract), /<html|<script/i, "artifact source is never inlined");
   });
 
+  test("the drafted plan follows the artifact kind", async () => {
+    const kindOf = (kind) => saveDuel(`duel-plan-kind-${kind}`, (a) => { withA(a); for (const e of a.events) if (e.type === "prototype") e.kind = kind; return a; });
+    const web = await bare({ fromSession: kindOf("web") });
+    assert.deepEqual(web.contract.tasks.map((t) => t.id), ["duel-build", "duel-review", "duel-risks"]);
+    assert.ok(web.contract.tasks.every((t) => t.checks.length === 0));
+    assert.match(web.contract.tasks[0].acceptance[0], /no console errors/);
+    assert.ok(!web.contract.validation.commands.some((c) => c.argv[0] === "npm" && c.id === "test" && web.contract.tasks.some((t) => t.checks.includes("test"))));
+    for (const kind of ["text", "diagram"]) {
+      const r = await bare({ fromSession: kindOf(kind) });
+      assert.ok(r.contract.tasks.every((t) => t.checks.length === 0 && t.paths.write.join() === "docs/**"), kind);
+      assert.match(r.contract.tasks[0].title, /under docs\//);
+      assert.ok(r.warnings.some((w) => /task plan was drafted.*docs\/\*\*", no test command/.test(w)), kind);
+    }
+    const code = await bare({ fromSession: kindOf("code") });
+    assert.ok(code.contract.tasks.every((t) => t.checks[0] === "test" && t.paths.write.join() === "**"));
+    assert.ok(code.warnings.some((w) => /placeholder test command/.test(w)));
+  });
+
   test("draft_plan: false, a tie, none and a missing artifact draft no plan", async () => {
     const id = saveDuel("duel-plan-0002", withA);
     await assert.rejects(bare({ fromSession: id, draftPlan: false }), /needs a structure/);
@@ -1361,7 +1379,7 @@ test("verdicts are stored as own properties, whatever the agent name", async () 
     const s2 = await openContractStore(r2.contractId);
     await requestConsent(s2, r2.contractId, { by: "main", llm });
     await freezeContract(r2.contractId, { orchestrator: "main" });
-    await assert.rejects(amendContract(s2, {}, { by: "main", contractId: r2.contractId, fromSession: id }), /tripwire is required/);
+    await assert.rejects(amendContract(s2, {}, { by: "main", contractId: r2.contractId, fromSession: id }), /duel-dissent-1 \(by duel-skeptic\)[\s\S]*Next: call amend_contract again[\s\S]*tripwire/);
     const quiet = saveDuel("duel-amend-0002", (x) => { x.events = x.events.filter((e) => e.type !== "dissent"); return x; });
     const ok = await amendContract(s2, {}, { by: "main", contractId: r2.contractId, fromSession: quiet });
     assert.ok(ok.contract.decisions.some((d) => d.id === "duel-winner"));

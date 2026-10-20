@@ -30,32 +30,36 @@ export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, in
 }
 
 export function extractJsonObject(text: string): unknown {
+  if (Buffer.byteLength(text, "utf8") > 1024 * 1024) throw new Error("JSON input exceeds size limit");
   const candidates = [text.trim()];
   for (const fence of text.matchAll(/```[^\r\n`]*\r?\n([\s\S]*?)```/g)) candidates.push(fence[1].trim());
-  // Balanced top-level {...} spans. Quotes are tracked only inside a span, so prose apostrophes,
-  // stray quotes and brackets around the object cannot hide it.
-  const spans: string[] = [];
-  for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
-    let depth = 0;
-    let quoted = false;
-    let escaped = false;
-    for (let end = start; end < text.length; end++) {
-      const char = text[end];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (char === "\\") escaped = true;
-        else if (char === '"') quoted = false;
-      } else if (char === '"') quoted = true;
-      else if (char === "{") depth++;
-      else if (char === "}" && --depth === 0) {
-        spans.push(text.slice(start, end + 1));
-        start = end;
-        break;
-      }
+  // Record balanced spans in one pass; completed children of an unfinished span remain candidates.
+  const spans: Array<{ start: number; end?: number }> = [];
+  const stack: number[] = [];
+  let quoted = false;
+  let escaped = false;
+  for (let pos = 0; pos < text.length; pos++) {
+    const char = text[pos];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"' && stack.length) quoted = true;
+    else if (char === "{") {
+      stack.push(spans.length);
+      spans.push({ start: pos });
+    } else if (char === "}" && stack.length) {
+      spans[stack.pop()!].end = pos + 1;
     }
-    // An unclosed span does not hide objects starting later in the response.
   }
-  candidates.push(...spans.sort((a, b) => b.length - a.length));
+  const balanced: string[] = [];
+  let end = 0;
+  for (const span of spans) {
+    if (span.end === undefined || span.start < end) continue;
+    balanced.push(text.slice(span.start, span.end));
+    end = span.end;
+  }
+  for (const span of balanced.sort((a, b) => b.length - a.length)) candidates.push(span);
   for (const candidate of candidates) {
     try {
       const value: unknown = JSON.parse(candidate);

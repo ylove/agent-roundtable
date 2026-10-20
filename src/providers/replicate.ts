@@ -6,7 +6,7 @@
 // keys the model declares, create a prediction, and poll it to a terminal state.
 import { setTimeout as sleep } from "node:timers/promises";
 import type { LLMMessage, ProviderCall } from "./shared.js";
-import { assertNonEmpty, assertNotRedirect, stripThinkTags } from "./shared.js";
+import { assertNonEmpty, assertNotRedirect, readProviderJson, stripThinkTags } from "./shared.js";
 import { isRateLimited, providerHttpError, withRetry } from "./retry.js";
 import { requireEnv } from "../config.js";
 import { scrubAndCap } from "../security/secrets.js";
@@ -122,24 +122,6 @@ export function clearReplicateSchemaCache(): void {
   tokenWarned.clear();
 }
 
-/**
- * Error bodies only: an error envelope that fails to parse is still an error, so swallowing the
- * parse failure is safe there. Success bodies are parsed strictly (a dropped connection, an abort
- * during the body read, or a non-JSON 200 must surface as a rejection, never as an empty object).
- */
-async function readJsonBestEffort(response: Response): Promise<Record<string, unknown>> {
-  try {
-    const parsed = (await response.json()) as unknown;
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
-
-async function readJson(response: Response): Promise<Record<string, unknown>> {
-  return response.ok ? ((await response.json()) as Record<string, unknown>) : readJsonBestEffort(response);
-}
-
 /** Resolve/reject with `promise`, or reject with the signal's reason as soon as it fires. */
 function raceSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
@@ -182,7 +164,7 @@ export function fetchReplicateInputSchema(
         redirect: "manual",
       });
       assertNotRedirect("Replicate", response, url);
-      body = (await readJson(response)) as ReplicateModelResponse;
+      body = (await readProviderJson(response)) as ReplicateModelResponse;
     } catch (error) {
       // Report our own bound in our own words so it is not mistaken for ROUNDTABLE_LLM_TIMEOUT_MS.
       if (own.aborted) {
@@ -327,7 +309,7 @@ export function createReplicateCall({
         redirect: "manual",
       });
       assertNotRedirect("Replicate", response, createUrl);
-      const created = (await readJson(response)) as ReplicatePrediction;
+      const created = (await readProviderJson(response)) as ReplicatePrediction;
       if (o.signal.aborted) throw o.signal.reason;
       if (!response.ok) {
         let message = `Replicate API error (${response.status}) for model ${refText}: ${
@@ -377,7 +359,7 @@ export function createReplicateCall({
             await pollResponse.body?.cancel().catch(() => {});
             throw providerHttpError(`Replicate API error (${pollResponse.status}) polling model ${refText}`, pollResponse);
           }
-          return (await readJson(pollResponse)) as ReplicatePrediction;
+          return (await readProviderJson(pollResponse)) as ReplicatePrediction;
         }, { signal: o.signal, label: "Replicate poll" });
         if (o.signal.aborted) throw o.signal.reason;
         text = terminal(prediction);

@@ -270,10 +270,27 @@ export function isPathLikeRef(ref: string): boolean {
  * .claude/agents, and every directory in ROUNDTABLE_AGENT_PATHS.
  */
 export function allowedAgentRoots(): string[] {
+  const discovered = (dir: string, parent: string): string[] => {
+    const location = (path: string): string => {
+      try {
+        lstatSync(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        return join(location(dirname(path)), basename(path));
+      }
+      return realpathSync.native(path);
+    };
+    try {
+      try { if (lstatSync(dir).isSymbolicLink()) return []; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return []; }
+      if (!isContained(location(resolve(parent)), location(resolve(dir)))) return [];
+      return [dir];
+    } catch { return []; }
+  };
   return [...new Set([
-    AGENTS_DIR,
-    join(WORKSPACE_DIR, ".claude", "agents"),
-    join(homedir(), ".claude", "agents"),
+    ...(process.env.ROUNDTABLE_AGENTS_DIR ? [AGENTS_DIR] : discovered(AGENTS_DIR, process.cwd())),
+    ...discovered(join(WORKSPACE_DIR, ".claude", "agents"), WORKSPACE_DIR),
+    ...discovered(join(homedir(), ".claude", "agents"), homedir()),
     ...agentPaths(),
   ].map((dir) => resolve(dir)))];
 }
@@ -387,10 +404,24 @@ function directoryEntries(path: string): string[] {
 
 export function listAgents(agentsDir: string = AGENTS_DIR): Array<{ key: string; name?: string; description?: string; path: string }> {
   const agents: Array<{ key: string; name?: string; description?: string; path: string }> = [];
+  const r = agentRoots();
+  const root = resolve(agentsDir);
+  // An explicit discovery directory is trusted; automatic locations use the shared root policy.
+  const automatic = [AGENTS_DIR, join(WORKSPACE_DIR, ".claude", "agents"), join(homedir(), ".claude", "agents")]
+    .some(dir => resolve(dir) === root);
+  if (!r.roots.includes(root)) {
+    if (automatic) return agents;
+    const real = realpathOrNull(root);
+    if (!real) return agents;
+    r.roots.push(root);
+    r.realRoots.push(real);
+  }
   for (const entry of directoryEntries(agentsDir)) {
     const candidate = resolve(agentsDir, entry);
     const path = /\.md$/i.test(entry) && isFile(candidate) ? candidate : join(candidate, "AGENT.md");
     if (!isFile(path)) continue;
+    try { assertRealpathContained(path, path, r); }
+    catch { continue; }
     try {
       const { data } = readFrontmatter(readFileSync(path, "utf-8"));
       agents.push({ key: agentKey(path), path, ...((typeof data.name === "string" || typeof data.name === "number") && String(data.name).trim() && { name: String(data.name).trim() }), ...metadataDescription(data) });

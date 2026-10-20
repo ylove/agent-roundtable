@@ -8,6 +8,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fsyncDir, mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
+import { SECRET_KEY_RE } from "../security/redaction-rules.js";
 import { scrub } from "../security/secrets.js";
 import { canonicalJSON, sha256Hex } from "./chain.js";
 import { preview } from "./events.js";
@@ -87,13 +88,13 @@ export function getBlob(blobsDir: string, ref: string): Buffer {
   return buf;
 }
 
-/** Scrub every string inside plain objects and arrays (keys and other values are left alone). */
-export function scrubDeep<T>(value: T): T {
-  if (typeof value === "string") return scrub(value) as T;
-  if (Array.isArray(value)) return value.map((v) => scrubDeep(v)) as T;
+/** Scrub object keys and strings, preserving non-string structural values. */
+export function scrubDeep<T>(value: T, key?: string): T {
+  if (typeof value === "string") return (key !== undefined && value && SECRET_KEY_RE.test(key) ? "[redacted:secret]" : scrub(value)) as T;
+  if (Array.isArray(value)) return value.map((v) => scrubDeep(v, key)) as T;
   if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = scrubDeep(v);
+    const secretContext = key !== undefined && SECRET_KEY_RE.test(key);
+    const out = Object.fromEntries(Object.entries(value).map(([k, v]) => [scrub(k), scrubDeep(v, secretContext ? key : k)]));
     return out as T;
   }
   return value;

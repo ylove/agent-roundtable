@@ -169,6 +169,24 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     return { dir, runs: () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []) };
   }
 
+  test("local meeting bounds stdout bytes and stops the child", { timeout: 5000 }, async (t) => {
+    const { dir } = fakeClaude(t, (d) =>
+      `require("node:fs").writeFileSync(${JSON.stringify(join(d, "child.pid"))}, String(process.pid));
+      let chunks = 0;
+      const timer = setInterval(() => {
+        process.stdout.write("é".repeat(32 * 1024));
+        if (++chunks === 160) clearInterval(timer);
+      }, 1);`
+    );
+    await assert.rejects(startLocalMeeting(sample, "agenda"), /stdout exceeds 8388608 byte limit/);
+    const pid = Number(readFileSync(join(dir, "child.pid"), "utf8"));
+    for (let i = 0; i < 100; i++) {
+      try { process.kill(pid, 0); } catch { return; }
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    assert.fail("child did not stop after the output limit");
+  });
+
   test("debate passes --append-system-prompt on every call; standard never does", async (t) => {
     const { runs } = fakeClaude(t);
 

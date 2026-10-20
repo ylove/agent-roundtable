@@ -86,6 +86,28 @@ test("scrubbedJSON keeps structured data valid where text scrubbing would not", 
   assert.throws(() => scrubbedJSON({ when: new Date(0) }), /not a plain object/);
 });
 
+test("structured blobs redact credential values and object keys", () => {
+  const key = "sk-ant-" + "z".repeat(23);
+  const value = {
+    password: "hunter22", SECRET: "opaque", token: ["one", "two"],
+    Api_Key: "opaque", authorization: "opaque", credential: "opaque",
+    credentials: { value: "nested-value" },
+    nested: { [key]: "ordinary text", password: "short" },
+    author: "writer", authority: "local", id: "row-1", run_id: "run-1",
+    usage: { inputTokens: 1234, output_tokens: 20 },
+  };
+  const out = JSON.parse(scrubbedJSON(value));
+  for (const name of ["password", "SECRET", "Api_Key", "authorization", "credential"]) {
+    assert.equal(out[name], "[redacted:secret]");
+  }
+  assert.deepEqual(out.token, ["[redacted:secret]", "[redacted:secret]"]);
+  assert.deepEqual(out.credentials, { value: "[redacted:secret]" });
+  assert.deepEqual(out.nested, { "[redacted:api_key]": "ordinary text", password: "[redacted:secret]" });
+  assert.deepEqual(out.usage, value.usage);
+  for (const name of ["author", "authority", "id", "run_id"]) assert.equal(out[name], value[name]);
+  assert.equal(value.password, "hunter22");
+});
+
 test("the store's putBlob/getBlob use the execution's blobs directory", async () => {
   const store = await createExecutionStore({ repoRoot: "/srv/repo", baseSha: "abc", agentsDir: "/srv/agents" });
   const ref = await store.putBlob("turn 1");

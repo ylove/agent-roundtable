@@ -28,7 +28,7 @@
 | `ROUNDTABLE_NTFY_USER` / `ROUNDTABLE_NTFY_PASSWORD` | ntfy basic auth, alternative to the token | — |
 | `ROUNDTABLE_WEBHOOK_URL` | webhook publisher: URL that receives each entry as JSON; https, or http to loopback or a private (LAN) address; never a cloud metadata address | — |
 | `ROUNDTABLE_WEBHOOK_VIEW_URL` | webhook publisher: URL template for the viewing page, `{channel}` is replaced | — |
-| `ROUNDTABLE_WEBHOOK_AUTH_HEADER` | webhook publisher: value sent as the `Authorization` header | — |
+| `ROUNDTABLE_WEBHOOK_AUTH_HEADER` | webhook publisher: header name and value, e.g. `Authorization: Bearer abc123` | — |
 | `ROUNDTABLE_PUBLIC_TOPIC_PREFIX` | prefix of the generated public channel name | `roundtable` |
 | `ROUNDTABLE_TRANSCRIPTS_DIR` | where public-session transcripts are saved | `~/.agent-roundtable/transcripts` |
 | `ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS` | max wait for pending posts when a public session ends | `30000` |

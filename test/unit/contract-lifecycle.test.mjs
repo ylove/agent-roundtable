@@ -1290,4 +1290,82 @@ test("verdicts are stored as own properties, whatever the agent name", async () 
     assert.equal(r.duelImport.imported_decision, false);
     assert.match(r.warnings.join("\n"), /archived no artifact/);
   });
+
+  // WS21e-1: a duel with no structure drafts a deterministic task plan; draft_plan: false opts out.
+  writeFileSync(join(AGENTS_DIR, "duel-builder.md"), "---\nname: Builder\ndescription: test persona\n---\nYou build.\n");
+  writeFileSync(join(AGENTS_DIR, "duel-designer.md"), "---\nname: Designer\ndescription: test persona\n---\nYou design.\n");
+  const withA = (a) => { for (const e of a.events) for (const s of [e.seat, ...(e.type === "start" ? e.seats : [])]) if (s && s.team === "A" && !s.id.startsWith("A:")) { s.id = `A:duel-${s.id}`; s.name = s.id; } return a; };
+  const bare = (over = {}) => proposeContract({ goal: "Ship the budget game", orchestrator: "main", repoDir, llm, ...over });
+
+  test("a duel with no structure drafts a task plan from the winner, the judges and the dissents", async () => {
+    const id = saveDuel("duel-plan-0001", (a) => {
+      withA(a);
+      a.events.splice(-1, 0, { type: "assessment", judge: { id: "cfo", name: "cfo" }, team: "A", verdict: "REVISE", reason: "Show a clear end screen." });
+      return a;
+    });
+    const r = await bare({ fromSession: id });
+    assert.match(r.source, /^drafted:duel-plan-0001$/);
+    const ids = r.contract.tasks.map((t) => t.id);
+    assert.deepEqual(ids, ["duel-build", "duel-fix-1", "duel-tests", "duel-risks"]);
+    assert.equal(r.contract.tasks[0].persona, "duel-builder");
+    assert.deepEqual(r.contract.tasks[1].depends_on, ["duel-build"]);
+    assert.match(r.contract.tasks[0].title, /Ten Coins/);
+    assert.ok(r.contract.tasks[0].acceptance.some((x) => /Covers needs and tradeoffs/.test(x)), "APPROVE reasons are kept");
+    assert.match(r.contract.tasks[1].acceptance[0], /end screen/);
+    assert.match(r.contract.tasks[3].acceptance[0], /different family budgets/);
+    assert.match(JSON.stringify(r.contract.tasks[0].context), /index\.html \(1434 bytes\)/);
+    assert.match(JSON.stringify(r.contract.tasks[0].context), /duels\/duel-plan-0001\.json/);
+    assert.ok(r.contract.decisions.some((d) => d.id === "duel-winner"));
+    assert.equal(r.contract.dissents.length, 1);
+    assert.ok(r.contract.participants.some((p) => p.agent === "duel-builder"));
+    assert.ok(r.warnings.some((w) => /task plan was drafted/.test(w)));
+    assert.doesNotMatch(JSON.stringify(r.contract), /<html|<script/i, "artifact source is never inlined");
+  });
+
+  test("draft_plan: false, a tie, none and a missing artifact draft no plan", async () => {
+    const id = saveDuel("duel-plan-0002", withA);
+    await assert.rejects(bare({ fromSession: id, draftPlan: false }), /needs a structure/);
+    const kept = await bare({ fromSession: id, draftPlan: false, contract: explicit() });
+    assert.equal(kept.contract.tasks.length, baseTasks().length);
+    // An explicit contract with tasks or a plan is never replaced by a draft.
+    assert.equal((await bare({ fromSession: id, contract: explicit() })).contract.tasks.length, baseTasks().length);
+    for (const winner of ["tie", "none"]) {
+      const t = saveDuel(`duel-plan-${winner}`, (a) => setEnd(withA(a), { winner }));
+      await assert.rejects(bare({ fromSession: t }), /needs a structure/, winner);
+      const r = await bare({ fromSession: t, contract: explicit() });
+      assert.ok(!r.contract.decisions.some((x) => x.id === "duel-winner"));
+    }
+    const m = saveDuel("duel-plan-0003", (a) => { withA(a); a.events = a.events.filter((e) => e.type !== "prototype"); return a; });
+    await assert.rejects(bare({ fromSession: m }), /needs a structure/);
+    // No resolvable persona: a clear error, and participants can name the workers.
+    const np = saveDuel("duel-plan-0004");
+    await assert.rejects(bare({ fromSession: np }), /No task plan could be drafted/);
+    assert.equal((await bare({ fromSession: np, participants: ["duel-skeptic"] })).contract.tasks[0].persona, "duel-skeptic");
+  });
+
+  test("amend_contract from a duel adds the decision and dissents under the consent rules, once", async (t) => {
+    provider(t, () => "Consent: AGREE");
+    const id = saveDuel("duel-amend-0001");
+    const r = await propose();
+    const store = await openContractStore(r.contractId);
+    const a = await amendContract(store, {}, { by: "main", contractId: r.contractId, fromSession: id });
+    assert.equal(a.contract.version, 2);
+    assert.ok(a.contract.decisions.some((d) => d.id === "duel-winner"));
+    assert.equal(a.contract.dissents.length, 1);
+    assert.deepEqual(a.contract.dissents[0].source, { kind: "duel", ref: id });
+    assert.ok(a.contract.participants.some((p) => p.agent === "duel-skeptic"));
+    assert.equal(a.contract.tasks.length, baseTasks().length, "tasks are untouched");
+    await assert.rejects(amendContract(store, {}, { by: "main", contractId: r.contractId, fromSession: id }), /changes nothing/);
+    // A frozen contract cannot take a concern without a tripwire; a decision alone goes through the normal amend path.
+    const r2 = await propose();
+    const s2 = await openContractStore(r2.contractId);
+    await requestConsent(s2, r2.contractId, { by: "main", llm });
+    await freezeContract(r2.contractId, { orchestrator: "main" });
+    await assert.rejects(amendContract(s2, {}, { by: "main", contractId: r2.contractId, fromSession: id }), /tripwire is required/);
+    const quiet = saveDuel("duel-amend-0002", (x) => { x.events = x.events.filter((e) => e.type !== "dissent"); return x; });
+    const ok = await amendContract(s2, {}, { by: "main", contractId: r2.contractId, fromSession: quiet });
+    assert.ok(ok.contract.decisions.some((d) => d.id === "duel-winner"));
+    assert.equal(ok.contract.version, 2);
+    await assert.rejects(amendContract(s2, {}, { by: "main", contractId: r2.contractId, fromSession: "duel-missing-0009" }), /not found/);
+  });
 }

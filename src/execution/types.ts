@@ -157,6 +157,23 @@ export interface ContractBudget {
   max_attempts: number;
 }
 
+/** Non-executing predicates over recorded execution state. */
+export type DissentTripwire =
+  | { kind: "check_failed"; check: string; task?: string }
+  | { kind: "path_touched"; paths: string[]; task?: string }
+  | { kind: "task_state"; task: string; state: "rejected" | "blocked" };
+
+export interface Dissent {
+  id: string;
+  by: string;
+  source: { kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "manual"; ref?: string };
+  claim: string;
+  predicted_failure: string;
+  /** May be absent only while drafting; freeze requires arming or explicit excusal. */
+  tripwire?: DissentTripwire;
+  on_fire: "notify" | "huddle" | "pause_and_huddle";
+}
+
 export interface Contract {
   schema: typeof CONTRACT_SCHEMA;
   id: string;
@@ -177,6 +194,7 @@ export interface Contract {
   tasks: TaskSpec[];
   interfaces: InterfaceSpec[];
   decisions: Decision[];
+  dissents: Dissent[];
   validation: { commands: CommandSpec[]; final: string[] };
   budget: ContractBudget;
   authority: { lead: string; may: AuthorityAction[]; budget_extension_pct: number };
@@ -259,11 +277,14 @@ export interface TaskRuntime {
   last_commit?: string;
   submitted_seq?: number;
   accepted_seq?: number;
+  /** Latest rejection, retained because rejection immediately returns the task to work. */
+  rejected_seq?: number;
+  blocked_seq?: number;
   /**
    * Why a blocked task waits. needs (added in WS07) are its open interface and artifact needs:
    * dependency.requested adds one, dependency.satisfied removes it. Task needs are in deps.
    */
-  blocked_by?: { escalation?: string; deps?: string[]; needs?: Array<{ kind: "interface" | "artifact"; ref: string }> };
+  blocked_by?: { escalation?: string; escalations?: string[]; deps?: string[]; needs?: Array<{ kind: "interface" | "artifact"; ref: string }> };
   started_at?: string;
   finished_at?: string;
 }
@@ -297,6 +318,8 @@ export interface EscalationDiagnostics {
 
 export interface Escalation {
   id: string;
+  /** Dissent requester identity is independent of the affected task. */
+  dissent_id?: string;
   task?: string;
   agent: string;
   kind: EscalationKind;
@@ -349,7 +372,7 @@ export interface EventPayloads {
   "contract.consent_requested": { contract: string; version: number; participants: string[]; round?: string; hash?: string; host?: string };
   /** `round` (WS04, optional): the round this answers; an answer to any other round is ignored. */
   "contract.consent_recorded": { contract: string; agent: string; verdict: ConsentVerdict; reason?: string; round?: string };
-  "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused"; reason: string };
+  "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused" | "dissented"; reason: string; dissent_id?: string };
   /**
    * `blob` (added in WS03) is the full contract JSON at this version, stored with putBlob. The store
    * requires it at runtime: the blackboard reads the contract from it (heads-down.md §6). It is
@@ -416,7 +439,7 @@ export interface EventPayloads {
   "task.merged": { task: string; integration_sha: string };
   "task.accepted": { task: string };
   "task.blocked": { task: string; escalation?: string; deps?: string[] };
-  "task.unblocked": { task: string };
+  "task.unblocked": { task: string; escalation?: string };
   "task.retried": { task: string; attempt: number; why: string };
   "task.reassigned": { task: string; from: string; to: string };
   "task.split": { task: string; into: TaskSpec[] };
@@ -467,6 +490,8 @@ export interface EventPayloads {
   "decision.recorded": { decision: Decision };
   "directive.issued": { id: string; to: string[]; text: string; requires_ack: boolean };
   "directive.acknowledged": { id: string; agent: string };
+  "dissent.tripwire_fired": { dissent_id: string; task?: string; tripped_by: string; evidence: string; generation?: number; notified?: string[]; orchestrator_woken?: boolean };
+  "dissent.scored": { dissent_id: string; outcome: "vindicated" | "refuted" | "untested" };
 
   "escalation.raised": { escalation: Escalation };
   "escalation.routed": { id: string; to: string; format?: HuddleFormat; wake: boolean };
@@ -514,6 +539,7 @@ export const EVENT_TYPES = [
   "check.started", "check.passed", "check.failed", "check.timed_out",
   "command.completed",
   "merge.succeeded", "merge.conflicted",
+  "dissent.tripwire_fired", "dissent.scored",
   "note.posted", "decision.recorded", "directive.issued", "directive.acknowledged",
   "escalation.raised", "escalation.routed", "escalation.auto_resolved", "escalation.resolved",
   "escalation.awaiting_human", "escalation.withdrawn",
@@ -658,6 +684,19 @@ export interface BudgetLedger {
   extensions_usd: number;
 }
 
+export interface DissentRuntime {
+  spec?: Dissent;
+  /** New/changed predicates match only evidence recorded after this amendment sequence. */
+  armed_seq?: number;
+  /** Set when changing a predicate (or reintroducing an id with historical escalations). */
+  generation?: number;
+  /** Deterministic tripwire keys retain every firing, including across amendments. */
+  fires: Record<string, EventPayloads["dissent.tripwire_fired"] & { seq: number }>;
+  /** Advisory only; never an input to consent or vote weighting. */
+  score?: EventPayloads["dissent.scored"]["outcome"];
+  scored_seq?: number;
+}
+
 export interface BlackboardState {
   execution: string;
   seq: number;
@@ -668,11 +707,12 @@ export interface BlackboardState {
   goal?: Contract["goal"];
   interfaces: Record<string, { spec?: InterfaceSpec; version: number; path?: string; blob?: string; task?: string }>;
   decisions: Decision[];
+  dissents: Record<string, DissentRuntime>;
   tasks: Record<string, TaskRuntime>;
   claims: Record<string, Claim>;
   leases: Record<string, Lease>;
   lease_queue: LeaseRequest[];
-  files: Record<string, { task: string; agent: string; last_commit: string; merged: boolean }>;
+  files: Record<string, { task: string; agent: string; last_commit: string; merged: boolean; at_seq?: number }>;
   diffs: Record<string, { stat: string; blob: string; commit: string }>;
   checks: Record<"task" | "integration", Record<string, CheckState>>;
   escalations: Record<string, Escalation>;

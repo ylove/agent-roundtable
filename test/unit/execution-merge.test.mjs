@@ -29,6 +29,24 @@ const integrationClean = async (ex) => {
   return { dirty: s.dirty, merging: s.merging, head: s.head };
 };
 
+test("a dissent hold before or during a merge leaves the integration branch unchanged until acceptance is allowed", async () => {
+  const ex = await makeExecution({ "base.txt": "base\n" });
+  await task(ex, "held", { "held.txt": "pending\n" });
+  for (const when of ["before", "during", "acceptance"]) {
+    let gates = 0;
+    const result = await M.mergeTask(ex.header, "held", {
+      canMerge: async () => { gates++; return when === "acceptance" || (when === "during" && gates === 1); },
+      onMerged: async () => false,
+    });
+    assert.deepEqual(result, { ok: false, reason: "held", conflicts: [], violations: [] }, when);
+    assert.equal(git(ex.root, "rev-parse", integrationBranch(ex.header.id)), ex.sha, when);
+    assert.deepEqual(await integrationClean(ex), { dirty: [], merging: false, head: ex.sha }, when);
+  }
+  const released = await M.mergeTask(ex.header, "held", { canMerge: async () => true, onMerged: async () => true });
+  assert.equal(released.ok, true);
+  assert.equal(readFileSync(join(W.integrationWorktreePath(ex.header.id), "held.txt"), "utf8"), "pending\n");
+});
+
 test("two tasks touching different files both merge, as --no-ff merge commits with trailers", async () => {
   const ex = await makeExecution({ "shared.txt": lines(10) });
   await task(ex, "alpha", { "alpha.txt": "a\n" });

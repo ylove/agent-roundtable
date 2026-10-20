@@ -31,6 +31,11 @@ const {
   stopLocalMeetingProcesses,
 } = await import("../../dist/sessions/local-meetings.js");
 const modes = await import("../../dist/sessions/modes.js");
+const { readArchivedSession } = await import("../../dist/sessions/archive.js");
+const { sessionDissentDrafts } = await import("../../dist/sessions/dissents.js");
+const { day, readTableLines } = await import("../../dist/usage/table.js");
+
+const sessionUsage = (id) => readTableLines([day()]).filter((line) => line.session === id);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fx = (n) => resolve(here, "../fixtures/agents", n);
@@ -57,6 +62,8 @@ describe("mode constants", () => {
       modes.buildAttackerTurnPrompt(),
       modes.buildWaffleHouseSummaryPrompt("t"),
       modes.buildDebateSummaryPrompt("t"),
+      modes.buildDissentSummaryPrompt("challenger", "t"),
+      modes.buildDissentSummaryPrompt("attacker", "t"),
     ].join("\n");
     assert.ok(!new RegExp(["vo" + "uch", "/Us" + "ers/"].join("|"), "i").test(text));
   });
@@ -170,7 +177,7 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     await continueLocalMeeting(d.meetingId, "more");
     await endLocalMeeting(d.meetingId, true);
     const calls = runs();
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 4);
     for (const { argv: a, stdin } of calls) {
       const i = a.indexOf("--append-system-prompt");
       assert.ok(i >= 0, `missing flag in ${JSON.stringify(a)}`);
@@ -181,6 +188,8 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     }
     assert.ok(calls[0].stdin.includes("You are the challenger in this meeting"));
     assert.ok(calls[1].stdin.includes("**User:** more"), "history goes in on stdin");
+    assert.match(calls[2].stdin, /action items or conclusions/);
+    assert.ok(calls[3].stdin.includes("<DISSENT>"), "the local challenger is asked for its own dissent separately");
     assert.equal(listLocalMeetings().length, 0);
 
     const s = await startLocalMeeting(sample, "agenda");
@@ -197,6 +206,23 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     const [{ argv, stdin }] = runs();
     assert.equal(stdin, agenda);
     assert.ok(!argv.includes("--dangerously-skip-permissions") && !argv.includes("Bash"));
+  });
+
+  test("local debate closing statements retain a dissent for contract import", async (t) => {
+    const block = "<DISSENT>\nclaim: Retries duplicate orders.\npredicted_failure: The order check fails.\n</DISSENT>";
+    const { runs } = fakeClaude(t, () => `process.stdout.write(input.includes("You were the challenger") ? ${JSON.stringify(block)} : "Normal summary\\n" + ${JSON.stringify(block)});`);
+    const { meetingId } = await startLocalMeeting(sample, "Orders", undefined, "debate");
+    assert.equal(await endLocalMeeting(meetingId, true), "Normal summary");
+    assert.equal(readArchivedSession(meetingId).summary, "Normal summary");
+    assert.match(runs()[1].stdin, /action items or conclusions/);
+    assert.match(runs()[2].stdin, /<DISSENT>/);
+    const [draft] = sessionDissentDrafts(readArchivedSession(meetingId));
+    assert.equal(draft.by, sample);
+    assert.equal(draft.claim, "Retries duplicate orders.");
+    assert.deepEqual(draft.source, { kind: "debate", ref: meetingId });
+    const usage = sessionUsage(meetingId);
+    assert.equal(usage.length, 3, "opening, summary and dissent extraction are all metered");
+    assert.ok(usage.every((line) => line.agent === "sample" && line.kind === "local-meeting" && line.tokens_prov === "estimated"));
   });
 
   test("CLI errors are scrubbed of secrets and capped", async (t) => {
@@ -501,7 +527,7 @@ describe("waffle-house", () => {
     const { collaborationId } = await startCollaboration([A, B], "topic", { ...opts, mode: "waffle-house" });
     const { summary } = await endCollaboration(collaborationId, true);
     assert.equal(summary, "reply 1");
-    const last = calls.at(-1);
+    const last = calls[1]; // defender summary precedes the attacker's own closing statement
     assert.equal(sys(last), "You are Sample.\n");
     const p = user(last);
     assert.ok(p.includes("final form of the idea"));
@@ -523,6 +549,66 @@ describe("waffle-house", () => {
     await continueCollaboration(collaborationId, 1);
     assert.deepEqual(seen, [A, "ORCHESTRATOR", B, A]);
     await endCollaboration(collaborationId);
+  });
+});
+
+describe("adversarial closing summaries", () => {
+  const block = "<DISSENT>\nclaim: Retries duplicate orders.\npredicted_failure: The order check fails.\n</DISSENT>";
+  for (const mode of ["debate", "waffle-house"]) {
+    test(`${mode} preserves every adversary's statement and author separately from the main summary`, async (t) => {
+      const third = fx("third.md");
+      const calls = stubFetch(t, (_u, _i, i) => json(200, { choices: [{ message: { content:
+        i === 1 ? `Main summary\n${block}` : i >= 2 ? block : "Opening position",
+      } }] }));
+      const { collaborationId } = await startCollaboration([sample, plain, third], "Orders", { ...opts, mode });
+      const result = await endCollaboration(collaborationId, true);
+      assert.equal(result.summary, `Main summary\n${block}`);
+      assert.deepEqual(result.dissentSummaries, [{ agent: plain, content: block }, { agent: third, content: block }]);
+      assert.equal(calls.length, 4);
+      for (const [i, label] of [[2, "Plain"], [3, "Third"]]) {
+        assert.ok(sys(calls[i]).startsWith(`You are ${label}.`));
+        assert.ok(user(calls[i]).includes(`You were the ${mode === "debate" ? "challenger" : "attacker"}`));
+        assert.ok(user(calls[i]).includes("<DISSENT>"));
+        assert.ok(user(calls[i]).includes("500 characters"));
+        assert.ok(user(calls[i]).includes("16 blocks"));
+        assert.ok(user(calls[i]).includes("Opening position"));
+        assert.ok(!user(calls[i]).includes("Main summary"), "the proponent's summary is not another participant's statement");
+      }
+      const archived = readArchivedSession(collaborationId);
+      assert.deepEqual(archived.dissentSummaries, result.dissentSummaries);
+      const drafts = sessionDissentDrafts(archived);
+      assert.deepEqual(drafts.map((d) => d.by), [plain, third]);
+      assert.ok(drafts.every((d) => d.source.ref === collaborationId && d.tripwire === undefined));
+      const usage = sessionUsage(collaborationId);
+      assert.deepEqual(usage.map((line) => line.agent), ["sample", "sample", "plain", "third"],
+        "each adversary's extraction is metered under its own identity");
+      assert.ok(usage.every((line) => line.kind === "collaboration" && line.tokens.input > 0));
+    });
+  }
+
+  test("debate meeting closing statement is tagged, archived, and attributed to its challenger", async (t) => {
+    const calls = stubFetch(t, (_u, _i, i) => json(200, { choices: [{ message: { content: ["Opening", `Normal summary\n${block}`, block][i] } }] }));
+    const { meetingId } = await startMeeting(plain, "Orders", undefined, "openai_compatible", "m", BASE, "debate");
+    assert.equal(await endMeeting(meetingId, true), "Normal summary");
+    assert.match(calls[1].body.messages.at(-1).content, /action items or conclusions/);
+    assert.ok(calls[2].body.messages.at(-1).content.includes("<DISSENT>"));
+    assert.equal(calls.length, 3);
+    assert.equal(readArchivedSession(meetingId).summary, "Normal summary");
+    const [draft] = sessionDissentDrafts(readArchivedSession(meetingId));
+    assert.equal(draft.by, plain);
+    assert.deepEqual(draft.source, { kind: "debate", ref: meetingId });
+    const usage = sessionUsage(meetingId);
+    assert.equal(usage.length, 3, "opening, summary and dissent extraction are all metered");
+    assert.ok(usage.every((line) => line.agent === "plain" && line.kind === "meeting" && line.tokens.input > 0));
+  });
+
+  test("closing without a requested summary makes no additional calls or drafts", async (t) => {
+    const calls = stubFetch(t, () => json(200, { choices: [{ message: { content: block } }] }));
+    const { collaborationId } = await startCollaboration([sample, plain], "Orders", { ...opts, mode: "debate" });
+    const result = await endCollaboration(collaborationId);
+    assert.equal(calls.length, 1);
+    assert.equal(result.dissentSummaries, undefined);
+    assert.deepEqual(sessionDissentDrafts(readArchivedSession(collaborationId)), []);
   });
 });
 

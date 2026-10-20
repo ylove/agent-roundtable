@@ -38,6 +38,7 @@ import {
   buildChallengerDirective,
   buildChallengerTurnPrompt,
   buildDebateSummaryPrompt,
+  buildDissentSummaryPrompt,
   buildDefenderOpeningPrompt,
   buildDefenderTurnPrompt,
   buildProponentDirective,
@@ -708,6 +709,7 @@ export async function endCollaboration(
 ): Promise<{
   transcript: CollaborationMessage[];
   summary?: string;
+  dissentSummaries?: Array<{ agent: string; content: string }>;
   publicBlock?: string;
   publicResult?: FinalizeResult;
   /** Prototype sessions only: "## Prototype outcomes" and "## Shortlist for the human" (full shortlisted source). */
@@ -728,6 +730,7 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
   const messages = tracker ? stubbedTranscript(collaboration) : collaboration.messages;
 
   let summary: string | undefined;
+  const dissentSummaries: Array<{ agent: string; content: string }> = [];
 
   if (requestSummary && messages.length > 0) {
     // Ask the first agent to summarize (they initiated; in debate/waffle-house they are the proponent/defender)
@@ -746,17 +749,25 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
       summaryPrompt += `2. Points of disagreement or tension\n`;
       summaryPrompt += `3. Actionable conclusions or next steps\n\n`;
     }
-    summaryPrompt += `**Full transcript:**\n\n`;
-
-    for (const msg of messages) {
-      summaryPrompt += `**${nameFor(msg.agent, !!collaboration.publicChannel)}:** ${msg.content}\n\n`;
-    }
+    const transcriptPrompt = "**Full transcript:**\n\n" + messages.map((msg) =>
+      `**${nameFor(msg.agent, !!collaboration.publicChannel)}:** ${msg.content}\n\n`).join("");
+    summaryPrompt += transcriptPrompt;
 
     summary = await metered({ session: collaboration.id, kind: "collaboration", agent: summarizer.name }, () => callLLM(
       summarizer.systemPrompt,
       [{ role: "user", content: summaryPrompt }],
       { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl }
     ));
+    if (collaboration.mode === "debate" || collaboration.mode === "waffle-house") {
+      const role = collaboration.mode === "debate" ? "challenger" : "attacker";
+      for (const agent of collaboration.agents.slice(1)) {
+        const content = await metered({ session: collaboration.id, kind: "collaboration", agent: agent.name }, () => callLLM(agent.systemPrompt,
+          [{ role: "user", content: buildDissentSummaryPrompt(role, collaboration.topic) +
+            transcriptPrompt }],
+          { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl }));
+        dissentSummaries.push({ agent: agent.name, content });
+      }
+    }
   }
 
   recordActivity({
@@ -770,7 +781,7 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
     ...(collaboration.origin !== undefined && { origin: collaboration.origin }),
   });
   const transcript = [...messages];
-  archiveCollaboration(collaboration, transcript, summary);
+  archiveCollaboration(collaboration, transcript, summary, dissentSummaries);
   collaborations.delete(collaborationId);
   const outcomes = tracker ? { prototypeOutcomes: tracker.outcomesMarkdown() } : undefined;
 
@@ -779,12 +790,13 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
     return {
       transcript,
       summary,
+      ...(dissentSummaries.length && { dissentSummaries }),
       publicResult,
       publicBlock: formatPublicBlock(collaboration.publicChannel, publicResult),
       ...outcomes,
     };
   }
-  return { transcript, summary, ...outcomes };
+  return { transcript, summary, ...(dissentSummaries.length && { dissentSummaries }), ...outcomes };
 }
 
 /** The transcript as agents see it: resolved prototypes are stubs (shortlisted source is in the outcomes). */

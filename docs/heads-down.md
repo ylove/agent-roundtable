@@ -86,6 +86,8 @@ External workers register with `join_execution` and receive an `agent_token` onc
 
 ## Escalations and huddles
 
+Keep concerns raised at the table through [dissents and tripwires](dissents.md): notify the dissenter, huddle or pause affected work when recorded evidence matches. The dashboard's **Dissents** page shows firings, huddle outcomes and advisory scores.
+
 Only blocked work and affected dependents pause. Workers use `escalate` for blockers, ambiguity, resource needs, conflicts, assistance or emergencies. The watchdog handles expired claims/leases and transient failures, detects stalls, repeated signatures and deadlocks, and routes what remains.
 
 `execution_status(view: "escalations")` lists open items. Answer with `resolve_escalation` using `decide`, `huddle`, `retry`, `reassign`, `amend`, `dismiss` or `await_human`. `participants[0]` is the replacement persona for reassignment. `amendment` is a contract merge patch. The runner applies resulting worker resumes/stops on its next tick.

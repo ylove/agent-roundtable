@@ -90,7 +90,7 @@ test("usage page: cards, provenance chips with words, legend, platform table; no
   assert.match(r.body, /<button type="button" id="stop-cancel" autofocus>Cancel<\/button>/);
   assert.match(r.body, /<div id="announce" class="sr-only" aria-live="polite"><\/div>/);
   assert.match(r.body, /<p class="live" id="live" role="status" aria-live="polite">/);
-  assert.match(r.body, /<nav>.*Overview.*Tasks.*>Usage<.*Graph.*Escalations.*Events.*Contract/);
+  assert.match(r.body, /<nav>.*Overview.*Tasks.*>Usage<.*Graph.*Escalations.*>Dissents<.*Events.*Contract/);
   assert.match(r.body, /body data-base="[^"]+" data-seq="\d+" data-live="swap"/);
 });
 
@@ -102,7 +102,7 @@ test("usage page: the nonce is delivered only inside the Usage page", async (t) 
   const nonce = metaNonce(usagePage.body);
   assert.ok(nonce, "a 24-character nonce in a <meta> element");
   assert.ok(!dash.url.includes(nonce));
-  for (const path of ["", "tasks", "escalations", "events", "contract", "dag", "state.json", "static/dashboard.js", "static/dashboard.css"]) {
+  for (const path of ["", "tasks", "escalations", "dissents", "events", "contract", "dag", "state.json", "static/dashboard.js", "static/dashboard.css"]) {
     const r = await send(dash.url + path);
     assert.ok(!r.body.includes(nonce), `${path} does not carry the nonce`);
     if (!path.startsWith("static/")) assert.doesNotMatch(r.body, /roundtable-action/, path);

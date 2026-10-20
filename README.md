@@ -31,7 +31,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [Collaboration: conversation](docs/modes/collaborations.md#conversation-mode) | Informal colleague chat with an optional theme and private grounding. | “Let cfo and product-lead chat about the launch in conversation mode.” |
 | [Ultraplan](docs/modes/ultraplan.md) | Collect input, review revisions and record sign-offs on a plan. | “Ultraplan the launch with product-lead, cfo and skeptic; show the final document verbatim.” |
 | [Agent workshops](docs/modes/agent-workshops.md) | Specialists create or improve an agent and reusable skills. | “Have cfo and skeptic create a budget agent, then improve product-lead's escalation rules; preview both.” |
-| [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local board for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
+| [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local blackboard for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
 | [Public sessions](docs/modes/public-sessions.md) | Mirror an explicitly public session to ntfy or a webhook. | “Make that pricing debate public and give me the viewing link.” |
 
 ### Heads-down
@@ -40,7 +40,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 ## Tools
 
-**38 tools on the orchestrator server; 7 on worker servers.** Worker tools appear in both; the orchestrator's copies also require `execution_id` and `agent_token`. The table follows the registered definitions in `src/tools/*.ts`; [full arguments and examples](docs/tools.md).
+**40 tools on the orchestrator server; 8 on worker servers.** The seven execution worker tools appear in both; the orchestrator's copies also require `execution_id` and `agent_token`. Dissent filing is also available on both servers. The table follows the registered definitions in `src/tools/*.ts`; [full arguments and examples](docs/tools.md).
 
 | Group | Tool | Purpose |
 | --- | --- | --- |
@@ -67,6 +67,8 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | Contracts | [`propose_contract`](docs/tools.md#propose_contract) | Turn a plan into a draft execution contract. |
 | Contracts | [`amend_contract`](docs/tools.md#amend_contract) | Apply a versioned contract merge patch. |
 | Contracts | [`freeze_contract`](docs/tools.md#freeze_contract) | Freeze the current contract after consent. |
+| Contracts (both servers) | [`file_dissent`](docs/dissents.md#file-or-update-a-concern) | File, complete or explicitly excuse a draft dissent. |
+| Contracts | [`score_dissent`](docs/dissents.md#advisory-scores) | Record an advisory assessment of a dissent's prediction. |
 | Runs | [`execute`](docs/tools.md#execute) | Preflight and start an authorized frozen contract. |
 | Runs | [`execution_status`](docs/tools.md#execution_status) | Report progress, blockers, budget and context. |
 | Runs | [`control_execution`](docs/tools.md#control_execution) | Pause, resume, steer, abort or purge a run; stop an agent; write a handoff. |
@@ -107,6 +109,7 @@ No arguments starts the orchestrator MCP server. The **11 subcommands** are docu
 - [Mode guides](docs/modes/meetings.md): [collaborations](docs/modes/collaborations.md), [ultraplan](docs/modes/ultraplan.md), [agent workshops](docs/modes/agent-workshops.md), [prototypes](docs/modes/prototype-mode.md), [public sessions](docs/modes/public-sessions.md)
 - [Heads-down user guide](docs/heads-down.md) and [design specification](docs/design/heads-down.md)
 - [Usage visibility](docs/usage.md): the status line, the usage report, the dashboard Usage page and stopping an agent
+- [Dissents and tripwires](docs/dissents.md)
 - [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)
 - [Configuration](docs/configuration.md) and [providers](docs/providers.md)
 - [Agent personas and skills](docs/agents.md) and [session archives](docs/sessions.md)

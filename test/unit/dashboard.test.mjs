@@ -4,9 +4,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import { startDashboard, DASHBOARD_CSP, capAtLine } from "../../dist/dashboard/server.js";
-import { completion, markdownToHtml, taskWeight } from "../../dist/dashboard/render.js";
+import { completion, markdownToHtml, renderDissents, taskWeight } from "../../dist/dashboard/render.js";
 import { renderDagSvg, layers } from "../../dist/dashboard/dag-svg.js";
-import { COMMON_HEADERS } from "../../dist/http/secure-server.js";
+import { COMMON_HEADERS, SecureServer } from "../../dist/http/secure-server.js";
 import { emit, frozenRun, makeContract, src, taskSpec } from "../fixtures/execution/run.mjs";
 import { inlineProblems } from "./helpers.mjs";
 
@@ -44,6 +44,9 @@ function hostileContract() {
     ],
     interfaces: [{ name: "NavProps", kind: "type", owner: "a", description: `props ${XSS}` }],
     decisions: [{ id: "d0", scope: "contract", text: `Use ${ATTR}`, by: "main" }],
+    dissents: [{ id: "retry-risk", by: `critic ${ATTR}`, source: { kind: "manual", ref: XSS },
+      claim: `Retries ${XSS}`, predicted_failure: `Duplicates ${ATTR}`, on_fire: "huddle",
+      tripwire: { kind: "path_touched", paths: [`src/${XSS}/**`] } }],
     validation: { commands: [{ id: "test", argv: ["npm", "test", XSS], timeout_s: 600 }], final: ["test"] },
   });
 }
@@ -74,7 +77,7 @@ async function hostileRun() {
   return store;
 }
 
-const PAGES = ["", "tasks", "usage", "tasks/a", "tasks/b", "tasks/c", "escalations", "events", "events?task=a", "events?type=task", "events?type=note.posted", "contract", "dag"];
+const PAGES = ["", "tasks", "usage", "tasks/a", "tasks/b", "tasks/c", "escalations", "dissents", "events", "events?task=a", "events?type=task", "events?type=note.posted", "contract", "dag"];
 
 test("dashboard: every page escapes and redacts hostile run content, with no inline script, style or handler", async (t) => {
   const store = await hostileRun();
@@ -110,6 +113,8 @@ test("dashboard: every page escapes and redacts hostile run content, with no inl
   assert.match(seen["tasks/a"], /Output \(redacted\)/);
   assert.match(seen["tasks/a"], /Authorization: \[redacted:secret\] \[redacted:bearer\]/);
   assert.match(seen["escalations"], /Need money &lt;script&gt;/);
+  assert.match(seen["dissents"], /Retries &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(seen["dissents"], /Duplicates &quot;&gt;&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.match(seen["contract"], /<h3>Goal<\/h3>/);
   assert.ok(seen["contract"].includes("(javascript:alert(1))") || seen["contract"].includes("javascript:alert(1)"));
   assert.match(seen["dag"], /<svg class="dag"/);
@@ -121,12 +126,122 @@ test("dashboard: every page escapes and redacts hostile run content, with no inl
   assert.doesNotMatch(seen["events?task=a"], /note\.posted<\/code>/);
 });
 
+test("dashboard: dissents show armed and fired predicates, task evidence, huddle outcomes and advisory scores", async () => {
+  const dissent = (id, tripwire, on_fire = "huddle") => ({ id, by: "critic", source: { kind: "consent", ref: "round-1" },
+    claim: `Concern ${id}`, predicted_failure: `Prediction ${id}`, tripwire, on_fire });
+  const { store } = await frozenRun(makeContract({ dissents: [
+    dissent("checks", { kind: "check_failed", check: "test" }),
+    dissent("paths", { kind: "path_touched", paths: ["src/**"], task: "b" }, "notify"),
+    dissent("states", { kind: "task_state", task: "b", state: "blocked" }, "pause_and_huddle"),
+  ] }));
+  const render = async () => renderDissents({ state: await store.state(), header: store.header(), base: "/test/", runner: { status: "unknown", detail: "" } });
+  const armed = await render();
+  assert.match(armed, /href="[^"]+\/dissents" class="here">Dissents<\/a>/);
+  assert.match(armed, /data-live="reload"/);
+  assert.equal(armed.match(/Status: armed/g)?.length, 3);
+  for (const text of ["critic", "Concern checks", "Prediction paths", "consent · round-1", "check_failed", "path_touched", "task_state", "pause_and_huddle", "Not scored", "No huddles recorded."]) {
+    assert.ok(armed.includes(text), text);
+  }
+  for (const task of ["a", "b", undefined]) {
+    await emit(store, "dissent.tripwire_fired", { dissent_id: "checks", ...(task && { task }),
+      tripped_by: `worker ${ATTR}`, evidence: `Failed ${task ?? "integration"} ${XSS} ${EMAIL} ${GH_TOKEN}` });
+  }
+  for (const [id, task, outcome] of [["ha", "a", "AGREED"], ["hb", "b", "DISAGREED"], ["hc", undefined, undefined]]) {
+    const escalation = { id: `e-${id}`, dissent_id: "checks", ...(task && { task }), agent: "critic", kind: "assistance",
+      with: "agent", target: "worker", summary: "Review prediction", blocking: false, status: "open", raised_seq: 0 };
+    await emit(store, "escalation.raised", { escalation });
+    await emit(store, "huddle.started", { id, escalation: escalation.id, format: "micro", seats: ["critic", "worker"] });
+    if (outcome) await emit(store, "huddle.concluded", { id, outcome, decision: `Decision ${ATTR} ${KEY}` });
+  }
+  // A huddle for another escalation must not appear under this dissent.
+  await emit(store, "huddle.started", { id: "unrelated", escalation: "other", format: "micro", seats: [] });
+  for (const outcome of ["vindicated", "refuted", "untested"]) {
+    await emit(store, "dissent.scored", { dissent_id: "checks", outcome });
+    const html = await render();
+    const section = html.split("<h2>checks</h2>")[1].split("</section>")[0];
+    assert.match(section, /Status: fired/);
+    assert.equal(html.match(/Status: armed/g)?.length, 2);
+    assert.ok(section.includes(`Score: ${outcome}`));
+    assert.match(section, /<td>a<\/td><td>worker &quot;&gt;&lt;img/);
+    assert.match(section, /<td>b<\/td><td>worker &quot;&gt;&lt;img/);
+    assert.match(section, /<td>Integration<\/td><td>worker &quot;&gt;&lt;img/);
+    assert.match(section, /<td>ha<\/td><td>a<\/td><td>AGREED<\/td>/);
+    assert.match(section, /<td>hb<\/td><td>b<\/td><td>DISAGREED<\/td>/);
+    assert.match(section, /<td>hc<\/td><td>Integration<\/td><td>Pending<\/td>/);
+    assert.match(section, /Failed a &lt;script&gt;/);
+    assert.match(section, /Decision &quot;&gt;&lt;img/);
+    assert.match(section, /\[redacted:email\]/);
+    assert.doesNotMatch(section, /unrelated|<script>|<img/);
+    for (const secret of [EMAIL, GH_TOKEN, KEY]) assert.ok(!html.includes(secret), secret);
+    assert.deepEqual(inlineProblems(html), []);
+    assert.match(html, /Scores are advisory and never change voting or consent weight/);
+  }
+});
+
+test("dashboard: dissents handle empty state, incomplete drafts and runtime records without definitions", async () => {
+  const { store } = await frozenRun();
+  const state = await store.state();
+  const context = { state, header: store.header(), base: "/test/", runner: { status: "unknown", detail: "" } };
+  assert.match(renderDissents(context), /No dissents\./);
+  state.contract.status = "draft";
+  const spec = { id: XSS, by: ATTR, source: { kind: "manual", ref: ATTR }, claim: XSS, predicted_failure: ATTR, on_fire: "notify" };
+  state.dissents = {
+    incomplete: { spec, fires: {} },
+    ready: { spec: { ...spec, tripwire: { kind: "path_touched", paths: [XSS], task: ATTR } }, fires: {} },
+    [XSS]: { fires: { one: { seq: 1, dissent_id: XSS, task: ATTR, tripped_by: XSS, evidence: ATTR, notified: [ATTR], orchestrator_woken: true } } },
+  };
+  const html = renderDissents(context);
+  assert.match(html, /Status: needs tripwire/);
+  assert.match(html, /Status: pending freeze/);
+  assert.match(html, /Status: fired/);
+  assert.match(html, /Dissent definition unavailable\./);
+  assert.match(html, /Orchestrator woken/);
+  assert.match(html, /<h2>&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/h2>/);
+  assert.match(html, /&quot;&gt;&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(html, /<script>|<img/);
+});
+
+test("dashboard: dissents route renders the page with the dashboard CSP", async (t) => {
+  const store = await hostileRun();
+  let routes;
+  t.mock.method(SecureServer, "start", async (options) => {
+    routes = options.routes;
+    return { url: "http://127.0.0.1:1/test/", base: "/test/", close: async () => {} };
+  });
+  const dash = await startDashboard(store.id, { store, writeInfo: false });
+  t.after(() => dash.close());
+  const route = routes.find((r) => r.path === "/dissents");
+  assert.ok(route);
+  let response;
+  await route.handler({ html: (status, body, csp) => { response = { status, body, csp }; } });
+  assert.equal(response.status, 200);
+  assert.equal(response.csp, DASHBOARD_CSP);
+  assert.match(response.body, /<h1>Dissents<\/h1>/);
+  assert.match(response.body, /href="[^"]+\/usage">Usage<\/a>/);
+  assert.match(response.body, /href="[^"]+\/dissents" class="here">Dissents<\/a>/);
+  assert.match(response.body, /Retries &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.deepEqual(inlineProblems(response.body), []);
+  assert.doesNotMatch(response.body, /name="roundtable-action"/);
+
+  const usageRoute = routes.find((r) => r.path === "/usage");
+  assert.ok(usageRoute);
+  await usageRoute.handler({ html: (status, body, csp) => { response = { status, body, csp }; } });
+  assert.equal(response.status, 200);
+  assert.equal(response.csp, DASHBOARD_CSP);
+  assert.match(response.body, /<h1 id="usage-title">Usage<\/h1>/);
+  assert.match(response.body, /href="[^"]+\/usage" class="here">Usage<\/a>/);
+  assert.match(response.body, /href="[^"]+\/dissents">Dissents<\/a>/);
+  assert.match(response.body, /name="roundtable-action"/);
+  assert.match(response.body, /data-live="swap"/);
+  assert.deepEqual(inlineProblems(response.body), []);
+});
+
 test("dashboard: read-only, under the token, Host checked; unknown tasks and assets are 404", async (t) => {
   const { store } = await frozenRun();
   const dash = await startDashboard(store.id, { store });
   t.after(() => dash.close());
   const origin = new URL(dash.url).origin;
-  for (const path of ["/", "/state.json", "/stream", "/tasks"]) assert.equal((await get(origin + path)).status, 404, path);
+  for (const path of ["/", "/state.json", "/stream", "/tasks", "/usage", "/dissents"]) assert.equal((await get(origin + path)).status, 404, path);
   assert.equal((await get(dash.url, { host: "evil.example" })).status, 421);
   for (const method of ["POST", "PUT", "DELETE", "PATCH"]) assert.equal((await get(dash.url, { method })).status, 405, method);
   for (const path of ["tasks/zz", "tasks/constructor", "tasks/__proto__", "static/nope.js", "static/constructor.js", "nope"]) {

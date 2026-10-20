@@ -2,6 +2,8 @@
 
 ## 1.1.0 (unreleased)
 
+- Fix postmortem usage attribution and lost spend: run-backed meetings charge each speaking persona with source `postmortem` and preserve token/cost provenance. Flush usage on success and failure before publishing the meeting; calls without usage reports retain text-length estimates. Standalone meetings keep their per-persona table ledger. `REDUCER_VERSION` stays 10.
+
 - Merge usage visibility with postmortem mode and dissents: reducer version 10, 42 orchestrator tools and 8 worker tools, and Usage, Dissents and Postmortems dashboard pages. Fix standalone postmortem calls being swallowed by a usage meter with no execution ledger; each persona's calls now use the table ledger with measured tokens and estimated spend.
 
 - Fix overlapping Stop and dissent holds: resolving dissent cannot resume a task while its Stop escalation remains unresolved. Huddle timeout and recovery settle orphaned paid reservations by call id as retained estimates, including after conclusion or routing, so budget enforcement cannot stall. `REDUCER_VERSION` remains 10.

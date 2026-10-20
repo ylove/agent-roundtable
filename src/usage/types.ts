@@ -62,7 +62,7 @@ export interface UsageAgent {
   /** Heads-down: the agent's money as a fraction (0-1) of the run's budget. */
   budget_share?: number;
   last_at?: string;
-  /** Bounded calls charged to this identity, with dissent provenance when applicable. */
+  /** Calls charged to this identity, with their source and dissent provenance when applicable. */
   calls?: UsageCall[];
   /** A charged requester may use different platforms for driver and persona calls. */
   platforms?: UsagePlatform[];

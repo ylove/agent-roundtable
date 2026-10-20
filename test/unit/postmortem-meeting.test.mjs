@@ -50,7 +50,7 @@ async function enabled(repo = makeRepo()) {
  * Fake the provider. `reply({system, user, index, persona})` returns the turn text; the default is a
  * short turn, and `block` (text) is appended to the turn number `last`.
  */
-function provider(t, { total, block = "", reply } = {}) {
+function provider(t, { total, block = "", reply, reportTokens = true } = {}) {
   const requests = [];
   stubFetch(t, async (url, init) => {
     assert.ok(url.startsWith(BASE), `unexpected request: ${url}`);
@@ -62,7 +62,7 @@ function provider(t, { total, block = "", reply } = {}) {
     const persona = /PERSONA-([A-Z]+)/.exec(system)?.[1]?.toLowerCase() ?? "unknown";
     let content = reply ? await reply({ system, user, index, persona }) : `Turn ${index} from ${persona}.`;
     if (total !== undefined && index === total - 1) content += `\n\n${block}`;
-    return json(200, { choices: [{ message: { content } }], usage: { prompt_tokens: 100, completion_tokens: 20 } });
+    return json(200, { choices: [{ message: { content } }], ...(reportTokens && { usage: { prompt_tokens: 100, completion_tokens: 20 } }) });
   });
   return requests;
 }
@@ -87,6 +87,22 @@ async function atTheTable(t, { work = "checkout redesign", responsible = [["buil
     if (fixed) await ok("postmortem", { action: "fix", project: repo.root, work, finding_id: r.recorded, fix: { status: "fixed", by: who[0] } });
   }
   return { repo, ids, work, rounds, participants };
+}
+
+async function assertUsageSurfaces(view, filter, personas) {
+  const args = { ...(filter.execution && { execution_id: filter.execution }), ...(filter.session && { session_id: filter.session }) };
+  const tool = await ok("usage", args);
+  const cli = filterView(JSON.parse(execFileSync(process.execPath, [new URL("../../dist/index.js", import.meta.url).pathname, "usage", "--json"], { encoding: "utf8" })), filter);
+  for (const surface of [tool, cli]) {
+    assert.deepEqual(surface.totals, view.totals);
+    assert.deepEqual(surface.agents.filter((a) => a.tokens.input > 0).map((a) => a.id).sort(), [...personas].sort());
+    assert.deepEqual(surface.agents.map((a) => a.calls), view.agents.map((a) => a.calls));
+  }
+  const statusline = renderStatusline(view, {}, { host: false, agents: 4, color: false, cols: 300 }).join("\n");
+  assert.match(statusline, /estimated/);
+  assert.doesNotMatch(statusline, /\[huddle\]/);
+  if (filter.execution) for (const persona of personas) assert.ok(statusline.includes(persona), statusline);
+  else assert.match(statusline, new RegExp(`table ${personas.length} agents?`));
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +165,62 @@ test("a standalone postmortem records each persona's spend in the table ledger a
   assert.match(statusline, /table 2 agents 360 tok meas/);
   assert.match(statusline, /estimated/);
 });
+
+for (const runBacked of [true, false]) {
+  for (const { failureAt, reportTokens } of [{ failureAt: 0, reportTokens: true }, { failureAt: 1, reportTokens: true }, { failureAt: 1, reportTokens: false }]) {
+    test(`${runBacked ? "run-backed" : "standalone"} postmortem retains ${reportTokens ? "reported" : "estimated"} spend and an estimated failed call at turn ${failureAt} across usage surfaces`, async (t) => {
+      let scope;
+      if (runBacked) {
+        const run = await makeRun({ contract: { postmortem: { enabled: true } } });
+        await enabled(run);
+        scope = { project: run.root, execution_id: run.store.id };
+        const finding = await ok("postmortem", { action: "record", ...scope, finding: FINDING });
+        await ok("postmortem", { action: "fix", ...scope, finding_id: finding.recorded, fix: { status: "fixed" } });
+      } else {
+        const { repo, work } = await atTheTable(t);
+        scope = { project: repo.root, work };
+      }
+      const before = readTableLines([day()]).length;
+      const requests = provider(t, { reportTokens, reply: ({ index }) => {
+        if (index === failureAt) throw new Error("scripted paid call failure");
+        return "The breakpoint check was missing.";
+      } });
+      const error = await fails("hold_postmortem", { ...scope, opening: "We missed a layout check.", participants: ["tester"], rounds: 1, ...LLM, model: "claude-sonnet-4" });
+      assert.match(error, /scripted paid call failure/);
+      assert.equal(requests.length, failureAt + 1);
+      assert.equal((await ok("postmortem", { action: "draft", ...scope })).findings.length, 1, "failure leaves the draft available to retry");
+      let view;
+      let filter;
+      if (runBacked) {
+        const { openExecutionStore } = await import("../../dist/execution/store.js");
+        const store = await openExecutionStore(scope.execution_id);
+        const events = await store.events({ types: ["budget.usage_recorded"] });
+        assert.equal(events.length, failureAt + 1, "each attempted call is retained once");
+        assert.ok(events.every((e) => e.payload.source === "postmortem" && e.correlation.startsWith("pm-")));
+        assert.deepEqual(events.map((e) => e.payload.agent), ["builder", "tester"].slice(0, failureAt + 1));
+        const failed = events.at(-1).payload;
+        assert.ok(failed.usd > 0);
+        assert.deepEqual(failed.provenance, { tokens: "estimated", usd: "estimated" });
+        assert.equal((await store.events({ types: ["postmortem.started"] })).length, 0);
+        assert.equal(readTableLines([day()]).length, before, "the execution and table ledgers do not charge the same call twice");
+        filter = { execution: store.id };
+        view = filterView(await collectUsage({ executions: [store.id], table: false }), filter);
+      } else {
+        const lines = readTableLines([day()]).slice(before);
+        assert.equal(lines.length, failureAt + 1);
+        assert.ok(lines.at(-1).usd > 0);
+        assert.equal(lines.at(-1).tokens_prov, "estimated");
+        assert.equal(lines.at(-1).usd_prov, "estimated");
+        filter = { session: lines[0].session };
+        view = filterView(await collectUsage({ executions: [] }), filter);
+      }
+      assert.equal(view.totals.tokens.by.measured, reportTokens ? failureAt * 120 : 0);
+      assert.ok(view.totals.tokens.by.estimated > 0);
+      assert.ok(view.totals.estimated > 0);
+      await assertUsageSurfaces(view, filter, ["builder", "tester"].slice(0, failureAt + 1));
+    });
+  }
+}
 
 test("one responsible agent means a waffle-house with that agent as defender; the artifact block is read from the last turn only", async (t) => {
   const { repo, ids, work } = await atTheTable(t);
@@ -245,7 +317,8 @@ test("a run's meeting seats the registered agents' personas, records its events 
 
   const requests = provider(t, { total: 4, block: artifactBlock([a.recorded, b.recorded]) });
   const opening = `The human asked: ${run.contract.goal.original_prompt} and then said "${confirmation}". We built it too fast.`;
-  const out = await ok("hold_postmortem", { project: run.root, execution_id: exe, opening, rounds: 2, ...LLM });
+  const beforeTable = readTableLines([day()]).length;
+  const out = await ok("hold_postmortem", { project: run.root, execution_id: exe, opening, rounds: 2, ...LLM, model: "claude-sonnet-4" });
   assert.equal(out.format, "collaborate");
   assert.deepEqual(out.seats, ["orchestrator", "builder", "tester"]);
   assert.equal(requests.length, 4);
@@ -263,6 +336,17 @@ test("a run's meeting seats the registered agents' personas, records its events 
   const started = events.find((e) => e.type === "postmortem.started");
   assert.deepEqual(started.payload, { id: out.pm, format: "collaborate", seats: ["orchestrator", "builder", "tester"] });
   assert.ok(events.filter((e) => e.type === "budget.usage_recorded").length >= 4, "the meeting's usage is on the run's ledger");
+  const charges = events.filter((e) => e.type === "budget.usage_recorded");
+  assert.equal(charges.length, 4);
+  assert.deepEqual(charges.map((e) => e.payload.agent), ["builder", "tester", "builder", "tester"]);
+  assert.ok(charges.every((e) => e.payload.source === "postmortem" && e.correlation === out.pm));
+  assert.ok(charges.every((e) => e.payload.provenance.tokens === "measured" && e.payload.provenance.usd === "estimated"));
+  assert.equal(readTableLines([day()]).length, beforeTable, "run spend is not duplicated on the table ledger");
+  const usage = await collectUsage({ executions: [exe], table: false });
+  assert.equal(usage.totals.tokens.by.measured, 480);
+  assert.ok(Math.abs(usage.totals.estimated - 0.0024) < 1e-9);
+  assert.ok(!usage.agents.some((a) => a.id === "[huddle]"));
+  await assertUsageSurfaces(usage, { execution: exe }, ["builder", "tester"]);
   const state = await run.store.state();
   assert.equal(state.postmortem.meetings[out.pm].format, "collaborate");
   assert.equal(state.postmortem.findings[a.recorded].pm, out.pm, "the meeting covers the findings");

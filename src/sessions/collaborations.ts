@@ -437,7 +437,7 @@ async function openCollaboration(
     firstMessage = await metered({ session: collaborationId, kind: "collaboration", agent: firstAgent.name }, () => callLLM(
       firstAgent.systemPrompt,
       [{ role: "user", content: initialPrompt }],
-      { provider, model: resolvedModel, baseUrl }
+      { provider, model: resolvedModel, baseUrl, estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin) }
     ));
   } catch (e) {
     // Nothing was said: do not leave an orphan session, an unfinalized public topic or a board behind.
@@ -563,7 +563,7 @@ export async function advanceCollaboration(
   const messageContent = await metered({ session: collaboration.id, kind: "collaboration", agent: currentAgent.name }, () => callLLM(
     currentAgent.systemPrompt,
     [{ role: "user", content: conversationContext }],
-    { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl }
+    { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl, estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin) }
   ));
 
   const newMessage: CollaborationMessage = {
@@ -757,7 +757,7 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
     summary = await metered({ session: collaboration.id, kind: "collaboration", agent: summarizer.name }, () => callLLM(
       summarizer.systemPrompt,
       [{ role: "user", content: summaryPrompt }],
-      { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl }
+      { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl, estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin) }
     ));
     if (collaboration.mode === "debate" || collaboration.mode === "waffle-house") {
       const role = collaboration.mode === "debate" ? "challenger" : "attacker";
@@ -765,7 +765,7 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
         const content = await metered({ session: collaboration.id, kind: "collaboration", agent: agent.name }, () => callLLM(agent.systemPrompt,
           [{ role: "user", content: buildDissentSummaryPrompt(role, collaboration.topic) +
             transcriptPrompt }],
-          { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl }));
+          { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl, estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin) }));
         dissentSummaries.push({ agent: agent.name, content });
       }
     }

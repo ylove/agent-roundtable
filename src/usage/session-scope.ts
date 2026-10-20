@@ -193,9 +193,10 @@ export function recordCliCall(scope: SessionScope, chars: { input: number; outpu
 export async function metered<T>(scope: SessionScope, fn: () => Promise<T>): Promise<T> {
   const signal = sessionSignal(scope.session);
   const run = () => withAbortSignal(signal, fn);
+  const outer = activeUsageSink();
   turns.set(scope.session, (turns.get(scope.session) ?? 0) + 1);
   try {
-    return await (activeUsageSink() ? run() : withUsageSink(ledgerSink(scope), run));
+    return await withUsageSink(outer ? (r) => outer({ ...r, agent: agentKey(scope.agent) }) : ledgerSink(scope), run);
   } finally {
     turns.set(scope.session, (turns.get(scope.session) ?? 1) - 1);
   }

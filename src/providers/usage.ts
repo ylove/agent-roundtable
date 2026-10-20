@@ -15,6 +15,8 @@ import type { LLMCompletionResult } from "./shared.js";
 
 export interface UsageReport {
   provider: string;
+  /** Speaking persona, attached by the enclosing session when an outer ledger owns the call. */
+  agent?: string;
   /** The model the provider reports having used (falls back to the requested one). */
   model: string;
   /** Absent when the provider reported none (Replicate, some local servers). */

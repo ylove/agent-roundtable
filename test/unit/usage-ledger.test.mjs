@@ -185,6 +185,7 @@ test("an outer usage sink (a heads-down huddle) keeps the spend: the table ledge
     reportUsage({ provider: "provider-a", model: "m", usage: { inputTokens: 1, outputTokens: 1 } });
   }));
   assert.equal(seen.length, 1);
+  assert.equal(seen[0].agent, "cfo", "the owning ledger receives the actual speaking persona");
   assert.equal(existsSync(join(dir, "usage", `table-${T.day()}.jsonl`)), false);
 });
 

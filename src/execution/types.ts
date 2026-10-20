@@ -47,7 +47,7 @@ export interface TokenUsage {
   cacheWriteTokens?: number;
 }
 
-export type BudgetSource = "worker" | "huddle" | "dissent micro-huddle" | "consent" | "lead" | "structuring";
+export type BudgetSource = "worker" | "huddle" | "postmortem" | "dissent micro-huddle" | "consent" | "lead" | "structuring";
 
 /**
  * Where a figure comes from (usage-visibility.md §3): measured by the system that did the work and

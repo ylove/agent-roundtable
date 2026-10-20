@@ -46,6 +46,8 @@ export interface ChatCompletionOptions {
   temperature?: number;
   /** Only with provider "openai_compatible": overrides OPENAI_COMPATIBLE_BASE_URL. */
   baseUrl?: string;
+  /** Postmortems retain a text-length estimate for a dispatched call that fails without usage. */
+  estimateUsageOnFailure?: boolean;
 }
 
 export async function chatCompletion(
@@ -72,9 +74,11 @@ export async function chatCompletion(
       : options.model || DEFAULT_MODELS[provider];
 
   const stop = activeAbortSignal();
+  let dispatched = false;
   try {
     stop?.throwIfAborted();
     const timeout = AbortSignal.timeout(LLM_TIMEOUT_MS);
+    dispatched = true;
     const result = await call(messages, {
       model,
       maxTokens: options.maxTokens || MAX_TOKENS,
@@ -91,6 +95,9 @@ export async function chatCompletion(
     });
     return result;
   } catch (error) {
+    if (dispatched && options.estimateUsageOnFailure) {
+      reportUsage({ provider, model, chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });
+    }
     if (stop?.aborted) throw new StoppedError();
     if (
       error instanceof Error &&
@@ -109,6 +116,7 @@ export interface CallLLMOptions {
   model: string;
   maxTokens?: number;
   baseUrl?: string;
+  estimateUsageOnFailure?: boolean;
 }
 
 /**
@@ -118,7 +126,7 @@ export interface CallLLMOptions {
 export async function callLLMDetailed(
   systemPrompt: string,
   messages: Array<{ role: "user" | "assistant"; content: string }>,
-  { provider, model, maxTokens = MAX_TOKENS, baseUrl }: CallLLMOptions
+  { provider, model, maxTokens = MAX_TOKENS, baseUrl, estimateUsageOnFailure }: CallLLMOptions
 ): Promise<LLMCompletionResult> {
   const llmMessages: LLMMessage[] = [
     { role: "system", content: systemPrompt },
@@ -133,6 +141,7 @@ export async function callLLMDetailed(
     model,
     maxTokens,
     baseUrl,
+    estimateUsageOnFailure,
   });
   return result;
 }

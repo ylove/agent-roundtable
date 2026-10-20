@@ -179,6 +179,7 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
   const source = orchestratorSource(state?.contract?.scope.orchestrator ?? "orchestrator");
   let session = "";
   const transcript: Turn[] = [];
+  let meetingFailed = false;
   try {
     const meeting = async () => {
       const llm = { ...(i.llm.provider && { provider: i.llm.provider }), ...(i.llm.model && { model: i.llm.model }), ...(i.llm.baseUrl && { baseUrl: i.llm.baseUrl }) };
@@ -210,10 +211,16 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
       } });
     }, meeting) : meeting());
   } catch (e) {
+    meetingFailed = true;
     throw new Error(`the postmortem meeting for ${scopeLabel(i.scope)} stopped: ${errText(e)}. The draft is unchanged; hold it again when the provider is back.`);
   } finally {
     // Flush before publication too: failed turns and a failed/overlapping hold still cost money.
-    if (store && usage.length) await store.transact(() => ({ events: usage }));
+    try {
+      if (store && usage.length) await store.transact(() => ({ events: usage }));
+    } catch (e) {
+      if (!meetingFailed) throw e;
+      console.error(`[Postmortem] usage flush failed: ${scrub(errText(e))}`);
+    }
   }
   if (!transcript.length) throw new Error("the postmortem meeting produced no turns; the draft is unchanged");
 

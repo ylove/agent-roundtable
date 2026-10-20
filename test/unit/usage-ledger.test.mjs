@@ -328,6 +328,29 @@ test("huddle and consent usage: tokens the provider counted are measured, the do
   });
 });
 
+test("a taskless meter settles driver usage carrying a task without changing reservation attribution", async () => {
+  const { store } = await frozenRun();
+  const persisted = [];
+  const meter = new UsageMeter("dissent micro-huddle", undefined, "requester", true, {
+    huddle: "hud-taskless", dissent_id: "risk",
+    persist: async (records) => {
+      persisted.push(...structuredClone(records));
+      await store.transact(() => ({ events: records.map((payload) => ({ type: "budget.usage_recorded", source: src, payload })) }));
+    },
+  });
+  await meter.run(async () => usage({ agent: "counterpart", task: "a", usd: 0.02 }),
+    { provider: "claude-code", model: "claude-code", usd: 0.5 }, (result) => result);
+  assert.equal(persisted.length, 2, "reservation and measured settlement both persist");
+  assert.ok(persisted.every((record) => !Object.hasOwn(record, "task") && record.agent === "requester"));
+  const state = await store.state();
+  const settled = state.budget.calls["hud-taskless:1"];
+  assert.equal(settled.task, undefined);
+  assert.equal(settled.reservation, false);
+  assert.deepEqual(settled.provenance, { tokens: "measured", usd: "measured" });
+  assert.equal(state.budget.spent_usd, 0.02, "the measured charge replaces the estimate");
+  assert.deepEqual(state.budget.by_task, {});
+});
+
 test("bounded ledger settlement replaces reservations in totals, provenance, watchdog budgets and sparklines, including replay", async () => {
   const { store } = await frozenRun();
   const base = usage({ source: "dissent micro-huddle", call_id: "hud-test:1", dissent_id: "risk", agent: "critic", provider: "paid",

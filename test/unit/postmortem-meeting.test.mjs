@@ -222,6 +222,41 @@ for (const runBacked of [true, false]) {
   }
 }
 
+for (const meetingFails of [true, false]) {
+  test(`a usage flush failure ${meetingFails ? "preserves the meeting error and is logged without secrets" : "propagates when the meeting succeeded"}`, async (t) => {
+    const run = await makeRun({ contract: { postmortem: { enabled: true } } });
+    await enabled(run);
+    const scope = { project: run.root, execution_id: run.store.id };
+    const finding = await ok("postmortem", { action: "record", ...scope, finding: FINDING });
+    await ok("postmortem", { action: "fix", ...scope, finding_id: finding.recorded, fix: { status: "fixed" } });
+    provider(t, { reply: () => {
+      if (meetingFails) throw new Error("original meeting failure");
+      return "The layout check was missing.";
+    } });
+    const secret = "tk_Abcdefghij0123456789";
+    const proto = Object.getPrototypeOf(run.store);
+    const transact = proto.transact;
+    t.mock.method(proto, "transact", function (fn) {
+      return transact.call(this, async (ctx) => {
+        const result = await fn(ctx);
+        if (result.events.some((e) => e.type === "budget.usage_recorded" && e.payload.source === "postmortem")) throw new Error(`usage flush unavailable ${secret}`);
+        return result;
+      });
+    });
+    const logs = [];
+    t.mock.method(console, "error", (...args) => logs.push(args.join(" ")));
+    const error = await fails("hold_postmortem", { ...scope, opening: "We missed a layout check.", participants: ["tester"], rounds: 1, ...LLM });
+    if (meetingFails) {
+      assert.match(error, /stopped: original meeting failure/);
+      assert.doesNotMatch(error, /usage flush unavailable/);
+      assert.match(logs.join("\n"), /usage flush unavailable/);
+    } else {
+      assert.match(error, /usage flush unavailable/);
+    }
+    assert.ok(!error.includes(secret) && !logs.join("\n").includes(secret));
+  });
+}
+
 test("one responsible agent means a waffle-house with that agent as defender; the artifact block is read from the last turn only", async (t) => {
   const { repo, ids, work } = await atTheTable(t);
   // waffle-house with 2 agents and 1 round: the defender opens, then one volley of two turns

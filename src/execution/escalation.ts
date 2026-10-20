@@ -239,6 +239,7 @@ export class UsageMeter {
       const u = { ...record, source: this.source,
         ...(this.task !== undefined && { task: this.task }), ...(this.agent !== undefined && { agent: this.agent }),
         ...(callId && { call_id: callId }), ...(this.lifecycle.dissent_id && { dissent_id: this.lifecycle.dissent_id }) };
+      if (this.task === undefined) delete u.task;
       if (current) Object.assign(current, u);
       else { current = u; this.records.push(u); }
       // A stopped driver may report its final result after abort has already routed the huddle.

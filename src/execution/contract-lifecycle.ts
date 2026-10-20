@@ -25,7 +25,7 @@ import { childEnv } from "../security/child-env.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { readArchivedSession, type ArchivedSession } from "../sessions/archive.js";
 import { sessionDissentDrafts } from "../sessions/dissents.js";
-import { draftDuelPlan, importDuel, isDuelId, type DuelImport } from "../sessions/duel-import.js";
+import { draftDuelPlan, importDuel, MAX_FIX_TASKS, isDuelId, type DuelImport } from "../sessions/duel-import.js";
 import { isSessionBusy } from "../sessions/lock.js";
 import { scrubbedJSON } from "./blobs.js";
 import { pausedBy } from "./escalation.js";
@@ -341,7 +341,9 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
       for (const ref of duel.artifact.members) { try { await loadAgent(ref); usable.push(ref); } catch { /* not a persona here */ } }
       for (const ref of o.participants ?? []) if (!usable.includes(ref)) { try { await loadAgent(ref); usable.push(ref); } catch { /* skip */ } }
       if (!usable.length) throw new Error(`No task plan could be drafted from ${duel.id}: none of the winning team's personas resolve. Pass participants (personas to do the work), contract or plan, or draft_plan: false.`);
-      const plan = draftDuelPlan(duel, { build: usable[0], review: usable[1] ?? usable[0] });
+      const sp = isObj(o.contract) && isObj(o.contract.scope) && Array.isArray(o.contract.scope.paths) ? o.contract.scope.paths.filter((x): x is string => typeof x === "string") : undefined;
+      const plan = draftDuelPlan(duel, { build: usable[0], review: usable[1] ?? usable[0] }, sp);
+      if (duel.artifact.fixes.length > MAX_FIX_TASKS) warnings.push(`the judges gave ${duel.artifact.fixes.length} fix points: the plan has ${MAX_FIX_TASKS} fix tasks and the rest are folded into the last one's acceptance list`);
       drafted = `Task plan drafted from duel ${duel.id}.\n\n\`\`\`${TASK_BLOCK_TAG}\n${JSON.stringify(plan, null, 2).replaceAll("`", "\\u0060")}\n\`\`\`\n`;
       warnings.push(`a task plan was drafted from the winning artifact of ${duel.id} (${(plan?.tasks as unknown[]).length} tasks, sequential, ${duel.artifact.kind === "text" || duel.artifact.kind === "diagram" ? 'write paths "docs/**", no test command' : duel.artifact.kind === "web" ? 'write paths "**", no test command' : 'write paths "**", placeholder test command "npm test"'}, placeholder budget): review and refine it with amend_contract before consent. Pass draft_plan: false to skip.`);
     }
@@ -456,11 +458,11 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
     source = "explicit";
     structure = {};
   } else {
-    const block = locateBlock([{ from: "plan", text: o.plan ?? drafted }, ...(src?.blockTexts ?? [])]);
+    const block = locateBlock([{ from: "plan", text: o.plan?.trim() ? o.plan : drafted }, ...(src?.blockTexts ?? [])]);
     if (block) {
       const parsed = blockToContract(block.value);
       if (parsed.errors.length) throw new Error(`The ${TASK_BLOCK_TAG} block in ${block.from} is not usable:\n- ${listErrors(parsed.errors)}`);
-      source = drafted && !o.plan ? `drafted:${duel!.id}` : `fenced:${block.from.startsWith(o.fromSession ?? "\0") ? o.fromSession : block.from}`;
+      source = drafted && !o.plan?.trim() ? `drafted:${duel!.id}` : `fenced:${block.from.startsWith(o.fromSession ?? "\0") ? o.fromSession : block.from}`;
       structure = parsed.contract;
       if (block.warn) warnings.push(block.warn);
     } else {
@@ -481,7 +483,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
     }
   }
   const v = await validateContract(assemble(structure), checkOpts);
-  if (!v.ok) throw new Error(`The contract is not valid:\n- ${listErrors(v.errors)}`);
+  if (!v.ok) throw new Error(`The contract is not valid:\n- ${listErrors(v.errors)}${drafted ? `\nThe task plan was drafted from ${duel!.id}; if it does not fit your contract, pass draft_plan: false with your own contract or plan.` : ""}`);
   warnings.push(...v.warnings);
   if (dropped) warnings.push(`the duel's winning decision was not added: ${dropped}`);
 
@@ -978,6 +980,11 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
 
   const fromSession = opts.fromSession ? await sessionPatch(opts.fromSession, c) : undefined;
   if (fromSession?.warn) warnings.push(fromSession.warn);
+  if (fromSession?.untripped?.length && Object.hasOwn(patch, "dissents")) {
+    const given = Array.isArray(patch.dissents) ? patch.dissents : [];
+    const omitted = fromSession.untripped.filter((d) => !given.some((g) => isObj(g) && g.id === d.id));
+    if (omitted.length) warnings.push(`the patch's dissents replace the duel's: ${omitted.map((d) => `${d.id} (by ${d.by})`).join(", ")} from ${opts.fromSession} ${omitted.length === 1 ? "is" : "are"} not in it and was not imported`);
+  }
   if (rec.frozen && fromSession?.untripped?.length && !Object.hasOwn(patch, "dissents")) {
     const list = fromSession.untripped.map((d) => `${d.id} (by ${d.by}): ${d.claim.slice(0, 120)}`);
     const tpl = fromSession.untripped.map((d) => ({ id: d.id, tripwire: { kind: "check_failed", check: "<command id>", task: "<task id>" } }));

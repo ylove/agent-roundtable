@@ -148,12 +148,14 @@ export function importDuel(id: string): DuelImport {
 }
 
 
+export const MAX_FIX_TASKS = 6;
+
 /**
  * A deterministic task plan (a roundtable-tasks object, no model call) from the winning artifact, the judges'
  * reasons and the imported dissents. Tasks run in sequence on one persona pair so none writes in parallel.
  * Artifact source is never included: each task's context names the duel archive and the file list.
  */
-export function draftDuelPlan(duel: DuelImport, personas: { build: string; review: string }): Record<string, unknown> | undefined {
+export function draftDuelPlan(duel: DuelImport, personas: { build: string; review: string }, scopePaths?: string[]): Record<string, unknown> | undefined {
   const a = duel.artifact;
   if (!a) return undefined;
   const fileList = a.files.length ? a.files.map((f) => `${f.path}${f.bytes !== undefined ? ` (${f.bytes} bytes)` : ""}`).join(", ") : "(no files archived)";
@@ -164,7 +166,9 @@ export function draftDuelPlan(duel: DuelImport, personas: { build: string; revie
   const kind = a.kind ?? "code";
   const doc = kind === "text" || kind === "diagram";
   const web = kind === "web";
-  const write = doc ? ["docs/**"] : ["**"];
+  // A caller's scope.paths bounds every task; documents narrow to docs/ when the scope allows it.
+  const inDocs = (scopePaths ?? []).map((p) => (p === "**" ? "docs/**" : p)).filter((p) => p.startsWith("docs/"));
+  const write = scopePaths?.length ? (doc && inDocs.length ? [...new Set(inDocs)] : scopePaths) : doc ? ["docs/**"] : ["**"];
   // Code checks with a placeholder test command; web and documents have no runnable check to invent.
   const checks = doc || web ? [] : ["test"];
   const tasks: Array<Record<string, unknown>> = [];
@@ -188,7 +192,13 @@ export function draftDuelPlan(duel: DuelImport, personas: { build: string; revie
       `It meets the brief: ${a.brief || duel.topic}`.slice(0, 500), ...keep,
     ]);
   }
-  for (const [i, fix] of a.fixes.entries()) add(`duel-fix-${i + 1}`, `Address judge feedback ${i + 1}: ${fix}`, personas.build, [`The judges' point is resolved${doc ? " in the revision" : web ? " on the page" : " in the code"}: ${fix}`]);
+  const where = doc ? " in the revision" : web ? " on the page" : " in the code";
+  // At most MAX_FIX_TASKS fix tasks: the rest ride in the last one's acceptance list.
+  const shown = a.fixes.slice(0, MAX_FIX_TASKS);
+  for (const [i, fix] of shown.entries()) {
+    const extra = i === shown.length - 1 ? a.fixes.slice(MAX_FIX_TASKS) : [];
+    add(`duel-fix-${i + 1}`, `Address judge feedback ${i + 1}: ${fix}`, personas.build, [`The judges' point is resolved${where}: ${fix}`, ...extra.map((x) => `Also resolved${where}: ${x}`)]);
+  }
   if (doc) add("duel-review", `Review "${a.title}" against the brief`, personas.review, ["A reviewer has read the final file and confirms it meets the brief and the judges' points"]);
   else if (web) add("duel-review", `Review "${a.title}" in a browser`, personas.review, ["The page was opened in a browser: it loads with no console errors, works on a narrow screen and meets the brief"]);
   else add("duel-tests", `Add tests and acceptance checks for "${a.title}"`, personas.review, ["Automated tests cover the main flow of the artifact and every fix above", "The test command passes"]);

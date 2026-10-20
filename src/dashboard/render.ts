@@ -450,7 +450,7 @@ export function renderDissents(c: PageContext): string {
       `<p class="note">Predicted failure: ${t(d?.predicted_failure ?? "Unknown")}</p>` +
       `<p>Source: ${t(d?.source.kind ?? "Unknown")}${d?.source.ref ? ` · ${t(d.source.ref)}` : ""}</p>` +
       `<p>Tripwire:</p><pre>${t(d?.tripwire ? JSON.stringify(d.tripwire, null, 2) : "Not supplied")}</pre>` +
-      `<p>On fire: ${t(d?.on_fire ?? "Unknown")} · Score: ${t(rec.score ?? "Not scored")}</p>` +
+      `<p>On fire: ${t(d?.on_fire ?? "Unknown")} · Score: ${t(rec.score ?? "not assessed")}</p>` +
       (fires.length ? `<h3>Firings</h3><table><thead><tr><th>Task</th><th>Tripped by</th><th>Evidence</th><th>Notification</th></tr></thead><tbody>` +
         fires.map((f) => `<tr><td>${t(f.task ?? "Integration")}</td><td>${t(f.tripped_by)}</td><td class="note">${t(f.evidence)}</td>` +
           `<td>${t((f.notified ?? []).join(", "))}${f.orchestrator_woken ? ` · ${t("Orchestrator woken")}` : ""}</td></tr>`).join("") +

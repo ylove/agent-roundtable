@@ -36,7 +36,7 @@ Seats: every agent named in a finding, every agent that did the original work (i
 - **waffle-house** when exactly one agent is responsible for every finding: it defends, the others challenge, and the opening is the charge.
 - **collaborate** otherwise, two rounds by default (1 to 4); `format` can force either.
 
-The context is a bounded bundle: the findings, the contract summary (or the work label), the task cards of the affected tasks, failing check signatures and the rules already agreed. It never carries your chat, your `confirmation` or the `original_prompt`: task cards are built without it, prompt-misread findings quote the contract's goal, and any of your words that the orchestrator's own text repeats verbatim are withheld. A postmortem session is refused by `nudge_collaboration`, `continue_collaboration`, `say` and `say_local` ("postmortem meetings take no outside input") and is not listed by `list_collaborations`.
+The context is a bounded bundle: the findings, the contract summary (or the work label), the task cards of the affected tasks, failing check signatures, the reviewed run’s dissents, and the rules already agreed. The **Dissents** section comes from the existing execution projection: claims, predictions, tripwires, current-generation firing status, observed evidence and each current score (or "not assessed"). The input may excerpt long fields; the record retains the full review snapshot. It never carries your chat, your `confirmation` or the `original_prompt`: task cards are built without it, prompt-misread findings quote the contract's goal, and any of your words that the orchestrator's own text repeats verbatim are withheld. A postmortem session is refused by `nudge_collaboration`, `continue_collaboration`, `say` and `say_local` ("postmortem meetings take no outside input") and is not listed by `list_collaborations`.
 
 Every seat is told the meeting is blameless about people and strict about mechanisms: each finding needs a cause and a prevention, and the last turn of the last round proposes artifacts in an artifact block, one line each:
 
@@ -44,10 +44,11 @@ Every seat is told the meeting is blameless about people and strict about mechan
 Artifact: <kind> | <target> | <finding ids> | <text>
 ```
 
-Lines are read from that turn's own lines only (not inside a blockquote or a code fence); lines that cannot be used are reported back as `rejected_lines`. At most 20 artifacts of 600 characters each; targets must name a seat or `project`, and finding ids must exist.
+Lines are read from that turn's own lines only (not inside a blockquote or a code fence); lines that cannot be used are reported back as `rejected_lines`. At most 20 artifacts of 600 characters each; targets name a seat, `project`, a fix path/task, or a reviewed dissent, and finding ids must exist.
 
 | Kind | Target | Effect when accepted |
 | --- | --- | --- |
+| `dissent_score` | a dissent id in the reviewed run | Records an evidence-backed advisory outcome through the existing dissent scoring tool’s shared path. |
 | `fix` | a path or task id | Recorded as a follow-up; nothing changes by itself. |
 | `rule` | `project` | A lesson shown to every future plan. |
 | `persona_addendum` | an agent | A line added to that persona file under `## Postmortem addenda`, through the agent workshop's write path (backup first, same containment, frontmatter untouched). |
@@ -56,6 +57,30 @@ Lines are read from that turn's own lines only (not inside a blockquote or a cod
 | `memory` | an agent | Appended to `projects/<key>/memory/<agent>.md`; with `memory_target: "claude"` also to `<repo>/.claude/agent-memory/<agent>/MEMORY.md`, refused if `.claude` or a parent along the way is a symlink or leaves the repository. |
 
 The orchestrator then closes the meeting with `hold_postmortem(action: "conclude", pm, closing, accept[], reject[{id, why}])`. Its closing statement is the last turn of the record, and only accepted artifacts take effect; each is audited as `postmortem.applied` with its target and hash. The result carries a summary and the record path for the orchestrator to relay to you.
+
+## Reviewing dissents
+
+A finding can support a proposed dissent outcome. Use this artifact form in the last turn:
+
+```
+Artifact: dissent_score | dissent-storage-retry | pmf-00000001 | vindicated | tests/storage.test.ts reproduced a duplicate write; the retry check failed
+```
+
+The outcome is `vindicated` (evidence supports the prediction), `refuted` (evidence contradicts it), or `untested` (the run established neither). Supporting evidence is required. A tripwire firing alone does not vindicate a prediction, and an unfired tripwire does not refute one. Without an assessment, the record says "not assessed" and no scoring event is invented.
+
+To apply one, the orchestrator explicitly accepts its artifact id and supplies the reviewed contract’s identity:
+
+```json
+{
+  "action": "conclude",
+  "pm": "pm-00000001",
+  "closing": "The repeated-write test supports the prediction.",
+  "orchestrator": "main",
+  "accept": ["a1"]
+}
+```
+
+The project must still have postmortem mode on. Rejected or omitted artifacts do nothing. Accepted assessments use the same frozen-contract, identity and outcome validation as `score_dissent`, emit `dissent.scored`, and are individually audited with their artifact hash. Retrying a conclusion does not repeat an assessment or overwrite a later one. Assessments stay in the postmortem record; they never become planning rules, weight votes, change consent thresholds or affect routing. At-the-table work without a reviewed execution has no runtime dissents to score.
 
 ## Reading lessons back
 

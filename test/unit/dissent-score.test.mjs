@@ -40,3 +40,25 @@ test("score_dissent is orchestrator-only, validates references and outcomes, and
   }
   assert.equal((await run.store.events({ types: ["dissent.scored"] })).length, 3);
 });
+
+test("shared scoring validates direct callers and deduplicates retries without reverting a later assessment", async (t) => {
+  const { scoreDissent } = await import("../../dist/execution/dissent-scoring.js");
+  const run = await makeRun({ contract: { tasks: [task("a")], dissents: [spec] } });
+  t.after(() => rmSync(run.root, { recursive: true, force: true }));
+  const input = { contractId: run.contract.id, orchestrator: "main", dissentId: "risk", outcome: "vindicated" };
+  for (const patch of [{ outcome: "trusted" }, { orchestrator: "other" }, { dissentId: "constructor" }, { contractId: "other" }]) {
+    await assert.rejects(scoreDissent(run.store, { ...input, ...patch }));
+  }
+  await Promise.all([scoreDissent(run.store, input), scoreDissent(run.store, input)]);
+  assert.equal((await run.store.events({ types: ["dissent.scored"] })).length, 1);
+  const operation = { ...input, outcome: "untested", operationKey: "postmortem:retry" };
+  await scoreDissent(run.store, operation);
+  await scoreDissent(run.store, { ...input, outcome: "refuted" });
+  await scoreDissent(run.store, operation);
+  assert.equal((await run.store.state()).dissents.risk.score, "refuted");
+  assert.equal((await run.store.events({ types: ["dissent.scored"] })).length, 3);
+  await assert.rejects(scoreDissent(run.store, { ...operation, outcome: "refuted" }), /identity was reused/);
+  const state = await run.store.state();
+  const { validateDissentScore } = await import("../../dist/execution/dissent-scoring.js");
+  assert.throws(() => validateDissentScore({ ...state, contract: { ...state.contract, status: "draft" } }, input), /frozen/);
+});

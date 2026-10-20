@@ -11,6 +11,7 @@
 import { agentKey, isPathLikeRef, loadAgent } from "../agents.js";
 import type { LLMProvider } from "../config.js";
 import { orchestratorSource } from "../execution/contract-state.js";
+import { scoreDissent, validateDissentScore } from "../execution/dissent-scoring.js";
 import { UsageMeter } from "../execution/escalation.js";
 import { postmortemBlockers } from "../execution/postmortem-state.js";
 import type { AnyEventDraft, BlackboardState, PostmortemArtifactKind, PostmortemFinding, PostmortemFormat } from "../execution/types.js";
@@ -19,6 +20,7 @@ import { scrub } from "../security/secrets.js";
 import { collaborations, continueCollaboration, endCollaboration, startCollaboration, ORCHESTRATOR } from "../sessions/collaborations.js";
 import { applyMemory, applyPersonaAddendum, artifactCounts, parseArtifactBlock } from "./artifacts.js";
 import { buildPostmortemContext, withholdHumanWords } from "./context.js";
+import { reviewedDissents } from "./dissents.js";
 import { executionOf, readDraft, scopeLabel } from "./draft.js";
 import { addLessons, activeLessons, type NewLesson } from "./lessons.js";
 import { requireEnabled, type ProjectRef } from "./project.js";
@@ -56,7 +58,8 @@ export type HoldResult =
       seats: string[];
       transcript: Turn[];
       findings: PostmortemFinding[];
-      proposed_artifacts: Array<Pick<Artifact, "id" | "kind" | "target" | "findings" | "text">>;
+      dissents: NonNullable<PostmortemRecord["dissents"]>;
+      proposed_artifacts: Array<Pick<Artifact, "id" | "kind" | "target" | "findings" | "text" | "outcome">>;
       rejected_lines: string[];
       warnings: string[];
       record: string;
@@ -196,8 +199,9 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
   }
   if (!transcript.length) throw new Error("the postmortem meeting produced no turns; the draft is unchanged");
 
+  const dissents = reviewedDissents(state);
   const last = transcript[transcript.length - 1].content;
-  const { artifacts, rejected } = parseArtifactBlock(last, seats.keys, new Set(view.findings.map((f) => f.id)));
+  const { artifacts, rejected } = parseArtifactBlock(last, seats.keys, new Set(view.findings.map((f) => f.id)), new Set(Object.keys(dissents)));
   const warnings: string[] = [];
   if (!artifacts.length) {
     warnings.push(rejected.length ? "none of the lines in the last turn's artifact block could be used" : "the last turn had no artifact block, so the meeting proposed no artifacts");
@@ -208,7 +212,7 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
     v: 1, pm: view.pm, project: i.project.key, scope: i.scope, status: "held", created: heldAt, held_at: heldAt,
     format: seats.format, rounds, seats: ["orchestrator", ...seats.keys], refs: Object.fromEntries(seats.keys.map((k, n) => [k, seats.refs[n]])), session,
     ...(i.memoryTarget === "claude" && { memory_target: "claude" as const }),
-    opening, findings: view.findings, transcript, proposed: artifacts, rejected_lines: rejected,
+    opening, findings: view.findings, dissents, transcript, proposed: artifacts, rejected_lines: rejected,
   };
   await withProjectLock(i.project.key, async () => {
     saveRecord(rec, renderRecord(rec));
@@ -226,11 +230,11 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
   return {
     status: "held", pm: view.pm, project: i.project.key, scope: i.scope, format: seats.format, rounds, seats: rec.seats,
     transcript: [{ seat: "orchestrator", content: opening }, ...transcript], findings: view.findings,
-    proposed_artifacts: artifacts.map(({ id, kind, target, findings, text }) => ({ id, kind, target, findings, text })),
+    dissents, proposed_artifacts: artifacts.map(({ id, kind, target, findings, text, outcome }) => ({ id, kind, target, findings, text, ...(outcome && { outcome }) })),
     rejected_lines: rejected, warnings, record: recordPath(i.project.key, view.pm, "md"),
     next:
       `Read the transcript, then close the meeting with your own words: hold_postmortem { "action": "conclude", "pm": "${view.pm}", "closing": "…", "accept": [artifact ids], "reject": [{ "id", "why" }] }. ` +
-      "Only accepted artifacts take effect. Tell the human the meeting happened; they can read every turn with postmortem(action: \"read\").",
+      "When accepting dissent_score, also pass orchestrator (the contract’s orchestrator identity). Only accepted artifacts take effect. Tell the human the meeting happened; they can read every turn with postmortem(action: \"read\").",
   };
 }
 
@@ -240,6 +244,8 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
 
 export interface ConcludeInput {
   pm: string;
+  /** Required when accepting dissent_score artifacts, as for score_dissent. */
+  orchestrator?: string;
   closing: string;
   accept?: string[];
   reject?: Array<{ id: string; why: string }>;
@@ -293,12 +299,21 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
   if (!project) throw new Error(`project ${found.project} is gone from the postmortem store`);
   const proj: ProjectRef = { key: found.project, root: project.repo_root };
 
+  const assessments = found.proposed.filter((a) => a.kind === "dissent_score" && accept.includes(a.id));
+  if (assessments.length) requireEnabled(proj);
   const protectedTexts: string[] = [];
   const store = found.scope.execution_id !== undefined ? await executionOf(proj, found.scope).catch(() => undefined) : undefined;
   if (store) {
     const s = await store.state();
     if (s.goal?.original_prompt) protectedTexts.push(s.goal.original_prompt);
     for (const e of await store.events({ types: ["execution.started"], limit: 1 })) if (e.type === "execution.started") protectedTexts.push(e.payload.confirmation);
+  }
+  if (assessments.length) {
+    if (!store) throw new Error("dissent_score requires the reviewed execution to be available");
+    const state = await store.state();
+    for (const a of assessments) validateDissentScore(state, {
+      contractId: state.contract?.id ?? "", orchestrator: i.orchestrator ?? "", dissentId: a.target, outcome: a.outcome!,
+    });
   }
   const closing = withholdHumanWords(clean(i.closing, LIMITS.closing), protectedTexts);
   if (!closing) throw new Error("closing is required: your closing statement for the record");
@@ -322,15 +337,24 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
     for (const a of rec.proposed.filter((x) => accept.includes(x.id))) {
       try {
         let done: AppliedArtifact;
-        if (a.kind === "persona_addendum") done = await applyPersonaAddendum(a, rec.pm, now, rec.refs?.[a.target]);
+        if (a.kind === "dissent_score") {
+          requireEnabled(proj);
+          if (!store) throw new Error("dissent_score requires the reviewed execution to be available");
+          const state = await store.state();
+          await scoreDissent(store, {
+            contractId: state.contract?.id ?? "", orchestrator: i.orchestrator ?? "", dissentId: a.target, outcome: a.outcome!,
+            operationKey: `postmortem:${rec.pm}:${a.id}:${a.hash}`,
+          });
+          done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: store.dir, note: `advisory assessment: ${a.outcome}` };
+        } else if (a.kind === "persona_addendum") done = await applyPersonaAddendum(a, rec.pm, now, rec.refs?.[a.target]);
         else if (a.kind === "memory") done = applyMemory(a, rec.pm, { key: rec.project, root: proj.root }, rec.memory_target === "claude");
         else if (a.kind === "fix") done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, note: "recorded as a follow-up; nothing was changed" };
         else {
           lessons.push({ kind: LESSON_KIND[a.kind]!, target: a.kind === "agent_rule" ? a.target : "project", text: a.text, pm: rec.pm, findings: a.findings });
           done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: "lessons.json", note: "added to the project's lessons" };
         }
-        // A file-writing kind is audited as soon as its write succeeded; the others after the lessons are written.
-        if (a.kind === "persona_addendum" || a.kind === "memory") await audit(a, done);
+        // File and scoring writes are audited immediately; lesson writes are audited after persistence.
+        if (a.kind === "persona_addendum" || a.kind === "memory" || a.kind === "dissent_score") await audit(a, done);
         applied.push(done);
       } catch (e) {
         warnings.push(`${a.id} (${a.kind} → ${a.target}) was accepted but not applied: ${errText(e)}`);
@@ -340,14 +364,14 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
     const ok = new Set(applied.filter((a) => !a.note?.startsWith("failed")).map((a) => a.id));
     // Flags: a finding that misread the prompt, the project or the contract is recorded as such, with the clearer wording accepted for it.
     const flagged: FlagRecord[] = rec.findings.filter((f) => FLAG_CATEGORIES.includes(f.category)).map((f) => {
-      const clearer = rec.proposed.filter((a) => ok.has(a.id) && a.findings.includes(f.id) && a.kind !== "memory").map((a) => a.text).join(" ");
+      const clearer = rec.proposed.filter((a) => ok.has(a.id) && a.findings.includes(f.id) && a.kind !== "memory" && a.kind !== "dissent_score").map((a) => a.text).join(" ");
       return { finding: f.id, category: f.category, misread: f.summary, ...(clearer && { clearer: clearer.slice(0, 600) }) };
     });
     for (const f of flagged) {
       lessons.push({ kind: "flag", target: "project", flag: true, text: `${f.misread}${f.clearer ? ` Clearer: ${f.clearer}` : ""}`.slice(0, 1200), pm: rec.pm, findings: [f.finding] });
     }
     lessonsAdded = lessons.length ? addLessons(rec.project, lessons, now.toISOString()).length : 0;
-    for (const a of rec.proposed.filter((x) => ok.has(x.id) && x.kind !== "persona_addendum" && x.kind !== "memory")) await audit(a, applied.find((x) => x.id === a.id)!);
+    for (const a of rec.proposed.filter((x) => ok.has(x.id) && x.kind !== "persona_addendum" && x.kind !== "memory" && x.kind !== "dissent_score")) await audit(a, applied.find((x) => x.id === a.id)!);
     const concluded: PostmortemRecord = {
       ...rec, status: "concluded", concluded_at: now.toISOString(), closing,
       accepted: accept, rejected: reject, applied, flagged,

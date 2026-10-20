@@ -13,6 +13,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync 
 import { join, sep } from "node:path";
 import { appendPersonaAddendum, formatBackupTimestamp } from "../agent-files.js";
 import { agentKey, loadAgent } from "../agents.js";
+import { DISSENT_OUTCOMES, type DissentOutcome } from "../execution/dissent-scoring.js";
 import { ownLines } from "../execution/escalation.js";
 import type { PostmortemArtifactKind } from "../execution/types.js";
 import { writeFileAtomic } from "../security/fs-safe.js";
@@ -26,8 +27,8 @@ const PROJECT_KINDS: readonly PostmortemArtifactKind[] = ["rule", "contract_rule
 /** Kinds whose target is a seat (an agent name). */
 const SEAT_KINDS: readonly PostmortemArtifactKind[] = ["persona_addendum", "agent_rule", "memory"];
 
-export const artifactHash = (kind: string, target: string, text: string): string =>
-  createHash("sha256").update(`${kind}\n${target}\n${text}`).digest("hex");
+export const artifactHash = (kind: string, target: string, text: string, outcome?: DissentOutcome): string =>
+  createHash("sha256").update(`${kind}\n${target}\n${text}${outcome ? `\n${outcome}` : ""}`).digest("hex");
 
 /** A field without the markdown emphasis or code ticks a model puts around it (only at its ends: names keep their underscores). */
 const bare = (s: string): string => s.trim().replace(/^[*_`\s]+|[*_`\s]+$/g, "");
@@ -47,7 +48,7 @@ export interface ParsedArtifacts {
  * The artifacts a turn proposes. `seats` are the agent keys that may be targeted, `findings` the ids
  * that exist.
  */
-export function parseArtifactBlock(turn: string, seats: readonly string[], findings: ReadonlySet<string>): ParsedArtifacts {
+export function parseArtifactBlock(turn: string, seats: readonly string[], findings: ReadonlySet<string>, dissents: ReadonlySet<string> = new Set()): ParsedArtifacts {
   const artifacts: Artifact[] = [];
   const rejected: string[] = [];
   const seatKeys = new Map(seats.map((s) => [agentKey(s), agentKey(s)]));
@@ -64,13 +65,19 @@ export function parseArtifactBlock(turn: string, seats: readonly string[], findi
     const kind = bare(parts[0]).toLowerCase() as PostmortemArtifactKind;
     const targetRaw = bare(parts[1]);
     const ids = parts[2].split(/[\s,;]+/).map(bare).filter(Boolean);
-    const text = scrub(parts.slice(3).join("|")).replace(/\s+/g, " ").trim();
+    const outcome = kind === "dissent_score" ? bare(parts[3]).toLowerCase() as DissentOutcome : undefined;
+    const text = scrub(parts.slice(kind === "dissent_score" ? 4 : 3).join("|")).replace(/\s+/g, " ").trim();
     if (!ARTIFACT_KINDS.includes(kind)) {
       reject(`unknown kind; one of ${ARTIFACT_KINDS.join(", ")}`);
       continue;
     }
     let target = targetRaw;
-    if (PROJECT_KINDS.includes(kind)) {
+    if (kind === "dissent_score") {
+      if (!dissents.has(target) || !outcome || !DISSENT_OUTCOMES.includes(outcome)) {
+        reject("dissent_score needs a dissent id from this run and vindicated, refuted or untested before the evidence text");
+        continue;
+      }
+    } else if (PROJECT_KINDS.includes(kind)) {
       if (targetRaw.toLowerCase() !== "project") {
         reject(`${kind} targets "project"`);
         continue;
@@ -100,14 +107,14 @@ export function parseArtifactBlock(turn: string, seats: readonly string[], findi
       reject(`text is ${text.length} characters; the limit is ${LIMITS.artifactText}`);
       continue;
     }
-    const hash = artifactHash(kind, target, text);
+    const hash = artifactHash(kind, target, text, outcome);
     if (seen.has(hash)) continue;
     if (artifacts.length >= LIMITS.artifacts) {
       reject(`over the limit of ${LIMITS.artifacts} artifacts`);
       continue;
     }
     seen.add(hash);
-    artifacts.push({ id: `a${artifacts.length + 1}`, kind, target, findings: [...new Set(ids)], text, hash });
+    artifacts.push({ id: `a${artifacts.length + 1}`, kind, target, findings: [...new Set(ids)], text, hash, ...(outcome && { outcome }) });
   }
   return { artifacts, rejected };
 }

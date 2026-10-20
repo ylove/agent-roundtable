@@ -5,7 +5,8 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { LLMProvider } from "../config.js";
 import { amendContract, fileDissent, freezeContract, proposeContract, type ContractResult } from "../execution/contract-lifecycle.js";
-import { openContractStore, describeConsent, orchestratorSource } from "../execution/contract-state.js";
+import { openContractStore, describeConsent } from "../execution/contract-state.js";
+import { scoreDissent, type DissentOutcome } from "../execution/dissent-scoring.js";
 import { renderContractMarkdown } from "../execution/contract.js";
 import { truncate } from "../sessions/workshop.js";
 import { AMEND_CONTRACT, FILE_DISSENT, FREEZE_CONTRACT, PROPOSE_CONTRACT, SCORE_DISSENT } from "./names.js";
@@ -225,13 +226,9 @@ export async function handleContractTool(name: string, args: ToolArgs, ctx: Tool
     case SCORE_DISSENT: {
       if (ctx.mode !== "orchestrator") throw new Error("only an orchestrator may score a dissent");
       const store = await openContractStore(a.contract_id as string);
-      await store.transact(({ state }) => {
-        const c = state.contract;
-        if (!c || c.id !== a.contract_id || c.status !== "frozen") throw new Error("scoring requires a frozen contract");
-        if (c.scope.orchestrator !== a.orchestrator) throw new Error("only the contract's orchestrator may score a dissent");
-        if (!(c.dissents ?? []).some((d) => d.id === a.dissent_id)) throw new Error("unknown dissent id");
-        return { events: [{ type: "dissent.scored", source: orchestratorSource(a.orchestrator as string),
-          payload: { dissent_id: a.dissent_id as string, outcome: a.outcome as "vindicated" | "refuted" | "untested" } }] };
+      await scoreDissent(store, {
+        contractId: a.contract_id as string, orchestrator: a.orchestrator as string,
+        dissentId: a.dissent_id as string, outcome: a.outcome as DissentOutcome,
       });
       return { content: [{ type: "text", text: JSON.stringify({ dissent_id: a.dissent_id, outcome: a.outcome, advisory: true }) }] };
     }

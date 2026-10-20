@@ -45,7 +45,7 @@ const fields = {
     pmFinding: ["finding"], pmFix: ["fix"],
   },
   hold_postmortem: {
-    string: ["project", "work", "opening", "closing", "provider", "model", "base_url"], exe: ["execution_id"], holdAction: ["action"], pmId: ["pm"],
+    string: ["project", "work", "opening", "closing", "orchestrator", "provider", "model", "base_url"], exe: ["execution_id"], holdAction: ["action"], pmId: ["pm"],
     array: ["participants", "accept"], pmFormat: ["format"], pmRounds: ["rounds"], pmMemory: ["memory_target"], pmReject: ["reject"],
   },
 };

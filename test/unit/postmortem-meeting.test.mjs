@@ -546,3 +546,158 @@ test("hold_postmortem and postmortem are listed with strict schemas on the orche
   assert.match(await fails("hold_postmortem", { action: "conclude", pm: "pm-0123abcd" }), /"closing" is required/);
   assert.match(await fails("hold_postmortem", { action: "conclude", pm: "pm-0123abcd", closing: "x" }), /No held postmortem/);
 });
+
+// WS14/WS16 integration: a finding proposes an assessment, acceptance uses the shared scorer,
+// and replay/display consume exactly the existing dissent projection.
+const dissentSpec = (id) => ({
+  id, by: "builder", source: { kind: "manual" }, claim: `Concern ${id} \\| remains data`,
+  predicted_failure: `Prediction ${id}`, tripwire: { kind: "task_state", task: "api", state: "blocked" }, on_fire: "notify",
+});
+
+async function dissentMeeting(t, { outcomes = ["vindicated", "refuted", "untested"], malformed = false } = {}) {
+  const specs = ["fired", "quiet", "unresolved", "unassessed"].map(dissentSpec);
+  const run = await makeRun({ contract: { tasks: [task("api")], dissents: specs, postmortem: { enabled: true } } });
+  t.after(() => rmSync(run.root, { recursive: true, force: true }));
+  await enabled(run);
+  await run.store.transact(() => ({ events: [
+    { type: "dissent.tripwire_fired", source: runner, payload: { dissent_id: "fired", task: "api", tripped_by: "builder", evidence: "A blocked task is a signal \\| not proof" } },
+    { type: "dissent.scored", source: { kind: "orchestrator", id: "main", pid: process.pid }, payload: { dissent_id: "quiet", outcome: "untested" } },
+  ] }));
+  const finding = await ok("postmortem", { action: "record", project: run.root, execution_id: run.store.id, finding: FINDING });
+  await ok("postmortem", { action: "fix", project: run.root, execution_id: run.store.id, finding_id: finding.recorded, fix: { status: "fixed" } });
+  const block = outcomes.map((outcome, n) => `Artifact: dissent_score | ${specs[n].id} | ${finding.recorded} | ${outcome} | src/api/index.js supports ${outcome} \\| evidence`).join("\n");
+  const requests = provider(t, { total: 3, block: block + (malformed ? `\nArtifact: dissent_score | missing | ${finding.recorded} | vindicated | bad target` : "") });
+  const held = await ok("hold_postmortem", { project: run.root, execution_id: run.store.id, opening: "Review the predictions against the evidence", participants: ["tester"], rounds: 1, ...LLM });
+  return { run, held, finding, requests };
+}
+
+test("postmortem finding → accepted assessments → dissent.scored → replay, with evidence, audit and display-only semantics", async (t) => {
+  const { run, held, finding, requests } = await dissentMeeting(t, { malformed: true });
+  const before = await run.store.state();
+  const rec = loadRecord(held.project, held.pm);
+  assert.deepEqual(rec.dissents, before.dissents);
+  assert.deepEqual(held.dissents, before.dissents);
+  assert.equal(held.rejected_lines.length, 1);
+  assert.equal(held.proposed_artifacts.length, 3);
+  assert.ok(held.proposed_artifacts.every((a) => a.findings.includes(finding.recorded) && a.text.includes("src/api/index.js")));
+  assert.match(requests[0].user, /## Dissents/);
+  for (const id of ["fired", "quiet", "unresolved", "unassessed"]) {
+    assert.ok(requests[0].user.includes(`Prediction ${id}`));
+    assert.equal(rec.dissents[id].spec.claim, dissentSpec(id).claim);
+  }
+  const heldMd = await ok("postmortem", { action: "read", pm: held.pm });
+  assert.match(heldMd, /not assessed/);
+  assert.ok(heldMd.includes("Concern fired " + "\\\\\\|" + " remains data"), "backslashes are escaped before pipes");
+  assert.equal((await run.store.events({ types: ["dissent.scored"] })).length, 1, "holding never invents a score");
+  for (const orchestrator of [undefined, "other"]) {
+    assert.match(await fails("hold_postmortem", { action: "conclude", pm: held.pm, closing: "Assessed", accept: ["a1"], ...(orchestrator && { orchestrator }) }), /only the contract's orchestrator/);
+    assert.equal(loadRecord(held.project, held.pm).status, "held");
+  }
+  await ok("postmortem", { action: "disable", project: run.root, reason: "Stop postmortem meetings" });
+  assert.match(await fails("hold_postmortem", { action: "conclude", pm: held.pm, closing: "Assessed", accept: ["a1"], orchestrator: "main" }), /off/);
+  await enabled(run);
+  const args = { action: "conclude", pm: held.pm, closing: "The evidence supports these assessments", accept: ["a1", "a2", "a3"], orchestrator: "main" };
+  const done = await ok("hold_postmortem", args);
+  assert.deepEqual(done.warnings, []);
+  assert.equal(done.lessons_added, 0, "assessments never become planning rules");
+  const events = await run.store.events({ types: ["dissent.scored"] });
+  assert.equal(events.length, 4);
+  assert.deepEqual(events.slice(1).map((e) => e.payload.outcome), ["vindicated", "refuted", "untested"]);
+  assert.ok(events.slice(1).every((e) => e.source.id === "main" && e.source.kind === "orchestrator" && e.correlation.startsWith(`postmortem:${held.pm}:`)));
+  const state = await run.store.state();
+  assert.equal(state.dissents.unassessed.score, undefined);
+  assert.deepEqual(state.contract, before.contract);
+  for (const key of ["tasks", "escalations", "inbox", "paused_tasks"]) assert.deepEqual(state[key], before[key], key);
+  assert.equal(state.postmortem.meetings[held.pm].concluded.artifacts.dissent_score, 3);
+  const { openExecutionStore } = await import("../../dist/execution/store.js");
+  assert.deepEqual((await (await openExecutionStore(run.store.id)).state()).dissents, state.dissents);
+  assert.equal((await run.store.verify()).ok, true);
+  const { dissentTripwireRules } = await import("../../dist/execution/watchdog.js");
+  assert.deepEqual(dissentTripwireRules(state), dissentTripwireRules(before), "scores do not change routing actions");
+  const { wakeFor } = await import("../../dist/execution/watch.js");
+  assert.equal(wakeFor(state, events[1], "main"), null, "a score does not wake or route");
+  const { readArchivedSession } = await import("../../dist/sessions/archive.js");
+  const archived = readArchivedSession(rec.session);
+  assert.equal(archived.origin, `postmortem:${held.pm}`);
+  assert.match(archived.transcript, /Artifact: dissent_score/);
+  const { renderDissents, renderPostmortems } = await import("../../dist/dashboard/render.js");
+  const pageContext = { state, header: run.store.header(), base: "/test/", runner: { status: "unknown", detail: "" } };
+  assert.match(renderDissents(pageContext), /Score: vindicated/);
+  assert.match(renderDissents(pageContext), /Score: not assessed/);
+  const markdown = await ok("postmortem", { action: "read", pm: held.pm });
+  const page = renderPostmortems(pageContext, { [held.pm]: { markdown } });
+  assert.match(page, /3 dissent score/);
+  assert.match(page, /Dissents/);
+  assert.match(page, /Prediction unassessed/);
+
+  const appliedAudit = readdirSync(AUDIT_DIR).flatMap((n) => readFileSync(join(AUDIT_DIR, n), "utf8").split("\n")).filter((l) => l.includes("postmortem.applied") && l.includes(held.pm));
+  assert.equal(appliedAudit.length, 3);
+  assert.ok(appliedAudit.every((l) => l.includes('"kind":"dissent_score"') && /"hash":"[0-9a-f]{64}"/.test(l)));
+  const conclusion = (await run.store.events({ types: ["postmortem.concluded"] }))[0];
+  assert.match((await run.store.getBlob(conclusion.payload.record)).toString(), /vindicated: src\/api\/index.js/);
+  assert.equal((await ok("hold_postmortem", args)).already_concluded, true);
+  assert.equal((await run.store.events({ types: ["dissent.scored"] })).length, 4);
+});
+
+test("rejected and omitted dissent assessments never score; firing does not determine the proposed outcome", async (t) => {
+  const { run, held } = await dissentMeeting(t, { outcomes: ["refuted", "vindicated"] });
+  const before = (await run.store.state()).dissents;
+  const result = await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "Insufficient evidence", reject: [{ id: "a1", why: "Not established" }] });
+  assert.deepEqual(result.applied, []);
+  assert.deepEqual(result.not_accepted, ["a2"]);
+  assert.deepEqual((await run.store.state()).dissents, before);
+  assert.equal((await run.store.events({ types: ["dissent.scored"] })).length, 1);
+});
+
+test("dissent assessment parsing requires a reviewed dissent, finding, supported outcome and evidence on own lines", () => {
+  const findings = new Set(["pmf-00000001"]);
+  const dissents = new Set(["risk"]);
+  const line = (target, outcome, text = "src/check.js confirms it") => `Artifact: dissent_score | ${target} | pmf-00000001 | ${outcome} | ${text}`;
+  for (const candidate of [line("missing", "vindicated"), line("risk", "trusted"), line("risk", "refuted", ""), line("risk", "refuted").replace("pmf-00000001", "pmf-00000002")]) {
+    const parsed = parseArtifactBlock(candidate, ["builder"], findings, dissents);
+    assert.equal(parsed.artifacts.length, 0);
+    assert.equal(parsed.rejected.length, 1);
+  }
+  assert.equal(parseArtifactBlock(line("risk", "refuted"), ["builder"], findings).artifacts.length, 0, "at-the-table work has no reviewed run");
+  const parsed = parseArtifactBlock(["> " + line("risk", "vindicated"), "~~~", line("risk", "untested"), "~~~", line("risk", "refuted")].join("\n"), ["builder"], findings, dissents);
+  assert.equal(parsed.artifacts.length, 1);
+  assert.equal(parsed.artifacts[0].outcome, "refuted");
+  assert.equal(parsed.artifacts[0].text, "src/check.js confirms it");
+  assert.notEqual(parsed.artifacts[0].hash, parseArtifactBlock(line("risk", "vindicated"), ["builder"], findings, dissents).artifacts[0].hash);
+});
+
+test("dissent snapshots preserve historical firing evidence, distinguish current generations, scrub secrets and keep every dissent in bounded input", async () => {
+  const { reviewedDissents, dissentsSection } = await import("../../dist/postmortem/dissents.js");
+  const { initialState } = await import("../../dist/execution/blackboard.js");
+  const state = { ...initialState("exe-test"), dissents: Object.fromEntries(Array.from({ length: 16 }, (_, n) => {
+    const id = `risk-${String(n).padStart(2, "0")}-${"a".repeat(56)}`;
+    return [id, { spec: { ...dissentSpec(id), by: "a".repeat(200), claim: "\\|".repeat(250), predicted_failure: "\\|".repeat(250) }, generation: 10, fires: {
+      old: { dissent_id: id, task: "api", tripped_by: "builder", evidence: "Old observation tk_Abcdefghij0123456789", seq: 9 },
+    } }];
+  })) };
+  const snapshot = reviewedDissents(state);
+  assert.ok(!JSON.stringify(snapshot).includes("tk_Abcdefghij0123456789"));
+  assert.ok(JSON.stringify(state).includes("tk_Abcdefghij0123456789"), "snapshot does not mutate its source");
+  const full = dissentsSection(snapshot);
+  assert.ok(full.includes("| no |"), "historical firings do not mark the current predicate fired");
+  assert.match(full, /seq 9 task api/);
+  const context = buildPostmortemContext({ scope: { execution_id: "exe-test" }, format: "collaborate", seats: ["builder", "tester"], opening: "Review", findings: [], state });
+  assert.ok(context.length <= 12000);
+  for (const id of Object.keys(state.dissents)) assert.ok(context.includes(id), `includes ${id}`);
+});
+
+test("a postmortem conclusion retried after its scoring write does not duplicate it or revert a later assessment", async (t) => {
+  const { run, held } = await dissentMeeting(t, { outcomes: ["vindicated"] });
+  const { scoreDissent } = await import("../../dist/execution/dissent-scoring.js");
+  const artifact = loadRecord(held.project, held.pm).proposed[0];
+  const input = { contractId: run.contract.id, orchestrator: "main", dissentId: artifact.target, outcome: artifact.outcome,
+    operationKey: `postmortem:${held.pm}:${artifact.id}:${artifact.hash}` };
+  // The event was persisted, but the process stopped before saving the concluded record.
+  await scoreDissent(run.store, input);
+  await scoreDissent(run.store, { ...input, outcome: "refuted", operationKey: undefined });
+  const before = await run.store.events({ types: ["dissent.scored"] });
+  const done = await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "Close the interrupted review", orchestrator: "main", accept: [artifact.id] });
+  assert.deepEqual(done.warnings, []);
+  assert.equal((await run.store.state()).dissents.fired.score, "refuted");
+  assert.deepEqual(await run.store.events({ types: ["dissent.scored"] }), before);
+});

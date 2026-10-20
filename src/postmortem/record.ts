@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { scrub } from "../security/secrets.js";
+import { dissentsSection } from "./dissents.js";
 import { scopeLabel } from "./draft.js";
 import type { PostmortemRecord } from "./types.js";
 
@@ -40,6 +41,8 @@ export function renderRecord(r: PostmortemRecord): string {
       `${f.fix ? `; fix ${f.fix.status}${f.fix.by ? ` by ${text(f.fix.by)}` : ""}` : ""}${f.repeats ? `; repeated ${f.repeats}x` : ""}${f.evidence?.length ? `\n  Evidence: ${f.evidence.map(text).join(", ")}` : ""}`
     ),
     "",
+    dissentsSection(r.dissents ?? {}),
+    "",
     "## The meeting",
     "",
     "**orchestrator** (opening):",
@@ -51,8 +54,8 @@ export function renderRecord(r: PostmortemRecord): string {
   if (r.closing !== undefined) out.push("**orchestrator** (closing):", "", quote(r.closing), "");
   out.push("## Artifacts", "");
   if (r.proposed.length) {
-    out.push("| Id | Kind | Target | Findings | Status | Text |", "| --- | --- | --- | --- | --- | --- |");
-    for (const a of r.proposed) out.push(`| ${a.id} | ${a.kind} | ${cell(a.target, 80)} | ${a.findings.join(", ")} | ${artifactStatus(r, a.id)} | ${cell(a.text, 600)} |`);
+    out.push("| Id | Kind | Target | Findings | Status | Outcome / evidence or text |", "| --- | --- | --- | --- | --- | --- |");
+    for (const a of r.proposed) out.push(`| ${a.id} | ${a.kind} | ${cell(a.target, 80)} | ${a.findings.join(", ")} | ${artifactStatus(r, a.id)} | ${cell(`${a.outcome ? `${a.outcome}: ` : ""}${a.text}`, 650)} |`);
   } else {
     out.push("None were proposed.");
   }

@@ -139,7 +139,7 @@ test("dashboard: dissents show armed and fired predicates, task evidence, huddle
   assert.match(armed, /href="[^"]+\/dissents" class="here">Dissents<\/a>/);
   assert.match(armed, /data-live="reload"/);
   assert.equal(armed.match(/Status: armed/g)?.length, 3);
-  for (const text of ["critic", "Concern checks", "Prediction paths", "consent · round-1", "check_failed", "path_touched", "task_state", "pause_and_huddle", "Not scored", "No huddles recorded."]) {
+  for (const text of ["critic", "Concern checks", "Prediction paths", "consent · round-1", "check_failed", "path_touched", "task_state", "pause_and_huddle", "not assessed", "No huddles recorded."]) {
     assert.ok(armed.includes(text), text);
   }
   for (const task of ["a", "b", undefined]) {

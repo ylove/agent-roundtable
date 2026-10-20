@@ -295,7 +295,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "postmortem.started": { id: "s", format: "'collaborate'|'waffle-house'", seats: "s[]" },
   "postmortem.concluded": {
     id: "s",
-    artifacts: { "fix?": "int", "rule?": "int", "persona_addendum?": "int", "agent_rule?": "int", "contract_rule?": "int", "memory?": "int" },
+    artifacts: { "fix?": "int", "rule?": "int", "persona_addendum?": "int", "agent_rule?": "int", "contract_rule?": "int", "memory?": "int", "dissent_score?": "int" },
     flagged: "int",
     record: "s",
   },

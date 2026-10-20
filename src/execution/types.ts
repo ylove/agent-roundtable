@@ -324,7 +324,7 @@ export interface Escalation {
 export type PostmortemCategory = "prompt_misread" | "project_misread" | "contract_ambiguity" | "implementation" | "test_gap" | "process";
 export type PostmortemFixStatus = "pending" | "fixed" | "abandoned";
 export type PostmortemFormat = "collaborate" | "waffle-house";
-export type PostmortemArtifactKind = "fix" | "rule" | "persona_addendum" | "agent_rule" | "contract_rule" | "memory";
+export type PostmortemArtifactKind = "fix" | "rule" | "persona_addendum" | "agent_rule" | "contract_rule" | "memory" | "dissent_score";
 
 export interface PostmortemFinding {
   id: string;

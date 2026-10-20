@@ -12,6 +12,7 @@ import { agentKey } from "../agents.js";
 import { buildTaskCard } from "../execution/task-card.js";
 import type { BlackboardState, PostmortemFinding, PostmortemFormat } from "../execution/types.js";
 import { scrub } from "../security/secrets.js";
+import { dissentsSection, reviewedDissents } from "./dissents.js";
 import { scopeLabel } from "./draft.js";
 import type { Lesson, PostmortemScope } from "./types.js";
 import { LIMITS } from "./types.js";
@@ -57,7 +58,8 @@ export function directive(format: PostmortemFormat, seats: readonly string[], de
     "",
     "Kinds: fix (target a path or task id: a follow-up, nothing changes by itself), rule (target project: shown to every future plan), persona_addendum (target an agent: a line added to its persona file), " +
       "agent_rule (target an agent: shown in its task card while it works on this project), contract_rule (target project: a rule every future contract must state), memory (target an agent: a note it keeps).",
-    `Targets are \`project\` or one of these seats: ${seats.join(", ")}. At most ${LIMITS.artifacts} artifacts, ${LIMITS.artifactText} characters each; finding ids are the pmf- ids listed below.`,
+    `Rule and agent targets are \`project\` or one of these seats: ${seats.join(", ")}. At most ${LIMITS.artifacts} artifacts, ${LIMITS.artifactText} characters each; finding ids are the pmf- ids listed below.`,
+    "For a dissent assessment use: Artifact: dissent_score | <dissent id> | <finding ids> | <vindicated/refuted/untested> | <supporting evidence>. Name a dissent in the Dissents section and explain the evidence, not just whether its tripwire fired. Omit an assessment when none is supported; scores are advisory, never voting weights, consent thresholds or routing inputs.",
     "For a prompt_misread, project_misread or contract_ambiguity finding, state in a rule or contract_rule which field, task text or phrase was misread and the clearer wording.",
     "The last turn of the last round must contain the artifact block. Write each Artifact line as plain text (not in a quote or a code fence), or it is ignored.",
   ];
@@ -137,6 +139,7 @@ function rulesSection(i: ContextInput): string {
 export function buildPostmortemContext(i: ContextInput): string {
   const sections = [
     directive(i.format, i.seats, i.defender),
+    dissentsSection(reviewedDissents(i.state), true),
     `## The main orchestrator's opening (turn 0)\n\n${cap(i.opening, 3000)}`,
     `## Findings\n\n${i.findings.map(findingLine).join("\n")}`,
     workSection(i),

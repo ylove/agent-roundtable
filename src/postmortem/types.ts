@@ -2,9 +2,9 @@
 // Postmortem mode: shared types and limits (docs/design/postmortem.md)
 // ============================================================================
 
-import type { PostmortemArtifactKind, PostmortemCategory, PostmortemFinding, PostmortemFormat } from "../execution/types.js";
+import type { DissentRuntime, PostmortemArtifactKind, PostmortemCategory, PostmortemFinding, PostmortemFormat } from "../execution/types.js";
 
-export const ARTIFACT_KINDS: readonly PostmortemArtifactKind[] = ["fix", "rule", "persona_addendum", "agent_rule", "contract_rule", "memory"];
+export const ARTIFACT_KINDS: readonly PostmortemArtifactKind[] = ["fix", "rule", "persona_addendum", "agent_rule", "contract_rule", "memory", "dissent_score"];
 export const CATEGORIES: readonly PostmortemCategory[] = ["prompt_misread", "project_misread", "contract_ambiguity", "implementation", "test_gap", "process"];
 /** Findings in these categories are flagged: the meeting records what was misread (§6). */
 export const FLAG_CATEGORIES: readonly PostmortemCategory[] = ["prompt_misread", "project_misread", "contract_ambiguity"];
@@ -63,11 +63,13 @@ export interface Turn {
 export interface Artifact {
   id: string;
   kind: PostmortemArtifactKind;
-  /** A path or task id (fix), "project", or an agent name. */
+  /** A path or task id (fix), dissent id (dissent_score), "project", or an agent name. */
   target: string;
   findings: string[];
   text: string;
-  /** sha256 of the artifact's kind, target and text. */
+  /** For dissent_score only; text carries the supporting evidence. */
+  outcome?: DissentRuntime["score"];
+  /** sha256 of the artifact's kind, target, text and outcome (when present). */
   hash: string;
 }
 
@@ -111,6 +113,8 @@ export interface PostmortemRecord {
   opening: string;
   closing?: string;
   findings: PostmortemFinding[];
+  /** Scrubbed snapshot from the reviewed run's WS16 projection, taken when held. */
+  dissents?: Record<string, DissentRuntime>;
   transcript: Turn[];
   proposed: Artifact[];
   rejected_lines: string[];

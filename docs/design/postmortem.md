@@ -89,7 +89,7 @@ The draft file is the source of truth for at-the-table scopes; for an execution 
 - **collaborate** otherwise, two rounds by default (`rounds`, 1–4).
 - `format` can force either.
 
-The meeting runs through the existing engines (`startCollaboration` / `continueCollaboration`) with `public: false`, `prototype: false`, and an activity entry with `origin: "postmortem:<pm>"`. Its context is a bounded bundle like `buildContextBundle()`: the findings, the contract summary (or the host's `work` summary), the task cards of affected tasks, and the failing check signatures. It never includes the human's chat, `confirmation` or `original_prompt` verbatim; prompt-misread findings quote the *contract's* `goal` and the relevant task text instead.
+The meeting runs through the existing engines (`startCollaboration` / `continueCollaboration`) with `public: false`, `prototype: false`, and an activity entry with `origin: "postmortem:<pm>"`. Its context is a bounded bundle like `buildContextBundle()`: the findings, the contract summary (or the host's `work` summary), the task cards of affected tasks, the failing check signatures, and the reviewed run’s dissents from the WS16 blackboard projection. A **Dissents** section includes each claim, prediction, tripwire, current-generation firing status, firing evidence and current score (or "not assessed"). Long fields are excerpted in the bounded input; the JSON and Markdown records retain the full snapshot taken when the meeting is held. It never includes the human's chat, `confirmation` or `original_prompt` verbatim; prompt-misread findings quote the *contract's* `goal` and the relevant task text instead.
 
 **No human seat.** A postmortem session is not addressable by `nudge_collaboration`, `continue_collaboration`, `say` or `say_local`: each refuses a postmortem session id with "postmortem meetings take no outside input". The session is not listed by `list_collaborations`.
 
@@ -105,6 +105,7 @@ Artifact: <kind> | <target> | <finding ids> | <text>
 
 | Kind | Target | Effect when accepted |
 |---|---|---|
+| `dissent_score` | a dissent id in the reviewed run | An accepted evidence-backed assessment emits `dissent.scored` through the same scorer as `score_dissent`. |
 | `fix` | a path or task id | Recorded as a follow-up; nothing is changed automatically. |
 | `rule` | `project` | Added to the project's lessons. Shown to every future plan. |
 | `persona_addendum` | an agent name | Appended to that persona file under `## Postmortem addenda`, through the agent workshop's write path (backup first, same realpath containment, same frontmatter preservation). |
@@ -112,7 +113,17 @@ Artifact: <kind> | <target> | <finding ids> | <text>
 | `contract_rule` | `project` | Added to the lessons as a rule every future contract for this project must state; `propose_contract` turns it into a contract `decisions` entry (§7). |
 | `memory` | an agent name | Appended to `projects/<key>/memory/<agent>.md`. With `memory_target: "claude"` the same text is also appended to `<repo>/.claude/agent-memory/<agent>/MEMORY.md`, refused if `.claude` or any parent along the way is a symlink or resolves outside the repository. |
 
-Limits: at most 20 artifacts per postmortem, 600 characters each, targets must name a seat (or `project`), and finding ids must exist. Malformed lines are reported back to the orchestrator as `rejected_lines`, never silently dropped. Persona addenda and memory writes happen only on conclude, only for accepted artifacts, and are audited (`postmortem.applied`, with the target path and the artifact hash).
+Limits: at most 20 artifacts per postmortem, 600 characters each, targets must name a seat, `project`, a fix path/task, or a reviewed dissent for `dissent_score`, and finding ids must exist. Malformed lines are reported back to the orchestrator as `rejected_lines`, never silently dropped. Persona addenda and memory writes happen only on conclude, only for accepted artifacts, and are audited (`postmortem.applied`, with the target path and the artifact hash).
+
+**Dissent assessments.** Findings may support a proposed assessment in this form:
+
+```
+Artifact: dissent_score | <dissent id> | <finding ids> | <vindicated/refuted/untested> | <supporting evidence>
+```
+
+The final field is required evidence, at most 600 characters, scrubbed like other artifact text. The referenced findings must exist and the dissent must be in this meeting’s reviewed run; at-the-table scopes have no runtime dissent projection. The parsed artifact carries `outcome` separately from its evidence text, and its hash includes the outcome. Only explicit `accept[]` on conclude applies it, with `orchestrator` naming the reviewed contract’s orchestrator and the project still opted in. The shared `src/execution/dissent-scoring.ts` path validates the frozen contract, identity, dissent id and outcome inside the execution transaction; there is no parallel scoring writer. Each successful application is immediately audited as `postmortem.applied` with the target and artifact hash. A stable event correlation identifies the postmortem/artifact operation so retries after a partial conclusion cannot duplicate the event or revert a later score. Repeating an unchanged explicit `score_dissent` assessment is also a no-op.
+
+`vindicated` requires evidence supporting the prediction, `refuted` requires contrary evidence, and `untested` means the run established neither. Firing does not establish vindication, and not firing does not establish refutation. Without an accepted assessment there is no new scoring event. Scores remain advisory and display-only: they never weight votes, alter consent thresholds, or change routing. These artifacts stay in the record and never become planning lessons or clearer-wording flags.
 
 **Flags.** A finding with category `prompt_misread`, `project_misread` or `contract_ambiguity` is **flagged**: the postmortem records which contract field, task text or prompt phrase was misread and the clearer wording the meeting proposed. Flags are lessons with `flag: true` (§7).
 
@@ -144,7 +155,7 @@ Two new orchestrator tools (worker servers unchanged), with `additionalPropertie
 | Tool | Arguments |
 |---|---|
 | `postmortem` | action\* (enable, disable, record, fix, draft, lessons, list, read), project, execution_id, work, reason, finding{summary\*, detected_by\*, responsible[]\*, category\*, task, evidence[]}, finding_id, fix{by, status, ref}, pm |
-| `hold_postmortem` | action (hold, the default, or conclude); hold: project\*, execution_id or work, opening\*, participants[], format, rounds, provider, model, base_url, memory_target; conclude: pm\*, closing\*, accept[], reject[{id, why}] |
+| `hold_postmortem` | action (hold, the default, or conclude); hold: project\*, execution_id or work, opening\*, participants[], format, rounds, provider, model, base_url, memory_target; conclude: pm\*, closing\*, accept[], reject[{id, why}], orchestrator (required for accepted dissent scores) |
 
 `hold_postmortem(action: "conclude")` is the closing step of §5; it is one tool with an `action` so the count stays small. README tool table, `docs/tools.md`, and a new `docs/modes/postmortem.md` guide are updated; the README entry stays one table row.
 
@@ -174,3 +185,5 @@ Unit tests for: project keying and refusal of non-repos; draft record/fix/rebuil
 - **Recurrences.** A failure that repeats an open finding (no meeting yet, fix pending) raises its `repeats` and adds any new responsible agent. A failure whose finding is already fixed, abandoned or covered by a meeting starts a new finding (its id carries an epoch), so a red integration check reopens the question and keeps the draft from its meeting.
 - **Seats by path.** A participant ref (such as a path outside the agents directory) replaces the bare key a finding gave the same agent, so the persona loads from where it lives.
 - **Retention.** Drafts that were never held are removed with the session retention sweep at server start (`src/postmortem/retention.ts`).
+
+- **Dissent integration (#133).** The scoring event payload and reducer semantics are unchanged; `REDUCER_VERSION` remains 9. `postmortem.concluded.artifacts` now accepts a `dissent_score` count. Its reducer, watcher, dashboard and sync consumers iterate artifact counts without an exhaustive kind list. The watchdog never reads scores; worker attestation reads worker startup tools and is unaffected by scoring. The session archive preserves scrubbed dialogue (including proposed artifact lines) and does not interpret execution scores. The readable postmortem record/blob preserves the dissent snapshot and each proposal’s outcome, evidence and application status.

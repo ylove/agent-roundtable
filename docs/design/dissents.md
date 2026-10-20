@@ -182,7 +182,7 @@ Add an orchestrator tool to set a dissent's outcome by emitting `dissent.scored`
 
 The per-persona record is advisory and display-only. It must never weight votes, alter consent thresholds or change routing authority. A fired tripwire does not automatically mean `vindicated`, and an unfired one does not automatically mean `refuted`. Before scoring, display the absence of an assessment rather than manufacturing an event.
 
-WS16 supplies the event, projection and explicit scoring tool. WS14 later connects postmortem findings to this scoring path.
+WS16 supplies the event, projection and explicit scoring tool. WS14 connects postmortem findings through accepted `dissent_score` artifacts with supporting evidence. The postmortem input and record include a **Dissents** snapshot from the existing projection. Conclude requires project opt-in, explicit artifact acceptance and the contract’s orchestrator identity, then calls the same shared scoring transaction as `score_dissent` and audits each application. Stable operation correlations deduplicate postmortem retries; repeated unchanged explicit scores are no-ops. No assessment is displayed as "not assessed" and emits no event. See [Postmortem mode: artifacts](postmortem.md#6-artifacts).
 
 ## 8. Dashboard
 

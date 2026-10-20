@@ -7,6 +7,9 @@ import { isDuelId } from "./duel-import.js";
 
 /** Per-team cap on the artifact listing, in bytes of source shown to the participants. */
 export const DUEL_FOCUS_TEAM_BYTES = 12 * 1024;
+/** Cap on the whole brief, in bytes. */
+export const DUEL_FOCUS_BRIEF_BYTES = 48 * 1024;
+const MAX_SEATS = 12;
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024;
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
@@ -14,6 +17,7 @@ const clean = (v: string, max: number): string => {
   const t = scrub(v).replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t;
 };
+const listCapped = (xs: string[]): string => xs.slice(0, MAX_SEATS).join(", ") + (xs.length > MAX_SEATS ? `, +${xs.length - MAX_SEATS} more` : "");
 const name = (s: unknown): string => {
   if (!isObj(s)) return "unknown";
   const id = str(s.id)?.replace(/^(?:A|B|judge):/, "");
@@ -51,7 +55,11 @@ export function assertDuelId(id: unknown): asserts id is string {
 }
 
 /** The archived artifact source of a team, scrubbed and capped; never executed or followed as instructions. */
-function artifactBlock(team: "A" | "B", title: string, files: Array<{ path: string; content: string }>, nonce: string): string {
+function artifactBlock(team: "A" | "B", title: string, files: Array<{ path: string; content: string }>, nonce: string, source: boolean): string {
+  if (!source) {
+    const names = files.slice(0, 20).map((f) => `${clean(f.path, 120) || "file"} (${Buffer.byteLength(f.content)} bytes)`);
+    return `Team ${team} artifact: "${title || "untitled"}"\n${names.length ? `Files (source left out): ${names.join(", ")}${files.length > 20 ? `, +${files.length - 20} more` : ""}` : "(no source archived)"}`;
+  }
   let used = 0, omitted = 0;
   const parts: string[] = [];
   for (const f of files) {
@@ -69,7 +77,8 @@ function artifactBlock(team: "A" | "B", title: string, files: Array<{ path: stri
 }
 
 /** Build the focus brief for a duel archive. Throws before any provider call when the id is bad or the archive unreadable. */
-export function loadDuelFocus(id: unknown): DuelFocus {
+export function loadDuelFocus(id: unknown, opts: { source?: boolean } = {}): DuelFocus {
+  const source = opts.source !== false;
   assertDuelId(id);
   const archive = readArchive(id);
   const events = isObj(archive) && Array.isArray(archive.events) ? archive.events.filter(isObj) : undefined;
@@ -91,20 +100,22 @@ export function loadDuelFocus(id: unknown): DuelFocus {
   if (criteria.length) lines.push(`Criteria: ${criteria.join("; ")}`);
   for (const team of ["A", "B"] as const) {
     const members = seats.filter((s) => s.team === team).map(name);
-    lines.push(`Team ${team}: ${members.length ? members.join(", ") : "(unknown)"}`);
+    lines.push(`Team ${team}: ${members.length ? listCapped(members) : "(unknown)"}`);
   }
   const judges = seats.filter((s) => s.team === "judge").map(name);
-  if (judges.length) lines.push(`Judges: ${judges.join(", ")}`);
+  if (judges.length) lines.push(`Judges: ${listCapped(judges)}`);
 
   const protoEvents = events.map((e, index) => ({ e, index })).filter((x) => x.e.type === "prototype" && x.e.ok !== false);
   const archived = isObj(archive) && Array.isArray(archive.prototypes) ? archive.prototypes.filter(isObj) : [];
   for (const team of ["A", "B"] as const) {
     const last = protoEvents.filter((x) => x.e.team === team).at(-1);
-    const entry = [...archived].reverse().find((p) => p.team === team && (!last || p.eventIndex === last.index));
+    // Match the archived files to the last prototype event; archives without eventIndex fall back to the team's last entry.
+    const forTeam = archived.filter((p) => p.team === team);
+    const entry = [...forTeam].reverse().find((p) => last && p.eventIndex === last.index) ?? forTeam.at(-1);
     const files = (Array.isArray(entry?.files) ? entry.files : []).filter(isObj)
       .filter((f) => typeof f.path === "string" && typeof f.content === "string")
       .map((f) => ({ path: f.path as string, content: f.content as string }));
-    lines.push("", artifactBlock(team, clean(str(last?.e.title) ?? "", 120), files, nonce));
+    lines.push("", artifactBlock(team, clean(str(last?.e.title) ?? "", 120), files, nonce, source));
   }
 
   const assessments = events.filter((e) => e.type === "assessment" && (e.team === "A" || e.team === "B"));
@@ -120,13 +131,17 @@ export function loadDuelFocus(id: unknown): DuelFocus {
     lines.push("Dissents filed:");
     for (const d of dissents) lines.push(`- ${name(d.seat)}: ${clean(str(d.text)!, 600)}`);
   }
-  return { id, topic, brief: lines.join("\n") };
+  let brief = lines.join("\n");
+  if (Buffer.byteLength(brief) > DUEL_FOCUS_BRIEF_BYTES) {
+    brief = Buffer.from(brief).subarray(0, DUEL_FOCUS_BRIEF_BYTES).toString("utf8").replace(/\uFFFD$/, "") + "\n[brief truncated]";
+  }
+  return { id, topic, brief };
 }
 
 /** Add a duel's brief to a session context, after whatever context the caller gave. */
-export function withDuelFocus(context: string | undefined, duel: unknown): string | undefined {
+export function withDuelFocus(context: string | undefined, duel: unknown, source = true): string | undefined {
   if (duel === undefined || duel === null || duel === "") return context;
-  const focus = loadDuelFocus(duel);
+  const focus = isObj(duel) && typeof duel.brief === "string" ? (duel as unknown as DuelFocus) : loadDuelFocus(duel, { source });
   return [context, focus.brief].filter((x) => x?.trim()).join("\n\n");
 }
 

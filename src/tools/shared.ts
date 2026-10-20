@@ -112,6 +112,11 @@ export const DUEL_PROP = {
   description: "Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call.",
 } as const;
 
+export const DUEL_SOURCE_PROP = {
+  type: "boolean",
+  description: "Default true; only with duel. The duel brief is resent on every turn to every participant (a full brief can be about 20k tokens per turn). Set false to leave out artifact file contents and keep titles, file names and sizes, verdicts, tally and dissents.",
+} as const;
+
 export const PROTOTYPE_PROP = {
   type: "boolean",
   description:

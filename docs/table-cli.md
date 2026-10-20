@@ -67,6 +67,7 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | `--criteria` | Duel only: comma-separated judging rubric (default: fit to the brief, quality, usability and accessibility, risk or safety) |
 | `--judges` | Duel only: 1 to 5 comma-separated agents |
 | `--duel` | Debate, waffle or meeting only: a saved duel id (`duel-<id>`) to focus the session on; the topic may then be omitted |
+| `--no-duel-source` | With `--duel`: leave artifact file contents out of the brief to save tokens (titles, file names, verdicts, tally and dissents stay) |
 | `--agents` | Debate, waffle or meeting participants, in speaking order |
 | `--agents-dir` | Absolute persona directory; overrides the saved directory for this command |
 | `--rounds` | Duel: 1 or 2 (default 1); other verbs: 1–20 (default 2) |

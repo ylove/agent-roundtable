@@ -79,6 +79,8 @@ The archive in `ROUNDTABLE_HOME/duels/` is turned into a brief that is appended 
 
 An unknown id, an id that is not `duel-` followed by letters, digits and hyphens, a symlinked or oversized archive, or a malformed archive fails with a clear error before any provider call.
 
+**Cost.** The brief is part of the context, so it is resent on every turn to every participant. A full brief (two 12 KB artifact listings plus verdicts and dissents) can run to about 20k tokens per turn, and the whole brief is capped at 48 KB (ending in `[brief truncated]`); team and judge lists show at most 12 names and then "+N more". To save tokens, pass `duel_source: false` (CLI `--no-duel-source`): the artifact file contents are left out and the brief keeps the titles, file names and sizes, the verdicts, the tally and the dissents. Use it when the discussion is about the judgement rather than the artifact itself.
+
 Typical uses:
 
 - **Debate the losing design.** `start_collaboration { mode: "debate", agents: [<loser's designer>, <winner's builder>, ...], duel: "duel-<id>" }`: the first persona defends the design that lost, the others challenge it.

@@ -15,7 +15,7 @@
 | `ROUNDTABLE_WORKSPACE_DIR` | conversation grounding | project containing `.claude/agents`, otherwise server working directory |
 | `ROUNDTABLE_ACTIVITY_LOG` | stored session activity; excerpts in private conversation grounding and private improve prompts | `~/.agent-roundtable/activity.jsonl`; `off`, `false`, `0` or `no` disables it |
 | `ROUNDTABLE_PARALLEL_TURNS` | concurrent ultraplan phases and workshop reviews | `4` (minimum 1) |
-| `ROUNDTABLE_ANTHROPIC_MODEL` | default Anthropic model (id or alias) | `claude-opus-5` |
+| `ROUNDTABLE_ANTHROPIC_MODEL` | default model for `anthropic` (id or alias) | `claude-sonnet-5-5` |
 | `ROUNDTABLE_OPENAI_MODEL` | default OpenAI model | `gpt-5.6-luna` |
 | `ROUNDTABLE_TOGETHER_MODEL` | default Together model | `zai-org/GLM-5.3` |
 | `ROUNDTABLE_REPLICATE_MODEL` | default Replicate model | `qwen/qwen3-235b-a22b-instruct-2507` |
@@ -34,7 +34,7 @@
 | `ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS` | max wait for pending posts when a public session ends | `30000` |
 | `ROUNDTABLE_PROTOTYPE_DIR` | prototype sandbox root; refused inside a git work tree, as a symlink, or when owned by another user; created with mode 0700 | `<os temp dir>/agent-roundtable-prototypes` |
 | `ROUNDTABLE_PROTOTYPE_TTL_MS` | prototype safety cap: a prototype still under assessment after this long is destroyed; values below `60000` are raised to `60000` | `1800000` (30 min) |
-| `ROUNDTABLE_PROTOTYPE_OPEN` | open the prototype board in a browser at session start | off (`1`, `true`, `yes` or `on` enables) |
+| `ROUNDTABLE_PROTOTYPE_OPEN` | open the prototype blackboard in a browser at session start | off (`1`, `true`, `yes` or `on` enables) |
 | `ROUNDTABLE_CHROME_PATH` | Chrome/Chromium binary for public-session screenshots | auto-detect: the Google Chrome or Chromium app (macOS) or Chrome install (Windows), then `google-chrome`, `google-chrome-stable`, `chromium` or `chromium-browser` on `PATH` |
 | `ROUNDTABLE_PROTOTYPE_SCREENSHOTS` | screenshots of web prototypes; only used by public prototype sessions | on (`0`, `false`, `no` or `off` disables) |
 | `ROUNDTABLE_LOCAL_TIMEOUT_MS` | local meetings: timeout for one `claude -p` call; the CLI's process group is killed after it | `300000` (5 min) |
@@ -53,7 +53,33 @@
 | `ROUNDTABLE_SESSION_RETENTION_DAYS` | days an archived at-the-table session, and a postmortem draft that was never held, is kept; swept at server start | `30` (`0` or `off` keeps all) |
 | `ROUNDTABLE_AUDIT_RETENTION_DAYS` | days the audit log keeps a month file after the month ended; swept at server start | `365` (`0` or `off` keeps all) |
 
-`.env` is loaded from the package directory (next to `package.json`) with `override: true`, so values there win over anything the MCP host passes in its `env` block. `.env` is gitignored and is the single source of truth for secrets. See [`.env.example`](../.env.example).
+The package `.env` (next to `package.json`) keeps its existing `override: true` behavior, so its values override the launcher's environment. An optional pointed env file then fills allowed unset variables with `override: false` semantics. See [`.env.example`](../.env.example).
+
+## Saved CLI settings and env files
+
+```sh
+roundtable config set env-file /absolute/path/to/private.env
+roundtable config set agents-dir /absolute/path/to/agents
+roundtable config show
+```
+
+Settings are saved as `{ "envFile": "…", "agentsDir": "…" }` in `~/.agent-roundtable/config.json`, or `ROUNDTABLE_HOME/config.json` when a state root is configured. Writes use mode 0600. `config show` prints only `env-file: set|unset` and `agents-dir: set|unset`; it never displays paths or values.
+
+`ROUNDTABLE_ENV_FILE` overrides the saved `envFile`. The target must be an absolute path to an accessible regular file. A file readable by group or world produces a warning without revealing its path. Restrict it to mode 0600. Invalid targets are skipped with a path-free warning.
+
+Only these key names may be copied from the pointed file:
+
+- `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TOGETHER_API_KEY`, `REPLICATE_API_TOKEN`
+- `OPENAI_COMPATIBLE_*`
+- `ROUNDTABLE_*_MODEL`
+
+Other credentials, shell settings and paths from that file are ignored. Parsing never populates the entire pointed file into the environment. The pointed file preserves existing values, including empty values. Precedence is package `.env`, then the launcher's environment, then the pointed file.
+
+The saved `agentsDir` sets `ROUNDTABLE_AGENTS_DIR` only when the variable is unset, before model and persona configuration is evaluated. `--agents-dir` overrides it for a terminal session. Set paths through `config set` or the shell, because the pointed env-file allowlist excludes `ROUNDTABLE_AGENTS_DIR`.
+
+`ROUNDTABLE_DOTENV=off` skips both env files. Worker and hook processes also skip saved settings and both env files, preserving their launcher's environment. Provider defaults use `claude-sonnet-5-5` for `anthropic`; the `opus` alias selects `claude-opus-5-5` explicitly and `haiku` selects `claude-haiku-5-5`.
+
+See [the table CLI](table-cli.md) for mixed-provider seats, preflight and replay.
 
 ## State root and sandbox
 

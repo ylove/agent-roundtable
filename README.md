@@ -32,6 +32,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [Ultraplan](docs/modes/ultraplan.md) | Collect input, review revisions and record sign-offs on a plan. | “Ultraplan the launch with product-lead, cfo and skeptic; show the final document verbatim.” |
 | [Agent workshops](docs/modes/agent-workshops.md) | Specialists create or improve an agent and reusable skills. | “Have cfo and skeptic create a budget agent, then improve product-lead's escalation rules; preview both.” |
 | [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local blackboard for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
+| [Duel](docs/modes/duel.md) | Two teams build competing artifacts (a page, code, a diagram or a document); judges assess them; dissents are recorded. | “Run a duel on a rate limiter module with architect and engineer against pragmatist and reviewer, judged by security-lead.” |
 | [Public sessions](docs/modes/public-sessions.md) | Mirror an explicitly public session to ntfy or a webhook. | “Make that pricing debate public and give me the viewing link.” |
 
 | Terminal command | Purpose |
@@ -61,13 +62,13 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | Local meetings | [`end_local_meeting`](docs/tools.md#end_local_meeting) | End a local meeting, optionally with a summary. |
 | Local meetings | [`list_local_meetings`](docs/tools.md#list_local_meetings) | List active local meetings. |
 | Collaborations | [`start_collaboration`](docs/tools.md#start_collaboration) | Start a discussion between two or more personas. |
-| Duel | [`start_duel`](docs/tools.md#start_duel) | Run a duel: two teams build competing artifacts, judges assess them, dissents are recorded. |
 | Collaborations | [`continue_collaboration`](docs/tools.md#continue_collaboration) | Run additional rounds. |
 | Collaborations | [`nudge_collaboration`](docs/tools.md#nudge_collaboration) | Inject guidance without consuming an agent turn. |
 | Collaborations | [`pause_collaboration`](docs/tools.md#pause_collaboration) | Pause after the current turn. |
 | Collaborations | [`end_collaboration`](docs/tools.md#end_collaboration) | End a discussion and return its transcript and optional summary. |
 | Collaborations | [`get_collaboration_transcript`](docs/tools.md#get_collaboration_transcript) | Read a discussion without ending it. |
 | Collaborations | [`list_collaborations`](docs/tools.md#list_collaborations) | List active collaborations. |
+| Duel | [`start_duel`](docs/tools.md#start_duel) | Run a duel: two teams build competing artifacts, judges assess them, dissents are recorded. |
 | Ultraplan | [`start_ultraplan`](docs/tools.md#start_ultraplan) | Collect input and begin a reviewed plan. |
 | Ultraplan | [`submit_plan`](docs/tools.md#submit_plan) | Review a full plan version or collect final sign-offs. |
 | Ultraplan | [`end_ultraplan`](docs/tools.md#end_ultraplan) | Close a plan without sign-offs. |

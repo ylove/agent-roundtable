@@ -150,6 +150,115 @@ test("code and text artifacts are served as inert text and rendered through text
   assert.match(doc.headers["content-type"], /^text\/plain/);
   assert.match(doc.text, /<script>alert\(1\)<\/script>/);
   assert.equal((await get(new URL("p/A/index.html", new URL(room2.url)))).status, 404);
+  assert.match(doc.headers["content-security-policy"], /sandbox/);
+  // A code artifact whose files look like a page or an image is still inert text.
+  const room3 = await startRoom({ hold: false });
+  t.after(() => room3.close());
+  const risky = await run(t, { kind: "code" }, { build: team => `<prototype kind="code" title="X ${team}"><file path="index.html"><script>alert(1)</script></file><file path="x.svg"><svg onload="alert(1)"/></file></prototype>` });
+  for (const event of risky.events) await room3.observer.onEvent(event);
+  for (const path of ["index.html", "x.svg"]) {
+    const response = await get(new URL(`p/A/${path}`, new URL(room3.url)));
+    assert.equal(response.status, 200, path);
+    assert.match(response.headers["content-type"], /^text\/plain/, path);
+    assert.match(response.headers["content-security-policy"], /sandbox/, path);
+    assert.equal(response.headers["x-content-type-options"], "nosniff", path);
+  }
+});
+
+test("system and build prompts frame the brief as the task, scope web limits, spell out path rules, and fence listings", async t => {
+  const { duelSystem, buildPrompt } = await import("../../dist/table/prompts.js");
+  assert.match(duelSystem("code"), /The brief is your task/);
+  assert.match(duelSystem("code"), /standard library/);
+  assert.doesNotMatch(duelSystem("code"), /external URLs/);
+  assert.match(duelSystem("web"), /no external URLs/);
+  assert.doesNotMatch(duelSystem("text"), /untrusted material[^.]*brief/);
+  assert.match(buildPrompt("x", "A", "c", "", "code"), /dotfiles.*__init__\.py.*4 segments|4 segments.*dotfiles/s);
+  const { calls } = await run(t, { kind: "code" });
+  const judge = calls.find(c => c.body.messages.at(-1).content.startsWith("R2 JUDGE")).body.messages.at(-1).content;
+  const nonce = /<<<ARTIFACT ([0-9a-f]{12}) A>>>/.exec(judge)?.[1];
+  assert.ok(nonce);
+  assert.equal(judge.match(new RegExp(`^<<<FILE ${nonce} (?!path>>>)`, "gm")).length, 4, "two files per team, each fenced");
+  assert.match(judge, new RegExp(`<<<END ARTIFACT ${nonce} B>>>`));
+  assert.match(judge, /carry the code/);
+});
+
+test("start events and titles are scrubbed; a duel with nothing built skips closings", async t => {
+  const secret = "sk-ant-api03-ZZZZ-hardening-fixture-0123456789";
+  const original = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = secret;
+  t.after(() => { if (original === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = original; });
+  const { events, result } = await run(t, { topic: `brief ${secret}`, criteria: [`own ${secret}`] }, { build: team => artifacts.web(team).replace(`Page ${team}`, `Page ${secret}`).replace(`title="Page ${secret}"`, `title="T ${secret}"`) });
+  assert.ok(!JSON.stringify(events).includes(secret));
+  assert.ok(!(await readFile(result.archivePath, "utf8")).includes(secret));
+  assert.equal(getPrototypeFiles(events.find(e => e.type === "prototype")).length, 1, "scrubbing keeps the attached files");
+  const none = await run(t, {}, { build: () => "nothing" });
+  assert.ok(!none.events.some(e => e.type === "turn" && e.round === "R4"));
+});
+
+test("replay rejects duplicate paths and multi-file text artifacts", async t => {
+  const { result } = await run(t, { kind: "text" });
+  const archive = JSON.parse(await readFile(result.archivePath, "utf8"));
+  const bad = structuredClone(archive);
+  const first = bad.prototypes[0];
+  first.files.push({ ...first.files[0] });
+  const event = bad.events[first.eventIndex];
+  event.files.push({ ...event.files[0] });
+  const path = join(ROUNDTABLE_HOME, "dup-text.json");
+  await writeFile(path, JSON.stringify(bad));
+  await assert.rejects(replayDuel(path, { onEvent() {} }), /Invalid/);
+});
+
+test("--criteria parsing: commas split, ; overrides, empty items get a criteria-specific error", async () => {
+  const { parseTableArgs } = await import("../../dist/cli-table.js");
+  const args = c => ["a brief", "--team-a", "a", "--team-b", "b", "--judges", "j", "--criteria", c];
+  assert.deepEqual(parseTableArgs("duel", args("x, y")).options.criteria, ["x", "y"]);
+  assert.deepEqual(parseTableArgs("duel", args("clear, concise; legal")).options.criteria, ["clear, concise", "legal"]);
+  assert.throws(() => parseTableArgs("duel", args("x,,y")), /--criteria takes 1 to 8/);
+  assert.equal(parseTableArgs("duel", args("x")).options.maxSeconds, undefined);
+});
+
+test("a running duel is a live session that can be stopped, and leaves the live list when done", async t => {
+  const { liveSessions, stopSession } = await import("../../dist/usage/table-service.js");
+  const original = process.env.OPENAI_COMPATIBLE_BASE_URL;
+  process.env.OPENAI_COMPATIBLE_BASE_URL = "http://127.0.0.1:1/v1";
+  t.after(() => { if (original === undefined) delete process.env.OPENAI_COMPATIBLE_BASE_URL; else process.env.OPENAI_COMPATIBLE_BASE_URL = original; });
+  let pending;
+  const gotCall = new Promise(r => { pending = r; });
+  stubFetch(t, (_url, init) => new Promise((_resolve, reject) => {
+    pending();
+    const abort = () => reject(init.signal.reason);
+    if (init.signal.aborted) abort(); else init.signal.addEventListener("abort", abort, { once: true });
+  }));
+  let id;
+  const running = runDuel({ ...base, topic: "A brief" }, { onEvent(e) { if (e.type === "start") id = e.id; } }, new AbortController().signal, { resolveSeats: () => seats2 });
+  await gotCall;
+  const live = liveSessions().find(s => s.id === id);
+  assert.equal(live.kind, "duel");
+  assert.ok(live.agents.includes("cfo") && live.agents.includes("designer"));
+  const stopped = await stopSession({ session: id, by: "test", surface: "cli" });
+  assert.equal(stopped.status, "stopped");
+  const result = await running;
+  assert.equal(result.aborted, true);
+  assert.equal(liveSessions().some(s => s.id === id), false);
+});
+
+test("start_duel sends progress for turns, artifacts and verdicts", async t => {
+  const { handleToolCall } = await import("../../dist/tools.js");
+  await mkdir(AGENTS_DIR, { recursive: true });
+  const names = ["pg-a", "pg-b", "pg-c", "pg-d"];
+  for (const n of names) await writeFile(join(AGENTS_DIR, `${n}.md`), `---\nname: ${n}\n---\nYou are ${n}.\n`);
+  stub(t, { kind: "text" });
+  const seats = Object.fromEntries(names.map(n => [n, { provider: "openai_compatible", model: "m" }]));
+  const seen = [];
+  const reply = await handleToolCall("start_duel", { topic: "A policy", team_a: ["pg-a"], team_b: ["pg-b"], judges: ["pg-c"], kind: "text", seats: Object.fromEntries(Object.entries(seats).slice(0, 3)) }, "orchestrator", { progress: (n, total, message) => seen.push({ n, total, message }) });
+  assert.ok(!reply.isError, reply.content[0].text);
+  assert.ok(seen.length >= 6, "concept, build, verdict and closing steps report");
+  assert.deepEqual(seen.map(s => s.n), seen.map((_, i) => i + 1));
+  assert.ok(seen.some(s => /^prototype/.test(s.message)) && seen.some(s => /^assessment/.test(s.message)) && seen.some(s => /^turn R1 A/.test(s.message)));
+  const result = JSON.parse(reply.content[0].text);
+  assert.equal(result.verdicts[0].judge_key, "pg-c");
+  const low = await handleToolCall("start_duel", { topic: "x", team_a: ["pg-a"], team_b: ["pg-b"], judges: ["pg-c"], max_seconds: 0 });
+  assert.equal(low.isError, true);
 });
 
 test("the archive stays backward compatible: the demo replays, and a general archive replays with kind, criteria and teams", async t => {
@@ -171,7 +280,9 @@ test("the archive stays backward compatible: the demo replays, and a general arc
 });
 
 test("duel calls land in the usage ledger per persona, kind duel", async t => {
-  const { result, calls } = await run(t, { teamA: ["designer", "builder"] });
+  // Seat ids carry the team prefix, as the CLI and the tool produce them.
+  const prefixed = seats2.map(x => ({ ...x, id: `${x.team}:${x.name}` }));
+  const { result, calls } = await run(t, {}, {}, prefixed);
   const lines = readTableLines([new Date().toISOString().slice(0, 10)], ROUNDTABLE_HOME).filter(l => l.session === result.id);
   assert.equal(lines.length, calls.length);
   assert.ok(lines.every(l => l.kind === "duel"));

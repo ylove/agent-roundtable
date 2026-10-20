@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { agentKey, listAgents, loadAgent, readFrontmatter } from "../agents.js";
@@ -11,11 +11,12 @@ import { scrub, scrubAndCap } from "../security/secrets.js";
 import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { parseDissentBlocks } from "../sessions/dissents.js";
 import { mapLimit } from "../sessions/workshop.js";
+import { registerDuel, unregisterDuel } from "./live-duels.js";
 import { abortSession, lineFor, metered, sessionSignal } from "../usage/session-scope.js";
 import type { DuelKind, DuelOptions, DuelResult, RunDuel, Seat, TableEvent, TableObserver } from "./events.js";
 import { validateDuelOptions } from "./duel-options.js";
-import { buildPrompt, closingPrompt, conceptPrompt, critiquePrompt, DEFAULT_CRITERIA, DUEL_MAX_BYTES, DUEL_SYSTEM, judgePrompt, normalizeCriteria } from "./prompts.js";
-import { attachPrototypeFiles, type DuelArchive } from "./replay.js";
+import { buildPrompt, closingPrompt, conceptPrompt, critiquePrompt, DEFAULT_CRITERIA, DUEL_MAX_BYTES, duelSystem, judgePrompt, normalizeCriteria } from "./prompts.js";
+import { attachPrototypeFiles, getPrototypeFiles, type DuelArchive } from "./replay.js";
 
 export interface ResolvedDuelSeat extends Seat { prompt?: string }
 export interface DuelDependencies {
@@ -98,7 +99,7 @@ function validatedFiles(text: string, kind: DuelKind = "web"): { title: string; 
 }
 
 /** Judges read every file, labelled by path. */
-const listing = (files: PrototypeFile[]): string => files.map(f => `--- ${f.path} ---\n${f.content}`).join("\n");
+const listing = (files: PrototypeFile[], nonce: string): string => files.map(f => `<<<FILE ${nonce} ${f.path}>>>\n${f.content}\n<<<END FILE ${nonce}>>>`).join("\n");
 
 /** Map the CLI's or a tool's resolved seats onto the persona-loading resolver. */
 export function withChosenSeats(seats: Map<string, Seat>): DuelDependencies {
@@ -172,9 +173,12 @@ type DuelRunner = (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, d
 export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
   validateDuelOptions(opts);
   const kind: DuelKind = opts.kind ?? "web";
+  // Every extra critique turn needs time, so the default deadline grows with the larger team.
+  const limitSeconds = opts.maxSeconds ?? Math.min(3600, 600 + 120 * Math.max(0, Math.max(opts.teamA.length, opts.teamB.length) - 2));
+  const nonce = randomBytes(6).toString("hex");
   const criteria = normalizeCriteria(opts.criteria);
   if ((opts.rounds !== undefined && opts.rounds !== 1 && opts.rounds !== 2) ||
-      !Number.isFinite(opts.maxSeconds ?? 600) || (opts.maxSeconds ?? 600) < 0 || (opts.maxSeconds ?? 600) > 3600 ||
+      !Number.isFinite(limitSeconds) || limitSeconds < 0 || limitSeconds > 3600 ||
       !Number.isFinite(opts.turnTimeoutMs ?? 90_000) || (opts.turnTimeoutMs ?? 90_000) <= 0 || (opts.turnTimeoutMs ?? 90_000) > 3_600_000) throw new Error("Invalid duel limits.");
   const resolved = await (deps.resolveSeats ?? resolveSeatsLocal)(opts);
   const seats: Seat[] = resolved.map(({ prompt: _prompt, ...seat }) => seat);
@@ -188,9 +192,13 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   const emit = async (raw: TableEvent) => {
     // Persisted and displayed content is scrubbed at the source.
     const event: TableEvent = raw.type === "turn" || raw.type === "dissent" ? { ...raw, text: scrub(raw.text) }
+      : raw.type === "start" ? { ...raw, topic: scrub(raw.topic), ...(raw.criteria && { criteria: raw.criteria.map(c => scrub(c)) }) }
+      : raw.type === "prototype" && raw.title ? { ...raw, title: scrub(raw.title), ...(raw.error && { error: scrub(raw.error) }) }
       : raw.type === "assessment" ? { ...raw, reason: scrub(raw.reason) }
       : raw.type === "prototype" && raw.error ? { ...raw, error: scrub(raw.error) }
       : raw.type === "end" && raw.archivePath ? { ...raw, archivePath: `duels/${id}.json` } : raw;
+    // Scrubbing builds a new object, which must keep the attached file bytes.
+    if (event !== raw && raw.type === "prototype") attachPrototypeFiles(event, getPrototypeFiles(raw));
     archive.events.push(event);
     try { await obs.onEvent(event); } catch { /* An observer cannot interrupt archival. */ }
   };
@@ -201,13 +209,14 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   };
   const stop = () => abortSession(id, "Duel stopped.");
   const sessionStop = sessionSignal(id);
+  registerDuel({ id, agents: [...new Set(seats.map(s => agentKey(s.id.replace(/^(?:A|B|judge):/, ""))))], started: new Date().toISOString() });
   const cancelled = () => signal.aborted || sessionStop.aborted;
   signal.addEventListener("abort", stop, { once: true });
   if (signal.aborted) stop();
   const phase = new AbortController();
-  const deadline = setTimeout(() => phase.abort(new Error("Duel deadline reached.")), (opts.maxSeconds ?? 600) * 1000);
+  const deadline = setTimeout(() => phase.abort(new Error("Duel deadline reached.")), limitSeconds * 1000);
   if (opts.maxSeconds === 0) phase.abort();
-  const ended = Date.now() + (opts.maxSeconds ?? 600) * 1000;
+  const ended = Date.now() + limitSeconds * 1000;
   const expired = () => phase.signal.aborted || Date.now() >= ended;
   const submissions: Partial<Record<"A" | "B", { title: string; files: PrototypeFile[] }>> = {};
   const concepts = { A: "", B: "" };
@@ -242,7 +251,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
           if (line.tokens_prov === "estimated") total.estimated = true;
           ledger?.(report);
         }, () => withAbortSignal(callStop, () => callLLM(
-          `${DUEL_SYSTEM}\n\n${seat.prompt ?? `Your role is ${seat.role ?? seat.name}.`}`,
+          `${duelSystem(kind)}\n\n${seat.prompt ?? `Your role is ${seat.role ?? seat.name}.`}`,
           [{ role: "user", content: prompt }],
           { provider: seat.provider, model: seat.model, maxTokens: tokens, estimateUsageOnFailure: true },
         )));
@@ -269,7 +278,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
 
   async function build(team: "A" | "B", revision = false): Promise<void> {
     const seat = teams[team].at(-1)!;
-    let feedback = revision ? `R3 REVISION. Previous source:\n${submissions[team] ? listing(submissions[team].files) : "No valid artifact."}\nJudges' feedback:\n${assessments.filter(a => a.team === team).map(a => `${a.verdict}: ${a.reason}`).join("\n")}` : "";
+    let feedback = revision ? `R3 REVISION. Previous source:\n${submissions[team] ? listing(submissions[team].files, nonce) : "No valid artifact."}\nJudges' feedback:\n${assessments.filter(a => a.team === team).map(a => `${a.verdict}: ${a.reason}`).join("\n")}` : "";
     let error = "No valid artifact. None was submitted before the deadline.";
     for (let attempt = 0; attempt < 2 && !cancelled() && !expired(); attempt++) {
       const text = await turn(seat, revision ? "R3" : "R1b", buildPrompt(opts.topic, team, concepts[team] + critiques[team], feedback, kind), false, source => {
@@ -331,8 +340,8 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
       await emit({ type: "prototype", team, seat: publicSeat(teams[team].at(-1)!), ok: false, files: [], kind, error: cancelled() ? "Duel stopped." : "No valid artifact before the deadline." });
     }
     await mapLimit(judges, PARALLEL_TURNS, async judge => {
-      const source = (team: "A" | "B") => submissions[team] ? listing(submissions[team].files) : "No valid submission. Automatic REJECT.";
-      const judging = { kind, criteria };
+      const source = (team: "A" | "B") => submissions[team] ? listing(submissions[team].files, nonce) : "No valid submission. Automatic REJECT.";
+      const judging = { kind, criteria, nonce };
       let text = await turn(judge, "R2", judgePrompt(opts.topic, { A: source("A"), B: source("B") }, judging));
       let verdicts = text === undefined ? undefined : parseDuelVerdicts(text);
       if (text !== undefined && verdicts!.A.verdict === "UNCLEAR" && verdicts!.B.verdict === "UNCLEAR") {
@@ -369,7 +378,8 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
     : preferences.A - preferences.B;
   const winner: DuelResult["winner"] = aborted || (!submissions.A && !submissions.B) || !decided ? "none" : order() === 0 ? "tie" : order() > 0 ? "A" : "B";
   try {
-    if (!cancelled()) await mapLimit(["A", "B"] as ("A" | "B")[], PARALLEL_TURNS, async team => {
+    // With nothing built there is nothing to close on.
+    if (!cancelled() && (submissions.A || submissions.B)) await mapLimit(["A", "B"] as ("A" | "B")[], PARALLEL_TURNS, async team => {
       const seat = teams[team][0];
       const text = await turn(seat, "R4", closingPrompt(opts.topic, team, `${winner}; A ${tally.A}, B ${tally.B}${expired() ? "; time limit reached" : ""}`, winner !== "tie" && winner !== "none" && winner !== team), true);
       for (const dissent of parseDissentBlocks(text ?? "")) await emit({ type: "dissent", seat: publicSeat(seat), team, text: `${dissent.claim}\nPredicted failure: ${dissent.predicted_failure}` });
@@ -382,6 +392,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
     return result;
   } finally {
     signal.removeEventListener("abort", stop);
+    unregisterDuel(id);
     if (sandbox) { removeDirSync(sandbox); releaseSessionDir(sandbox); ownedSandboxes.delete(sandbox); }
   }
 };

@@ -8,6 +8,7 @@ import { runDuel, validateDuelOptions, withChosenSeats } from "../table/duel.js"
 import type { DuelKind, DuelOptions, SeatSpec, TableEvent } from "../table/events.js";
 import { DUEL_KINDS, MAX_CRITERIA } from "../table/prompts.js";
 import { assertSeatCredentials, resolveSeats } from "../table/seats.js";
+import type { ToolCallContext } from "./shared.js";
 import type { JsonSchema } from "../validate.js";
 import { MAX_JUDGES, MAX_TEAM_SIZE } from "../table/duel-options.js";
 
@@ -33,16 +34,17 @@ export const START_DUEL_SCHEMA: JsonSchema & { type: "object" } = {
       patternProperties: { "^.+$": { type: "object", properties: { agent: { type: "string" }, provider: { type: "string", enum: PROVIDER_IDS }, model: { type: "string", minLength: 1 } }, additionalProperties: false } },
     },
     turn_timeout_s: { type: "number", minimum: 1, maximum: 3600, description: "Seconds allowed for each turn. Default 90 (builds get at least 240)." },
-    max_seconds: { type: "number", minimum: 0, maximum: 3600, description: "Time limit for the whole duel before it moves to closings. Default 600." },
+    max_seconds: { type: "number", minimum: 1, maximum: 3600, description: "Time limit for the whole duel before it moves to closings. Default 600, plus 120 per member beyond two on the larger team. Hosts need a request timeout longer than this, or one that resets on progress notifications." },
   },
   required: ["topic", "team_a", "team_b", "judges"],
 };
 
 export const START_DUEL_DESCRIPTION =
   "Run a duel and return its result: two teams each build an artifact for the same brief (a web page, code, a Mermaid diagram or a text document), judges assess both against a rubric, and the losing side files dissents. " +
-  "The call runs the whole duel, which can take several minutes. The result has the duel id, winner, tally, each team's artifact title, kind and ok flag, the judges' verdicts, the dissents, a usage summary and the archive id " +
+  "The call runs the whole duel, which can take several minutes and sends a progress notification on every turn, artifact and verdict; the host's request timeout must be long enough or reset on progress. No room is opened. The result has the duel id, winner, tally, each team's artifact title, kind and ok flag, the judges' verdicts, the dissents, a usage summary and the archive id " +
   "(duels/<id>.json, replayable with roundtable duel --replay). It never includes artifact source.";
 
+const personaKey = (id: string): string => id.replace(/^(?:A|B|judge):/, "");
 const one = (value: string, max: number): string => value.replace(/\s+/g, " ").trim().slice(0, max);
 
 /** The compact result of a finished duel. Contains no artifact source and no path beyond duels/<id>.json. */
@@ -61,18 +63,18 @@ export function summarizeDuel(events: TableEvent[], result: { id: string; winner
     kind: start?.kind ?? "web",
     criteria: start?.criteria,
     teams,
-    verdicts: events.flatMap(e => e.type === "assessment" ? [{ judge: e.judge.name, team: e.team, verdict: e.verdict, reason: one(e.reason, 300) }] : []),
-    dissents: events.flatMap(e => e.type === "dissent" ? [{ team: e.team, persona: e.seat.name, text: e.text.slice(0, 600) }] : []),
+    verdicts: events.flatMap(e => e.type === "assessment" ? [{ judge: e.judge.name, judge_key: personaKey(e.judge.id), team: e.team, verdict: e.verdict, reason: one(e.reason, 300) }] : []),
+    dissents: events.flatMap(e => e.type === "dissent" ? [{ team: e.team, persona: e.seat.name, persona_key: personaKey(e.seat.id), text: e.text.slice(0, 600) }] : []),
     usage: usage && {
       total_cost_usd: Number(usage.totalCostUsd.toFixed(6)),
       ...(usage.totalUnpricedTokens ? { unpriced_tokens: usage.totalUnpricedTokens } : {}),
-      per_persona: usage.perSeat.map(s => ({ persona: s.seatId.replace(/^(?:A|B|judge):/, ""), input_tokens: s.inputTokens, output_tokens: s.outputTokens, cost_usd: Number(s.costUsd.toFixed(6)), ...(s.unpricedTokens ? { unpriced_tokens: s.unpricedTokens } : {}) })),
+      per_persona: usage.perSeat.map(s => ({ persona: personaKey(s.seatId), input_tokens: s.inputTokens, output_tokens: s.outputTokens, cost_usd: Number(s.costUsd.toFixed(6)), ...(s.unpricedTokens ? { unpriced_tokens: s.unpricedTokens } : {}) })),
     },
     ...(result.archivePath && { archive_id: result.id, archive: `duels/${result.id}.json` }),
   };
 }
 
-export async function startDuelTool(args: Record<string, unknown>, signal?: AbortSignal): Promise<CallToolResult> {
+export async function startDuelTool(args: Record<string, unknown>, ctx?: ToolCallContext): Promise<CallToolResult> {
   const a = args as { topic: string; team_a: string[]; team_b: string[]; judges: string[]; kind?: DuelKind; criteria?: string[]; rounds?: number; seats?: Record<string, SeatSpec>; turn_timeout_s?: number; max_seconds?: number };
   const opts: DuelOptions = {
     topic: a.topic, teamA: a.team_a, teamB: a.team_b, judges: a.judges,
@@ -86,6 +88,15 @@ export async function startDuelTool(args: Record<string, unknown>, signal?: Abor
   const seats = await resolveSeats({ teamA: opts.teamA, teamB: opts.teamB, judges: opts.judges, seats: a.seats });
   assertSeatCredentials(seats.values());
   const events: TableEvent[] = [];
-  const result = await runDuel(opts, { onEvent(event) { events.push(event); } }, signal ?? new AbortController().signal, withChosenSeats(seats));
+  let step = 0;
+  const observer = { onEvent(event: TableEvent) {
+    events.push(event);
+    // A host's request timeout resets on progress, so every visible step reports.
+    if (event.type === "turn" || event.type === "prototype" || event.type === "assessment") {
+      const team = event.type === "turn" ? event.seat.team ?? "" : event.type === "assessment" ? event.team : event.team;
+      ctx?.progress?.(++step, undefined, `${event.type} ${event.type === "turn" ? event.round : ""} ${team}`.replace(/\s+/g, " ").trim());
+    }
+  } };
+  const result = await runDuel(opts, observer, ctx?.signal ?? new AbortController().signal, withChosenSeats(seats));
   return { content: [{ type: "text", text: JSON.stringify(summarizeDuel(events, result), null, 2) }] };
 }

@@ -708,7 +708,7 @@ export const deliberationTools: ToolDefinition[] = [
 export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?: ToolCallContext): Promise<CallToolResult> {
   switch (name) {
     case START_DUEL:
-      return startDuelTool(args ?? {}, ctx?.signal);
+      return startDuelTool(args ?? {}, ctx);
 
     // === Meeting Tools ===
     case START_MEETING: {

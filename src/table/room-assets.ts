@@ -21,12 +21,13 @@ const SOURCE_KINDS = ["code", "diagram", "text"];
 function sourceView(team, prototype, version) {
   const box = node("div"); const tabs = node("div", undefined, "tabs"); const pre = node("pre", "Loading…", "source");
   tabs.setAttribute("role", "tablist"); pre.tabIndex = 0; pre.setAttribute("aria-label", "Team " + team + " " + prototype.kind + " source");
-  const buttons = [];
+  const buttons = []; let latest = 0;
   const show = async (file, button) => {
+    const mine = ++latest;
     for (const other of buttons) other.setAttribute("aria-selected", String(other === button));
     pre.textContent = "Loading…";
-    try { const response = await fetch("p/" + team + "/" + file.path + "?v=" + version, {cache:"no-store"}); pre.textContent = response.ok ? await response.text() : "This file is unavailable."; }
-    catch { pre.textContent = "This file is unavailable."; }
+    try { const response = await fetch("p/" + team + "/" + file.path + "?v=" + version, {cache:"no-store"}); const body = response.ok ? await response.text() : "This file is unavailable."; if (mine === latest) pre.textContent = body; }
+    catch { if (mine === latest) pre.textContent = "This file is unavailable."; }
   };
   for (const file of prototype.files) { const button = node("button", file.path); button.type = "button"; button.setAttribute("role", "tab"); button.onclick = () => show(file, button); buttons.push(button); tabs.append(button); }
   box.append(tabs, pre); if (buttons.length) show(prototype.files[0], buttons[0]);

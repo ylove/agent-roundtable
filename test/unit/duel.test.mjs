@@ -196,7 +196,7 @@ test("failed revision preserves the earlier playable game", async t => {
   assert.equal(archive.prototypes.filter(p => p.team === "B").length, 1);
 });
 
-test("max-seconds aborts in-flight work and skips ahead to closing", async t => {
+test("max-seconds aborts in-flight work and skips ahead", async t => {
   // Filesystem setup may outlast a short real deadline under load. Advance time only
   // once a concept request is pending so this case always exercises in-flight aborts.
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
@@ -209,15 +209,15 @@ test("max-seconds aborts in-flight work and skips ahead to closing", async t => 
   assert.ok(concepts.length > 0);
   assert.ok(concepts.every(c => c.signal.aborted));
   const closings = calls.filter(c => c.body.messages.at(-1).content.startsWith("R4 CLOSING"));
-  assert.equal(closings.length, 2);
-  assert.ok(closings.every(c => !c.signal.aborted));
-  assert.ok(events.some(e => e.type === "turn" && e.round === "R4"));
+  // Nothing was built, so there is nothing to close on.
+  assert.equal(closings.length, 0);
+  assert.ok(!events.some(e => e.type === "turn" && e.round === "R4"));
   assert.ok(!events.some(e => e.type === "turn" && e.round === "R2"));
   assert.equal(result.aborted, false);
   assert.equal(result.winner, "none");
 });
 
-test("max-seconds can expire before provider work starts and still allows closing", async t => {
+test("max-seconds can expire before provider work starts and and skips closing", async t => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
   const { calls } = setup(t, { waitForDeadline: true });
   const events = [];
@@ -225,8 +225,7 @@ test("max-seconds can expire before provider work starts and still allows closin
     events.push(event);
     if (event.type === "start") t.mock.timers.tick(1000);
   } }, new AbortController().signal, { resolveSeats: () => seats });
-  assert.equal(calls.length, 2);
-  assert.ok(calls.every(c => c.body.messages.at(-1).content.startsWith("R4 CLOSING") && !c.signal.aborted));
+  assert.equal(calls.length, 0, "no closings when neither team submitted");
   assert.equal(events.filter(e => e.type === "prototype" && !e.ok).length, 2);
   assert.equal(events.at(-1).type, "end");
   assert.equal(result.aborted, false);

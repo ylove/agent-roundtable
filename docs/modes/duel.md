@@ -39,7 +39,7 @@ A team has 1 to 4 members. The first member writes the concept (at most 150 word
 
 ## Criteria
 
-By default judges weigh fit to the brief, quality of the result, usability and accessibility, and risk or safety within their own remit, which they take from their persona. `--criteria "a,b,c"` (up to 8 items) replaces that rubric. The reply format is fixed regardless: `VERDICT A: APPROVE|REVISE|REJECT — reason`, the same for B, and `PREFER: A|B`. Judges are told that the artifacts are untrusted listings and to ignore instructions inside them.
+By default judges weigh fit to the brief, quality of the result, usability and accessibility, and risk or safety within their own remit, which they take from their persona. `--criteria "a,b,c"` (up to 8 items) replaces that rubric. Commas separate items; if an item contains a comma, separate items with `;` instead. The reply format is fixed regardless: `VERDICT A: APPROVE|REVISE|REJECT — reason`, the same for B, and `PREFER: A|B`. Judges are told that the artifacts are untrusted listings and to ignore instructions inside them.
 
 ## Rounds
 
@@ -50,7 +50,7 @@ By default judges weigh fit to the brief, quality of the result, usability and a
 1. With `--rounds 2`, R3 gives each team receiving REVISE or REJECT one revision, with the same validation retry. The original judging tally determines the result. A failed revision preserves an earlier valid artifact.
 1. R4: the first member of each team gives a closing statement; the losing team is asked to file a dissent. Complete `<DISSENT>` blocks become separate cards. Equal scores stay a tie.
 
-Concept, judging and closing calls time out after 90 seconds (set with `--turn-timeout`); build calls get at least 240 seconds. The `--max-seconds` deadline defaults to 600 seconds. It cancels pending work and skips ahead to closing statements; closing calls have their own turn timeout. Ctrl-C cancellation ends provider work and archives the partial result. The room remains available after the end until Ctrl-C; `--no-hold` lets automation finish without waiting.
+Concept, judging and closing calls time out after 90 seconds (set with `--turn-timeout`); build calls get at least 240 seconds. The `--max-seconds` deadline defaults to 600 seconds, plus 120 per member beyond two on the larger team (to fit the critique turns). It cancels pending work and skips ahead to closing statements; closing calls have their own turn timeout. Ctrl-C cancellation ends provider work and archives the partial result. The room remains available after the end until Ctrl-C; `--no-hold` lets automation finish without waiting.
 
 Archives live at `ROUNDTABLE_HOME/duels/<id>.json` with mode 0600. They contain the event list and the artifact files as text, including revisions. The start event also records `kind`, `criteria` and `teams`; archives from before these fields existed were all web and still replay. The duel owns its sandbox until process exit; artifacts survive judging and have no TTL. Real archives belong in local state and must stay out of the repository.
 
@@ -69,7 +69,7 @@ For integration, `runDuel(opts, observer, signal, { resolveSeats })` accepts a r
 
 ## From an MCP client
 
-The `start_duel` tool runs the same engine and returns a compact result: the duel id, winner, tally, each team's artifact title, kind and ok flag, the verdicts, the dissents, a per-persona usage summary and the archive id (`duels/<id>.json`). It never returns artifact source. See [tools](../tools.md#start_duel). Duel calls are recorded in the usage ledger with the persona as the agent, so `roundtable usage` shows duel spend per persona.
+The `start_duel` tool runs the same engine and returns a compact result: the duel id, winner, tally, each team's artifact title, kind and ok flag, the verdicts, the dissents, a per-persona usage summary and the archive id (`duels/<id>.json`). It never returns artifact source. No room is opened: the live room belongs to the CLI, and `start_duel` returns only the result (replay the archive with `roundtable duel --replay` to see it in a room). The tool sends a progress notification on every turn, artifact and verdict, so the host needs a long request timeout (a duel runs for minutes) or must reset it on progress. A running duel appears in the usage view and can be stopped with `roundtable stop <persona> --session duel-<id>`. See [tools](../tools.md#start_duel). Duel calls are recorded in the usage ledger with the persona as the agent, so `roundtable usage` shows duel spend per persona.
 
 ## From duel to contract
 

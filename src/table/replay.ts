@@ -25,6 +25,8 @@ const count = (value: unknown): value is number => typeof value === "number" && 
 const date = (value: unknown): boolean => text(value) && Number.isFinite(Date.parse(value));
 /** Archives from before the general duel carry no kind: they were all web. */
 const isWeb = (kind: unknown): boolean => kind === undefined || kind === "web";
+/** Web, text and diagram artifacts are exactly one file. */
+const isSingle = (kind: unknown): boolean => isWeb(kind) || kind === "text" || kind === "diagram";
 const team = (value: unknown): boolean => value === "A" || value === "B";
 function seat(value: Seat): boolean {
   return !!value && text(value.id) && text(value.name) && text(value.provider) && text(value.model) &&
@@ -42,7 +44,7 @@ function validEvent(event: TableEvent): boolean {
     case "prototype": return team(event.team) && seat(event.seat) && typeof event.ok === "boolean" &&
       (event.title === undefined || text(event.title)) && (event.error === undefined || text(event.error)) &&
       (event.kind === undefined || PROTOTYPE_KINDS.includes(event.kind)) &&
-      Array.isArray(event.files) && (event.ok ? isWeb(event.kind) ? event.files.length === 1 : event.files.length >= 1 && event.files.length <= MAX_FILES : event.files.length === 0) &&
+      Array.isArray(event.files) && (event.ok ? isSingle(event.kind) ? event.files.length === 1 : event.files.length >= 1 && event.files.length <= MAX_FILES : event.files.length === 0) &&
       event.files.every(file => file && (isWeb(event.kind) ? file.path === "index.html" : !validatePath(file.path)) && count(file.bytes) && file.bytes <= MAX_TOTAL_BYTES);
     case "assessment": return seat(event.judge) && team(event.team) &&
       ["APPROVE", "REVISE", "REJECT", "UNCLEAR"].includes(event.verdict) && text(event.reason);
@@ -71,11 +73,12 @@ function validateArchive(value: unknown): DuelArchive {
     const event = archive.events[submission.eventIndex];
     if (!Number.isInteger(submission.eventIndex) || seen.has(submission.eventIndex) || event?.type !== "prototype" ||
         !event.ok || event.team !== submission.team || !Array.isArray(submission.files) ||
-        (isWeb(event.kind) ? submission.files.length !== 1 : submission.files.length < 1 || submission.files.length > MAX_FILES)) {
+        (isSingle(event.kind) ? submission.files.length !== 1 : submission.files.length < 1 || submission.files.length > MAX_FILES)) {
       throw new Error("Invalid archived prototype.");
     }
     seen.add(submission.eventIndex);
     let total = 0;
+    if (new Set(submission.files.map(f => f?.path)).size !== submission.files.length) throw new Error("Invalid archived prototype file.");
     for (const file of submission.files) {
       total += typeof file?.content === "string" ? Buffer.byteLength(file.content) : 0;
       if (!file || typeof file.path !== "string" || validatePath(file.path) || (isWeb(event.kind) && file.path !== "index.html") ||

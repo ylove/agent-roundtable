@@ -55,7 +55,10 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   if (command !== "duel" && (parsed.kind !== undefined || parsed.criteria !== undefined)) throw new UsageError("--kind and --criteria are available for duel.");
   if (parsed.kind !== undefined && !DUEL_KINDS.includes(parsed.kind as never)) throw new UsageError(`--kind must be one of ${DUEL_KINDS.join(", ")}.`);
   if (parsed.criteria !== undefined && typeof parsed.criteria !== "string") throw new UsageError("--criteria requires a comma-separated list.");
-  const criteria = typeof parsed.criteria === "string" ? list(parsed.criteria) : undefined;
+  // Commas split criteria; a ";" anywhere switches the separator, so a criterion may contain commas.
+  const criteria = typeof parsed.criteria === "string"
+    ? parsed.criteria.split(parsed.criteria.includes(";") ? ";" : ",").map(c => c.trim()) : undefined;
+  if (criteria && (criteria.some(c => !c) || criteria.length > 8)) throw new UsageError("--criteria takes 1 to 8 non-empty items, separated by commas (or by ; when an item contains a comma).");
   if (!replay && command === "duel") {
     if (!teamA.length || !teamB.length || !judges.length) throw new UsageError("duel requires --team-a, --team-b and at least one judge.");
     try { validateDuelOptions({ topic, teamA, teamB, judges, kind: parsed.kind as never, criteria }); }
@@ -67,7 +70,7 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const turnTimeoutMs = positive(parsed, "turn-timeout", 90) * 1000;
   const maxSeconds = positive(parsed, "max-seconds", 600);
   positive(parsed, "speed", 1);
-  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, rounds: rounds as 1 | 2, turnTimeoutMs, maxSeconds, ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }) } };
+  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, rounds: rounds as 1 | 2, turnTimeoutMs, ...(command !== "duel" || parsed["max-seconds"] !== undefined ? { maxSeconds } : {}), ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }) } };
 }
 
 /** Merge-time module contracts. String imports let the CLI build before the duel modules land. */

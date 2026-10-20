@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "agent-roundtable": "dist/index.js"
+    "agent-roundtable": "dist/index.js",
+    "roundtable": "dist/index.js"
   },
   "engines": {
     "node": ">=22"

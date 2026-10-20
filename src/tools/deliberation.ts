@@ -5,6 +5,7 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { LLMProvider } from "../config.js";
+import type { SeatSpec } from "../table/events.js";
 import {
   VERSION,
   DEFAULT_MODELS,
@@ -317,7 +318,7 @@ export const deliberationTools: ToolDefinition[] = [
     modes: ORCHESTRATOR_ONLY,
     annotations: { title: "Chat completion", readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     description:
-      "Call an LLM for text completion. Providers: anthropic (claude-opus-5 / claude-sonnet-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).",
+      "Call an LLM for text completion. Providers: anthropic (claude-opus-5-5 / claude-sonnet-5-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).",
     inputSchema: {
       type: "object",
       properties: {
@@ -381,6 +382,22 @@ export const deliberationTools: ToolDefinition[] = [
           minItems: 2,
           description:
             'Array of agent identifiers. Examples: ["cfo", "fpa"], ["product", "engineering", "design"]',
+        },
+        seats: {
+          type: "object",
+          description: 'Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider and model.',
+          additionalProperties: true,
+          patternProperties: {
+            "^.+$": {
+              type: "object",
+              properties: {
+                agent: { type: "string" },
+                provider: { type: "string", enum: PROVIDER_IDS },
+                model: { type: "string", minLength: 1 },
+              },
+              additionalProperties: false,
+            },
+          },
         },
         topic: {
           type: "string",
@@ -821,7 +838,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Collaboration Tools ===
     case START_COLLABORATION: {
-      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, base_url, mode, debate_focus, grounding, public: isPublic, prototype } = args as {
+      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype } = args as {
         agents: string[];
         topic?: string;
         context?: string;
@@ -829,6 +846,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         auto_run_rounds?: number;
         provider?: LLMProvider;
         model?: string;
+        seats?: Record<string, SeatSpec>;
         base_url?: string;
         mode?: CollaborationMode;
         debate_focus?: string;
@@ -844,6 +862,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         runRounds: auto_run_rounds,
         provider,
         model,
+        seats,
         baseUrl: base_url,
         mode,
         debateFocus: debate_focus,

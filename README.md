@@ -34,6 +34,12 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local blackboard for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
 | [Public sessions](docs/modes/public-sessions.md) | Mirror an explicitly public session to ntfy or a webhook. | “Make that pricing debate public and give me the viewing link.” |
 
+| Terminal command | Purpose |
+| --- | --- |
+| [`roundtable duel`](docs/modes/duel.md) | Two teams build playable games and judges assess them in a local room. |
+| [`roundtable debate`, `waffle`, `meeting`](docs/table-cli.md) | Stream a discussion with per-seat models and spend. |
+| [`roundtable config`](docs/configuration.md#saved-cli-settings-and-env-files) | Save env-file and persona-directory settings; show set/unset status. |
+
 ### Heads-down
 
 [Heads-down runs](docs/heads-down.md) execute an agreed, frozen contract in parallel task worktrees with leases, checks, a watchdog and escalations. Example: “Execute the approved contract with a $20 budget and a dashboard; keep me posted here.” See the [example contract](examples/contract.example.json).

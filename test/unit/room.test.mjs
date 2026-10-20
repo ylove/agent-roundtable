@@ -8,7 +8,7 @@ import { replayDuel } from "../../dist/table/replay.js";
 import { APP_CSP } from "../../dist/prototypes/board.js";
 import { inlineProblems } from "./helpers.mjs";
 
-const fixture = new URL("../fixtures/duel/demo.json", import.meta.url);
+const fixture = new URL("../../examples/duel/demo.json", import.meta.url);
 function rawRequest(url, path, headers = {}) {
   return new Promise((resolve, reject) => {
     const request = http.request({ hostname: url.hostname, port: url.port, path, headers }, response => {

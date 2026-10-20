@@ -8,7 +8,7 @@ export const ROOM_HTML = `<!doctype html>
 <section><h2>Judges' verdicts</h2><div id="verdicts"></div></section><section><h2>Dissents</h2><div id="dissents"></div></section>
 <section><h2>At the table</h2><div id="turns"></div></section></main><footer id="spend">Estimated spend: $0.0000</footer></body></html>`;
 
-export const ROOM_CSS = `:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#10151d;color:#eef2f7}body{margin:0;padding:24px;max-width:1500px;margin-inline:auto}header{margin-bottom:24px}header p{color:#91bdf3;letter-spacing:.1em}h1{font-size:clamp(24px,3vw,40px)}h2{font-size:20px}#banner{padding:16px;border:1px solid #6888ae;border-radius:12px;background:#1a2b42}#games{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:24px 0}article,.seat,.verdict,.dissent{padding:16px;border:1px solid #34465c;border-radius:12px;background:#19222f}iframe{display:block;width:100%;height:480px;border:0;border-radius:8px;background:white}#seats,#verdicts,#dissents{display:flex;flex-wrap:wrap;gap:12px}.seat{flex:1;min-width:180px}.seat p{overflow-wrap:anywhere;margin:6px 0;color:#c3d1e1}.verdict[data-verdict=APPROVE]{border-color:#63c69a}.verdict[data-verdict=REVISE]{border-color:#eac26a}.verdict[data-verdict=REJECT]{border-color:#ee8c8c}.dissent{white-space:pre-wrap;flex:1;min-width:240px}#turns p{white-space:pre-wrap;padding:12px;border-bottom:1px solid #34465c}footer{margin-top:24px;color:#b8c8da}.placeholder{padding:50px 12px;color:#c3d1e1}@media(max-width:800px){body{padding:12px}#games{grid-template-columns:1fr}iframe{height:440px}}`;
+export const ROOM_CSS = `:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#10151d;color:#eef2f7}body{margin:0;padding:24px;max-width:1500px;margin-inline:auto}header{margin-bottom:24px}header p{color:#91bdf3;letter-spacing:.1em}h1{font-size:clamp(24px,3vw,40px)}h2{font-size:20px}#banner{padding:16px;border:1px solid #6888ae;border-radius:12px;background:#1a2b42}#games{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:24px 0}article,.seat,.verdict,.dissent{padding:16px;border:1px solid #34465c;border-radius:12px;background:#19222f}iframe{display:block;width:100%;height:480px;border:0;border-radius:8px;background:white}#seats,#verdicts,#dissents{display:flex;flex-wrap:wrap;gap:12px}.seat{flex:1;min-width:180px}.seat p{overflow-wrap:anywhere;margin:6px 0;color:#c3d1e1}.verdict[data-verdict=APPROVE]{border-color:#63c69a}.verdict[data-verdict=REVISE]{border-color:#eac26a}.verdict[data-verdict=REJECT]{border-color:#ee8c8c}.dissent{white-space:pre-wrap;flex:1;min-width:240px}#turns{max-height:420px;overflow-y:auto}#turns p{white-space:pre-wrap;padding:12px;border-bottom:1px solid #34465c}footer{margin-top:24px;color:#b8c8da}.placeholder{padding:50px 12px;color:#c3d1e1}@media(max-width:800px){body{padding:12px}#games{grid-template-columns:1fr}iframe{height:440px}}`;
 
 /** All model-written strings enter the DOM through textContent. Frames survive state polling. */
 export const ROOM_JS = `"use strict";
@@ -18,7 +18,7 @@ const gameCards = new Map();
 function render(state) {
   byId("topic").textContent = state.topic || "Waiting for the duel";
   const end = state.end;
-  byId("banner").textContent = end ? (end.aborted ? "Duel stopped" : end.winner === "tie" ? "It's a tie" : end.winner === "none" ? "No winner" : "Team " + end.winner + " wins") + " · A " + end.tally.A + " / B " + end.tally.B : "The duel is in progress";
+  byId("banner").textContent = end ? (end.aborted ? "Duel stopped" : end.winner === "tie" ? "It's a tie" : end.winner === "none" ? "No verdict" : "Team " + end.winner + " wins") + " · A " + end.tally.A + " / B " + end.tally.B : "The duel is in progress";
   byId("seats").replaceChildren(...state.seats.map(seat => {
     const card = node("article", undefined, "seat");
     const spend = state.usage.perSeat.find(item => item.seatId === seat.id);
@@ -43,7 +43,7 @@ function render(state) {
     card.append(node("strong", item.judge.name + " · Team " + item.team + " · " + item.verdict), node("p", item.reason)); return card;
   }));
   byId("dissents").replaceChildren(...state.dissents.map(item => node("article", item.seat.name + " · Team " + item.team + "\\n" + item.text, "dissent")));
-  byId("turns").replaceChildren(...state.turns.slice(-8).map(item => node("p", item.seat.name + " · " + item.round + "\\n" + item.text)));
+  byId("turns").replaceChildren(...state.turns.map(item => node("p", item.seat.name + " · " + item.round + "\\n" + item.text)));
   byId("spend").textContent = "Estimated spend: $" + state.usage.totalCostUsd.toFixed(4);
 }
 async function poll() {

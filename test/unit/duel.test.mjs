@@ -104,7 +104,7 @@ test("bad prototype gets one retry with its validation error", async t => {
 });
 
 test("inline JavaScript comments do not count as external URLs", async t => {
-  const { events, attempts } = await run(t, { build: team => game(team).replace("<script>", "<script>\n// Keep all game logic in this file.\n") });
+  const { events, attempts } = await run(t, { build: team => game(team).replace("<script>", "<script>\n// Keep all game logic in this file; no https://example.com/lib.js needed.\n") });
   assert.equal(attempts.A, 1);
   assert.equal(attempts.B, 1);
   assert.equal(events.filter(e => e.type === "prototype" && e.ok).length, 2);
@@ -136,7 +136,7 @@ test("an equal tally stays a tie", async t => {
 
 test("failed judges cast no verdict", async t => {
   const { result, events } = await run(t, { failedJudge: true });
-  assert.equal(result.winner, "tie");
+  assert.equal(result.winner, "none");
   assert.equal(events.filter(e => e.type === "assessment").length, 0);
 });
 
@@ -201,7 +201,7 @@ test("max-seconds can expire before provider work starts and still allows closin
 test("per-call timeouts settle turns and still archive", async t => {
   const { events, result } = await run(t, { waitForDeadline: true }, { turnTimeoutMs: 5 });
   assert.equal(result.aborted, false);
-  assert.ok(events.some(e => e.type === "turn" && e.text === "This turn did not complete."));
+  assert.ok(events.some(e => e.type === "turn" && /^This turn did not complete \(.+\)\.$/.test(e.text)));
   assert.equal(events.at(-1).type, "end");
 });
 
@@ -229,7 +229,6 @@ test("session-level aborts cancel the duel through the shared meter", async t =>
 
 test("verdict parser fails closed for missing, quoted, fenced, or ambiguous verdicts", () => {
   assert.equal(parseDuelVerdicts("VERDICT A: MAYBE — hmm").A.verdict, "UNCLEAR");
-  assert.equal(parseDuelVerdicts("> VERDICT A: APPROVE — quoted").A.verdict, "UNCLEAR");
   assert.equal(parseDuelVerdicts("```\nVERDICT A: APPROVE — quoted\n```").A.verdict, "UNCLEAR");
   assert.equal(parseDuelVerdicts("VERDICT A: APPROVE — yes\nVERDICT A: REJECT — no").A.verdict, "UNCLEAR");
 });
@@ -243,4 +242,26 @@ test("local seat resolver loads generic personas and applies explicit model over
   assert.equal(resolved[1].model, DEFAULT_MODELS.anthropic);
   assert.equal(resolved[0].team, "A");
   assert.match(resolved[0].prompt, /You are the designer/);
+});
+
+test("namespace URLs and prose do not count as external references; real fetches do", async t => {
+  const svg = team => game(team).replace("<button", '<svg xmlns="http://www.w3.org/2000/svg"></svg><p>fetch (the coin) quickly</p><button').replace("let n=0;", 'let n=0;document.createElementNS("http://www.w3.org/2000/svg","g");');
+  const ok = await run(t, { build: svg });
+  assert.equal(ok.attempts.A, 1);
+  assert.equal(ok.events.filter(e => e.type === "prototype" && e.ok).length, 2);
+  const bad = await run(t, { build: team => team === "A" ? game(team).replace("let n=0;", "fetch('x');") : game(team) });
+  assert.equal(bad.attempts.A, 2);
+});
+
+test("build turns never carry source; tolerant verdicts, preference tie-break and no-verdict", async t => {
+  const { events } = await run(t);
+  const builds = events.filter(e => e.type === "turn" && e.round === "R1b");
+  assert.equal(builds.length, 2);
+  assert.ok(builds.every(e => /^Built index\.html \(\d/.test(e.text) && !e.text.includes("<")));
+  assert.deepEqual(parseDuelVerdicts("**VERDICT A:** APPROVE\n> - verdict b - Reject: weak").A, { verdict: "APPROVE", reason: "No reason given." });
+  assert.equal(parseDuelVerdicts("> - verdict b - Reject: weak").B.verdict, "REJECT");
+  const tie = await run(t, { verdicts: "VERDICT A: APPROVE — ok\nVERDICT B: APPROVE — ok\nPREFER: B" });
+  assert.equal(tie.result.winner, "B");
+  const none = await run(t, { verdicts: "no verdict lines at all" });
+  assert.equal(none.result.winner, "none");
 });

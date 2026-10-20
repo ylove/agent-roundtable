@@ -74,7 +74,7 @@ function validatedFiles(text: string): { title: string; files: PrototypeFile[] }
       (prototype.entry !== undefined && prototype.entry !== "index.html")) throw new Error("Return only one web file named index.html.");
   const html = prototype.files[0].content;
   if (Buffer.byteLength(html) > 40 * 1024) throw new Error("index.html exceeds 40 KB.");
-  const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)];
+  const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script[^>]*>/gi)];
   if (!scripts.some(m => m[2].trim())) throw new Error("index.html needs inline playable JavaScript in a script element.");
   // Namespace identifiers are not network references.
   const markup = html.replace(/https?:\/\/www\.w3\.org\/(?:2000\/svg|1998\/Math\/MathML|1999\/xhtml|1999\/xlink)/gi, "");

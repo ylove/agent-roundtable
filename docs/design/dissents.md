@@ -19,7 +19,7 @@ Add a top-level `dissents[]` field to `Contract` in `src/execution/types.ts`. Ea
   id: string;
   by: string;
   source: {
-    kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "manual";
+    kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "duel" | "manual";
     ref?: string;
   };
   claim: string;

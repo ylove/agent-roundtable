@@ -37,7 +37,7 @@ const DISSENT_PROPS = {
       id: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" },
       by: { type: "string" },
       source: { type: "object", additionalProperties: false, required: ["kind"], properties: {
-        kind: { type: "string", enum: ["ultraplan", "consent", "debate", "waffle_house", "manual"] }, ref: { type: "string" },
+        kind: { type: "string", enum: ["ultraplan", "consent", "debate", "waffle_house", "duel", "manual"] }, ref: { type: "string" },
       } },
       claim: { type: "string", maxLength: 500 },
       predicted_failure: { type: "string", maxLength: 500 },
@@ -112,7 +112,7 @@ export const contractTools: ToolDefinition[] = [
         title: { type: "string", description: "Short title; default the goal's first line." },
         original_prompt: { type: "string", description: "The human's request, verbatim (default: from_session's task or topic). Workers see it on every task card." },
         artifacts: { type: "array", items: { type: "string" }, description: "Repository paths or URLs the goal refers to." },
-        from_session: { type: "string", description: "Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from." },
+        from_session: { type: "string", description: "Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from, or of an archived duel (duel-<id>): its winning artifact title becomes a decision and its dissents become draft concerns (a tie or no winner imports no decision). A duel has no task structure, so also pass contract or plan." },
         plan: { type: "string", description: "Plan text: its last roundtable-tasks block is used, else a structuring call turns it into tasks." },
         contract: { type: "object", description: "An explicit contract (roundtable.contract/1 fields: title, scope.paths, participants, teams, tasks, interfaces, decisions, dissents, validation {commands, final}, budget, authority, sandbox, workers). id, version, status and consent are set for you." },
         parent_contract: { type: "string", description: "For a child contract: the parent contract id (with parent_task, a subcontract task of it)." },

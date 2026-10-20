@@ -70,3 +70,14 @@ For integration, `runDuel(opts, observer, signal, { resolveSeats })` accepts a r
 ## From an MCP client
 
 The `start_duel` tool runs the same engine and returns a compact result: the duel id, winner, tally, each team's artifact title, kind and ok flag, the verdicts, the dissents, a per-persona usage summary and the archive id (`duels/<id>.json`). It never returns artifact source. See [tools](../tools.md#start_duel). Duel calls are recorded in the usage ledger with the persona as the agent, so `roundtable usage` shows duel spend per persona.
+
+## From duel to contract
+
+`propose_contract(from_session: "duel-<id>")` loads the archive from `ROUNDTABLE_HOME/duels/` and feeds the Roundtable's contract flow.
+
+- **Decision.** When team A or B won, the contract gains a `duel-winner` decision naming the winning artifact's title, its kind (when archived), the team and its personas, with the judges' scrubbed APPROVE reasons as the rationale. Artifact source is never copied into the contract; it points to the duel id and the title only.
+- **No winner.** A `tie`, `none` or stopped duel imports no decision. The result says so (a warning and `duelImport.imported_decision: false`), and the orchestrator must decide which approach to build.
+- **Dissents.** Every archived `<DISSENT>` from a team or judge becomes a draft concern with `source: {kind: "duel", ref: <duel id>}`. Each needs a tripwire (`file_dissent`) or an orchestrator excusal before freeze. See [dissents](../dissents.md).
+- **Structure.** A duel carries no task list, so also pass `contract` (with tasks) or `plan`. Seats are not added as participants, except the authors of imported dissents.
+
+Archives that lack newer optional fields still import.

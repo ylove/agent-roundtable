@@ -470,7 +470,7 @@ Turn an agreed plan into a heads-down contract: a draft v1 in a new execution, w
 | `title` | string | no | Short title; default the goal's first line. |
 | `original_prompt` | string | no | The human's request, verbatim (default: from_session's task or topic). Workers see it on every task card. |
 | `artifacts` | array of string | no | Repository paths or URLs the goal refers to. |
-| `from_session` | string | no | Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from. |
+| `from_session` | string | no | Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from, or of an archived duel (duel-<id>): its winning artifact title becomes a decision and its dissents become draft concerns (a tie or no winner imports no decision). A duel has no task structure, so also pass contract or plan. |
 | `plan` | string | no | Plan text: its last roundtable-tasks block is used, else a structuring call turns it into tasks. |
 | `contract` | object | no | An explicit contract (roundtable.contract/1 fields: title, scope.paths, participants, teams, tasks, interfaces, decisions, validation {commands, final}, budget, authority, sandbox, workers). id, version, status and consent are set for you. |
 | `parent_contract` | string | no | For a child contract: the parent contract id (with parent_task, a subcontract task of it). |

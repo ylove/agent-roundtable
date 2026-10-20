@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { childEnv } from "../../dist/security/child-env.js";
+
+const PRIVATE = "ROUNDTABLE_SCRUB_LITERALS";
+const runnerSettings = (extra, source) => {
+  const { [PRIVATE]: literals, ...settings } = childEnv("runner", extra, source);
+  return settings;
+};
 
 test("runner retains provider and execution settings", () => {
   const names = [
@@ -28,7 +38,7 @@ test("runner retains provider and execution settings", () => {
     "ROUNDTABLE_CHROME_PATH", "ROUNDTABLE_PROTOTYPE_SCREENSHOTS",
   ];
   const source = Object.fromEntries(names.map(name => [name, `setting-${name}`]));
-  assert.deepEqual(childEnv("runner", {}, source), source);
+  assert.deepEqual(runnerSettings({}, source), source);
 });
 
 test("runner composes worker, git, docker and gh allowlists", () => {
@@ -39,10 +49,10 @@ test("runner composes worker, git, docker and gh allowlists", () => {
     "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "GH_ENTERPRISE_TOKEN",
   ];
   const source = Object.fromEntries(names.map(name => [name, `setting-${name}`]));
-  assert.deepEqual(childEnv("runner", {}, source), source);
+  assert.deepEqual(runnerSettings({}, source), source);
   const conditional = { ANTHROPIC_AUTH_TOKEN: "worker-token", ANTHROPIC_BASE_URL: "http://localhost:8080" };
-  for (const name of Object.keys(conditional)) assert.equal(childEnv("runner", {}, conditional)[name], undefined);
-  assert.deepEqual(childEnv("runner", {}, { ...conditional, ROUNDTABLE_WORKER_AUTH: "api_key" }), {
+  for (const name of Object.keys(conditional)) assert.equal(runnerSettings({}, conditional)[name], undefined);
+  assert.deepEqual(runnerSettings({}, { ...conditional, ROUNDTABLE_WORKER_AUTH: "api_key" }), {
     ...conditional, ROUNDTABLE_WORKER_AUTH: "api_key",
   });
   for (const [flag, credentials] of [
@@ -54,8 +64,8 @@ test("runner composes worker, git, docker and gh allowlists", () => {
       "CLAUDE_CODE_SKIP_FOUNDRY_AUTH"]],
   ]) {
     const platform = Object.fromEntries(credentials.map(name => [name, `setting-${name}`]));
-    assert.deepEqual(childEnv("runner", {}, platform), {});
-    assert.deepEqual(childEnv("runner", {}, { ...platform, [flag]: "1" }), { ...platform, [flag]: "1" });
+    assert.deepEqual(runnerSettings({}, platform), {});
+    assert.deepEqual(runnerSettings({}, { ...platform, [flag]: "1" }), { ...platform, [flag]: "1" });
   }
 });
 
@@ -65,8 +75,81 @@ test("runner drops unrelated settings and runtime overrides", () => {
     "DYLD_FRAMEWORK_PATH", "NPM_TOKEN", "DATABASE_PASSWORD", "UNRELATED_API_KEY", "ROUNDTABLE_UNRELATED_TOKEN",
   ];
   const source = Object.fromEntries(dropped.map(name => [name, "unused-value"]));
-  assert.deepEqual(childEnv("runner", {}, source), {});
-  assert.deepEqual(childEnv("runner", { ROUNDTABLE_EXECUTION_ID: "exe-test", PATH: undefined }, { PATH: "/bin" }), {
+  assert.deepEqual(runnerSettings({}, source), {});
+  assert.deepEqual(runnerSettings({ ROUNDTABLE_EXECUTION_ID: "exe-test", PATH: undefined }, { PATH: "/bin" }), {
     ROUNDTABLE_EXECUTION_ID: "exe-test",
   });
+});
+
+test("runner receives configured literals without the individual host variables", () => {
+  const source = {
+    DATABASE_PASSWORD: "database-value-123456",
+    SERVICE_TOKEN: "database-value-123456-extra",
+    DUPLICATE_SECRET: "database-value-123456",
+    SHORT_PASSWORD: "short",
+    GIT_AUTHOR_NAME: "Example Author",
+    UNRELATED_SETTING: "ordinary-value",
+    [PRIVATE]: JSON.stringify(["inherited-value-123456", "tiny", 42, null]),
+  };
+  const env = childEnv("runner", {}, source);
+  assert.deepEqual(Object.keys(env), [PRIVATE]);
+  assert.deepEqual(JSON.parse(env[PRIVATE]), [
+    source.SERVICE_TOKEN, "inherited-value-123456", source.DATABASE_PASSWORD,
+  ]);
+  assert.deepEqual(childEnv("runner", {}, env), env);
+});
+
+test("only the runner profile receives the private literal variable, including extra overrides", () => {
+  const runner = childEnv("runner", {}, { DATABASE_PASSWORD: "host-database-value-123456" });
+  for (const profile of ["claude-worker", "codex-worker", "local-meeting", "git", "gh", "docker", "browser", "open", "sandbox-local", "cloud-cli"]) {
+    for (const extra of [{}, { [PRIVATE]: runner[PRIVATE] }]) {
+      const worker = childEnv(profile, extra, runner);
+      assert.equal(worker[PRIVATE], undefined, profile);
+      assert.equal(worker.DATABASE_PASSWORD, undefined, profile);
+      assert.ok(!Object.values(worker).includes(runner[PRIVATE]), profile);
+    }
+  }
+});
+
+test("a runner process and its output relay redact host literals without package dotenv", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rt-runner-scrub-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const secret = 'host-only-database-value-123456-"quoted"';
+  const env = childEnv("runner", {}, { DATABASE_PASSWORD: secret, ROUNDTABLE_DOTENV: "off" });
+  assert.equal(env.DATABASE_PASSWORD, undefined);
+  const script = `
+    import "./dist/env.js";
+    import { readFileSync } from "node:fs";
+    import { childEnv } from "./dist/security/child-env.js";
+    import { scrubConfiguredSecrets } from "./dist/security/secrets.js";
+    import { spawnWorker, workerExit } from "./dist/workers/process.js";
+    const secret = readFileSync(0, "utf8");
+    const workerEnv = childEnv("codex-worker");
+    const { pid } = await spawnWorker({
+      file: process.execPath,
+      args: ["-e", 'process.stdin.pipe(process.stdout);'],
+      cwd: process.cwd(), env: workerEnv, prompt: secret,
+      outputPath: ${JSON.stringify(join(dir, "output.log"))},
+    });
+    const exit = await workerExit(pid);
+    if (exit.code !== 0) throw new Error("worker failed");
+    process.stdout.write(JSON.stringify({
+      direct: scrubConfiguredSecrets(secret).text,
+      payload: scrubConfiguredSecrets(process.env.${PRIVATE}).text,
+      envDump: scrubConfiguredSecrets(JSON.stringify(process.env)).text,
+      relay: readFileSync(${JSON.stringify(join(dir, "output.log"))}, "utf8"),
+      hostVariableAbsent: process.env.DATABASE_PASSWORD === undefined,
+      privateVariableAbsent: workerEnv.${PRIVATE} === undefined,
+    }));
+  `;
+  const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    env, input: secret, encoding: "utf8", timeout: 15_000,
+  });
+  const result = JSON.parse(output);
+  assert.equal(result.hostVariableAbsent, true);
+  assert.equal(result.privateVariableAbsent, true);
+  for (const name of ["direct", "payload", "envDump", "relay"]) {
+    assert.doesNotMatch(result[name], /host-only-database-value/);
+    assert.match(result[name], /\[redacted:/);
+  }
 });

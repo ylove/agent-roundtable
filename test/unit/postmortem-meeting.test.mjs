@@ -698,6 +698,46 @@ const dissentSpec = (id) => ({
   predicted_failure: `Prediction ${id}`, tripwire: { kind: "task_state", task: "api", state: "blocked" }, on_fire: "notify",
 });
 
+test("postmortem persistence preserves auth-prefixed persona refs and dissent ids through conclusion", async (t) => {
+  const { WORKSPACE_DIR } = await import("../../dist/config.js");
+  const dir = join(WORKSPACE_DIR, ".claude", "agents");
+  mkdirSync(dir, { recursive: true });
+  const reviewer = join(dir, "auth-reviewer.md");
+  writeFileSync(reviewer, PERSONA("Auth-reviewer"));
+  const run = await makeRun({ contract: {
+    tasks: [task("api")], dissents: [dissentSpec("auth-check")], postmortem: { enabled: true },
+  } });
+  t.after(() => rmSync(run.root, { recursive: true, force: true }));
+  await enabled(run);
+  const finding = await ok("postmortem", {
+    action: "record", project: run.root, execution_id: run.store.id,
+    finding: { ...FINDING, responsible: ["auth-reviewer"] },
+  });
+  await ok("postmortem", {
+    action: "fix", project: run.root, execution_id: run.store.id,
+    finding_id: finding.recorded, fix: { status: "fixed" },
+  });
+  provider(t, { total: 3, block: `Artifact: persona_addendum | auth-reviewer | ${finding.recorded} | Review login checks before submitting` });
+  const held = await ok("hold_postmortem", {
+    project: run.root, execution_id: run.store.id, opening: "Review the login checks",
+    participants: [reviewer, "tester"], rounds: 1, ...LLM,
+  });
+  const before = loadRecord(held.project, held.pm);
+  assert.equal(before.refs["auth-reviewer"], reviewer);
+  assert.deepEqual(before.dissents, (await run.store.state()).dissents);
+  assert.equal(before.dissents["auth-check"].spec.claim, dissentSpec("auth-check").claim);
+  const result = await ok("hold_postmortem", {
+    action: "conclude", pm: held.pm, closing: "Keep the login checks", accept: ["a1"], orchestrator: "main",
+  });
+  assert.deepEqual(result.warnings, []);
+  assert.equal(result.applied[0].path, reviewer);
+  assert.match(readFileSync(reviewer, "utf8"), /Review login checks before submitting/);
+  const after = loadRecord(held.project, held.pm);
+  assert.equal(after.status, "concluded");
+  assert.deepEqual(after.refs, before.refs);
+  assert.deepEqual(after.dissents, before.dissents);
+});
+
 async function dissentMeeting(t, { outcomes = ["vindicated", "refuted", "untested"], malformed = false } = {}) {
   const specs = ["fired", "quiet", "unresolved", "unassessed"].map(dissentSpec);
   const run = await makeRun({ contract: { tasks: [task("api")], dissents: specs, postmortem: { enabled: true } } });

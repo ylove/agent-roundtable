@@ -5,6 +5,9 @@
 // else secret-shaped stay in this process unless a profile explicitly needs them.
 // ============================================================================
 
+import { configuredSecretLiterals, SCRUB_LITERALS_ENV } from "./secrets.js";
+export { SECRET_NAME_RE } from "./secrets.js";
+
 export type ChildEnvProfile =
   | "claude-worker"
   | "codex-worker"
@@ -17,13 +20,6 @@ export type ChildEnvProfile =
   | "sandbox-local"
   | "cloud-cli"
   | "runner";
-
-/**
- * Names that look like credentials (used by secret scrubbing, tests and the contract validator).
- * AUTH, PASS and CRED count only as whole name segments, so GIT_AUTHOR_NAME, BYPASS_CACHE and
- * session ids are not treated as secrets while ROUNDTABLE_WEBHOOK_AUTH_HEADER and DB_PASS are.
- */
-export const SECRET_NAME_RE = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|COOKIE|(?:^|_)(?:AUTH|PASS|CREDS?)(?:_|$)/i;
 
 const BASE = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TMPDIR", "TERM"];
 const PROXY = ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"];
@@ -131,6 +127,7 @@ const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: s
 /**
  * Build a child environment from an allowlist profile. `extra` is applied last (callers use it for
  * per-run values such as ROUNDTABLE_EXECUTION_ID); undefined values in `extra` delete a key.
+ * The private scrub-literal variable is computed for the runner and excluded from other profiles.
  */
 export function childEnv(
   profile: ChildEnvProfile,
@@ -147,6 +144,11 @@ export function childEnv(
   for (const [k, v] of Object.entries(extra)) {
     if (v === undefined) delete env[k];
     else env[k] = v;
+  }
+  delete env[SCRUB_LITERALS_ENV];
+  if (profile === "runner") {
+    const literals = configuredSecretLiterals({ ...source, ...extra });
+    if (literals.length) env[SCRUB_LITERALS_ENV] = JSON.stringify(literals);
   }
   return env;
 }

@@ -91,7 +91,7 @@ test("structured blobs redact credential values and object keys", () => {
   const value = {
     password: "hunter22", SECRET: "opaque", token: ["one", "two"],
     Api_Key: "opaque", authorization: "opaque", credential: "opaque",
-    credentials: { value: "nested-value" },
+    credentials: { value: "nested-value", password: "nested-password" },
     nested: { [key]: "ordinary text", password: "short" },
     author: "writer", authority: "local", id: "row-1", run_id: "run-1",
     usage: { inputTokens: 1234, output_tokens: 20 },
@@ -101,11 +101,60 @@ test("structured blobs redact credential values and object keys", () => {
     assert.equal(out[name], "[redacted:secret]");
   }
   assert.deepEqual(out.token, ["[redacted:secret]", "[redacted:secret]"]);
-  assert.deepEqual(out.credentials, { value: "[redacted:secret]" });
+  assert.deepEqual(out.credentials, { value: "nested-value", password: "[redacted:secret]" });
   assert.deepEqual(out.nested, { "[redacted:api_key]": "ordinary text", password: "[redacted:secret]" });
   assert.deepEqual(out.usage, value.usage);
   for (const name of ["author", "authority", "id", "run_id"]) assert.equal(out[name], value[name]);
   assert.equal(value.password, "hunter22");
+});
+
+test("scrubbedJSON preserves persona refs and nested dissents with auth-prefixed identifiers", () => {
+  const value = {
+    refs: { "auth-reviewer": "/agents/auth-reviewer.md", "authentication-reviewer": "reviewer", "tokenizer": "tokenizer" },
+    dissents: {
+      "auth-check": {
+        spec: { id: "auth-check", by: "auth-reviewer", claim: "Review the login flow", tripwire: { kind: "task_state", task: "auth-api", state: "rejected" } },
+        score: "vindicated", evidence: ["review-1"],
+      },
+    },
+    credentials: { "auth-reviewer": { path: "/agents/auth-reviewer.md" } },
+    token: [{ id: "auth-check", description: "Review the login flow" }],
+    auth: "reviewer", authz: "reviewer", authentication: "reviewer",
+    author: "writer", authority: "local", passwordless: "enabled", tokenization: "enabled",
+  };
+  assert.deepEqual(JSON.parse(scrubbedJSON(value)), value);
+});
+
+test("structured credential fields match normalized segments and redact only string or number leaves", () => {
+  const fields = ["password", "PASSWD", "secret", "token", "Api_Key", "apikey", "access-key", "private.key",
+    "authorization", "credential", "credentials", "client_secret", "bearer", "db-password", "service.token", "clientSecret", "accessKey"];
+  for (const field of fields) {
+    for (const value of ["hunter22", "", 1234, 0]) {
+      assert.deepEqual(JSON.parse(scrubbedJSON({ [field]: value })), { [field]: "[redacted:secret]" }, field);
+    }
+    for (const value of [null, false, { id: "auth-reviewer", enabled: true }, [{ id: "auth-check" }]]) {
+      assert.deepEqual(JSON.parse(scrubbedJSON({ [field]: value })), { [field]: value }, field);
+    }
+  }
+});
+
+test("object keys use token patterns and configured literals without assignment heuristics", (t) => {
+  const previous = process.env.BLOB_TEST_SECRET;
+  process.env.BLOB_TEST_SECRET = "configured-object-key-123456";
+  t.after(() => {
+    if (previous === undefined) delete process.env.BLOB_TEST_SECRET;
+    else process.env.BLOB_TEST_SECRET = previous;
+  });
+  const preserved = { "password=hunter22": { id: "row-1" }, "Authorization: Bearer ordinary": { id: "row-2" } };
+  assert.deepEqual(JSON.parse(scrubbedJSON(preserved)), preserved);
+  for (const [key, marker] of [
+    [FAKE_KEY, "api_key"],
+    ["eyJabcdef.abcdefghi.abcdefgh", "jwt"],
+    ["-----BEGIN PRIVATE KEY-----\nYWJj\n-----END PRIVATE KEY-----", "private_key"],
+    [process.env.BLOB_TEST_SECRET, "env:BLOB_TEST_SECRET"],
+  ]) {
+    assert.deepEqual(JSON.parse(scrubbedJSON({ [key]: { id: "row-1" } })), { [`[redacted:${marker}]`]: { id: "row-1" } });
+  }
 });
 
 test("the store's putBlob/getBlob use the execution's blobs directory", async () => {

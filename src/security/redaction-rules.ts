@@ -39,13 +39,44 @@ export function redactWith(input: string, rules: (rep: Replace) => void): Redact
   return { text, counts };
 }
 
+/** Token-shaped credentials, without field-name, assignment or authorization heuristics. */
+export function redactSecretTokens(input: string): RedactionResult {
+  return redactWith(input, (rep) => {
+    redactPrivateKeys(rep);
+    redactJWTs(rep);
+    redactVendorTokens(rep);
+  });
+}
+
+function redactPrivateKeys(rep: Replace): void {
+  // PEM private keys first (whole block, including JSON-escaped "\\n" bodies; then a dangling
+  // header whose END marker was cut off), so the key=value rule below only sees the marker.
+  rep(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "private_key");
+  rep(/-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\s\\]*/g, "private_key");
+}
+
+function redactJWTs(rep: Replace): void {
+  rep(/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g, "jwt");
+}
+
+function redactVendorTokens(rep: Replace): void {
+  rep(/(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{8,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])tk_[A-Za-z0-9]{10,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])/g, "api_key");
+  rep(/(?<![A-Za-z0-9])xox[abprs]-[A-Za-z0-9-]{10,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])r8_[A-Za-z0-9]{20,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36}/g, "api_key");
+}
+
 /** Credentials only: keys, tokens, private keys, URL and HTTP credentials, key=value secrets. */
 export function redactSecrets(input: string): RedactionResult {
   const result = redactWith(input, (rep) => {
-    // PEM private keys first (whole block, including JSON-escaped "\\n" bodies; then a dangling
-    // header whose END marker was cut off), so the key=value rule below only sees the marker.
-    rep(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "private_key");
-    rep(/-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\s\\]*/g, "private_key");
+    redactPrivateKeys(rep);
 
     // credentials embedded in a URL: scheme://user:pass@host
     rep(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s:@/]*:[^\s@/]+@/gi, "url_credentials", (_m, scheme) => scheme + mark("url_credentials") + "@");
@@ -55,19 +86,9 @@ export function redactSecrets(input: string): RedactionResult {
     rep(/\b((?:Proxy-)?Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "bearer", (_m, p) => p + mark("bearer"));
 
     // JWTs, then bearer credentials, then vendor tokens
-    rep(/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g, "jwt");
+    redactJWTs(rep);
     rep(/\b(Bearer\s+)(?=[A-Za-z0-9._~+/=-]*[\d._~+/=-]|[A-Za-z]{16})[A-Za-z0-9._~+/=-]{8,}/gi, "bearer", (_m, p) => p + mark("bearer"));
-    rep(/(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{8,}/g, "api_key");
-    rep(/(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g, "api_key");
-    rep(/(?<![A-Za-z0-9])tk_[A-Za-z0-9]{10,}/g, "api_key");
-    rep(/(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}/g, "api_key");
-    rep(/(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}/g, "api_key");
-    rep(/(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])/g, "api_key");
-    rep(/(?<![A-Za-z0-9])xox[abprs]-[A-Za-z0-9-]{10,}/g, "api_key");
-    rep(/(?<![A-Za-z0-9])r8_[A-Za-z0-9]{20,}/g, "api_key");
-    rep(/(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}/g, "api_key");
-    rep(/(?<![A-Za-z0-9])(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}/g, "api_key");
-    rep(/(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36}/g, "api_key");
+    redactVendorTokens(rep);
     // HTTP Basic credentials, including alphabet-only base64.
     rep(
       /\b(Basic\s+)[A-Za-z0-9+/]{8,}={0,2}/g,

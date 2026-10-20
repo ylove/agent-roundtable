@@ -3,16 +3,19 @@
 `roundtable` and `agent-roundtable` invoke the same binary. Build a source checkout with `npm run build`; use `node dist/index.js` in place of `roundtable` until installed.
 
 ```sh
-roundtable duel "60-second browser game that teaches kids to budget" \
+roundtable duel "Landing page for a bike-repair subscription" \
   --team-a designer,builder --team-b marketer,skeptic \
   --judges cfo,safety-reviewer --mix auto --open
+
+roundtable duel "One-page expenses policy" --kind text --criteria "legal accuracy,plain language" \
+  --team-a counsel --team-b hr-lead,editor --judges cfo
 
 roundtable debate "A weekly spending limit" --agents designer,skeptic --rounds 2
 roundtable waffle "A weekly spending limit" --agents designer,cfo,skeptic --rounds 2
 roundtable meeting "A weekly spending limit" --agents designer,builder,cfo
 ```
 
-Duel gives each team a designer followed by a builder, with at least one judge. Each agent needs a unique seat. The room shows the two games, assessments, dissent and outcome; `--open` opens it in a browser. See [duel](modes/duel.md) for rounds and scoring.
+Duel gives each team 1 to 4 members (the first writes the concept, the last builds, any between critique) and 1 to 5 judges. Each agent needs a unique seat. The room shows the two artifacts, assessments, dissent and outcome; `--open` opens it in a browser. See [duel](modes/duel.md) for rounds and scoring.
 
 `debate` makes the first persona the proponent and the others challengers. `waffle` makes the first persona the defender; each round ends with its rebuttal. `meeting` runs a collaboration where participants take turns. These three commands need at least two agents, stream from the opening turn, then archive their transcripts. They use the existing collaboration engine.
 
@@ -59,8 +62,10 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 
 | Flag | Meaning |
 | --- | --- |
-| `--team-a`, `--team-b` | Duel only: two comma-separated agents per team, designer first, builder second |
-| `--judges` | Duel only: one or more comma-separated agents |
+| `--team-a`, `--team-b` | Duel only: 1 to 4 comma-separated agents per team; first writes the concept, last builds, any between critique |
+| `--kind` | Duel only: `web` (default), `code`, `diagram` or `text` |
+| `--criteria` | Duel only: comma-separated judging rubric (default: fit to the brief, quality, usability and accessibility, risk or safety) |
+| `--judges` | Duel only: 1 to 5 comma-separated agents |
 | `--agents` | Debate, waffle or meeting participants, in speaking order |
 | `--agents-dir` | Absolute persona directory; overrides the saved directory for this command |
 | `--rounds` | Duel: 1 or 2 (default 1); other verbs: 1–20 (default 2) |

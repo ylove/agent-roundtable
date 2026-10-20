@@ -36,7 +36,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 | Terminal command | Purpose |
 | --- | --- |
-| [`roundtable duel`](docs/modes/duel.md) | Two teams build playable games and judges assess them in a local room. |
+| [`roundtable duel`](docs/modes/duel.md) | Two teams build competing artifacts; judges assess them; dissents are recorded. |
 | [`roundtable debate`, `waffle`, `meeting`](docs/table-cli.md) | Stream a discussion with per-seat models and spend. |
 | [`roundtable config`](docs/configuration.md#saved-cli-settings-and-env-files) | Save env-file and persona-directory settings; show set/unset status. |
 
@@ -61,6 +61,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | Local meetings | [`end_local_meeting`](docs/tools.md#end_local_meeting) | End a local meeting, optionally with a summary. |
 | Local meetings | [`list_local_meetings`](docs/tools.md#list_local_meetings) | List active local meetings. |
 | Collaborations | [`start_collaboration`](docs/tools.md#start_collaboration) | Start a discussion between two or more personas. |
+| Duel | [`start_duel`](docs/tools.md#start_duel) | Run a duel: two teams build competing artifacts, judges assess them, dissents are recorded. |
 | Collaborations | [`continue_collaboration`](docs/tools.md#continue_collaboration) | Run additional rounds. |
 | Collaborations | [`nudge_collaboration`](docs/tools.md#nudge_collaboration) | Inject guidance without consuming an agent turn. |
 | Collaborations | [`pause_collaboration`](docs/tools.md#pause_collaboration) | Pause after the current turn. |

@@ -339,7 +339,7 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 41 distinct tools", () => assert(tools.length === 41 && new Set(tools.map((t) => t.name)).size === 41, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 42 distinct tools", () => assert(tools.length === 42 && new Set(tools.map((t) => t.name)).size === 42, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
   check("contract and run tools are strict (additionalProperties: false)", () => {
     for (const name of ["propose_contract", "amend_contract", "freeze_contract", "file_dissent", "score_dissent", "postmortem", "hold_postmortem", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });

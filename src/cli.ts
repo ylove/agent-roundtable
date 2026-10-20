@@ -8,6 +8,9 @@
 //   status <exe> [--json]                                               the run at a glance
 //   verify <exe>                                                        the event chain and the audit chain
 //   purge <exe> --confirm                                               remove a finished run
+//   statusline [--agents N] [--plain] [--no-host]                       a Claude Code status line; always exits 0
+//   usage [--json] [--watch]                                            who is using what, on which platform
+//   stop <agent> [--execution <exe> | --session <id>] [--reason <text>] stop one agent (heads-down or at the table)
 //   help                                                                this text
 //
 // Modules load lazily, so the hook (which Claude Code runs before every edit) never loads the
@@ -30,6 +33,11 @@ export const USAGE = [
   "  agent-roundtable status <exe> [--json]          tasks, budget, escalations, runner and watchers",
   "  agent-roundtable verify <exe>                   verify the event chain and the audit chain",
   "  agent-roundtable purge <exe> --confirm          remove a finished run's worktrees, branches and log",
+  "  agent-roundtable statusline [--agents N] [--plain] [--no-host]",
+  "                                                  a Claude Code statusLine command (host JSON on stdin)",
+  "  agent-roundtable usage [--json] [--watch]       who is using what, on which platform, measured or estimated",
+  "  agent-roundtable stop <agent> [--execution <exe> | --session <id>] [--reason <text>]",
+  "                                                  stop one agent (a heads-down worker or an at-the-table session)",
   "  agent-roundtable help                           this text",
 ].join("\n");
 
@@ -182,6 +190,37 @@ async function purge(args: string[]): Promise<void> {
   }
 }
 
+async function statusline(args: string[]): Promise<void> {
+  const { runStatusline } = await import("./usage/commands.js");
+  return runStatusline(args);
+}
+
+async function usageReport(args: string[]): Promise<void> {
+  process.umask(0o077);
+  const flags = parseFlags(args, { values: [], flags: ["json", "watch"] });
+  if (typeof flags === "string") return usage(flags);
+  const { runUsage } = await import("./usage/commands.js");
+  try {
+    await runUsage(flags);
+  } catch (e) {
+    console.error(`agent-roundtable usage: ${errText(e)}`);
+    process.exitCode = 1;
+  }
+}
+
+async function stopAgentCommand(args: string[]): Promise<void> {
+  process.umask(0o077);
+  const [agent, ...rest] = args;
+  if (agent === undefined || agent.startsWith("--")) return usage("stop needs an agent (the name shown by `agent-roundtable usage`)");
+  const flags = parseFlags(rest, { values: ["execution", "session", "reason"], flags: [] });
+  if (typeof flags === "string") return usage(flags);
+  if (flags.execution !== undefined && flags.session !== undefined) return usage("name --execution or --session, not both");
+  if (typeof flags.execution === "string" && !EXECUTION_ID_RE.test(flags.execution)) return usage(`not an execution id: ${JSON.stringify(flags.execution.slice(0, 80))}`);
+  if (typeof flags.session === "string" && !/^[a-z][a-z0-9-]{1,63}$/.test(flags.session)) return usage(`not a session id: ${JSON.stringify(flags.session.slice(0, 80))}`);
+  const { runStop } = await import("./usage/commands.js");
+  return runStop(agent, flags);
+}
+
 /** Run one subcommand. Exit codes: 0 ok, 1 a refusal or failed check, 2 usage (and a denied hook). */
 export async function runCli(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
@@ -202,6 +241,12 @@ export async function runCli(argv: string[]): Promise<void> {
       return verify(rest);
     case "purge":
       return purge(rest);
+    case "statusline":
+      return statusline(rest);
+    case "usage":
+      return usageReport(rest);
+    case "stop":
+      return stopAgentCommand(rest);
     case "help":
       if (rest.length) return usage("help takes no arguments");
       process.stdout.write(USAGE + "\n");

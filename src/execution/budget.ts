@@ -7,7 +7,7 @@
 // a contract amendment (TaskSpec.budget_usd, ContractBudget.per_task_usd / per_agent_usd).
 // ============================================================================
 
-import type { BlackboardState } from "./types.js";
+import type { BlackboardState, UsageRecord } from "./types.js";
 import {
   TERMINAL_TASK_STATES,
   draft,
@@ -62,6 +62,16 @@ export function remainingUsd(state: BlackboardState, scope: { task?: string; age
   return Math.max(0, round6(rem));
 }
 
+/** Retain uncertain dispatched huddle spend by call identity, once, after its settlement is lost. */
+export function retainHuddleReservations(state: Readonly<BlackboardState>, huddle: string): UsageRecord[] {
+  return Object.values(state.budget.calls ?? {})
+    .filter((c) => c.reservation && c.call_id?.startsWith(`${huddle}:`))
+    .map(({ at: _at, ...c }) => ({
+      ...c, reservation: false, estimated: true,
+      provenance: { tokens: c.provenance?.tokens ?? "estimated", usd: "estimated" },
+    }));
+}
+
 /** Percent of the execution budget spent (0 without a budget). */
 export function spentPct(state: BlackboardState): number {
   const total = executionBudgetUsd(state);
@@ -93,6 +103,18 @@ export function thresholdCrossings(state: BlackboardState): number[] {
  *    runner reports the agent busy).
  */
 export function budgetRules(state: BlackboardState, opts: { busy?: ReadonlySet<string> } = {}): WatchdogAction[] {
+  // Reservations constrain admission through remainingUsd, but a pending call can settle below
+  // its allowance. Do not turn that temporary allocation into a durable money escalation.
+  const pending = Object.values(state.budget.calls ?? {}).filter((c) => c.reservation);
+  if (pending.length) {
+    const b = { ...state.budget, by_task: { ...state.budget.by_task }, by_agent: { ...state.budget.by_agent } };
+    for (const c of pending) {
+      b.spent_usd = Math.max(0, b.spent_usd - c.usd);
+      if (c.task !== undefined) b.by_task[c.task] = Math.max(0, (own(b.by_task, c.task) ?? 0) - c.usd);
+      if (c.agent !== undefined) b.by_agent[c.agent] = Math.max(0, (own(b.by_agent, c.agent) ?? 0) - c.usd);
+    }
+    state = { ...state, budget: b };
+  }
   const c = state.contract;
   if (!c) return [];
   const out: WatchdogAction[] = [];

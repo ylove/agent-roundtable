@@ -5,7 +5,8 @@
 // runs/<attempt>.jsonl since the last poll, feeds them to the driver's parser, and returns drafts:
 //   agent.attested         once, when system/init names the tools and MCP servers (claude-code)
 //   budget.usage_recorded  when the run reports its result (source "worker"; estimated: false
-//                          when the CLI reported a dollar cost, else priced from the pricing table)
+//                          when the CLI reported a dollar cost, else priced from the pricing table;
+//                          provenance: tokens measured, usd measured or estimated the same way)
 // finish() reads what is left and adds agent.exited with its reason; a run that ended without a
 // result line records the per-message usage it had seen, priced from the table (estimated).
 // The caller appends the drafts in store.transact and kills the worker when attestation fails.
@@ -136,7 +137,9 @@ export class RunMonitor {
         drafts.push(this.usageDraft(seen, undefined));
       }
     }
-    if (!this.attestation && this.o.expected !== null) {
+    // A worker a person stopped before its init line is not an attestation failure: it was never allowed to
+    // start. One that did print an init line (even as the last, unterminated line) is judged by it.
+    if (!this.attestation && this.o.expected !== null && (exit.reason !== "stopped" || this.acc.tools !== undefined)) {
       const a = this.attestation = attest(this.acc, this.o.expected ?? WORKER_ATTESTATION);
       drafts.push({ type: "agent.attested", source: this.source, payload: { agent: this.o.agent, tools: capPathList(a.tools, 3000), mcp_servers: capPathList(a.mcp_servers, 1000), ok: a.ok } });
     }
@@ -172,6 +175,8 @@ export class RunMonitor {
       tokens,
       usd: costUsd ?? estimateUsd(model, tokens).usd,
       estimated: costUsd === undefined,
+      // The CLI counted the tokens; the dollars are its own cost when it reported one, else ours.
+      provenance: { tokens: "measured", usd: costUsd === undefined ? "estimated" : "measured" },
     };
     if (this.o.provider) payload.provider = this.o.provider;
     return { type: "budget.usage_recorded", source: this.source, payload };

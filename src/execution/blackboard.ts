@@ -25,15 +25,19 @@ import {
   CONTRACT_SCHEMA,
   GENESIS_HASH,
   type AgentRecord,
+  type AgentUsage,
   type AnyEvent,
   type BlackboardState,
   type CheckState,
   type Contract,
   type EventEnvelope,
+  type EventPayloads,
   type EventType,
   type TaskRuntime,
   type TaskSpec,
   type TaskState,
+  type UsageProvenance,
+  usageProvenance,
 } from "./types.js";
 
 /**
@@ -46,9 +50,10 @@ import {
  * 6: dissent firings and advisory scores; retained task rejection evidence.
  * 7: source-specific holds, pipeline-safe dissent pauses, amendment generations and delivery records.
  * 8: escalation resolution releases its own hold, including historical retries without an unblock.
- * 9: combine dissent state with postmortem findings, fix transitions and meetings.
+ * 9: WS14 combines dissent state with postmortem findings, fix transitions and meetings.
+ * 10: WS15 per-agent, per-model usage with provenance (budget.by_agent_usage); agent.stop_requested / agent.stopped.
  */
-export const REDUCER_VERSION = 9;
+export const REDUCER_VERSION = 10;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -81,7 +86,7 @@ export function initialState(executionId: string): BlackboardState {
     huddles: {},
     agents: {},
     teams: {},
-    budget: { spent_usd: 0, estimated: false, by_agent: {}, by_task: {}, by_team: {}, thresholds_crossed: [], extensions_usd: 0 },
+    budget: { spent_usd: 0, estimated: false, by_agent: {}, by_agent_usage: {}, by_task: {}, by_team: {}, thresholds_crossed: [], extensions_usd: 0 },
     notes: [],
     inbox: {},
     watchdog: { circuits: {}, deadlocks: [] },
@@ -168,6 +173,39 @@ function put<V>(map: Record<string, V>, key: string, value: V): V {
 
 function addUsd(map: Record<string, number>, key: string, usd: number): void {
   put(map, key, (own(map, key) ?? 0) + usd);
+}
+
+const round9 = (n: number): number => Math.round(n * 1e9) / 1e9;
+
+/** budget.by_agent_usage: the record's tokens and money under its agent (else "[<source>]") and model, by provenance. */
+function recordAgentUsage(s: BlackboardState, ts: string, p: EventPayloads["budget.usage_recorded"], sign = 1): void {
+  const prov = usageProvenance(p);
+  const key = p.agent ?? `[${p.source}]`;
+  const byAgent = (s.budget.by_agent_usage ??= {});
+  const u = own(byAgent, key) ?? put(byAgent, key, { models: {}, last_at: ts });
+  // Seed older version-10 snapshots from their existing aggregate before recording new calls.
+  if (!u.platforms) u.platforms = Object.keys(u.models).length ? { [u.provider ?? "unknown"]: { models: clone(u.models), last_at: u.last_at } } : {};
+  const provider = p.provider ?? u.provider ?? "unknown";
+  const platform = own(u.platforms, provider) ?? put(u.platforms, provider, { models: {}, last_at: ts });
+  if (p.provider !== undefined) u.provider = p.provider;
+  u.last_at = ts;
+  platform.last_at = ts;
+  for (const ledger of [u, platform]) recordModelUsage(ledger, p, prov, sign);
+}
+
+function recordModelUsage(u: AgentUsage, p: EventPayloads["budget.usage_recorded"], prov: UsageProvenance, sign: number): void {
+  const zero = () => ({ measured: 0, reported: 0, estimated: 0 });
+  const m =
+    own(u.models, p.model) ??
+    put(u.models, p.model, { tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, tokens_prov: zero(), usd: zero() });
+  const t = p.tokens;
+  m.tokens.input += sign * t.inputTokens;
+  m.tokens.output += sign * t.outputTokens;
+  m.tokens.cache_read += sign * (t.cacheReadTokens ?? 0);
+  m.tokens.cache_write += sign * (t.cacheWriteTokens ?? 0);
+  m.tokens_prov[prov.tokens] += sign * (t.inputTokens + t.outputTokens + (t.cacheReadTokens ?? 0) + (t.cacheWriteTokens ?? 0));
+  m.usd[prov.usd] = round9(m.usd[prov.usd] + sign * p.usd);
+  if (sign < 0 && Object.values(m.tokens).every((n) => n === 0) && Object.values(m.usd).every((n) => n === 0)) delete u.models[p.model];
 }
 
 const TERMINAL: ReadonlySet<TaskState> = new Set(["accepted", "failed", "cancelled"]);
@@ -441,6 +479,8 @@ const HANDLERS: Handlers = {
     };
     if (p.budget_usd !== undefined) rec.budget_reserved_usd = p.budget_usd;
     else delete rec.budget_reserved_usd;
+    // A re-registration (retry, resume) starts a worker a settled stop no longer applies to; a stop still waiting is kept.
+    if (rec.stop?.state !== "requested") delete rec.stop;
     if (p.team !== undefined) rec.team = p.team;
     put(s.agents, p.agent, rec);
     if (p.team !== undefined) addMember(s, p.team, p.agent);
@@ -471,6 +511,21 @@ const HANDLERS: Handlers = {
     delete rec.pid;
     delete rec.started;
     delete rec.budget_reserved_usd;
+  },
+
+  /** The latest stop request of a live agent; unknown or finished agents are ignored (the requester refuses those). */
+  "agent.stop_requested": (s, e) => {
+    const p = e.payload;
+    const rec = own(s.agents, p.agent);
+    if (!rec || (rec.status !== "running" && rec.status !== "registered")) return;
+    rec.stop = { request: e.id, by: p.by, surface: p.surface, at: e.ts, seq: e.seq, state: "requested", ...(p.reason !== undefined && { reason: p.reason }) };
+  },
+  /** Settles the request it names. */
+  "agent.stopped": (s, { payload: p }) => {
+    const rec = own(s.agents, p.agent);
+    if (!rec?.stop || rec.stop.request !== p.request) return;
+    rec.stop.state = "stopped";
+    if (p.escalation !== undefined) rec.stop.escalation = p.escalation;
   },
 
   // --- tasks and claims (unknown or terminal tasks are refused; see liveTask) ---
@@ -842,14 +897,27 @@ const HANDLERS: Handlers = {
 
   // --- budget --------------------------------------------------------------
   /** Adds usd to the execution total and to the agent, the task, and the team (the agent's, else the task's). */
-  "budget.usage_recorded": (s, { payload: p }) => {
+  "budget.usage_recorded": (s, e, x) => {
+    const p = e.payload;
     const b = s.budget;
+    const prior = p.call_id ? own(b.calls ?? {}, p.call_id) : undefined;
+    if (prior) {
+      if (prior.source !== p.source || prior.agent !== p.agent || prior.task !== p.task || prior.dissent_id !== p.dissent_id) return refuse(x, "Usage settlement must preserve call attribution");
+      b.spent_usd -= prior.usd;
+      recordAgentUsage(s, e.ts, prior, -1);
+      if (prior.agent !== undefined) addUsd(b.by_agent, prior.agent, -prior.usd);
+      if (prior.task !== undefined) addUsd(b.by_task, prior.task, -prior.usd);
+      const team = own(s.agents, prior.agent)?.team ?? own(s.tasks, prior.task)?.spec.team;
+      if (team !== undefined) addUsd(b.by_team, team, -prior.usd);
+    }
+    if (p.call_id) put(b.calls ??= {}, p.call_id, { ...clone(p), at: e.ts });
     b.spent_usd += p.usd;
     if (p.source === "worker" && p.agent !== undefined) {
       const agent = own(s.agents, p.agent);
       if (agent) delete agent.budget_reserved_usd;
     }
-    if (p.estimated) b.estimated = true;
+    recordAgentUsage(s, e.ts, p);
+    b.estimated = Object.values(b.by_agent_usage).some((u) => Object.values(u.models).some((m) => m.usd.estimated > 0));
     if (p.agent !== undefined) addUsd(b.by_agent, p.agent, p.usd);
     if (p.task !== undefined) addUsd(b.by_task, p.task, p.usd);
     const team = own(s.agents, p.agent)?.team ?? own(s.tasks, p.task)?.spec.team;

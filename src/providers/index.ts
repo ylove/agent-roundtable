@@ -15,11 +15,20 @@ import { callAnthropic } from "./anthropic.js";
 import { callOpenAI, callTogether, callOpenAICompatible } from "./openai-compatible.js";
 import { callReplicate } from "./replicate.js";
 import { callOllama, isOllamaAvailable } from "./ollama.js";
-import { reportUsage } from "./usage.js";
+import { activeAbortSignal, reportUsage, StoppedError } from "./usage.js";
 
 export type { LLMMessage, LLMCompletionResult, ProviderCall, ProviderCallOptions } from "./shared.js";
 export { isOllamaAvailable };
-export { withUsageSink, reportUsage, type UsageReport, type UsageSink } from "./usage.js";
+export {
+  withUsageSink,
+  reportUsage,
+  activeUsageSink,
+  withAbortSignal,
+  activeAbortSignal,
+  StoppedError,
+  type UsageReport,
+  type UsageSink,
+} from "./usage.js";
 
 export const PROVIDERS: Record<LLMProvider, ProviderCall> = {
   anthropic: callAnthropic,
@@ -37,6 +46,8 @@ export interface ChatCompletionOptions {
   temperature?: number;
   /** Only with provider "openai_compatible": overrides OPENAI_COMPATIBLE_BASE_URL. */
   baseUrl?: string;
+  /** Postmortems retain a text-length estimate for a dispatched call that fails without usage. */
+  estimateUsageOnFailure?: boolean;
 }
 
 export async function chatCompletion(
@@ -62,18 +73,32 @@ export async function chatCompletion(
       ? resolveAnthropicModel(options.model || DEFAULT_MODELS.anthropic)
       : options.model || DEFAULT_MODELS[provider];
 
+  const stop = activeAbortSignal();
+  let dispatched = false;
   try {
+    stop?.throwIfAborted();
+    const timeout = AbortSignal.timeout(LLM_TIMEOUT_MS);
+    dispatched = true;
     const result = await call(messages, {
       model,
       maxTokens: options.maxTokens || MAX_TOKENS,
       temperature: options.temperature,
-      signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+      signal: stop ? AbortSignal.any([timeout, stop]) : timeout,
       ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
     });
     // Every completion (engines via callLLM, and the chat_completion tool) reaches the active usage sink.
-    reportUsage({ provider: result.provider, model: result.model, ...(result.usage && { usage: result.usage }) });
+    reportUsage({
+      provider: result.provider,
+      model: result.model,
+      ...(result.usage && { usage: result.usage }),
+      chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: result.content.length },
+    });
     return result;
   } catch (error) {
+    if (dispatched && options.estimateUsageOnFailure) {
+      reportUsage({ provider, model, chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });
+    }
+    if (stop?.aborted) throw new StoppedError();
     if (
       error instanceof Error &&
       (error.name === "TimeoutError" || error.name === "AbortError")
@@ -91,6 +116,7 @@ export interface CallLLMOptions {
   model: string;
   maxTokens?: number;
   baseUrl?: string;
+  estimateUsageOnFailure?: boolean;
 }
 
 /**
@@ -100,7 +126,7 @@ export interface CallLLMOptions {
 export async function callLLMDetailed(
   systemPrompt: string,
   messages: Array<{ role: "user" | "assistant"; content: string }>,
-  { provider, model, maxTokens = MAX_TOKENS, baseUrl }: CallLLMOptions
+  { provider, model, maxTokens = MAX_TOKENS, baseUrl, estimateUsageOnFailure }: CallLLMOptions
 ): Promise<LLMCompletionResult> {
   const llmMessages: LLMMessage[] = [
     { role: "system", content: systemPrompt },
@@ -115,6 +141,7 @@ export async function callLLMDetailed(
     model,
     maxTokens,
     baseUrl,
+    estimateUsageOnFailure,
   });
   return result;
 }

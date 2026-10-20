@@ -9,8 +9,10 @@
 //
 // A tick (every 1–2 s):
 //   1. catch up on the log (and rewrite leases.json for every lease the new events changed);
-//   2. poll each live worker's RunMonitor and append its drafts (agent.attested,
-//      budget.usage_recorded, agent.exited); a failed attestation kills the worker and escalates;
+//   2. stop the workers a person asked to stop (agent.stop_requested), then poll each live worker's
+//      RunMonitor and append its drafts (agent.attested, budget.usage_recorded, agent.exited); a
+//      failed attestation kills the worker and escalates; a stopped worker's exit is settled with
+//      agent.stopped and an escalation to the orchestrator (usage-visibility.md §6);
 //   3. evaluate the watchdog inside transact, append its drafts, then perform its process
 //      operations after the commit (every one idempotent; standing ones repeat each pass);
 //   4. hand new open escalations to the escalation router (a WS10 hook);
@@ -44,6 +46,7 @@ import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
 import { classifyFailure } from "./circuit.js";
 import { createRunnerHooks } from "./escalation.js";
+import { stopMicroHuddles } from "./huddle.js";
 import { integrationBranch, SubmodulesUnsupportedError } from "./git.js";
 import { acknowledgeHandoff, takeHandoffs } from "./handoff.js";
 import { decideLeaseRequest, leaseDrafts, leasesFor } from "./leases.js";
@@ -58,7 +61,7 @@ import {
   writeRunnerInfo,
   type RunnerInfo,
 } from "./runner-launch.js";
-import { runnerEscalation, withDefaults, type ProcessOp, type RunnerContext, type RunnerEscalationSpec, type RunnerHooks } from "./runner-hooks.js";
+import { runnerEscalation, runnerEscalationId, withDefaults, type ProcessOp, type RunnerContext, type RunnerEscalationSpec, type RunnerHooks } from "./runner-hooks.js";
 import { executionDir, openExecutionStore, type FileExecutionStore } from "./store.js";
 import { buildTaskCard, interruptedContext, respawnContext, type Immediate, type TaskCardOptions } from "./task-card.js";
 import type {
@@ -323,6 +326,8 @@ export class Runner {
   readonly abort = new AbortController();
   /** Non-standing process operations already performed by this process. */
   private readonly opsDone = new Set<string>();
+  /** Stop requests (agent.stop_requested event ids) this process has applied. */
+  private readonly stopApplied = new Set<string>();
   private readonly routed = new Set<string>();
   private readonly leadInFlight = new Set<string>();
   /** The hooks' escalation pass: one at a time, when the log moved or every PASS_MS. */
@@ -631,7 +636,9 @@ export class Runner {
       await this.reconcile();
     }
     await this.stopSuperseded();
+    await this.applyStops();
     await this.pollWorkers();
+    await this.settleStops();
     state = await this.store.state();
     for (const claim of Object.values(state.claims)) {
       if (!taskHeld(state, claim.task) && ["submitted", "checking"].includes(state.tasks[claim.task]?.state) &&
@@ -684,6 +691,87 @@ export class Runner {
         await this.killWorker(t.agent, "killed", "its task claim or attempt was superseded");
       }
     }
+  }
+
+  /**
+   * Stop the workers a person asked to stop (agent.stop_requested), before anything is scheduled: the
+   * same stop as a superseded worker's. The next poll records the exit with reason "stopped".
+   */
+  private async applyStops(): Promise<void> {
+    const state = await this.store.state();
+    for (const rec of Object.values(state.agents)) {
+      const stop = rec.stop;
+      if (stop) await stopMicroHuddles(this.store, rec.id, this.source);
+      // A worker with a kill, resume or spawn in flight is tried again next tick.
+      if (stop?.state !== "requested" || rec.status !== "running" || rec.external || this.stopApplied.has(stop.request) || this.busy.has(rec.id)) continue;
+      this.stopApplied.add(stop.request);
+      this.say(`stopping ${rec.id} (asked by ${stop.by}, from the ${stop.surface})`);
+      await this.killWorker(rec.id, "stopped", `stopped by ${stop.by}`);
+    }
+  }
+
+  /**
+   * A stopped worker has exited: record agent.stopped and, when it held a task, raise a blocking
+   * escalation to the orchestrator and block the task (never retried automatically; its WIP branch and
+   * worktree are kept). The orchestrator's watcher wakes with the choices: rework around the stopped
+   * agent with resolve_escalation, or write a handoff with control_execution.
+   */
+  private async settleStops(): Promise<void> {
+    let state = await this.store.state();
+    if (!Object.values(state.agents).some((a) => a.stop?.state === "requested" && a.status === "exited")) return;
+    await this.refreshLog();
+    state = await this.store.state();
+    for (const rec of Object.values(state.agents)) {
+      const stop = rec.stop;
+      if (stop?.state !== "requested" || rec.status !== "exited" || this.busy.has(rec.id)) continue;
+      // Any exit after the request settles it, whatever its reason (stopped, or lost with a runner that died
+      // mid-stop): the log alone says so, so a restarted runner finishes what an earlier one began.
+      const exit = [...this.log].reverse().find((e) => e.type === "agent.exited" && e.payload.agent === rec.id);
+      if (exit?.type !== "agent.exited" || exit.seq < stop.seq) continue;
+      const task = exit.payload.task ?? rec.task;
+      const key = `agent_stopped:${stop.request}`;
+      await this.store.transact(({ state: s }) => {
+        const cur = own(s.agents, rec.id);
+        if (cur?.stop?.request !== stop.request || cur.stop.state !== "requested") return { events: [] };
+        const taskState = task !== undefined ? own(s.tasks, task)?.state : undefined;
+        const working = taskState === "claimed" || taskState === "in_progress" || taskState === "blocked";
+        const held = taskState !== undefined && !["accepted", "failed", "cancelled"].includes(taskState);
+        const escalation = held
+          ? runnerEscalation(
+              s,
+              {
+                key,
+                task,
+                kind: "blocker",
+                summary: `${rec.id} was stopped by ${stop.by}.`,
+                question: `Rework around ${rec.id}, or write a handoff?`,
+                options: [
+                  "Rework around the stopped agent with resolve_escalation (reassign, retry, amend or decide)",
+                  'Write a handoff with control_execution(action: "handoff")',
+                ],
+                block: working,
+              },
+              this.source
+            )
+          : [];
+        return {
+          events: [
+            {
+              type: "agent.stopped",
+              source: this.source,
+              payload: { agent: rec.id, ...(task !== undefined && { task }), request: stop.request, ...(escalation.length && { escalation: runnerEscalationId(key) }) },
+            },
+            ...escalation,
+          ],
+        };
+      });
+      this.say(`${rec.id} stopped by ${stop.by}${task ? `; task ${task} waits for the orchestrator` : ""}`);
+    }
+  }
+
+  /** Run the next tick now (a request arrived: the dashboard wakes the runner it lives in). */
+  wakeNow(): void {
+    this.wake?.();
   }
 
   private async finish(state: BlackboardState): Promise<void> {
@@ -1218,6 +1306,8 @@ export class Runner {
     const rt = own(s.tasks, task);
     if (!rt) return `unknown task ${task}`;
     if (own(s.agents, agent)?.external) return `${agent} is an external agent`;
+    // A person asked for this agent to stop: whatever lost or resumed it must not undo that. The stop settles first.
+    if (own(s.agents, agent)?.stop?.state === "requested") return `a stop for ${agent} is waiting`;
     if (this.hasLiveWorker(task)) return `a worker already runs on ${task}`;
     const active = Object.values(s.tasks).filter((t) => t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id))).length;
     if (active >= (s.contract?.budget.max_parallel ?? 1)) return "max_parallel workers already run";
@@ -1637,7 +1727,8 @@ export class Runner {
         task, reasons: ["Submission checks were interrupted by process loss; submit again to rerun checks of the committed work."],
       } });
     }
-    this.say(`${agent} on ${task} is gone${wipCommit ? ` (WIP saved as ${wipCommit.slice(0, 12)})` : ""}; resuming it`);
+    const stopWaiting = own(state.agents, agent)?.stop?.state === "requested";
+    this.say(`${agent} on ${task} is gone${wipCommit ? ` (WIP saved as ${wipCommit.slice(0, 12)})` : ""}; ${stopWaiting ? "a stop for it is waiting, so it is not resumed" : "resuming it"}`);
     const why = wasRunning
       ? "The runner restarted and your worker process was gone. Your session is resumed."
       : "The runner restarted before your worker was started.";
@@ -1691,7 +1782,7 @@ export class Runner {
     const v = this.visibility();
     if (v?.dashboard) {
       try {
-        this.dashboard = await startDashboard(this.execution, { store: this.store });
+        this.dashboard = await startDashboard(this.execution, { store: this.store, onStopRequested: () => this.wakeNow() });
         this.say("dashboard started (its URL is in dashboard.json)");
       } catch (e) {
         this.say(`dashboard: ${errText(e)}`);

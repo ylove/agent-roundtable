@@ -483,8 +483,8 @@ test("checks and task.checks_passed bound to an older submission change nothing"
   assert.equal(apply(rejected, ev("task.checks_passed", { task: "a", commands: ["test"] })).tasks.a.state, "merging", "an unbound one is unchanged");
 });
 
-test("v9 dissent reducer retains first firing per task and latest advisory score across amendments and replay", async () => {
-  assert.equal(REDUCER_VERSION, 9);
+test("v10 dissent reducer retains first firing per task and latest advisory score across amendments and replay", async () => {
+  assert.equal(REDUCER_VERSION, 10);
   const { readFileSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");
@@ -505,7 +505,7 @@ test("v9 dissent reducer retains first firing per task and latest advisory score
   await emit("dissent.scored", { dissent_id: "risk", outcome: "vindicated" });
   await store.writeSnapshot();
   const snapshot = join(store.dir, "snapshot.json");
-  assert.equal(JSON.parse(readFileSync(snapshot, "utf8")).reducer_version, 9);
+  assert.equal(JSON.parse(readFileSync(snapshot, "utf8")).reducer_version, 10);
   await emit("dissent.scored", { dissent_id: "risk", outcome: "untested" });
   const amended = { ...contract, version: 2, dissents: [{ ...spec, claim: "Refined concern" }] };
   await emit("contract.amended", { contract: CONTRACT_ID, version: 2, patch_blob: "patch", reason: "refine", affected_tasks: [], blob: await store.putBlob(JSON.stringify(amended)) });
@@ -530,7 +530,7 @@ test("v9 dissent reducer retains first firing per task and latest advisory score
 
 for (const action of ["retry", "reassign"]) {
   for (const otherHold of [false, true]) {
-    test(`v8 replays historical ${action} without task.unblocked (${otherHold ? "another hold remains" : "replacement can start"})`, async () => {
+    test(`v10 replays historical ${action} without task.unblocked (${otherHold ? "another hold remains" : "replacement can start"})`, async () => {
       const { blockingIds, taskHeld } = await import("../../dist/execution/task-holds.js");
       const { readFileSync, writeFileSync } = await import("node:fs");
       const { join } = await import("node:path");

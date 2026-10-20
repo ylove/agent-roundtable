@@ -157,6 +157,8 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `agent.attested` | tools, mcp_servers, ok |
 | `agent.exited` | code, reason, result_subtype, usage, paused (the pause it stopped for: not counted against max_attempts) |
 | `agent.left` | reason |
+| `agent.stop_requested` | agent, by, surface (dashboard / cli / tool), reason? (WS15; see [usage-visibility.md](usage-visibility.md) §6) |
+| `agent.stopped` | agent, task?, request (the stop request's event id), escalation? (WS15) |
 | `task.ready` | task |
 | `task.claimed` | task, agent, attempt, ttl_s |
 | `task.released` | task, note |
@@ -202,7 +204,7 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `huddle.started` | id, escalation, format, seats |
 | `huddle.turn` | id, seat, blob |
 | `huddle.concluded` | id, outcome, decision? |
-| `budget.usage_recorded` | agent?, task?, source: worker / huddle / consent / lead, model, tokens, usd, estimated |
+| `budget.usage_recorded` | agent?, task?, source: worker / huddle / consent / lead, provider?, model, tokens, usd, estimated, provenance? ({tokens, usd}, each measured / reported / estimated; WS15) |
 | `budget.threshold_crossed` | pct, spent_usd, budget_usd (the total, extensions included, that pct refers to) |
 | `budget.exhausted` | scope: execution / task / agent, ref? |
 | `budget.extended` | by, usd |
@@ -252,7 +254,7 @@ The human's chat is never stored on the blackboard.
 - `task.split` records `splits[task] = parts`. Whenever a contract version is adopted, dependencies on a split task are rewritten to its parts, recursively.
 - Task and command ids match `^[a-z0-9][a-z0-9._-]{0,63}$` in payloads and contracts, so the `/` in a check key is unambiguous.
 - `contract.amended` marks the contract `frozen` and keeps the earlier freeze record unless the blob carries one.
-- Snapshots record `REDUCER_VERSION` (now 9) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
+- Snapshots record `REDUCER_VERSION` (now 10) and a sha256 of the canonical state. Bump the version whenever `apply` would produce a different state from an existing log. A snapshot with another version, or whose state does not match its digest, is ignored, and the log is replayed.
 
 ## 7. Contract
 
@@ -668,9 +670,13 @@ It warns when the main worktree is dirty. Otherwise it returns `{execution_id, r
 - `pause` and `resume`, for the whole run or for specific tasks;
 - `steer`, which issues a directive;
 - `abort`, which kills the process groups but keeps the worktrees and the log;
-- `purge`, which works on terminal runs only and needs `confirm: true`.
+- `purge`, which works on terminal runs only and needs `confirm: true`;
+- `stop_agent` (WS15), which records `agent.stop_requested` for each of `targets` (live runner-managed workers; an external worker is told to stop with `steer` instead);
+- `handoff` (WS15), which pauses a live run and writes `executions/<exe>/HANDOFF.md` from the blackboard only.
 
 Details:
+- `stop_agent` and the dashboard's stop share one path ([usage-visibility.md](usage-visibility.md) §6): the runner stops the worker on its next tick, before scheduling; its `agent.exited` carries `reason: "stopped"`; the runner then records `agent.stopped` and, for an agent that held a task, raises a blocking `blocker` escalation to the orchestrator (and `task.blocked`). The task is not retried, and its WIP branch and worktree are kept. The watcher wakes with `reason: "agent_stopped"` and two choices: rework around the stopped agent with `resolve_escalation`, or write a handoff.
+- `handoff` holds the contract summary, the goal, every task with its state, owner, branch and last progress note, the stopped agents and why, the open escalations, the budget with its provenance split and the exact commands to resume. It never holds the confirmation, the original prompt, a diff or command output, and every string is scrubbed.
 - `steer` records `execution.steered` and a `directive.issued` with `requires_ack`. Its targets may be agents, teams, or tasks (meaning the agent working on each task); without targets it goes to every registered agent.
 - `abort` emits `execution.aborted`, then stops the process groups of the live non-external workers itself (`stopGroup`), in case the runner is gone. It audits the abort.
 - `purge` is run-admin's `purgeExecution`, audited under the orchestrator's name.
@@ -690,12 +696,21 @@ Details:
 - binds to 127.0.0.1 on a random port;
 - requires a capability token (`randomBytes(18)`, base64url) as the first path segment of every route. It is compared with `timingSafeEqual` on sha256 digests, so neither its length nor a near miss shows: any request without it is the same plain 404. The token is never logged;
 - checks the Host header and answers 421 when it does not match;
-- serves only GET and HEAD (405 otherwise), and refuses CONNECT, upgrades and proxy requests (unless it is a deny-all proxy, as the board is for the screenshot browser);
+- serves only GET and HEAD (405 otherwise) unless a route names its own methods. A method no route allows is refused before anything else; a method some route allows still needs the token (404 without it) and a route that allows it (405 with that route's `Allow`). The one route that names a method is the dashboard's stop route below. CONNECT, upgrades and proxy requests are always refused (unless it is a deny-all proxy, as the board is for the screenshot browser, and then only for reading);
 - sends `nosniff`, `no-store`, `no-referrer`, same-origin CORP and COOP, `X-Frame-Options: DENY`, a Permissions-Policy denying camera, microphone, geolocation and similar features, and a CSP on every response (`default-src 'none'` unless the route sets its own).
 
 `startDashboard(executionId, {store?})` returns `{url, close()}` and writes `dashboard.json {url, pid, host, started_at}` while it runs. Pages: overview (goal, status, completion with the §13 weights, budget, runner heartbeat from `runner.json`, open escalations, the DAG, recent notes), tasks, task detail (acceptance, checks with signatures and redacted failing output, the latest diff from its blob, recent events), escalations, events (newest first, paged, filtered by type, group or task through plain links), contract (markdown generated from the frozen contract, plus `contracts/<ctr>/CONTRACT.md` when present, through a converter that escapes everything, passes no raw HTML and builds no links), and a server-rendered SVG of the task DAG (layered layout, colored by state; also at `dag.svg`). Every string from the run is redacted (secrets and personal data) and escaped. A banner on every page names the escalations awaiting a human.
 
-Updates arrive over SSE (`<token>/stream?since=<seq>` sends `rev {seq}` when the log grows), with polling of `state.json`, a redacted subset of the blackboard without diffs, outputs or blobs, as a fallback. The dashboard is read-only: it has no mutating route, so CSRF does not apply; steering stays in the orchestrator's tools.
+Updates arrive over SSE (`<token>/stream?since=<seq>` sends `rev {seq}` when the log grows), with polling of `state.json`, a redacted subset of the blackboard without diffs, outputs or blobs, as a fallback. Steering, pausing and resolving stay in the orchestrator's tools. The dashboard has exactly one mutating route (WS15), and the **Usage** page (`<token>/usage`) is where it lives: one card per agent with its tokens and money by provenance (measured, reported, estimated), a by-platform table and a **Stop** button on every stoppable card.
+
+**The stop route** is `POST <token>/agents/<agent>/stop`, and nothing else on the dashboard accepts a mutating method. Because the page that holds the button is served from the dashboard's own origin, the route is protected as a CSRF target and every check must pass, in this order:
+1. `Origin`, when present, must be the dashboard's own origin (`http://127.0.0.1:<port>`, or `localhost` for the same port, the two Host values the server answers on), and `Sec-Fetch-Site`, when present, must be `same-origin`;
+2. the request must carry `X-Roundtable-Action: <nonce>`. The nonce is a second `randomBytes(18)` value (base64url) generated per dashboard start and delivered only inside the Usage page, as a `<meta name="roundtable-action">` element; no other page, `state.json` or static file carries it. It is compared with `timingSafeEqual` on sha256 digests. A custom header forces a CORS preflight, which the server never approves (it answers no `OPTIONS` and sends no `Access-Control-*` header), so no other origin can send it. Neither the token nor the nonce is ever logged;
+3. the request has no body: `Content-Length` must be exactly `0` and any `Transfer-Encoding` is refused;
+4. at most 10 accepted stop requests a minute per dashboard (429 with `Retry-After`); a request refused by a check above never counts;
+5. the agent id must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and name an agent registered in the run (404 otherwise). The run's rules then apply (`stopRefusal`: an external worker, an agent with no live process and a finished run are refused with a plain 409).
+
+A request that passes records `agent.stop_requested {agent, by: "the human (dashboard)", surface: "dashboard"}` through `store.transact`, writes an audit entry (`agent.stop_requested` with surface, agent, scope and `by`), wakes the runner's tick and answers a small JSON status. `form-action 'none'` stays in the CSP: the button uses `fetch` from the static script (`connect-src 'self'`), and the confirm step is a native `<dialog>` with Cancel focused by default.
 
 The dashboard's CSP is `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`. Its stylesheet and script are TypeScript string constants served under `<token>/static/`, and no page has an inline script, style or event handler.
 
@@ -716,7 +731,7 @@ The prototype board's own scripts and stylesheet move to static routes too, so `
 
 ## 15. Tool surface
 
-There are 15 new tools, which brings the orchestrator server to 37 and leaves the worker server with 7. Every new tool has `additionalProperties: false` and MCP annotations.
+There are 15 new tools, which brings the orchestrator server to 37 and leaves the worker server with 7. Every new tool has `additionalProperties: false` and MCP annotations. WS15 adds a sixteenth, `usage` (who is using what, stop an agent, write a handoff), which brings the orchestrator server to 38; `control_execution` gains the actions `stop_agent` and `handoff`, and `post_update` the kind `usage` for external workers.
 
 | Group | Tool | Arguments |
 |---|---|---|
@@ -725,13 +740,14 @@ There are 15 new tools, which brings the orchestrator server to 37 and leaves th
 | | `freeze_contract` | contract_id\*, orchestrator\*, excuse[{agent, reason}], abandon_round |
 | Run | `execute` | contract_id\*, confirmation\*, visibility{dashboard, chat_only, github{repo, project_owner, project_number, create_project, pr}}, budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model |
 | | `execution_status` | execution_id, focus, view, since_seq, limit |
-| | `control_execution` | execution_id\*, action\*, reason, message, task_ids[], targets[], confirm, to_table, session |
+| | `control_execution` | execution_id\*, action\* (pause, resume, steer, abort, purge, stop_agent, handoff), reason, message, task_ids[], targets[], confirm, to_table, session |
+| | `usage` | action (report, stop, handoff), execution_id, session_id, agent, reason |
 | | `resolve_escalation` | execution_id\*, escalation_id\*, action\*, decision, format, participants[], amendment{}, resolved_by, provider, model, base_url |
 | | `join_execution` | execution_id\*, agent\*, team, task_id (orchestrator server only) |
 | Worker | `read_blackboard` | section, query, task_id, ref, since_seq, limit |
 | | `claim_task` | task_id, release, note |
 | | `lease` | action\*, paths[]\*, mode, reason |
-| | `post_update` | kind\*, text\*, percent, topic, name, owner, path, refs[], directive_id |
+| | `post_update` | kind\* (progress, note, interface, need, ack, usage), text (required except for usage), percent, topic, name, owner, path, refs[], directive_id, tokens{input, output, cache_read, cache_write}, usd, model |
 | | `run_command` | command_id or argv[], timeout_s |
 | | `submit_work` | summary\*, ready\* |
 | | `escalate` | kind\*, with\*, summary\*, target, question, options[], diagnostics{}, blocking, emergency |

@@ -12,11 +12,13 @@ import { agentKey, isPathLikeRef, loadAgent } from "../agents.js";
 import type { LLMProvider } from "../config.js";
 import { orchestratorSource } from "../execution/contract-state.js";
 import { scoreDissent, validateDissentScore } from "../execution/dissent-scoring.js";
-import { UsageMeter } from "../execution/escalation.js";
 import { postmortemBlockers } from "../execution/postmortem-state.js";
 import type { AnyEventDraft, BlackboardState, PostmortemArtifactKind, PostmortemFinding, PostmortemFormat } from "../execution/types.js";
 import { appendAudit } from "../security/audit.js";
 import { scrub } from "../security/secrets.js";
+import { newId } from "../ids.js";
+import { withUsageSink } from "../providers/usage.js";
+import { lineFor } from "../usage/session-scope.js";
 import { collaborations, continueCollaboration, endCollaboration, startCollaboration, ORCHESTRATOR } from "../sessions/collaborations.js";
 import { applyMemory, applyPersonaAddendum, artifactCounts, parseArtifactBlock } from "./artifacts.js";
 import { buildPostmortemContext, withholdHumanWords } from "./context.js";
@@ -173,11 +175,13 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
     : `Postmortem of ${scopeLabel(i.scope)}: why each finding happened and what prevents it next time`;
 
   // The meeting: the engine, in-process, nothing public, no human seat.
-  const meter = new UsageMeter("huddle");
+  const usage: AnyEventDraft[] = [];
+  const source = orchestratorSource(state?.contract?.scope.orchestrator ?? "orchestrator");
   let session = "";
   const transcript: Turn[] = [];
+  let meetingFailed = false;
   try {
-    await meter.run(async () => {
+    const meeting = async () => {
       const llm = { ...(i.llm.provider && { provider: i.llm.provider }), ...(i.llm.model && { model: i.llm.model }), ...(i.llm.baseUrl && { baseUrl: i.llm.baseUrl }) };
       const started = await startCollaboration(seats.refs, topic, {
         ...llm, context, mode: seats.format, maxRounds: rounds, public: false, prototype: false, grounding: false,
@@ -193,9 +197,30 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
       } finally {
         if (collaborations.has(session)) await endCollaboration(session, false).catch(() => undefined);
       }
-    });
+    };
+    // The run owns these calls; standalone meetings keep using the table ledger.
+    await (store ? withUsageSink((report) => {
+      if (!report.agent) throw new Error("Postmortem usage has no speaking persona");
+      const line = lineFor({ session: session || view.pm, kind: "postmortem", agent: report.agent }, report, "");
+      const tokens = line.tokens!;
+      usage.push({ type: "budget.usage_recorded", source, correlation: view.pm, payload: {
+        source: "postmortem", call_id: newId("call"), agent: line.agent, provider: report.provider, model: report.model,
+        tokens: { inputTokens: tokens.input, outputTokens: tokens.output, cacheReadTokens: tokens.cache_read, cacheWriteTokens: tokens.cache_write },
+        usd: report.usd ?? line.usd ?? 0, estimated: report.usd === undefined,
+        provenance: { tokens: line.tokens_prov!, usd: report.usd === undefined ? "estimated" : "measured" },
+      } });
+    }, meeting) : meeting());
   } catch (e) {
+    meetingFailed = true;
     throw new Error(`the postmortem meeting for ${scopeLabel(i.scope)} stopped: ${errText(e)}. The draft is unchanged; hold it again when the provider is back.`);
+  } finally {
+    // Flush before publication too: failed turns and a failed/overlapping hold still cost money.
+    try {
+      if (store && usage.length) await store.transact(() => ({ events: usage }));
+    } catch (e) {
+      if (!meetingFailed) throw e;
+      console.error(`[Postmortem] usage flush failed: ${scrub(errText(e))}`);
+    }
   }
   if (!transcript.length) throw new Error("the postmortem meeting produced no turns; the draft is unchanged");
 
@@ -220,11 +245,9 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
     saveRecord(rec, renderRecord(rec));
     removeDraft(i.project.key, view.pm);
     if (store) {
-      const source = orchestratorSource(state?.contract?.scope.orchestrator ?? "orchestrator");
       await store.transact(() => ({
         events: [
           { type: "postmortem.started", source, payload: { id: view.pm, format: seats.format, seats: rec.seats } } as AnyEventDraft,
-          ...meter.take(source, view.pm),
         ],
       }));
     }

@@ -42,6 +42,7 @@ test("poll: attestation once at init, usage at the result, partial lines wait fo
   assert.deepEqual(p3.drafts[0].payload, {
     source: "worker", agent: "builder-1", task: "api", model: "claude-sonnet-5", provider: "claude-code",
     tokens: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 1000 }, usd: 0.25, estimated: false,
+    provenance: { tokens: "measured", usd: "measured" },
   });
   for (const d of [...p1.drafts, ...p3.drafts]) validateDraft(d);
   const exit = m.finish({ code: 0, signal: null });
@@ -78,6 +79,7 @@ test("exit reasons: budget, killed, error; a run killed before its result record
   assert.deepEqual(drafts.map((d) => d.type), ["agent.attested", "budget.usage_recorded", "agent.exited"]);
   const usage = drafts[1].payload;
   assert.equal(usage.estimated, true, "no cost was reported");
+  assert.deepEqual(usage.provenance, { tokens: "measured", usd: "estimated" }, "the tokens were counted, the dollars are ours");
   assert.deepEqual(usage.tokens, { inputTokens: 6, outputTokens: 9, cacheReadTokens: 0, cacheWriteTokens: 0 });
   assert.ok(usage.usd > 0, "priced from the pricing table");
   assert.equal(drafts[2].payload.reason, "killed");
@@ -216,4 +218,23 @@ test("a worker that exits without init fails attestation, including an untermina
   writeFileSync(path, init(["Bash"]));
   const bad = monitor(path).finish({ code: 1 });
   assert.equal(bad.find((d) => d.type === "agent.attested").payload.ok, false);
+});
+
+test("a stopped worker is no attestation failure, unless it printed an init line (even an unterminated last one)", () => {
+  const silent = file();
+  writeFileSync(silent, "");
+  const quiet = monitor(silent).finish({ code: null, signal: "SIGTERM", reason: "stopped" });
+  assert.ok(!quiet.some((d) => d.type === "agent.attested"), "never started: nothing to judge");
+  assert.equal(quiet.at(-1).payload.reason, "stopped");
+
+  const bad = file();
+  writeFileSync(bad, init(["Read", "Bash", "Edit"])); // a bad init as the final line, with no newline
+  const judged = monitor(bad).finish({ code: null, signal: "SIGTERM", reason: "stopped" });
+  const attested = judged.find((d) => d.type === "agent.attested");
+  assert.equal(attested.payload.ok, false, "a bad init line is judged even when the worker was stopped");
+  assert.equal(judged.at(-1).payload.reason, "stopped");
+
+  const unstopped = file();
+  writeFileSync(unstopped, "");
+  assert.equal(monitor(unstopped).finish({ code: 1 }).find((d) => d.type === "agent.attested").payload.ok, false, "any other exit without init still fails");
 });

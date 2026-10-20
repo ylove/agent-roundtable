@@ -171,6 +171,27 @@ function workerState({ attempt = 1, status = "running" } = {}) {
   return s;
 }
 
+test("pending human Stop leaves dissent-held workers to the runner; the hold still stops workers once settled", () => {
+  for (const pipeline of ["blocked", "submitted", "checking", "merging"]) {
+    const w = new World(workerState());
+    w.emit("escalation.raised", { escalation: {
+      id: "esc-risk", task: "t", agent: "critic", kind: "assistance", with: "agent",
+      summary: "Dissent tripped", blocking: true, dissent_id: "risk", status: "open", raised_seq: 0,
+    } });
+    w.emit("task.blocked", { task: "t", escalation: "esc-risk" });
+    w.state.tasks.t.state = pipeline;
+    w.state.agents["w-t"].stop = {
+      request: "evt-stop", by: "human", surface: "cli", at: new Date(T0).toISOString(), seq: 5, state: "requested",
+    };
+    const workerActions = () => evaluate(w.state, T0, { agents: { "w-t": { alive: true } } })
+      .filter((a) => ["blocked_worker", "worker_dead", "worker_stall"].includes(a.rule));
+    assert.deepEqual(workerActions(), [], `${pipeline}: the runner settles the human's pending Stop`);
+    w.state.agents["w-t"].stop.state = "stopped";
+    assert.deepEqual(workerActions().map((a) => [a.type, a.rule, a.agent]),
+      [["kill_worker", "blocked_worker", "w-t"]], `${pipeline}: the critic's hold still applies`);
+  }
+});
+
 const deadCases = [
   {
     name: "an exited worker is retried with attempt+1",
@@ -213,6 +234,28 @@ const deadCases = [
     obs: {},
     events: [],
     ops: [],
+  },
+  {
+    name: "an exited worker whose stop is waiting in the log is left to the runner, which settles it",
+    state: () => {
+      const s = workerState({ status: "exited" });
+      s.agents["w-t"].stop = { request: "evt-1", by: "the human (cli)", surface: "cli", at: new Date(T0 - 10 * MIN).toISOString(), seq: 5, state: "requested" };
+      return s;
+    },
+    obs: {},
+    events: [],
+    ops: [],
+  },
+  {
+    name: "a settled stop no longer holds the retry back",
+    state: () => {
+      const s = workerState({ status: "exited" });
+      s.agents["w-t"].stop = { request: "evt-1", by: "the human (cli)", surface: "cli", at: new Date(T0 - 10 * MIN).toISOString(), seq: 5, state: "stopped" };
+      return s;
+    },
+    obs: {},
+    events: ["task.retried"],
+    ops: [["spawn_retry", { task: "t", attempt: 2 }]],
   },
   {
     name: "a task at its budget cap is not respawned",

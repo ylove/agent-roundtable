@@ -4,7 +4,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import { startDashboard, DASHBOARD_CSP, capAtLine } from "../../dist/dashboard/server.js";
-import { completion, markdownToHtml, renderDissents, taskWeight } from "../../dist/dashboard/render.js";
+import { completion, markdownToHtml, renderDissents, renderPostmortems, taskWeight } from "../../dist/dashboard/render.js";
+import { renderUsage } from "../../dist/dashboard/usage-page.js";
+import { collectUsage } from "../../dist/usage/model.js";
 import { renderDagSvg, layers } from "../../dist/dashboard/dag-svg.js";
 import { COMMON_HEADERS, SecureServer } from "../../dist/http/secure-server.js";
 import { emit, frozenRun, makeContract, src, taskSpec } from "../fixtures/execution/run.mjs";
@@ -77,7 +79,7 @@ async function hostileRun() {
   return store;
 }
 
-const PAGES = ["", "tasks", "tasks/a", "tasks/b", "tasks/c", "escalations", "dissents", "events", "events?task=a", "events?type=task", "events?type=note.posted", "contract", "dag"];
+const PAGES = ["", "tasks", "usage", "tasks/a", "tasks/b", "tasks/c", "escalations", "dissents", "events", "events?task=a", "events?type=task", "events?type=note.posted", "contract", "dag"];
 
 test("dashboard: every page escapes and redacts hostile run content, with no inline script, style or handler", async (t) => {
   const store = await hostileRun();
@@ -178,6 +180,23 @@ test("dashboard: dissents show armed and fired predicates, task evidence, huddle
   }
 });
 
+test("dashboard: merged navigation keeps Usage, Dissents and Postmortems together", async () => {
+  const { store } = await frozenRun(makeContract({ postmortem: { enabled: true } }));
+  const context = { state: await store.state(), header: store.header(), base: "/test/", runner: { status: "unknown", detail: "" } };
+  const usage = await collectUsage({ executions: [store.id], table: false });
+  for (const [active, html] of [
+    ["Usage", renderUsage(context, usage, {})],
+    ["Dissents", renderDissents(context)],
+    ["Postmortems", renderPostmortems(context, {})],
+  ]) {
+    for (const label of ["Usage", "Dissents", "Postmortems"]) {
+      assert.match(html, new RegExp(`href="/test/${label.toLowerCase()}"[^>]*>${label}</a>`));
+    }
+    assert.match(html, new RegExp(`class="here">${active}</a>`));
+    assert.deepEqual(inlineProblems(html), []);
+  }
+});
+
 test("dashboard: dissents handle empty state, incomplete drafts and runtime records without definitions", async () => {
   const { store } = await frozenRun();
   const state = await store.state();
@@ -217,7 +236,22 @@ test("dashboard: dissents route renders the page with the dashboard CSP", async 
   assert.equal(response.status, 200);
   assert.equal(response.csp, DASHBOARD_CSP);
   assert.match(response.body, /<h1>Dissents<\/h1>/);
+  assert.match(response.body, /href="[^"]+\/usage">Usage<\/a>/);
+  assert.match(response.body, /href="[^"]+\/dissents" class="here">Dissents<\/a>/);
   assert.match(response.body, /Retries &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.deepEqual(inlineProblems(response.body), []);
+  assert.doesNotMatch(response.body, /name="roundtable-action"/);
+
+  const usageRoute = routes.find((r) => r.path === "/usage");
+  assert.ok(usageRoute);
+  await usageRoute.handler({ html: (status, body, csp) => { response = { status, body, csp }; } });
+  assert.equal(response.status, 200);
+  assert.equal(response.csp, DASHBOARD_CSP);
+  assert.match(response.body, /<h1 id="usage-title">Usage<\/h1>/);
+  assert.match(response.body, /href="[^"]+\/usage" class="here">Usage<\/a>/);
+  assert.match(response.body, /href="[^"]+\/dissents">Dissents<\/a>/);
+  assert.match(response.body, /name="roundtable-action"/);
+  assert.match(response.body, /data-live="swap"/);
   assert.deepEqual(inlineProblems(response.body), []);
 });
 
@@ -226,7 +260,7 @@ test("dashboard: read-only, under the token, Host checked; unknown tasks and ass
   const dash = await startDashboard(store.id, { store });
   t.after(() => dash.close());
   const origin = new URL(dash.url).origin;
-  for (const path of ["/", "/state.json", "/stream", "/tasks", "/dissents"]) assert.equal((await get(origin + path)).status, 404, path);
+  for (const path of ["/", "/state.json", "/stream", "/tasks", "/usage", "/dissents"]) assert.equal((await get(origin + path)).status, 404, path);
   assert.equal((await get(dash.url, { host: "evil.example" })).status, 421);
   for (const method of ["POST", "PUT", "DELETE", "PATCH"]) assert.equal((await get(dash.url, { method })).status, 405, method);
   for (const path of ["tasks/zz", "tasks/constructor", "tasks/__proto__", "static/nope.js", "static/constructor.js", "nope"]) {

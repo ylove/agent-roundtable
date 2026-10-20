@@ -33,6 +33,9 @@ const {
 const modes = await import("../../dist/sessions/modes.js");
 const { readArchivedSession } = await import("../../dist/sessions/archive.js");
 const { sessionDissentDrafts } = await import("../../dist/sessions/dissents.js");
+const { day, readTableLines } = await import("../../dist/usage/table.js");
+
+const sessionUsage = (id) => readTableLines([day()]).filter((line) => line.session === id);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fx = (n) => resolve(here, "../fixtures/agents", n);
@@ -217,6 +220,9 @@ describe("local meeting debate mode (fake claude on PATH)", () => {
     assert.equal(draft.by, sample);
     assert.equal(draft.claim, "Retries duplicate orders.");
     assert.deepEqual(draft.source, { kind: "debate", ref: meetingId });
+    const usage = sessionUsage(meetingId);
+    assert.equal(usage.length, 3, "opening, summary and dissent extraction are all metered");
+    assert.ok(usage.every((line) => line.agent === "sample" && line.kind === "local-meeting" && line.tokens_prov === "estimated"));
   });
 
   test("CLI errors are scrubbed of secrets and capped", async (t) => {
@@ -573,6 +579,10 @@ describe("adversarial closing summaries", () => {
       const drafts = sessionDissentDrafts(archived);
       assert.deepEqual(drafts.map((d) => d.by), [plain, third]);
       assert.ok(drafts.every((d) => d.source.ref === collaborationId && d.tripwire === undefined));
+      const usage = sessionUsage(collaborationId);
+      assert.deepEqual(usage.map((line) => line.agent), ["sample", "sample", "plain", "third"],
+        "each adversary's extraction is metered under its own identity");
+      assert.ok(usage.every((line) => line.kind === "collaboration" && line.tokens.input > 0));
     });
   }
 
@@ -587,6 +597,9 @@ describe("adversarial closing summaries", () => {
     const [draft] = sessionDissentDrafts(readArchivedSession(meetingId));
     assert.equal(draft.by, plain);
     assert.deepEqual(draft.source, { kind: "debate", ref: meetingId });
+    const usage = sessionUsage(meetingId);
+    assert.equal(usage.length, 3, "opening, summary and dissent extraction are all metered");
+    assert.ok(usage.every((line) => line.agent === "plain" && line.kind === "meeting" && line.tokens.input > 0));
   });
 
   test("closing without a requested summary makes no additional calls or drafts", async (t) => {

@@ -304,7 +304,7 @@ test("answer: a forked session with --tools \"\" in the worker's worktree; text 
   const rec = { agent: "builder-1", task: "build-nav-bar", attempt: 1, pid: 1, sessionId: SESSION, outputPath: "/x", startedAt: "now", driver: "claude-code", cwd: join(dir, "wt") };
   const r = await new cc.ClaudeCodeDriver().answer(rec, "Will you keep the nav props stable?", 0.5);
   assert.equal(r.text, "the fork's answer");
-  assert.deepEqual(r.usage, { source: "huddle", agent: "builder-1", task: "build-nav-bar", provider: "claude-code", model: "claude-sonnet-5", tokens: { inputTokens: 3, outputTokens: 7, cacheReadTokens: 50 }, usd: 0.012, estimated: false });
+  assert.deepEqual(r.usage, { source: "huddle", agent: "builder-1", task: "build-nav-bar", provider: "claude-code", model: "claude-sonnet-5", tokens: { inputTokens: 3, outputTokens: 7, cacheReadTokens: 50 }, usd: 0.012, estimated: false, provenance: { tokens: "measured", usd: "measured" } });
   const call = calls()[0];
   assert.equal(call.cwd, join(dir, "wt"));
   assert.equal(call.input, "Will you keep the nav props stable?");

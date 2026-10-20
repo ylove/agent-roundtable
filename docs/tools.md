@@ -1,10 +1,10 @@
 # MCP tool reference
 
-Generated from the registered definitions in `src/tools/*.ts` after building: **41 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
+Generated from the registered definitions in `src/tools/*.ts` after building: **42 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
 
 Use these through your MCP client; Claude Code names them `mcp__agent-roundtable__<tool>`. Omitted optional fields use the behavior described below. A nested field marked required is required only when its enclosing object/item is supplied. Null optional values are treated as absent. New contract, run and worker tools reject unknown arguments.
 
-Worker examples below use the **worker server** schema, bound to its startup identity. On the orchestrator server each of the 7 worker tools additionally requires `execution_id` and `agent_token` from `join_execution`; keep that token private. `join_execution` itself exists only on the orchestrator server. Every worker response carries new inbox decisions/directives, including errors; acknowledge directives with `post_update(kind: "ack", directive_id, text)`.
+Worker examples below use the **worker server** schema, bound to its startup identity. On the orchestrator server each of the 7 execution worker tools additionally requires `execution_id` and `agent_token` from `join_execution`; keep that token private. The eighth worker tool is `file_dissent`, which also accepts orchestrator authority on the orchestrator server; see the [dissent guide](dissents.md). `join_execution` itself exists only on the orchestrator server. Every execution worker response carries new inbox decisions/directives, including errors; acknowledge directives with `post_update(kind: "ack", directive_id, text)`.
 
 ## Meetings
 
@@ -582,16 +582,16 @@ Example: `execution_status`
 
 ### control_execution
 
-Steer a heads-down run when the human asks. pause / resume: the whole run, or only task_ids (paused work starts nothing new; running workers finish their turn). steer: a directive (message) to targets (agents, teams or tasks; default every agent), which workers must acknowledge. abort: stop the run and its workers, keeping the worktrees, branches and log. purge: delete a finished (completed, failed or aborted) run's worktrees, branches and log; needs confirm: true, which only the human's agreement justifies, and is audited. Back to the table: pause with to_table: true (recorded in the log as a mode change), run the format with execution_status(view: "context"), amend_contract(from_session), then resume with to_table: true.
+Steer a heads-down run when the human asks. pause / resume: the whole run, or only task_ids (paused work starts nothing new; running workers finish their turn). steer: a directive (message) to targets (agents, teams or tasks; default every agent), which workers must acknowledge. abort: stop the run and its workers, keeping the worktrees, branches and log. purge: delete a finished (completed, failed or aborted) run's worktrees, branches and log; needs confirm: true, which only the human's agreement justifies, and is audited. stop_agent: stop the live workers named in targets (the human asked, in plain words or from the dashboard): the runner stops each worker, keeps its branch and worktree and blocks its task, and the watcher wakes you with two choices: rework around the stopped agent with resolve_escalation, or write a handoff. An external worker is told to stop through steer instead. handoff: pause the run (if live) and write executions/<exe>/HANDOFF.md from the blackboard (contract summary, goal, every task with its state, owner, branch and last note, stopped agents, open escalations, budget with provenance split, resume commands); returns its path and the document. Back to the table: pause with to_table: true (recorded in the log as a mode change), run the format with execution_status(view: "context"), amend_contract(from_session), then resume with to_table: true.
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
 | `execution_id` | string | yes | The heads-down run (exe-…), as execute or execution_status returned it. pattern: `^exe-[0-9a-hjkmnp-tv-z]{16}$`. |
-| `action` | string | yes | pause, resume, steer, abort or purge. Values: `pause`, `resume`, `steer`, `abort`, `purge`. |
+| `action` | string | yes | pause, resume, steer, abort, purge, stop_agent or handoff. Values: `pause`, `resume`, `steer`, `abort`, `purge`, `stop_agent`, `handoff`. |
 | `reason` | string | no | Why (recorded on the event). maxLength: `1000`. |
 | `message` | string | no | steer: the directive, in plain words. maxLength: `4000`. |
 | `task_ids` | array of string | no | pause / resume: only these tasks (default the whole run). maxItems: `100`. |
-| `targets` | array of string | no | steer: agent, team or task ids (default every agent of the run). maxItems: `50`. |
+| `targets` | array of string | no | steer: agent, team or task ids (default every agent of the run). stop_agent: the agents to stop (required). maxItems: `50`. |
 | `confirm` | boolean | no | purge: true once the human agreed to delete the run's worktrees, branches and log. |
 | `to_table` | boolean | no | pause: going back to the table; resume: coming back. Records the mode change in the log. |
 | `session` | string | no | With to_table: the at-the-table session id, recorded with the mode change. maxLength: `200`. |
@@ -604,6 +604,19 @@ Example: `control_execution`
   "action": "pause",
   "to_table": true,
   "reason": "Review the API design"
+}
+```
+
+Stopping and handing off:
+
+```json
+{
+  "execution_id": "exe-0123456789abcdef",
+  "action": "stop_agent",
+  "targets": [
+    "w-build-nav-bar"
+  ],
+  "reason": "The human asked to stop it"
 }
 ```
 
@@ -653,6 +666,45 @@ Example: `join_execution`
 {
   "execution_id": "exe-0123456789abcdef",
   "agent": "reviewer"
+}
+```
+
+## Usage
+
+### usage
+
+Who is using what, on which platform, for the heads-down runs and the sessions at the table. action report (default) returns the usage view: totals, platforms (provider and models), and one entry per agent with its tokens and money, where it works (heads-down, at-the-table or the host), its state and whether it can be stopped, plus recent stops. Every figure says whether it is measured (counted by whoever did the work), reported (told to us by an agent or the host) or estimated (worked out by us); a total that mixes them shows the split. Money for a model with no price is absent: you get its tokens instead. Narrow it with execution_id, session_id or agent ("what has cfo cost so far?"). Nothing in it is message text, a prompt, a diff or command output. stop (only when the human asks you to stop an agent): stops agent, a heads-down worker (the runner stops it, keeps its work, and wakes you with two choices) or an at-the-table session (its turn in flight is cut and the session ends; name execution_id or session_id when the agent is in more than one place). A stopped session answers {status: "stopped", …} to its next tool call. handoff: write a handoff document, for a stopped or ended session (session_id: sessions/<id>.handoff.md) or for a heads-down run (execution_id: HANDOFF.md, without pausing it; control_execution(action: "handoff") pauses first).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `action` | string | no | report (default), stop or handoff. Values: `report`, `stop`, `handoff`. |
+| `execution_id` | string | no | Only this heads-down run (exe-…). pattern: `^exe-[0-9a-hjkmnp-tv-z]{16}$`. |
+| `session_id` | string | no | Only this at-the-table session. maxLength: `100`. |
+| `agent` | string | no | report: only this agent (persona or worker id). stop: the agent to stop (required). maxLength: `100`. |
+| `reason` | string | no | stop: why (recorded on the stop and shown to the orchestrator). maxLength: `1000`. |
+
+Example: `usage`
+
+```json
+{
+  "action": "report"
+}
+```
+
+Stop an agent and write a handoff:
+
+```json
+{
+  "action": "stop",
+  "agent": "cfo",
+  "reason": "The human asked to stop it"
+}
+```
+
+```json
+{
+  "action": "handoff",
+  "session_id": "meeting-4k9q2mzt"
 }
 ```
 
@@ -817,12 +869,19 @@ Example: `lease`
 
 ### post_update
 
-Post to the blackboard. kind progress: percent and text. note: a broadcast note (topic, refs). interface: publish an interface you own (name, text = its definition, path), which unblocks tasks waiting on it. need: say you are waiting for a task, interface or artifact (name; topic = task | interface | artifact), which blocks your task until it arrives. ack: acknowledge a directive (directive_id).
+Post to the blackboard. kind progress: percent and text. note: a broadcast note (topic, refs). interface: publish an interface you own (name, text = its definition, path), which unblocks tasks waiting on it. need: say you are waiting for a task, interface or artifact (name; topic = task | interface | artifact), which blocks your task until it arrives. ack: acknowledge a directive (directive_id). usage (external workers only): report what you have used since your last report (tokens, usd, model); it is recorded as reported, not measured, and counts toward the budget.
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
-| `kind` | string | yes |  Values: `progress`, `note`, `interface`, `need`, `ack`. |
-| `text` | string | yes |  maxLength: `16000`. |
+| `kind` | string | yes |  Values: `progress`, `note`, `interface`, `need`, `ack`, `usage`. |
+| `text` | string | no | Required for every kind except usage. maxLength: `16000`. |
+| `tokens` | object | no | usage: tokens used since your last report. |
+| `tokens.input` | integer | no |  minimum: `0`. |
+| `tokens.output` | integer | no |  minimum: `0`. |
+| `tokens.cache_read` | integer | no |  minimum: `0`. |
+| `tokens.cache_write` | integer | no |  minimum: `0`. |
+| `usd` | number | no | usage: the cost in US dollars since your last report, if you know it (else it is priced from the table). minimum: `0`. |
+| `model` | string | no | usage: the model that did the work. maxLength: `200`. |
 | `percent` | number | no |  minimum: `0`. maximum: `100`. |
 | `topic` | string | no |  maxLength: `100`. |
 | `name` | string | no | interface: its name; need: the task, interface or artifact you wait for. maxLength: `200`. |
@@ -838,6 +897,20 @@ Example: `post_update`
   "kind": "progress",
   "percent": 50,
   "text": "Keyboard navigation works; checking focus order."
+}
+```
+
+An external worker reports what it has used (recorded as reported, never measured; counts toward the budget):
+
+```json
+{
+  "kind": "usage",
+  "tokens": {
+    "input": 12000,
+    "output": 1800
+  },
+  "usd": 0.4,
+  "model": "my-model"
 }
 ```
 
@@ -996,10 +1069,14 @@ A contract is what a heads-down run builds: the goal and the human's request ver
 
 - `execute` starts a frozen contract when the human asks; it returns `needs_input` questions until visibility, budget, sandbox and the worker CLI are settled, then the runner and the `watch` command to run in the background.
 - `execution_status` reports progress (`focus: "nav"` answers "how close is the nav?") with the views summary, tasks, escalations, events, budget and context.
-- `control_execution` pauses, resumes, steers, aborts or purges a run; `to_table: true` marks a trip back to the table.
+- `control_execution` pauses, resumes, steers, aborts or purges a run; `to_table: true` marks a trip back to the table. `stop_agent` stops live workers the human named, and `handoff` pauses the run and writes `HANDOFF.md`.
 - `resolve_escalation` answers an escalation: decide, huddle, retry, reassign, amend, dismiss or await_human.
 
 Arguments and behaviour: [heads-down design, §13 and §15](design/heads-down.md#13-orchestrator-experience).
+
+### Usage
+
+- `usage` answers "what has cfo cost so far?" (`action: "report"`, narrowed with `agent`, `execution_id` or `session_id`), stops an agent when the human asks (`action: "stop"`) and writes a handoff for a stopped session or a run (`action: "handoff"`). Every figure is labelled measured, reported or estimated. A stopped at-the-table session answers `{status: "stopped", …}` to the next call that names it. See the [usage guide](usage.md). Its `agents[].calls` entries include bounded call ids, dissent micro-huddle source, dissent id, execution/task, charged requester, provider/model, USD, `estimated`, `reservation` and provenance. `agents[].platforms` keeps driver and persona platform totals distinct. Settlements replace outstanding estimates by call id. Stop on either micro-huddle participant routes the unresolved huddle and preserves dissent holds for explicit escalation resolution.
 
 ### Postmortem
 

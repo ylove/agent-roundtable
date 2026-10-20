@@ -27,7 +27,7 @@ export function scriptedDriver(t, behavior = () => ({})) {
   async function start(l, resume) {
     const b = behavior(l, calls.length);
     const init = b.init ?? goodInit;
-    const script = b.sessionGone && resume ? `process.stderr.write("No conversation found with session ID\\n"); process.exit(1);` : `process.stdin.resume(); console.log(${JSON.stringify(JSON.stringify(init))}); ${b.result ? `console.log(${JSON.stringify(JSON.stringify(b.result))});` : ""} ${b.exit ? "setTimeout(() => process.exit(1), 20)" : "setInterval(() => {}, 1000)"};`;
+    const script = b.silent ? `process.stdin.resume(); setInterval(() => {}, 1000);` : b.sessionGone && resume ? `process.stderr.write("No conversation found with session ID\\n"); process.exit(1);` : `process.stdin.resume(); console.log(${JSON.stringify(JSON.stringify(init))}); ${b.result ? `console.log(${JSON.stringify(JSON.stringify(b.result))});` : ""} ${b.exit ? "setTimeout(() => process.exit(1), 20)" : "setInterval(() => {}, 1000)"};`;
     const { pid, started } = await spawnWorker({ file: process.execPath, args: ["-e", script], cwd: l.cwd, env: { PATH: process.env.PATH, ...l.env }, prompt: l.prompt, outputPath: l.outputPath });
     const handle = { ...l, pid, pgid: pid, started, startedAt: new Date().toISOString(), resume };
     calls.push(handle);

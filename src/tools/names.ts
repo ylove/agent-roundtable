@@ -68,6 +68,8 @@ export const CONTROL_EXECUTION = "control_execution";
 export const RESOLVE_ESCALATION = "resolve_escalation";
 export const JOIN_EXECUTION = "join_execution";
 
+// Usage (orchestrator server only)
+export const USAGE = "usage";
 // Postmortem mode (orchestrator server only)
 export const POSTMORTEM = "postmortem";
 export const HOLD_POSTMORTEM = "hold_postmortem";

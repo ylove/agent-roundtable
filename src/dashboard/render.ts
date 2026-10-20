@@ -3,6 +3,8 @@
 //
 // Every string that comes from the run (contract, notes, escalations, diffs, event payloads,
 // even ids) is redacted (secrets and personal data) and then HTML-escaped where it is inserted.
+// The Usage page (usage-page.ts) shares this frame; its Stop buttons are the dashboard's only
+// mutating control, and the per-start nonce they send is delivered only in that page's <meta>.
 // Pages carry no inline script, style or event handler: the stylesheet and the live-update
 // script are static routes (assets.ts), and links are built from validated ids only. Contract
 // markdown goes through a small converter that escapes everything and passes no raw HTML.
@@ -22,11 +24,13 @@ import {
   type TaskState,
 } from "../execution/types.js";
 import { renderDagSvg } from "./dag-svg.js";
+import { moneyText, tokensShort, usd, useText } from "../usage/format.js";
+import { moneyTotal, tokenTotal, type UsageView } from "../usage/types.js";
 
 /** Redacted text (secrets and personal data). */
 export const red = (s: unknown): string => redact(String(s ?? "")).text;
 /** Redacted, then HTML-escaped: the only way run content reaches a page. */
-const t = (s: unknown): string => escapeHtml(red(s));
+export const t = (s: unknown): string => escapeHtml(red(s));
 /** Cut to n characters (code points, so no surrogate pair is split). */
 const cap = (s: string, n: number) => {
   if (s.length <= n) return s;
@@ -36,7 +40,7 @@ const cap = (s: string, n: number) => {
 /** Redacted, then capped: cutting first could leave half an email or key that no rule matches. */
 const rc = (s: unknown, n: number): string => cap(red(s), n);
 /** Redacted, capped, escaped. */
-const tc = (s: unknown, n: number): string => escapeHtml(rc(s, n));
+export const tc = (s: unknown, n: number): string => escapeHtml(rc(s, n));
 const money = (n: number) => `$${(Number.isFinite(n) ? n : 0).toFixed(2)}`;
 const pctOf = (n: number | undefined) => (typeof n === "number" && Number.isFinite(n) ? Math.round(Math.min(100, Math.max(0, n))) : undefined);
 
@@ -141,7 +145,7 @@ export function awaitingHuman(state: BlackboardState): Escalation[] {
 // Page frame
 // ---------------------------------------------------------------------------
 
-export type PageKey = "overview" | "tasks" | "dag" | "escalations" | "dissents" | "events" | "contract" | "postmortems" | "task";
+export type PageKey = "overview" | "tasks" | "usage" | "dag" | "escalations" | "dissents" | "events" | "contract" | "postmortems" | "task";
 
 export interface PageContext {
   state: BlackboardState;
@@ -149,11 +153,16 @@ export interface PageContext {
   /** "/<token>/" */
   base: string;
   runner: RunnerHealth;
+  /** Who is using what in this run (the Overview card and the Usage page). */
+  usage?: UsageView;
+  /** The per-start nonce a stop request must carry (usage-visibility.md §7); only the Usage page prints it. */
+  nonce?: string;
 }
 
 const NAV: Array<[Exclude<PageKey, "task">, string, string]> = [
   ["overview", "Overview", ""],
   ["tasks", "Tasks", "tasks"],
+  ["usage", "Usage", "usage"],
   ["dag", "Graph", "dag"],
   ["escalations", "Escalations", "escalations"],
   ["dissents", "Dissents", "dissents"],
@@ -167,10 +176,11 @@ function hasPostmortems(s: BlackboardState): boolean {
   return s.contract?.postmortem?.enabled === true || Object.keys(s.postmortem?.findings ?? {}).length > 0 || Object.keys(s.postmortem?.meetings ?? {}).length > 0;
 }
 
-/** "reload" pages refresh themselves on new events; the others show a notice. */
-const LIVE: Record<PageKey, "reload" | "notice"> = {
+/** "reload" pages refresh themselves on new events; "swap" pages replace their content in place; the others show a notice. */
+const LIVE: Record<PageKey, "reload" | "swap" | "notice"> = {
   overview: "reload",
   tasks: "reload",
+  usage: "swap",
   dag: "reload",
   escalations: "reload",
   dissents: "reload",
@@ -180,7 +190,7 @@ const LIVE: Record<PageKey, "reload" | "notice"> = {
   task: "notice",
 };
 
-function badge(state: string): string {
+export function badge(state: string): string {
   return `<span class="badge st-${escapeHtml(/^[a-z_]+$/.test(state) ? state : "unknown")}">${t(state.replace(/_/g, " "))}</span>`;
 }
 
@@ -199,7 +209,7 @@ function banner(c: PageContext): string {
   return `<section class="banner"><h2>A human is needed</h2><ul>${items.join("")}</ul></section>`;
 }
 
-function frame(c: PageContext, page: PageKey, title: string, body: string): string {
+export function frame(c: PageContext, page: PageKey, title: string, body: string, after = ""): string {
   const b = escapeHtml(c.base);
   const runTitle = c.state.contract?.title ?? c.state.execution;
   const nav = NAV.filter(([key]) => key !== "postmortems" || page === "postmortems" || hasPostmortems(c.state)).map(
@@ -207,13 +217,14 @@ function frame(c: PageContext, page: PageKey, title: string, body: string): stri
   ).join("");
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    (page === "usage" && c.nonce ? `<meta name="roundtable-action" content="${escapeHtml(c.nonce)}">` : "") +
     `<title>${t(title)} · ${tc(runTitle, 80)}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head>` +
     `<body data-base="${b}" data-seq="${c.state.seq}" data-live="${LIVE[page]}"><main>` +
     `<nav>${nav}</nav>` +
-    `<p class="meta">${tc(runTitle, 160)} · ${t(c.state.execution)} · ${badge(c.state.status)} · event ${c.state.seq}</p>` +
-    `<p class="live" id="live">Read-only. This page follows the run as it happens.</p>` +
-    banner(c) +
-    body +
+    `<p class="meta" id="runmeta">${tc(runTitle, 160)} · ${t(c.state.execution)} · ${badge(c.state.status)} · event ${c.state.seq}</p>` +
+    `<p class="live" id="live" role="status" aria-live="polite">${page === "usage" ? "This page follows the run as it happens. The Stop buttons are the one thing it can change." : "Read-only. This page follows the run as it happens."}</p>` +
+    (LIVE[page] === "swap" ? `<div id="swap">${banner(c)}${body}</div>` : banner(c) + body) +
+    after +
     `</main><script src="${b}static/dashboard.js"></script></body></html>`
   );
 }
@@ -245,6 +256,7 @@ export function renderOverview(c: PageContext): string {
     (budget.estimated ? " · partly estimated" : "") +
     (s.budget.thresholds_crossed.length ? ` · crossed ${s.budget.thresholds_crossed.map((p) => `${p}%`).join(", ")}` : "") +
     `</p></div>` +
+    usageCard(c) +
     `<div class="card"><h3>Runner</h3><div class="big">${badge(c.runner.status)}</div>` +
     `<p class="meta">${t(c.runner.detail)}</p></div>` +
     `<div class="card"><h3>Escalations</h3><div class="big">${open}</div><p class="meta"><a href="${escapeHtml(c.base)}escalations">open</a></p></div>` +
@@ -255,6 +267,23 @@ export function renderOverview(c: PageContext): string {
       ? `<ul>${notes.map((n) => `<li><strong>${t(n.agent)}</strong> on ${t(n.topic)}: ${tc(n.text, 500)}</li>`).join("")}</ul>`
       : `<p class="empty">No notes yet.</p>`);
   return frame(c, "overview", "Overview", body);
+}
+
+/** The Overview's compact usage card: the run's spend with its provenance, and a way into the Usage page. */
+function usageCard(c: PageContext): string {
+  const v = c.usage;
+  const href = escapeHtml(`${c.base}usage`);
+  if (!v || (!v.agents.length && moneyTotal(v.totals) === 0)) {
+    return `<div class="card"><h3>Usage</h3><div class="big">none yet</div><p class="meta"><a href="${href}">Who is using what</a></p></div>`;
+  }
+  const spent = moneyTotal(v.totals) > 0 ? usd(moneyTotal(v.totals)) : tokenTotal(v.totals.tokens) > 0 ? `${tokensShort(tokenTotal(v.totals.tokens))} tok` : usd(0);
+  const split = moneyTotal(v.totals) > 0 ? moneyText(v.totals, "words") : useText(v.totals, v.totals.tokens, "words");
+  const working = v.agents.filter((a) => a.state === "working").length;
+  return (
+    `<div class="card"><h3>Usage</h3><div class="big">${t(spent)}</div>` +
+    `<p class="meta">${t(split)}</p>` +
+    `<p class="meta">${working} working · <a href="${href}">See who spent what</a></p></div>`
+  );
 }
 
 /** What a task waits on: its blocking escalation, blocking dependencies, open needs, or unaccepted dependencies. */

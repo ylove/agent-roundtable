@@ -11,6 +11,7 @@
 
 import { createHash } from "node:crypto";
 import type { ProcessOp } from "./escalation.js";
+import { blockingIds } from "./task-holds.js";
 import type { TaskCardOptions } from "./task-card.js";
 import type {
   AnyEventDraft,
@@ -108,14 +109,15 @@ export interface RunnerEscalationSpec {
   summary: string;
   question?: string;
   options?: string[];
-  /** Block the task (task.blocked {escalation}) unless it is finished or already blocked. */
+  /** Block the task (task.blocked {escalation}) unless it is finished. A task another hold already blocks gains this one as a further reason, so releasing either leaves the other. */
   block?: boolean;
   diagnosticsBlob?: string;
 }
 
 /**
  * escalation.raised (to the contract's orchestrator) plus task.blocked, or nothing when the
- * blackboard already has this escalation.
+ * blackboard already has this escalation. This is the sole writer of runner escalation holds;
+ * callers choose block eligibility and must not append another task.blocked for this id.
  */
 export function runnerEscalation(state: Readonly<BlackboardState>, spec: RunnerEscalationSpec, source: EventSource): AnyEventDraft[] {
   const id = runnerEscalationId(spec.key);
@@ -139,7 +141,7 @@ export function runnerEscalation(state: Readonly<BlackboardState>, spec: RunnerE
     ...(spec.diagnosticsBlob && { diagnostics_blob: spec.diagnosticsBlob }),
   };
   const out: AnyEventDraft[] = [{ type: "escalation.raised", source, correlation: id, payload: { escalation: esc } }];
-  if (block && rt!.state !== "blocked") out.push({ type: "task.blocked", source, correlation: id, payload: { task: spec.task!, escalation: id } });
+  if (block && !blockingIds(rt).includes(id)) out.push({ type: "task.blocked", source, correlation: id, payload: { task: spec.task!, escalation: id } });
   return out;
 }
 

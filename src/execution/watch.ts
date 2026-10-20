@@ -8,6 +8,7 @@
 //   escalation      an escalation.routed to this orchestrator with wake: true (still unresolved)
 //   dissent         a tripwire needs this orchestrator's attention
 //   awaiting_human  an escalation.awaiting_human (still awaiting)
+//   agent_stopped   an agent was stopped by a person (an escalation.routed for the escalation raised for its task)
 //   budget          a budget.threshold_crossed at 80% or more (of the current budget)
 //   postmortem_ready   the run's postmortem draft has no pending fix left (docs/design/postmortem.md §5)
 //   postmortem         a postmortem meeting concluded (§8)
@@ -45,7 +46,7 @@ export interface WatchFile {
   reason?: WatchReason;
 }
 
-export type WatchReason = "escalation" | "dissent" | "awaiting_human" | "budget" | "postmortem_ready" | "postmortem" | "completed" | "failed" | "aborted" | "timeout";
+export type WatchReason = "escalation" | "agent_stopped" | "dissent" | "awaiting_human" | "budget" | "postmortem_ready" | "postmortem" | "completed" | "failed" | "aborted" | "timeout";
 
 /** The one line `watch` prints. */
 export interface WatchResult {
@@ -149,6 +150,20 @@ export function wakeFor(state: Readonly<BlackboardState>, e: AnyEvent, orchestra
       const esc = own(state.escalations, e.payload.id);
       if (e.payload.to !== orchestrator || !e.payload.wake) return null;
       if (esc && (esc.status === "resolved" || esc.status === "withdrawn" || esc.routed_to !== orchestrator)) return null;
+      const stopped = Object.values(state.agents).find((a) => a.stop?.escalation === e.payload.id);
+      if (stopped?.stop) {
+        const who = scrub(stopped.stop.by).slice(0, 100);
+        const task = stopped.task ? ` while it worked on task ${stopped.task}` : "";
+        return {
+          ...base,
+          reason: "agent_stopped",
+          escalation: brief(esc, e.payload.id),
+          message:
+            `${stopped.id} was stopped by ${who}${task}. Its task is blocked and not retried automatically (its work-in-progress is kept). Two ways forward: ` +
+            `(1) rework around the stopped agent: resolve_escalation(escalation_id: "${e.payload.id}", action: reassign, retry, amend or decide); ` +
+            `(2) write a handoff for the human: control_execution(action: "handoff"). Then re-arm the watcher.`,
+        };
+      }
       return { ...base, reason: "escalation", escalation: brief(esc, e.payload.id), message: `Escalation ${e.payload.id} needs ${orchestrator}: resolve it with resolve_escalation, then re-arm the watcher.` };
     }
     case "escalation.awaiting_human": {

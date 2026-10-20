@@ -11,6 +11,7 @@ import { lockSession, sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveMeeting } from "./archive.js";
 import { withoutDissentBlocks } from "./dissent-summary.js";
 import { callLLM } from "../providers/index.js";
+import { metered, stoppedOutcome, type StoppedInfo } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import type { MeetingMode } from "./modes.js";
@@ -49,6 +50,8 @@ export interface Meeting {
   publicChannel?: PublicChannel;
   /** Set when the meeting was started with prototype: true (the caller assesses the agent's prototypes). */
   prototype?: PrototypeTracker;
+  /** Set when a person stopped the meeting (usage visibility): it then ends without a summary. */
+  stopped?: StoppedInfo;
 }
 
 export const meetings = new Map<string, Meeting>();
@@ -144,11 +147,11 @@ export async function startMeeting(
 
   let assistantMessage: string;
   try {
-    assistantMessage = await callLLM(
+    assistantMessage = await metered({ session: meetingId, kind: "meeting", agent }, () => callLLM(
       systemPrompt,
       [{ role: "user", content: userMessage }],
       { provider, model: resolvedModel, baseUrl }
-    );
+    ));
   } catch (e) {
     // The meeting never started; close the channel (and the prototype blackboard) so nothing dangles.
     if (publicChannel) void publicChannel.finalize();
@@ -229,11 +232,11 @@ async function runMeetingTurn(meetingId: string, message: string): Promise<strin
   const status = meetingPrototypeStatus(meeting);
   if (status && request.length > 0) request[request.length - 1].content += status;
 
-  const assistantMessage = await callLLM(
+  const assistantMessage = await metered({ session: meeting.id, kind: "meeting", agent: meeting.agent }, () => callLLM(
     meeting.systemPrompt,
     request,
     { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
-  );
+  ));
 
   await recordMeetingAgentReply(meeting, assistantMessage, record);
 
@@ -272,14 +275,14 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
           "Please provide a brief summary of what we discussed and any action items or conclusions. Do not include DISSENT tags or extraction blocks.",
       },
     ];
-    summary = withoutDissentBlocks(await callLLM(
+    summary = withoutDissentBlocks(await metered({ session: meeting.id, kind: "meeting", agent: meeting.agent }, () => callLLM(
       meeting.systemPrompt,
       summaryMessages,
       { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
-    ));
+    )));
     if (meeting.mode === "debate") {
       const messages = [...summaryMessages.slice(0, -1), { role: "user" as const, content: buildDissentSummaryPrompt("challenger", meeting.agenda ?? "") }];
-      const content = await callLLM(meeting.systemPrompt, messages, { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl });
+      const content = await metered({ session: meeting.id, kind: "meeting", agent: meeting.agent }, () => callLLM(meeting.systemPrompt, messages, { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }));
       dissentSummaries.push({ agent: meeting.agent, content });
     }
   }
@@ -290,7 +293,7 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
     mode: meeting.mode,
     agents: [agentKey(meeting.agent)],
     topic: meeting.agenda ?? "",
-    outcome: summary || history.slice().reverse().find((m) => m.role === "assistant")?.content,
+    outcome: meeting.stopped ? stoppedOutcome(meeting.stopped) : summary || history.slice().reverse().find((m) => m.role === "assistant")?.content,
     public: meeting.publicChannel !== undefined,
   });
   archiveMeeting("meeting", meeting, summary, dissentSummaries);

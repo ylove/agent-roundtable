@@ -41,6 +41,10 @@ function setup(t, script = {}) {
           init.signal.addEventListener("abort", abort, { once: true });
           script.onConceptPending?.();
         });
+        if (script.lengthOnce && team === "A" && !script.lengthDone) {
+          script.lengthDone = true;
+          return json(200, { choices: [{ message: { content: "", reasoning_content: "thinking..." }, finish_reason: "length" }], model: request.model, usage: { prompt_tokens: 100, completion_tokens: 2048 } });
+        }
         content = `Concept for ${team}.`;
       } else if (prompt.startsWith("R1b BUILD")) {
         attempts[team]++;
@@ -93,6 +97,30 @@ test("duel streams both games, judge assessments, dissent, measured usage, and a
   const ledger = readTableLines([new Date().toISOString().slice(0, 10)], ROUNDTABLE_HOME).filter(line => line.session === result.id);
   assert.equal(ledger.length, calls.length);
   assert.ok(events.find(e => e.type === "usage").perSeat.some(s => s.inputTokens > 0));
+});
+
+test("a non-build turn that ran out of tokens thinking is retried once at double the ceiling", async t => {
+  const { calls, events } = await run(t, { lengthOnce: true });
+  const concepts = calls.filter(c => c.body.messages.at(-1).content.startsWith("R1 CONCEPT") && /Team A/.test(c.body.messages.at(-1).content));
+  assert.equal(concepts.length, 2);
+  assert.equal(concepts[0].body.max_tokens, 8192);
+  assert.equal(concepts[1].body.max_tokens, 16_384);
+  assert.ok(calls.filter(c => c.body.messages.at(-1).content.startsWith("R1b BUILD")).every(c => c.body.max_tokens === 32_768));
+  assert.ok(!events.some(e => e.type === "turn" && /did not complete/.test(e.text)));
+  assert.match(events.find(e => e.type === "turn" && e.round === "R1" && e.seat.team === "A").text, /Concept for A/);
+});
+
+test("a model with no known price reports its tokens as unpriced, not $0", async t => {
+  setup(t);
+  const events = [];
+  const unpriced = seats.map(s => ({ ...s, provider: "together", model: "zai-org/GLM-5.3" }));
+  process.env.TOGETHER_API_KEY = "k";
+  t.after(() => { delete process.env.TOGETHER_API_KEY; });
+  await runDuel(options, { onEvent(e) { events.push(e); } }, new AbortController().signal, { resolveSeats: () => unpriced });
+  const usage = events.at(-2);
+  assert.equal(usage.totalCostUsd, 0);
+  assert.equal(usage.totalUnpricedTokens, 1040);
+  assert.ok(usage.perSeat.every(s => s.costUsd === 0 && s.unpricedTokens > 0));
 });
 
 test("bad prototype gets one retry with its validation error", async t => {

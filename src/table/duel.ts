@@ -121,6 +121,15 @@ export function parsePreference(text: string): "A" | "B" | undefined {
   return found;
 }
 
+const NO_TEXT_LENGTH = /returned no text \(finish reason: (length|max_tokens)\)/;
+/** Reasoning tokens count against max_tokens, so the ceilings are generous; prompts still ask for short answers. */
+const TURN_TOKENS = 8192;
+const BUILD_TOKENS = 32_768;
+/** Providers whose models cap output below the shared ceiling. */
+const PROVIDER_MAX_TOKENS: Partial<Record<Seat["provider"], number>> = { anthropic: 32_000 };
+const clampTokens = (provider: Seat["provider"], tokens: number): number => Math.min(tokens, PROVIDER_MAX_TOKENS[provider] ?? Infinity);
+const turnTokens = (provider: Seat["provider"], round: string): number => clampTokens(provider, round === "R1b" || round === "R3" ? BUILD_TOKENS : TURN_TOKENS);
+
 /** A short, secret-free cause for a failed provider call. */
 function failureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -147,7 +156,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   const id = `duel-${randomUUID()}`;
   const archive: DuelArchive = { version: 1, events: [], prototypes: [] };
   const archivePath = join(ROUNDTABLE_HOME, "duels", `${id}.json`);
-  const usage = new Map(seats.map(s => [s.id, { seatId: s.id, inputTokens: 0, outputTokens: 0, costUsd: 0 }]));
+  const usage = new Map(seats.map(s => [s.id, { seatId: s.id, inputTokens: 0, outputTokens: 0, costUsd: 0, unpricedTokens: 0, estimated: false }]));
   const emit = async (raw: TableEvent) => {
     // Persisted and displayed content is scrubbed at the source.
     const event: TableEvent = raw.type === "turn" || raw.type === "dissent" ? { ...raw, text: scrub(raw.text) }
@@ -159,7 +168,8 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   };
   const emitUsage = () => {
     const perSeat = [...usage.values()].map(total => ({ ...total }));
-    return emit({ type: "usage", perSeat, totalCostUsd: perSeat.reduce((n, seat) => n + seat.costUsd, 0) });
+    return emit({ type: "usage", perSeat, totalCostUsd: perSeat.reduce((n, seat) => n + seat.costUsd, 0),
+      totalUnpricedTokens: perSeat.reduce((n, seat) => n + seat.unpricedTokens, 0) });
   };
   const stop = () => abortSession(id, "Duel stopped.");
   const sessionStop = sessionSignal(id);
@@ -185,23 +195,36 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
     const scope = { session: id, kind: "duel", agent: seat.id };
     const callStop = AbortSignal.any([signal, sessionStop, AbortSignal.timeout(round === "R1b" || round === "R3" ? Math.max(opts.turnTimeoutMs ?? 90_000, 240_000) : opts.turnTimeoutMs ?? 90_000), ...(!closing ? [phase.signal] : [])]);
     try {
-      const call = metered(scope, () => {
+      const build = round === "R1b" || round === "R3";
+      const call = (tokens: number) => metered(scope, () => {
         const ledger = activeUsageSink();
         return withUsageSink(report => {
           const line = lineFor(scope, report, "duel");
           const total = usage.get(seat.id)!;
-          total.inputTokens += (line.tokens?.input ?? 0) + (line.tokens?.cache_read ?? 0) + (line.tokens?.cache_write ?? 0);
-          total.outputTokens += line.tokens?.output ?? 0;
-          total.costUsd += report.usd ?? line.usd ?? 0;
+          const input = (line.tokens?.input ?? 0) + (line.tokens?.cache_read ?? 0) + (line.tokens?.cache_write ?? 0);
+          const output = line.tokens?.output ?? 0;
+          const usd = report.usd ?? line.usd;
+          total.inputTokens += input;
+          total.outputTokens += output;
+          total.costUsd += usd ?? 0;
+          // A model with no known price keeps its tokens visible rather than counting as $0.00.
+          if (usd === undefined) total.unpricedTokens += input + output;
+          if (line.tokens_prov === "estimated") total.estimated = true;
           ledger?.(report);
         }, () => withAbortSignal(callStop, () => callLLM(
           `${DUEL_SYSTEM}\n\n${seat.prompt ?? `Your role is ${seat.role ?? seat.name}.`}`,
           [{ role: "user", content: prompt }],
-          { provider: seat.provider, model: seat.model, maxTokens: round === "R1b" || round === "R3" ? 16_384 : 2048, estimateUsageOnFailure: true },
+          { provider: seat.provider, model: seat.model, maxTokens: tokens, estimateUsageOnFailure: true },
         )));
       });
       // A deadline also settles a misbehaving provider stub that ignores its AbortSignal.
-      const text = await cancellable(call, callStop);
+      const text = await cancellable(call(turnTokens(seat.provider, round)), callStop).catch(async e => {
+        // Reasoning models can spend the whole ceiling thinking: retry a non-build turn once at double.
+        if (build || !NO_TEXT_LENGTH.test(e instanceof Error ? e.message : "")) throw e;
+        const larger = clampTokens(seat.provider, turnTokens(seat.provider, round) * 2);
+        if (larger <= turnTokens(seat.provider, round)) throw e;
+        return cancellable(call(larger), callStop);
+      });
       await emit({ type: "turn", seat: publicSeat(seat), round, text: show(text), ts: new Date().toISOString() });
       await emitUsage();
       return text;

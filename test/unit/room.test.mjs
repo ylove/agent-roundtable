@@ -86,3 +86,12 @@ test("default room hold registers Ctrl-C cleanup and close releases it", async (
   } finally { await room.close(); }
   assert.equal(process.listenerCount("SIGINT"), before);
 });
+
+test("room script words unpriced spend as tokens with no price", async () => {
+  const { ROOM_JS } = await import("../../dist/table/room-assets.js");
+  const start = ROOM_JS.indexOf("const spendText");
+  const spendText = new Function(`${ROOM_JS.slice(start, ROOM_JS.indexOf("\n", start))}; return spendText;`)();
+  assert.equal(spendText(0, 41200, false), "41.2k tok (no price)");
+  assert.equal(spendText(0.0123, 41200, true), "$0.0123 + 41.2k tok unpriced");
+  assert.equal(spendText(0.5, 0, true), "$0.5000");
+});

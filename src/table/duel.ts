@@ -125,10 +125,12 @@ const NO_TEXT_LENGTH = /returned no text \(finish reason: (length|max_tokens)\)/
 /** Reasoning tokens count against max_tokens, so the ceilings are generous; prompts still ask for short answers. */
 const TURN_TOKENS = 8192;
 const BUILD_TOKENS = 32_768;
-/** Providers whose models cap output below the shared ceiling. */
-const PROVIDER_MAX_TOKENS: Partial<Record<Seat["provider"], number>> = { anthropic: 32_000 };
+/** Providers whose models cap output below the shared ceiling (Replicate rejects larger max_tokens with a 422). */
+const PROVIDER_MAX_TOKENS: Partial<Record<Seat["provider"], number>> = {
+  anthropic: 32_000, openai: 32_768, replicate: 16_384, together: 16_384, openai_compatible: 16_384, ollama: 8192,
+};
 const clampTokens = (provider: Seat["provider"], tokens: number): number => Math.min(tokens, PROVIDER_MAX_TOKENS[provider] ?? Infinity);
-const turnTokens = (provider: Seat["provider"], round: string): number => clampTokens(provider, round === "R1b" || round === "R3" ? BUILD_TOKENS : TURN_TOKENS);
+export const turnTokens = (provider: Seat["provider"], round: string): number => clampTokens(provider, round === "R1b" || round === "R3" ? BUILD_TOKENS : TURN_TOKENS);
 
 /** A short, secret-free cause for a failed provider call. */
 function failureReason(error: unknown): string {

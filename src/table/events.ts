@@ -1,4 +1,8 @@
 import { PROVIDER_IDS, type LLMProvider as Provider } from "../config.js";
+import type { PrototypeKind } from "../prototypes/parse.js";
+
+/** What a duel's teams build: the same kinds prototype mode supports. */
+export type DuelKind = PrototypeKind;
 
 /** A participant and the model used for their turns at the table. */
 export interface Seat {
@@ -20,6 +24,12 @@ export type TableEvent =
       mode: "duel";
       seats: Seat[];
       startedAt: string;
+      /** Added in the general duel: absent in older archives, which were all web. */
+      kind?: DuelKind;
+      /** The judging rubric the judges were given. */
+      criteria?: string[];
+      /** Seat ids per team, in speaking order (concept first, builder last). */
+      teams?: { A: string[]; B: string[] };
     }
   /** A participant speaks; ts is an ISO 8601 timestamp. */
   | { type: "turn"; round: string; seat: Seat; text: string; ts: string }
@@ -29,6 +39,7 @@ export type TableEvent =
       team: "A" | "B";
       seat: Seat;
       title?: string;
+      kind?: DuelKind;
       files: { path: string; bytes: number }[];
       ok: boolean;
       error?: string;
@@ -123,6 +134,10 @@ export interface DuelOptions {
   teamB: string[];
   judges: string[];
   rounds?: 1 | 2;
+  /** Artifact kind both teams build; default web. */
+  kind?: DuelKind;
+  /** Judging rubric; default is fit to the brief, quality, usability and accessibility, and risk or safety. */
+  criteria?: string[];
   turnTimeoutMs?: number;
   maxSeconds?: number;
   seats?: Record<string, SeatSpec>;

@@ -138,14 +138,21 @@ test("inline JavaScript comments do not count as external URLs", async t => {
   assert.equal(events.filter(e => e.type === "prototype" && e.ok).length, 2);
 });
 
-test("script-free, oversized, and external prototypes fail validation", async t => {
-  for (const invalid of [game("A").replace(/<script>[\s\S]*?<\/script>/, ""), game("A").replace("<!doctype html>", "<!doctype html>" + "x".repeat(42 * 1024)), game("A").replace("<button", '<img src="https://invalid.example/pixel"><button')]) {
+test("oversized and external prototypes fail validation; a script-free page is fine", async t => {
+  for (const invalid of [game("A").replace("<!doctype html>", "<!doctype html>" + "x".repeat(42 * 1024)), game("A").replace("<button", '<img src="https://invalid.example/pixel"><button')]) {
     await t.test("rejects invalid source", async child => {
       const { events, attempts } = await run(child, { build: team => team === "A" ? invalid : game(team) });
       assert.equal(attempts.A, 2);
       assert.equal(events.find(e => e.type === "prototype" && e.team === "A").ok, false);
     });
   }
+});
+
+test("a web artifact without JavaScript is accepted", async t => {
+  const plain = team => game(team).replace(/<script>[\s\S]*?<\/script>/, "");
+  const { events, attempts } = await run(t, { build: plain });
+  assert.equal(attempts.A, 1);
+  assert.equal(events.filter(e => e.type === "prototype" && e.ok).length, 2);
 });
 
 test("a failed team gets a placeholder and automatic REJECTs", async t => {

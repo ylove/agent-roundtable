@@ -1,6 +1,6 @@
 import { open } from "node:fs/promises";
 import type { PrototypeFile } from "../prototypes/parse.js";
-import { validatePath } from "../prototypes/parse.js";
+import { MAX_FILES, MAX_TOTAL_BYTES, PROTOTYPE_KINDS, validatePath } from "../prototypes/parse.js";
 import type { DuelResult, Seat, TableEvent, TableObserver } from "./events.js";
 
 export interface DuelArchive {
@@ -23,6 +23,8 @@ export function getPrototypeFiles(event: TableEvent): PrototypeFile[] {
 const text = (value: unknown): value is string => typeof value === "string";
 const count = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const date = (value: unknown): boolean => text(value) && Number.isFinite(Date.parse(value));
+/** Archives from before the general duel carry no kind: they were all web. */
+const isWeb = (kind: unknown): boolean => kind === undefined || kind === "web";
 const team = (value: unknown): boolean => value === "A" || value === "B";
 function seat(value: Seat): boolean {
   return !!value && text(value.id) && text(value.name) && text(value.provider) && text(value.model) &&
@@ -31,13 +33,17 @@ function seat(value: Seat): boolean {
 function validEvent(event: TableEvent): boolean {
   if (!event) return false;
   switch (event.type) {
-    case "start": return text(event.id) && text(event.topic) && event.mode === "duel" && date(event.startedAt) &&
+    case "start": return (event.kind === undefined || PROTOTYPE_KINDS.includes(event.kind)) &&
+      (event.criteria === undefined || (Array.isArray(event.criteria) && event.criteria.every(text))) &&
+      (event.teams === undefined || (!!event.teams && Array.isArray(event.teams.A) && Array.isArray(event.teams.B) && [...event.teams.A, ...event.teams.B].every(text))) &&
+      text(event.id) && text(event.topic) && event.mode === "duel" && date(event.startedAt) &&
       Array.isArray(event.seats) && event.seats.every(seat);
     case "turn": return seat(event.seat) && text(event.round) && text(event.text) && date(event.ts);
     case "prototype": return team(event.team) && seat(event.seat) && typeof event.ok === "boolean" &&
       (event.title === undefined || text(event.title)) && (event.error === undefined || text(event.error)) &&
-      Array.isArray(event.files) && event.files.length === (event.ok ? 1 : 0) && event.files.every(file =>
-        file && file.path === "index.html" && count(file.bytes) && file.bytes <= 40 * 1024);
+      (event.kind === undefined || PROTOTYPE_KINDS.includes(event.kind)) &&
+      Array.isArray(event.files) && (event.ok ? isWeb(event.kind) ? event.files.length === 1 : event.files.length >= 1 && event.files.length <= MAX_FILES : event.files.length === 0) &&
+      event.files.every(file => file && (isWeb(event.kind) ? file.path === "index.html" : !validatePath(file.path)) && count(file.bytes) && file.bytes <= MAX_TOTAL_BYTES);
     case "assessment": return seat(event.judge) && team(event.team) &&
       ["APPROVE", "REVISE", "REJECT", "UNCLEAR"].includes(event.verdict) && text(event.reason);
     case "dissent": return seat(event.seat) && text(event.text) && (event.team === undefined || team(event.team));
@@ -64,13 +70,16 @@ function validateArchive(value: unknown): DuelArchive {
     if (!submission) throw new Error("Invalid archived prototype.");
     const event = archive.events[submission.eventIndex];
     if (!Number.isInteger(submission.eventIndex) || seen.has(submission.eventIndex) || event?.type !== "prototype" ||
-        !event.ok || event.team !== submission.team || !Array.isArray(submission.files) || submission.files.length !== 1) {
+        !event.ok || event.team !== submission.team || !Array.isArray(submission.files) ||
+        (isWeb(event.kind) ? submission.files.length !== 1 : submission.files.length < 1 || submission.files.length > MAX_FILES)) {
       throw new Error("Invalid archived prototype.");
     }
     seen.add(submission.eventIndex);
+    let total = 0;
     for (const file of submission.files) {
-      if (!file || typeof file.path !== "string" || validatePath(file.path) || file.path !== "index.html" ||
-          typeof file.content !== "string" || Buffer.byteLength(file.content) > 40 * 1024 ||
+      total += typeof file?.content === "string" ? Buffer.byteLength(file.content) : 0;
+      if (!file || typeof file.path !== "string" || validatePath(file.path) || (isWeb(event.kind) && file.path !== "index.html") ||
+          typeof file.content !== "string" || total > MAX_TOTAL_BYTES || (isWeb(event.kind) && total > 40 * 1024) ||
           !Array.isArray(event.files) || !event.files.some(f => f.path === file.path && f.bytes === Buffer.byteLength(file.content))) {
         throw new Error("Invalid archived prototype file.");
       }

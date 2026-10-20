@@ -12,8 +12,9 @@ import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { parseDissentBlocks } from "../sessions/dissents.js";
 import { mapLimit } from "../sessions/workshop.js";
 import { abortSession, lineFor, metered, sessionSignal } from "../usage/session-scope.js";
-import type { DuelOptions, DuelResult, RunDuel, Seat, TableEvent, TableObserver } from "./events.js";
-import { buildPrompt, closingPrompt, conceptPrompt, DUEL_SYSTEM, judgePrompt } from "./prompts.js";
+import type { DuelKind, DuelOptions, DuelResult, RunDuel, Seat, TableEvent, TableObserver } from "./events.js";
+import { validateDuelOptions } from "./duel-options.js";
+import { buildPrompt, closingPrompt, conceptPrompt, critiquePrompt, DEFAULT_CRITERIA, DUEL_MAX_BYTES, DUEL_SYSTEM, judgePrompt, normalizeCriteria } from "./prompts.js";
 import { attachPrototypeFiles, type DuelArchive } from "./replay.js";
 
 export interface ResolvedDuelSeat extends Seat { prompt?: string }
@@ -59,7 +60,7 @@ export async function resolveSeatsLocal(opts: DuelOptions): Promise<ResolvedDuel
       const override = opts.seats?.[ref] ?? opts.seats?.[agentKey(ref)];
       const provider = override?.provider ?? "anthropic";
       seats.push({ id: `${team}:${agentKey(ref)}`, name, team,
-        role: team === "judge" ? "judge" : index === 0 ? "designer" : "builder",
+        role: team === "judge" ? "judge" : refs.length === 1 ? "designer and builder" : index === 0 ? "designer" : index === refs.length - 1 ? "builder" : "critic",
         provider, model: override?.model ?? DEFAULT_MODELS[provider], prompt: body });
     }
   }
@@ -67,25 +68,48 @@ export async function resolveSeatsLocal(opts: DuelOptions): Promise<ResolvedDuel
 }
 
 class ValidationError extends Error {}
-function validatedFiles(text: string): { title: string; files: PrototypeFile[] } {
+export { MAX_JUDGES, MAX_TEAM_SIZE, validateDuelOptions } from "./duel-options.js";
+const WEB_EXTERNAL = /\b(?:src|href|action|poster|formaction)\s*=\s*["']?\s*(?:https?:|\/\/)|\burl\s*\(\s*["']?\s*(?:https?:|\/\/)|@import\b|<\s*(?:iframe|object|embed|link|base)\b|<script\b[^>]*\bsrc\s*=/i;
+const WEB_CALLS = /\b(?:fetch|importScripts|WebSocket|EventSource|Worker|SharedWorker|XMLHttpRequest|sendBeacon)\s*\(|\bnew\s+(?:WebSocket|EventSource|Worker|SharedWorker|XMLHttpRequest)\b|\bimport\s*(?:\(|["'{*])/;
+
+function validatedFiles(text: string, kind: DuelKind = "web"): { title: string; files: PrototypeFile[] } {
   const parsed = parsePrototypeBlock(text);
   if (!parsed.found) throw new ValidationError("Missing prototype block.");
   if (!parsed.ok) throw new ValidationError(parsed.error);
   const { prototype } = parsed;
-  if (prototype.kind !== "web" || prototype.files.length !== 1 || prototype.files[0].path !== "index.html" ||
-      (prototype.entry !== undefined && prototype.entry !== "index.html")) throw new ValidationError("Return only one web file named index.html.");
-  const html = prototype.files[0].content;
-  if (Buffer.byteLength(html) > 40 * 1024) throw new ValidationError("index.html exceeds 40 KB.");
-  const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script[^>]*>/gi)];
-  if (!scripts.some(m => m[2].trim())) throw new ValidationError("index.html needs inline playable JavaScript in a script element.");
-  // Namespace identifiers are not network references.
-  const markup = html.replace(/https?:\/\/www\.w3\.org\/(?:2000\/svg|1998\/Math\/MathML|1999\/xhtml|1999\/xlink)/gi, "");
-  const external = /\b(?:src|href|action|poster|formaction)\s*=\s*["']?\s*(?:https?:|\/\/)|\burl\s*\(\s*["']?\s*(?:https?:|\/\/)|@import\b|<\s*(?:iframe|object|embed|link|base)\b|<script\b[^>]*\bsrc\s*=/i;
-  const calls = /\b(?:fetch|importScripts|WebSocket|EventSource|Worker|SharedWorker|XMLHttpRequest|sendBeacon)\s*\(|\bnew\s+(?:WebSocket|EventSource|Worker|SharedWorker|XMLHttpRequest)\b|\bimport\s*(?:\(|["'{*])/;
-  if (external.test(markup) || scripts.some(m => calls.test(m[2]))) {
-    throw new ValidationError("Use inline code only, without external URLs, imports, or embedded pages.");
+  if (prototype.kind !== kind) throw new ValidationError(`Return a prototype of kind="${kind}".`);
+  const total = prototype.files.reduce((n, f) => n + Buffer.byteLength(f.content), 0);
+  if (kind === "web") {
+    if (prototype.files.length !== 1 || prototype.files[0].path !== "index.html" ||
+        (prototype.entry !== undefined && prototype.entry !== "index.html")) throw new ValidationError("Return only one web file named index.html.");
+  }
+  if (total > DUEL_MAX_BYTES) throw new ValidationError(`The artifact exceeds ${DUEL_MAX_BYTES / 1024} KB; make it smaller.`);
+  if (kind === "web") {
+    const html = prototype.files[0].content;
+    // JavaScript is optional; whatever script is present must stay inline and offline.
+    const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script[^>]*>/gi)];
+    // Namespace identifiers are not network references.
+    const markup = html.replace(/https?:\/\/www\.w3\.org\/(?:2000\/svg|1998\/Math\/MathML|1999\/xhtml|1999\/xlink)/gi, "");
+    if (WEB_EXTERNAL.test(markup) || scripts.some(m => WEB_CALLS.test(m[2]))) {
+      throw new ValidationError("Use inline code only, without external URLs, imports, or embedded pages.");
+    }
   }
   return { title: prototype.title, files: prototype.files };
+}
+
+/** Judges read every file, labelled by path. */
+const listing = (files: PrototypeFile[]): string => files.map(f => `--- ${f.path} ---\n${f.content}`).join("\n");
+
+/** Map the CLI's or a tool's resolved seats onto the persona-loading resolver. */
+export function withChosenSeats(seats: Map<string, Seat>): DuelDependencies {
+  return { resolveSeats: async o => {
+    const loaded = await resolveSeatsLocal(o);
+    const chosen = new Map([...seats].map(([id, seat]) => [agentKey(id), seat]));
+    return loaded.map(seat => {
+      const pick = chosen.get(seat.id.slice(seat.id.indexOf(":") + 1));
+      return pick ? { ...seat, provider: pick.provider, model: pick.model } : seat;
+    });
+  } };
 }
 
 type Verdicts = Record<"A" | "B", { verdict: "APPROVE" | "REVISE" | "REJECT" | "UNCLEAR"; reason: string }>;
@@ -146,7 +170,9 @@ function failureReason(error: unknown): string {
 
 type DuelRunner = (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps?: DuelDependencies) => Promise<DuelResult>;
 export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
-  if (!opts.topic?.trim() || !opts.teamA.length || !opts.teamB.length || !opts.judges.length) throw new Error("A duel needs a topic, two teams, and judges.");
+  validateDuelOptions(opts);
+  const kind: DuelKind = opts.kind ?? "web";
+  const criteria = normalizeCriteria(opts.criteria);
   if ((opts.rounds !== undefined && opts.rounds !== 1 && opts.rounds !== 2) ||
       !Number.isFinite(opts.maxSeconds ?? 600) || (opts.maxSeconds ?? 600) < 0 || (opts.maxSeconds ?? 600) > 3600 ||
       !Number.isFinite(opts.turnTimeoutMs ?? 90_000) || (opts.turnTimeoutMs ?? 90_000) <= 0 || (opts.turnTimeoutMs ?? 90_000) > 3_600_000) throw new Error("Invalid duel limits.");
@@ -185,6 +211,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   const expired = () => phase.signal.aborted || Date.now() >= ended;
   const submissions: Partial<Record<"A" | "B", { title: string; files: PrototypeFile[] }>> = {};
   const concepts = { A: "", B: "" };
+  const critiques = { A: "", B: "" };
   const assessments: Extract<TableEvent, { type: "assessment" }>[] = [];
   const preferences = { A: 0, B: 0 };
   let sandbox: string | undefined;
@@ -194,7 +221,8 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
 
   async function turn(seat: ResolvedDuelSeat, round: string, prompt: string, closing = false, show: (text: string) => string = text => text): Promise<string | undefined> {
     if (cancelled() || (!closing && expired())) return;
-    const scope = { session: id, kind: "duel", agent: seat.id };
+    // The ledger attributes spend to the persona, not the team-prefixed seat id.
+    const scope = { session: id, kind: "duel", agent: seat.id.replace(/^(?:A|B|judge):/, "") };
     const callStop = AbortSignal.any([signal, sessionStop, AbortSignal.timeout(round === "R1b" || round === "R3" ? Math.max(opts.turnTimeoutMs ?? 90_000, 240_000) : opts.turnTimeoutMs ?? 90_000), ...(!closing ? [phase.signal] : [])]);
     try {
       const build = round === "R1b" || round === "R3";
@@ -241,38 +269,42 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
 
   async function build(team: "A" | "B", revision = false): Promise<void> {
     const seat = teams[team].at(-1)!;
-    let feedback = revision ? `R3 REVISION. Previous source:\n${submissions[team]?.files[0].content ?? "No valid game."}\nJudges' feedback:\n${assessments.filter(a => a.team === team).map(a => `${a.verdict}: ${a.reason}`).join("\n")}` : "";
-    let error = "No prototype was submitted before the deadline.";
+    let feedback = revision ? `R3 REVISION. Previous source:\n${submissions[team] ? listing(submissions[team].files) : "No valid artifact."}\nJudges' feedback:\n${assessments.filter(a => a.team === team).map(a => `${a.verdict}: ${a.reason}`).join("\n")}` : "";
+    let error = "No valid artifact. None was submitted before the deadline.";
     for (let attempt = 0; attempt < 2 && !cancelled() && !expired(); attempt++) {
-      const text = await turn(seat, revision ? "R3" : "R1b", buildPrompt(opts.topic, team, concepts[team], feedback), false, source => {
+      const text = await turn(seat, revision ? "R3" : "R1b", buildPrompt(opts.topic, team, concepts[team] + critiques[team], feedback, kind), false, source => {
         // Source code belongs in prototype files, not in the transcript.
-        try { return `Built index.html (${(Buffer.byteLength(validatedFiles(source).files[0].content) / 1024).toFixed(1)} KB).`; }
+        try {
+          const { files } = validatedFiles(source, kind);
+          return `Built ${files.length === 1 ? files[0].path : `${files.length} files`} (${(files.reduce((n, f) => n + Buffer.byteLength(f.content), 0) / 1024).toFixed(1)} KB).`;
+        }
         catch (e) { return `Build failed: ${scrubAndCap(e instanceof Error ? e.message : "invalid prototype", 100)}`; }
       });
       if (text === undefined && (cancelled() || expired())) break;
       try {
-        const prototype = validatedFiles(text ?? "");
+        const prototype = validatedFiles(text ?? "", kind);
         if (!sandbox) throw new Error("Prototype sandbox unavailable.");
         const dir = join(sandbox, `submission-${++version}`);
         await mkdir(dir, { mode: 0o700 });
         prototype.files = await materializeFiles(dir, prototype.files.map(f => ({ ...f, content: scrub(f.content) })), { redactContent: false });
         submissions[team] = prototype;
-        const event: TableEvent = { type: "prototype", team, seat: publicSeat(seat), title: prototype.title, ok: true,
+        const event: TableEvent = { type: "prototype", team, seat: publicSeat(seat), title: prototype.title, kind, ok: true,
           files: prototype.files.map(f => ({ path: f.path, bytes: Buffer.byteLength(f.content) })) };
         attachPrototypeFiles(event, prototype.files);
         archive.prototypes.push({ eventIndex: archive.events.length, team, files: prototype.files });
         await emit(event);
         return;
       } catch (e) {
-        error = e instanceof ValidationError ? e.message : "The prototype could not be saved.";
+        error = e instanceof ValidationError ? e.message : "No valid artifact. It could not be saved.";
         feedback = `The previous attempt failed validation: ${error}\nReturn a complete corrected prototype.`;
       }
     }
-    // A failed revision keeps the previous playable submission available.
-    if (!submissions[team]) await emit({ type: "prototype", team, seat: publicSeat(seat), ok: false, files: [], error });
+    // A failed revision keeps the previous valid submission available.
+    if (!submissions[team]) await emit({ type: "prototype", team, seat: publicSeat(seat), kind, ok: false, files: [], error });
   }
 
-  await emit({ type: "start", id, topic: opts.topic, mode: "duel", seats, startedAt: new Date().toISOString() });
+  await emit({ type: "start", id, topic: opts.topic, mode: "duel", seats, startedAt: new Date().toISOString(), kind,
+    criteria: criteria.length ? criteria : [...DEFAULT_CRITERIA], teams: { A: teams.A.map(s => s.id), B: teams.B.map(s => s.id) } });
   try {
     if (!cancelled() && !expired()) {
       const root = await ensurePrototypeRoot();
@@ -280,21 +312,32 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
       sandbox = await createSessionDir(root, id);
       keepSandboxUntilExit(sandbox);
       await mapLimit(["A", "B"] as ("A" | "B")[], PARALLEL_TURNS, async team => {
-        concepts[team] = (await turn(teams[team][0], "R1", conceptPrompt(opts.topic, team)))?.split(/\s+/).slice(0, 150).join(" ") ?? "";
+        concepts[team] = (await turn(teams[team][0], "R1", conceptPrompt(opts.topic, team, kind)))?.split(/\s+/).slice(0, 150).join(" ") ?? "";
+        // Members between the first and the last critique the concept; the builder receives every critique.
+        const critics = teams[team].slice(1, -1);
+        if (concepts[team] && critics.length) {
+          const notes = await mapLimit(critics, PARALLEL_TURNS, async critic => {
+            const note = (await turn(critic, "R1c", critiquePrompt(opts.topic, team, concepts[team], kind)))?.split(/\s+/).slice(0, 100).join(" ");
+            return note ? `- ${critic.name}: ${note}` : "";
+          });
+          const kept = notes.filter(Boolean);
+          if (kept.length) critiques[team] = `\nCritiques of the concept from teammates:\n${kept.join("\n")}\n`;
+        }
       });
       await mapLimit(["A", "B"] as ("A" | "B")[], PARALLEL_TURNS, team => build(team));
     }
     // Every failed team gets a placeholder, even if the deadline arrived before construction.
     for (const team of ["A", "B"] as const) if (!submissions[team] && !archive.events.some(e => e.type === "prototype" && e.team === team)) {
-      await emit({ type: "prototype", team, seat: publicSeat(teams[team].at(-1)!), ok: false, files: [], error: cancelled() ? "Duel stopped." : "No prototype before the deadline." });
+      await emit({ type: "prototype", team, seat: publicSeat(teams[team].at(-1)!), ok: false, files: [], kind, error: cancelled() ? "Duel stopped." : "No valid artifact before the deadline." });
     }
     await mapLimit(judges, PARALLEL_TURNS, async judge => {
-      const source = (team: "A" | "B") => submissions[team]?.files[0].content ?? "No valid submission. Automatic REJECT.";
-      let text = await turn(judge, "R2", judgePrompt(opts.topic, { A: source("A"), B: source("B") }));
+      const source = (team: "A" | "B") => submissions[team] ? listing(submissions[team].files) : "No valid submission. Automatic REJECT.";
+      const judging = { kind, criteria };
+      let text = await turn(judge, "R2", judgePrompt(opts.topic, { A: source("A"), B: source("B") }, judging));
       let verdicts = text === undefined ? undefined : parseDuelVerdicts(text);
       if (text !== undefined && verdicts!.A.verdict === "UNCLEAR" && verdicts!.B.verdict === "UNCLEAR") {
         // One retry when the reply was readable text but no verdict line could be recognized.
-        text = await turn(judge, "R2", judgePrompt(opts.topic, { A: source("A"), B: source("B") }) + "\nYour previous reply had no recognizable VERDICT lines. Follow the format exactly.") ?? text;
+        text = await turn(judge, "R2", judgePrompt(opts.topic, { A: source("A"), B: source("B") }, judging) + "\nYour previous reply had no recognizable VERDICT lines. Follow the format exactly.") ?? text;
         verdicts = parseDuelVerdicts(text);
       }
       const preference = text === undefined ? undefined : parsePreference(text);
@@ -302,7 +345,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
       for (const team of ["A", "B"] as const) {
         if (!verdicts && submissions[team]) continue; // A failed judge casts no verdict.
         const assessment: Extract<TableEvent, { type: "assessment" }> = { type: "assessment", judge: publicSeat(judge), team,
-          ...(submissions[team] ? verdicts![team] : { verdict: "REJECT", reason: "No valid playable prototype." }) };
+          ...(submissions[team] ? verdicts![team] : { verdict: "REJECT", reason: "No valid artifact." }) };
         assessments.push(assessment);
         await emit(assessment);
       }

@@ -44,7 +44,7 @@ export function createTerminalObserver(options: TerminalOptions = {}): TableObse
     switch (event.type) {
       case "start": output.write(`At the table: ${oneLine(event.topic)}\n`); break;
       case "turn": output.write(`\n● ${label(event.seat)}\n${wrapped(event.text, width).join("\n")}\n`); break;
-      case "prototype": output.write(`Prototype ${event.team}: ${event.ok ? `${oneLine(event.title ?? "playable game")} (${event.files.length} files, ${event.files.reduce((n, f) => n + f.bytes, 0)} bytes)` : "unavailable"}\n`); break;
+      case "prototype": output.write(`Prototype ${event.team}: ${event.ok ? `${oneLine(event.title ?? "untitled artifact")}${event.kind && event.kind !== "web" ? ` [${event.kind}]` : ""} (${event.files.length} files, ${event.files.reduce((n, f) => n + f.bytes, 0)} bytes)` : "unavailable"}\n`); break;
       case "assessment": output.write(`${oneLine(event.judge.name)} → ${event.team} ${paint(event.verdict === "APPROVE" ? 32 : event.verdict === "REJECT" ? 31 : 33, `[${event.verdict}]`)} ${(lines => (lines[0] ?? "") + (lines.length > 1 ? "…" : ""))(wrapped(event.reason, width))}\n`); break;
       case "dissent": output.write(`Dissent · ${label(event.seat)}\n${wrapped(event.text, width).join("\n")}\n`); break;
       case "usage": spend = event.totalCostUsd; unpriced = event.totalUnpricedTokens ?? 0; perSeat = event.perSeat; break;

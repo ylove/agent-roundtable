@@ -5,12 +5,16 @@ import { readUserConfig, setUserConfig } from "./user-config.js";
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scrubAndCap } from "./security/secrets.js";
-import { agentKey } from "./agents.js";
+import { validateDuelOptions } from "./table/duel-options.js";
+import { DUEL_KINDS } from "./table/prompts.js";
 
-const HELP = `roundtable duel <topic> --team-a <a,b> --team-b <c,d> --judges <j,...> [options]
+const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges <j,...> [options]
+  teams have 1 to 4 members (first writes the concept, last builds, any between critique); 1 to 5 judges
   --open --no-room --no-hold   open the live room, skip it, or exit when the duel ends
   --json                       NDJSON events instead of the terminal view
   --seat <agent=provider:model,...>  --mix auto|cheap  --preflight | --no-preflight
+  --kind web|code|diagram|text   what the teams build (default web)
+  --criteria "a,b,c"           judging rubric (default: fit to the brief, quality, usability and accessibility, risk or safety)
   --rounds 1|2  --turn-timeout <s>  --max-seconds <s>  --agents-dir <abs-path>
   --dry-run                    replay the bundled synthetic duel (no keys)
   --replay <archive.json> [--speed <n>]   replay a saved duel
@@ -20,7 +24,7 @@ roundtable config show | config set env-file|agents-dir <absolute-path>
 class UsageError extends Error { readonly exitCode = 2; }
 type Flags = Record<string, string | true>;
 export interface ParsedTableArgs { topic: string; flags: Flags; options: DuelOptions; agents: string[] }
-const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed"];
+const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed"];
 const switches = ["open", "no-room", "no-hold", "json", "dry-run", "preflight", "no-preflight"];
 const list = (value: string | true | undefined): string[] => {
   if (value === undefined) return [];
@@ -48,14 +52,22 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const rounds = positive(parsed, "rounds", command === "duel" ? 1 : 2);
   if (!Number.isInteger(rounds) || (command === "duel" ? rounds > 2 : rounds > 20)) throw new UsageError(command === "duel" ? "--rounds must be 1 or 2." : "--rounds must be a whole number from 1 to 20.");
   const teamA = list(parsed["team-a"]), teamB = list(parsed["team-b"]), judges = list(parsed.judges), agents = list(parsed.agents);
-  if (!replay && command === "duel" && (teamA.length !== 2 || teamB.length !== 2 || !judges.length)) throw new UsageError("duel requires two agents per team and at least one judge.");
+  if (command !== "duel" && (parsed.kind !== undefined || parsed.criteria !== undefined)) throw new UsageError("--kind and --criteria are available for duel.");
+  if (parsed.kind !== undefined && !DUEL_KINDS.includes(parsed.kind as never)) throw new UsageError(`--kind must be one of ${DUEL_KINDS.join(", ")}.`);
+  if (parsed.criteria !== undefined && typeof parsed.criteria !== "string") throw new UsageError("--criteria requires a comma-separated list.");
+  const criteria = typeof parsed.criteria === "string" ? list(parsed.criteria) : undefined;
+  if (!replay && command === "duel") {
+    if (!teamA.length || !teamB.length || !judges.length) throw new UsageError("duel requires --team-a, --team-b and at least one judge.");
+    try { validateDuelOptions({ topic, teamA, teamB, judges, kind: parsed.kind as never, criteria }); }
+    catch (e) { throw new UsageError(e instanceof Error ? e.message : "Invalid duel options."); }
+  }
   if (!replay && command !== "duel" && agents.length < 2) throw new UsageError(`${command} requires --agents with at least two personas.`);
   if (command === "duel" && parsed.agents) throw new UsageError("duel uses --team-a, --team-b and --judges.");
   if (command !== "duel" && (parsed["team-a"] || parsed["team-b"] || parsed.judges || parsed.open || parsed["no-room"] || parsed["no-hold"])) throw new UsageError("Team and room flags are available for duel.");
   const turnTimeoutMs = positive(parsed, "turn-timeout", 90) * 1000;
   const maxSeconds = positive(parsed, "max-seconds", 600);
   positive(parsed, "speed", 1);
-  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, rounds: rounds as 1 | 2, turnTimeoutMs, maxSeconds, ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }) } };
+  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, rounds: rounds as 1 | 2, turnTimeoutMs, maxSeconds, ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }) } };
 }
 
 /** Merge-time module contracts. String imports let the CLI build before the duel modules land. */
@@ -78,16 +90,7 @@ const defaultModules: TableCliModules = {
     const real = await load<typeof import("./table/duel.js")>("duel");
     return {
       // The CLI already resolved every seat (flags, mix, frontmatter, preflight); apply those to the loaded personas.
-      runDuel: (opts, obs, signal, seats) => real.runDuel(opts, obs, signal, seats ? {
-        resolveSeats: async o => {
-          const loaded = await real.resolveSeatsLocal(o);
-          const chosen = new Map([...seats].map(([id, seat]) => [agentKey(id), seat]));
-          return loaded.map(seat => {
-            const pick = chosen.get(seat.id.slice(seat.id.indexOf(":") + 1));
-            return pick ? { ...seat, provider: pick.provider, model: pick.model } : seat;
-          });
-        },
-      } : {}),
+      runDuel: (opts, obs, signal, seats) => real.runDuel(opts, obs, signal, seats ? real.withChosenSeats(seats) : {}),
     };
   },
   room: async () => {

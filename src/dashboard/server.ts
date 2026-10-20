@@ -1,11 +1,17 @@
 // ============================================================================
-// Execution dashboard: a read-only local web view of one heads-down run
+// Execution dashboard: a local web view of one heads-down run
 //
 // Served by the runner on the shared secure server (src/http/secure-server.ts): 127.0.0.1, a
-// capability token in every URL, Host check, GET and HEAD only, strict headers. There is no
-// mutating route at all, so CSRF does not apply: steering, pausing and resolving stay in the
-// orchestrator's tools. Pages read the run through the execution store (lock-free reads) and
-// are rendered on the server with every run-derived string redacted and escaped (render.ts).
+// capability token in every URL, Host check, GET and HEAD, strict headers. Steering, pausing and
+// resolving stay in the orchestrator's tools. The one mutating route is the Usage page's Stop button:
+// POST <token>/agents/<agent>/stop (usage-visibility.md §7, heads-down.md §14). Because the page is
+// served from this origin, it is protected as a CSRF target: the request must carry
+// X-Roundtable-Action: <nonce>, a second random value made per dashboard start and delivered only
+// inside the Usage page (a <meta> element); a custom header forces a CORS preflight this server never
+// approves, so no other origin can send it. Origin and Sec-Fetch-Site, when present, must say
+// same-origin; a body is refused; at most 10 stops a minute. Pages read the run through the execution
+// store (lock-free reads) and are rendered on the server with every run-derived string redacted and
+// escaped (render.ts).
 //
 // Live updates: GET <token>/stream?since=<seq> is a server-sent event stream that sends
 // "rev" {seq} whenever the event log grows; the page script falls back to polling
@@ -17,10 +23,13 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { openExecutionStore } from "../execution/store.js";
 import { EVENT_TYPES, type AnyEvent, type BlackboardState, type EventType, type ExecutionStore } from "../execution/types.js";
-import { SecureServer, type ResponseStream, type RouteContext } from "../http/secure-server.js";
+import { hasBody, newCapabilityToken, sameOriginProblem, SecureServer, tokenMatches, type ResponseStream, type RouteContext } from "../http/secure-server.js";
+import { collectUsage } from "../usage/model.js";
+import { requestAgentStop, StopRefusal, stopper } from "../usage/stop.js";
 import { writeFileAtomic } from "../security/fs-safe.js";
 import { STATIC_ASSETS } from "./assets.js";
 import { renderDagSvg } from "./dag-svg.js";
+import { renderUsage, usageSpendSeries, type SpendSeries } from "./usage-page.js";
 import {
   contractMarkdown,
   eventMatches,
@@ -30,12 +39,15 @@ import {
   publicState,
   renderContract,
   renderDagPage,
+  renderDissents,
   renderEscalations,
   renderEvents,
   renderOverview,
+  renderPostmortems,
   renderTaskDetail,
   renderTasks,
   type PageContext,
+  type PostmortemRecordView,
   type RunnerHealth,
   type TaskDetail,
 } from "./render.js";
@@ -48,11 +60,16 @@ export const DASHBOARD_CSP =
 /** Most bytes of a diff shown on a task page, and of a failing check's output. */
 const DIFF_CAP_BYTES = 512 * 1024;
 const OUTPUT_CAP_BYTES = 64 * 1024;
+const RECORD_CAP_BYTES = 256 * 1024;
 /** Most concurrent event streams; more get 503 and the page falls back to polling. */
 const MAX_STREAMS = 32;
 const KEEPALIVE_MS = 15_000;
 /** A runner whose heartbeat is older than this is stale (heads-down.md §2). */
 const RUNNER_STALE_MS = 30_000;
+/** The header a stop request must carry, with the per-start nonce (usage-visibility.md §7). */
+export const ACTION_HEADER = "x-roundtable-action";
+/** Most stop requests a dashboard accepts a minute. */
+export const STOPS_PER_MINUTE = 10;
 
 export interface DashboardOptions {
   /** The store to read through (default: openExecutionStore(executionId)). */
@@ -61,6 +78,8 @@ export interface DashboardOptions {
   pollMs?: number;
   /** Write executions/<exe>/dashboard.json {url, pid, host, started_at} (default true); removed on close. */
   writeInfo?: boolean;
+  /** Called after a stop request was recorded: the runner this dashboard lives in runs its next tick at once. */
+  onStopRequested?: () => void;
 }
 
 export interface Dashboard {
@@ -102,6 +121,10 @@ class DashboardServer {
   private logSize = -1;
   private warned = false;
   private readonly infoPath: string;
+  /** The nonce stop requests carry: made per start, delivered only inside the Usage page, compared by digest. */
+  private readonly nonce = newCapabilityToken();
+  /** When the last accepted stop requests came in (ms), for the per-minute limit. */
+  private readonly stopTimes: number[] = [];
 
   constructor(
     private readonly store: ExecutionStore,
@@ -123,12 +146,16 @@ class DashboardServer {
     this.server = await SecureServer.start({
       name: "Dashboard",
       routes: [
-        { path: "/", handler: page(async () => renderOverview(await this.context())) },
+        { path: "/", handler: page(async () => renderOverview({ ...(await this.context()), usage: await this.usage() })) },
         { path: "/tasks", handler: page(async () => renderTasks(await this.context())) },
+        { path: "/usage", handler: page(() => this.usagePage()) },
+        { path: /^\/agents\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/stop$/, methods: ["POST"], handler: (c) => this.stopAgent(c) },
         { path: /^\/tasks\/([a-z0-9][a-z0-9._-]{0,63})$/, handler: page((c) => this.taskPage(c.match![1])) },
         { path: "/escalations", handler: page(async () => renderEscalations(await this.context())) },
+        { path: "/dissents", handler: page(async () => renderDissents(await this.context())) },
         { path: "/events", handler: page((c) => this.eventsPage(c.query)) },
         { path: "/contract", handler: page(() => this.contractPage()) },
+        { path: "/postmortems", handler: page(() => this.postmortemsPage()) },
         { path: "/dag", handler: page(async () => renderDagPage(await this.context())) },
         { path: "/dag.svg", handler: (c) => this.dagSvg(c) },
         { path: "/state.json", handler: async (c) => c.json(200, publicState(await this.store.state(), this.runnerHealth())) },
@@ -164,6 +191,52 @@ class DashboardServer {
   }
 
   // --------------------------------------------------------------------------
+
+  /** Who is using what in this run (the run's own agents; the at-the-table ledger is not part of it). */
+  private usage() {
+    return collectUsage({ executions: [this.store.id], table: false });
+  }
+
+  /** Cumulative spend over time by agent, and for the whole run under "", from the usage events. */
+  private async spendSeries(): Promise<SpendSeries> {
+    return usageSpendSeries(await this.store.events({ types: ["budget.usage_recorded"] }));
+  }
+
+  private async usagePage(): Promise<string> {
+    const state = await this.store.state();
+    return renderUsage({ ...(await this.context(state)), nonce: this.nonce }, await this.usage(), await this.spendSeries());
+  }
+
+  /**
+   * POST <token>/agents/<agent>/stop (usage-visibility.md §7). Checked in this order: same origin
+   * (Origin, Sec-Fetch-Site), the action header against this start's nonce, no body, the rate limit,
+   * the agent. The nonce and the token are never logged.
+   */
+  private async stopAgent(c: RouteContext): Promise<void> {
+    const refuse = (status: number, error: string, headers?: Record<string, string>) => c.json(status, { error }, headers);
+    const origin = this.server!.origin;
+    const problem = sameOriginProblem(c.req, [origin, origin.replace("127.0.0.1", "localhost")]);
+    if (problem) return refuse(403, problem);
+    const sent = c.req.headers[ACTION_HEADER];
+    if (typeof sent !== "string" || !tokenMatches(sent, this.nonce)) return refuse(403, "This request did not come from the Usage page. Reload the page and try again.");
+    if (hasBody(c.req)) return refuse(400, "A stop request has no body.", { Connection: "close" });
+    const now = Date.now();
+    while (this.stopTimes.length && now - this.stopTimes[0] >= 60_000) this.stopTimes.shift();
+    if (this.stopTimes.length >= STOPS_PER_MINUTE) return refuse(429, `At most ${STOPS_PER_MINUTE} stops a minute. Wait a moment and try again.`, { "Retry-After": "30" });
+    const agent = c.match![1];
+    const state = await this.store.state();
+    if (!Object.hasOwn(state.agents, agent)) return refuse(404, "There is no such agent in this run.");
+    this.stopTimes.push(now);
+    try {
+      const r = await requestAgentStop(this.store, { agent, by: stopper("dashboard"), surface: "dashboard" });
+      this.opts.onStopRequested?.();
+      c.json(200, { status: "requested", agent, ...(r.task !== undefined && { task: r.task }), ...(r.already && { already: true }) });
+    } catch (e) {
+      if (e instanceof StopRefusal) return refuse(409, e.message);
+      console.error(`[Dashboard] ${this.store.id}: stop failed: ${e instanceof Error ? e.message : String(e)}`);
+      refuse(500, "The stop could not be recorded.");
+    }
+  }
 
   private async context(state?: BlackboardState): Promise<PageContext> {
     const s = state ?? (await this.store.state());
@@ -245,6 +318,21 @@ class DashboardServer {
       if (written !== undefined) md += `\n\n---\n\n# CONTRACT.md\n\n${written}`;
     }
     return renderContract(await this.context(state), md, source);
+  }
+
+  /** Findings, and each concluded meeting's record from its blob (the record is redacted and escaped at render). */
+  private async postmortemsPage(): Promise<string> {
+    const state = await this.store.state();
+    const records: Record<string, PostmortemRecordView> = {};
+    for (const [id, m] of Object.entries(state.postmortem?.meetings ?? {})) {
+      if (!m.concluded) continue;
+      try {
+        Object.defineProperty(records, id, { value: { markdown: (await this.blobText(m.concluded.record, RECORD_CAP_BYTES)).text }, enumerable: true });
+      } catch (e) {
+        Object.defineProperty(records, id, { value: { error: `The record cannot be read: ${e instanceof Error ? e.message : String(e)}` }, enumerable: true });
+      }
+    }
+    return renderPostmortems(await this.context(state), records);
   }
 
   /** contracts/<ctr>/CONTRACT.md as the contract tools wrote it, when present (a regular file up to 1 MiB). */

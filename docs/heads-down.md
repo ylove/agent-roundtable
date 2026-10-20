@@ -53,7 +53,7 @@ A successful call returns the execution id, runner pid, optional dashboard URL a
 
 Choose explicitly, or set `ROUNDTABLE_DEFAULT_VISIBILITY`:
 
-- `visibility: {dashboard: true}`: a read-only loopback dashboard with capability URL, task DAG, contract, checks, diffs, budget, events and human-action banners. Keep the returned URL private. Steering stays in MCP tools.
+- `visibility: {dashboard: true}`: a loopback dashboard with capability URL, task DAG, contract, checks, diffs, budget, a Usage page (who is spending what, with a Stop button per agent), events and human-action banners. Keep the returned URL private: anyone who holds it can read the run and stop its agents. Steering stays in MCP tools.
 - `visibility: {github: {repo: "owner/name", create_project: true}}`: optional parent/task issues, project status, progress and `needs-human` labels/comments through the installed GitHub CLI. This needs login, repository write access and the `repo`/`project` scopes. The sync redacts text and excludes diffs/command output; remote visibility can degrade without blocking work.
 - `visibility: {chat_only: true}`: follow progress in chat without either UI. Use this alone; dashboard and GitHub can instead be combined with each other.
 
@@ -67,6 +67,8 @@ Start the exact `watch.command` returned by `execute` as a background shell comm
 agent-roundtable watch <execution-id> --as main --timeout-min 50
 agent-roundtable status <execution-id> --json
 ```
+
+The watcher's wake `reason` is one of `escalation`, `awaiting_human`, `budget`, `completed`, `failed`, `aborted`, `timeout`, and, with [postmortem mode](modes/postmortem.md), `postmortem_ready` (every fix has settled; hold the meeting) and `postmortem` (a meeting concluded; tell the human).
 
 Use `execution_status` for natural questions such as “how close is the nav?”:
 
@@ -85,6 +87,8 @@ Claude workers have restricted file tools, no Bash and a PreToolUse lease hook. 
 External workers register with `join_execution` and receive an `agent_token` once. The orchestrator server's worker tools require it and `execution_id` on every call; their claims expire after 15 minutes without a tool call. External workers are trusted like the host chat and are unsandboxed. Every worker response also delivers inbox directives and decisions; directives need acknowledgement.
 
 ## Escalations and huddles
+
+Keep concerns raised at the table through [dissents and tripwires](dissents.md): notify the dissenter, huddle or pause affected work when recorded evidence matches. The dashboard's **Dissents** page shows firings, huddle outcomes and advisory scores.
 
 Only blocked work and affected dependents pause. Workers use `escalate` for blockers, ambiguity, resource needs, conflicts, assistance or emergencies. The watchdog handles expired claims/leases and transient failures, detects stalls, repeated signatures and deadlocks, and routes what remains.
 
@@ -108,7 +112,7 @@ For a larger rethink, `control_execution(action: "pause", to_table: true)`, obta
 
 Reconnect and call `execution_status` or `control_execution(action: "resume")`: these ensure a live run has a runner. To start it manually use `agent-roundtable run <execution-id>`. Recovery verifies the chain, replays state, adopts live workers and resumes dead workers with their WIP and fresh task cards. The task retains its branch and worktree. A live runner lock is never stolen, even with a stale heartbeat; a different host is refused. A fully paused runner exits after six hours and can be restarted later.
 
-`abort` stops workers and keeps worktrees, branches and logs. `purge` deletes a terminal run only, needs `confirm: true` (CLI: `--confirm`), and is audited. `agent-roundtable verify <execution-id>` checks event and audit chains. Startup retention defaults to 30 days for terminal runs and archived sessions and 365 days for audit months; configure each policy or use `0`/`off` to retain it. Public transcripts and remote copies are separate.
+`stop_agent` stops one or more workers (the same stop as the dashboard's button): the runner keeps the work, blocks the task and wakes the orchestrator with two choices, rework around the agent with `resolve_escalation` or `control_execution(action: "handoff")`. Stopping either micro-huddle participant routes the unresolved huddle to the orchestrator: reported usage is charged, dispatched unreported allowance stays estimated, and unused allowance is released. Dissent holds survive until their own explicit escalation resolution; other holds and dependency waits remain. See [usage visibility](usage.md#stopping-an-agent). `abort` stops workers and keeps worktrees, branches and logs. `purge` deletes a terminal run only, needs `confirm: true` (CLI: `--confirm`), and is audited. `agent-roundtable verify <execution-id>` checks event and audit chains. Startup retention defaults to 30 days for terminal runs and archived sessions and 365 days for audit months; configure each policy or use `0`/`off` to retain it. Public transcripts and remote copies are separate.
 
 ## Budgets and sandbox
 

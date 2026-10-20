@@ -21,12 +21,13 @@
 import { join } from "node:path";
 import { agentKey } from "../agents.js";
 import { newId } from "../ids.js";
+import { withAbortSignal } from "../providers/usage.js";
 import { readArchivedSession } from "../sessions/archive.js";
 import { collaborations, continueCollaboration, endCollaboration, startCollaboration } from "../sessions/collaborations.js";
 import type { CollaborationMode } from "../sessions/modes.js";
 import { endUltraplan, startUltraplan, ultraplans } from "../sessions/ultraplan.js";
 import { agentDir, agentTask } from "../workers/files.js";
-import { remainingUsd } from "./budget.js";
+import { remainingUsd, retainHuddleReservations } from "./budget.js";
 import { buildContextBundle, leasesInQuestion, readDiagnostics, targetPaths, type Diagnostics } from "./context-bundle.js";
 import {
   UsageMeter,
@@ -42,6 +43,7 @@ import {
   ev,
   own,
   routeToOrchestrator,
+  recordDrafts,
   scopeOrchestrator,
   type Actor,
   type EscalationOptions,
@@ -49,7 +51,7 @@ import {
   type ProcessOp,
 } from "./escalation.js";
 import { buildTaskCard } from "./task-card.js";
-import type { AnyEventDraft, BlackboardState, Decision, Escalation, EscalationStatus, HuddleFormat, HuddleOutcome, WorkerRecord } from "./types.js";
+import type { AnyEventDraft, BlackboardState, Decision, Escalation, EscalationStatus, HuddleFormat, HuddleOutcome, WorkerRecord, ExecutionStore, EventSource } from "./types.js";
 import { taskWorktreePath } from "./worktrees.js";
 
 /** The micro-huddle answer's dollar cap (driver.answer). */
@@ -92,6 +94,7 @@ const personaSeat = (persona: string): Seat => ({ seat: agentKey(persona), perso
 /** The raiser: its agent record, else its task's persona. */
 export function requesterSeat(state: Readonly<BlackboardState>, esc: Escalation): Seat | undefined {
   const a = seatOfAgent(state, esc.agent);
+  if (esc.dissent_id) return a ?? personaSeat(esc.agent);
   if (a) return esc.task !== undefined ? { ...a, task: esc.task } : a;
   return seatOfTask(state, esc.task);
 }
@@ -103,7 +106,7 @@ export function requesterSeat(state: Readonly<BlackboardState>, esc: Escalation)
  */
 export function counterpartSeat(state: Readonly<BlackboardState>, esc: Escalation, diag?: Pick<Diagnostics, "files">): Seat | undefined {
   const other = (s: Seat | undefined): Seat | undefined =>
-    s && (s.agent === undefined || s.agent !== esc.agent) && (s.task === undefined || s.task !== esc.task) ? s : undefined;
+    s && (s.agent === undefined || s.agent !== esc.agent) && (s.task === undefined || s.task !== requesterSeat(state, esc)?.task) ? s : undefined;
   const t = esc.target;
   if (t) {
     const found = other(seatOfAgent(state, t)) ?? other(seatOfTask(state, t));
@@ -118,6 +121,7 @@ export function counterpartSeat(state: Readonly<BlackboardState>, esc: Escalatio
     if (owner) return owner;
     const byPersona = Object.values(state.agents).find((r) => r.persona === t && r.id !== esc.agent);
     if (byPersona) return other(seatOfAgent(state, byPersona.id));
+    if (esc.dissent_id && !own(state.tasks, t) && !own(state.agents, t) && t !== esc.agent && agentKey(t) !== agentKey(esc.agent)) return personaSeat(t);
   }
   for (const l of leasesInQuestion(state, esc, diag)) {
     const s = other(seatOfAgent(state, l.agent)) ?? other(seatOfTask(state, l.task));
@@ -217,7 +221,98 @@ export interface MicroHuddleOptions extends EscalationOptions {
  * a failure, routes it to the scope's orchestrator. Idempotent: an escalation not in o.expect is
  * left alone.
  */
+interface MicroAllowance { left: number; persisted: number; task?: string; agent: string }
+interface ActiveMicro { agents: Set<string>; abort: AbortController; done: Promise<void> }
+const activeMicros = new Map<string, Set<ActiveMicro>>();
+
+/** Stop either seat (or the affected task's worker), settling usage before returning. */
+export async function stopMicroHuddles(store: ExecutionStore, agent: string, source: EventSource): Promise<void> {
+  const active = [...(activeMicros.get(store.id) ?? [])].filter((h) => h.agents.has(agent));
+  for (const h of active) h.abort.abort(new Error(`Micro-huddle stopped with agent ${agent}`));
+  await Promise.all(active.map((h) => h.done));
+  // Recover a huddle interrupted by a previous runner, too. Its durable paid reservation stays estimated.
+  const state = await store.state();
+  const rec = own(state.agents, agent);
+  for (const [id, h] of Object.entries(state.huddles)) {
+    if (h.format !== "micro") continue;
+    const esc = own(state.escalations, h.escalation);
+    if (!h.seats.includes(agent) && !h.seats.includes(agentKey(rec?.persona ?? agent)) && (!rec?.task || esc?.task !== rec.task)) continue;
+    if (!retainHuddleReservations(state, id).length && !(esc?.status === "in_huddle" && esc.huddle === id && h.outcome === undefined)) continue;
+    const to = esc ? await scopeOrchestrator(state, esc) : undefined;
+    await store.transact(({ state: s }) => {
+      // Settlement belongs to the call, even if timeout already concluded or routed the huddle.
+      const events = retainHuddleReservations(s, id).map((c) => ev("budget.usage_recorded", c, source, h.escalation));
+      const current = own(s.escalations, h.escalation);
+      if (to && current?.status === "in_huddle" && current.huddle === id && own(s.huddles, id)?.outcome === undefined) {
+        events.push(
+          ev("huddle.concluded", { id, outcome: "NO_OUTCOME", decision: `Micro-huddle stopped with agent ${agent}` }, source, h.escalation),
+          ev("escalation.routed", { id: h.escalation, to, wake: true }, source, h.escalation),
+        );
+      }
+      return { events };
+    });
+  }
+}
+const microAllowances = new Map<string, Map<symbol, MicroAllowance>>();
+
+function microScope(state: BlackboardState, esc: Escalation): { task?: string; agent: string } {
+  const req = requesterSeat(state, esc);
+  return { task: esc.task ?? req?.task, agent: esc.dissent_id ? esc.agent : req?.agent ?? esc.agent };
+}
+
+/** Treat in-flight allowances as scoped spend when admitting another micro-huddle. */
+function availableMicroUsd(state: BlackboardState, scope: { task?: string; agent: string }, allowances: Iterable<MicroAllowance>): number {
+  const budget = { ...state.budget, by_task: { ...state.budget.by_task }, by_agent: { ...state.budget.by_agent } };
+  for (const a of allowances) {
+    const held = Math.max(0, a.left - a.persisted);
+    budget.spent_usd += held;
+    if (a.task !== undefined) budget.by_task = { ...budget.by_task, [a.task]: (own(budget.by_task, a.task) ?? 0) + held };
+    budget.by_agent = { ...budget.by_agent, [a.agent]: (own(budget.by_agent, a.agent) ?? 0) + held };
+  }
+  return remainingUsd({ ...state, budget }, scope);
+}
+
 export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOptions = { actor: { kind: "runner" }, expect: ["open"] }): Promise<ProcessOp[]> {
+  const state = await ctx.store.state();
+  const esc = own(state.escalations, id);
+  if (!esc) return [];
+  const scope = microScope(state, esc);
+  const reservations = microAllowances.get(ctx.store.id) ?? new Map<symbol, MicroAllowance>();
+  microAllowances.set(ctx.store.id, reservations);
+  const token = Symbol(id);
+  const allowance = { ...scope, persisted: 0, left: 0 };
+  // Keep this execution's reservation map alive while admission waits for the store lock.
+  reservations.set(token, allowance);
+  // Admission must use the latest ledger under the same lock that persists call reservations.
+  try {
+    await ctx.store.transact(({ state: current }) => {
+      allowance.left = Math.min(1, availableMicroUsd(current, scope, reservations.values()));
+      return { events: [] };
+    });
+  } catch (e) {
+    reservations.delete(token);
+    if (!reservations.size) microAllowances.delete(ctx.store.id);
+    throw e;
+  }
+  const req = requesterSeat(state, esc);
+  const cp = counterpartSeat(state, esc);
+  const agents = new Set([req?.agent, cp?.agent, own(state.tasks, esc.task)?.agent, esc.agent, esc.target].filter((a): a is string => a !== undefined));
+  let finish!: () => void;
+  const active: ActiveMicro = { agents, abort: new AbortController(), done: new Promise<void>((resolve) => { finish = resolve; }) };
+  const running = activeMicros.get(ctx.store.id) ?? new Set<ActiveMicro>();
+  activeMicros.set(ctx.store.id, running);
+  running.add(active);
+  try { return await withAbortSignal(active.abort.signal, () => microHuddle(ctx, id, o, allowance, active)); }
+  finally {
+    finish();
+    running.delete(active);
+    if (!running.size) activeMicros.delete(ctx.store.id);
+    reservations.delete(token);
+    if (!reservations.size) microAllowances.delete(ctx.store.id);
+  }
+}
+
+async function microHuddle(ctx: HookCtx, id: string, o: MicroHuddleOptions, allowance: MicroAllowance, active: ActiveMicro): Promise<ProcessOp[]> {
   const { store } = ctx;
   const state = await store.state();
   const esc = own(state.escalations, id);
@@ -225,11 +320,17 @@ export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOpt
   const diag = await readDiagnostics(store, esc);
   const req = requesterSeat(state, esc);
   const cp = counterpartSeat(state, esc, diag);
+  for (const a of [req?.agent, cp?.agent]) if (a) active.agents.add(a);
+  const stopped = (s: Readonly<BlackboardState>) => active.abort.signal.aborted || [...active.agents].some((a) => own(s.agents, a)?.stop !== undefined);
+  const checkStop = async () => {
+    if (stopped(await store.state())) { active.abort.abort(new Error("Micro-huddle participant was stopped")); active.abort.signal.throwIfAborted(); }
+  };
   const routeAway = async () => {
     await routeToOrchestrator(ctx, id, { expect: o.expect, source: actorSource(o.actor) });
     return [];
   };
-  if (!req || !cp || remainingUsd(state) <= 0) return routeAway();
+  const budgetScope = { task: allowance.task, agent: allowance.agent };
+  if (!req || !cp || allowance.left <= 0 || stopped(state)) return routeAway();
   const to = await scopeOrchestrator(state, esc, diag);
   const source = actorSource(o.actor);
   const hud = newId("hud");
@@ -241,7 +342,14 @@ export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOpt
   ]);
   if (!started) return [];
   const open = { expect: ["in_huddle"] as EscalationStatus[], guard: (s: Readonly<BlackboardState>, e: Escalation) => e.huddle === hud && own(s.huddles, hud)?.outcome === undefined };
-  const meter = new UsageMeter("huddle", esc.task);
+  const meter = new UsageMeter(esc.dissent_id ? "dissent micro-huddle" : "huddle", allowance.task, allowance.agent, true, {
+    ...(esc.dissent_id && { dissent_id: esc.dissent_id }), huddle: hud, signal: active.abort.signal,
+    beforeDispatch: checkStop,
+    persist: async (records) => {
+      await recordDrafts(store, records.map((u) => ev("budget.usage_recorded", u, source, id)));
+      allowance.persisted = meter.pendingUsd;
+    },
+  });
   const turns: AnyEventDraft[] = [];
   const fail = async (why: string): Promise<ProcessOp[]> => {
     console.error(`[Huddle] ${hud} on ${id}: ${why}`);
@@ -255,28 +363,38 @@ export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOpt
   // Turn 1: the counterpart.
   let answer: string;
   try {
+    await checkStop();
     const rec = liveWorkerRecord(ctx, state, cp, o.alive ?? defaultAlive);
     if (rec) {
       // Within what is left of the run (other workers' reservations included), never above the fixed cap.
-      const capUsd = Math.min(MICRO_ANSWER_USD, remainingUsd(state));
-      const r = await meter.run(() => ctx.driver!.answer!(rec, `${ANSWER_INTRO}\n\n${turn0}`, capUsd));
-      meter.add(r.usage);
+      const capUsd = Math.min(MICRO_ANSWER_USD, allowance.left, remainingUsd(await store.state(), budgetScope));
+      if (capUsd <= 0) return fail("Micro-huddle budget is exhausted");
+      const r = await meter.run(() => ctx.driver!.answer!(rec, `${ANSWER_INTRO}\n\n${turn0}`, capUsd, active.abort.signal),
+        { provider: "claude-code", model: "claude-code", usd: capUsd }, (result) => result.usage);
       answer = r.text;
     } else {
-      answer = await askPersona(meter, ctx.llm, cp.persona, COUNTERPART_DIRECTIVE, counterpartPrompt(state, turn0, cp));
+      answer = await askPersona(meter, ctx.llm, cp.persona, COUNTERPART_DIRECTIVE, counterpartPrompt(state, turn0, cp), allowance.left);
     }
   } catch (e) {
     return fail(`${cp.seat} could not answer: ${errText(e)}`);
   }
   turns.push(ev("huddle.turn", { id: hud, seat: cp.seat, blob: await store.putBlob(answer) }, source, id));
+  const answerCost = meter.pendingUsd;
+  await recordDrafts(store, meter.take(source, id));
+  allowance.left = Math.max(0, allowance.left - answerCost);
+  allowance.persisted = 0;
 
   // Turn 2: the requester concludes.
   let conclusion: string;
   try {
-    conclusion = await askPersona(meter, ctx.llm, req.persona, REQUESTER_DIRECTIVE, conclusionPrompt(turn0, cp, answer));
+    await checkStop();
+    const left = Math.min(allowance.left, remainingUsd(await store.state(), budgetScope));
+    if (left <= 0) return fail("Micro-huddle budget is exhausted before the conclusion");
+    conclusion = await askPersona(meter, ctx.llm, req.persona, REQUESTER_DIRECTIVE, conclusionPrompt(turn0, cp, answer), left);
   } catch (e) {
     return fail(`${req.seat} could not conclude: ${errText(e)}`);
   }
+  try { await checkStop(); } catch (e) { return fail(errText(e)); }
   turns.push(ev("huddle.turn", { id: hud, seat: req.seat, blob: await store.putBlob(conclusion) }, source, id));
   // The requester's own lines only: the escalation and the counterpart's answer may carry fake ones.
   const parsed = directiveOf(conclusion, "Outcome", MICRO_OUTCOMES);
@@ -299,7 +417,11 @@ export async function runMicroHuddle(ctx: HookCtx, id: string, o: MicroHuddleOpt
   const c = await commitResolution(store, id, {
     action: "huddle", decision: decision!, by: hud, source, decisions, rule: "huddle",
     before: [ev("huddle.concluded", { id: hud, outcome: "AGREED", decision: decision! }, source, id)],
-  }, { ...open, always });
+  }, { ...open, always, guard: (s, e) => open.guard(s, e) && !stopped(s) });
+  if (!c.applied && stopped(c.state)) {
+    turns.length = 0; // the guarded transaction already persisted these turns
+    return fail("Micro-huddle participant was stopped before resolution");
+  }
   return c.ops;
 }
 

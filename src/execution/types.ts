@@ -47,10 +47,28 @@ export interface TokenUsage {
   cacheWriteTokens?: number;
 }
 
-export type BudgetSource = "worker" | "huddle" | "consent" | "lead" | "structuring";
+export type BudgetSource = "worker" | "huddle" | "postmortem" | "dissent micro-huddle" | "consent" | "lead" | "structuring";
+
+/**
+ * Where a figure comes from (usage-visibility.md §3): measured by the system that did the work and
+ * read directly, reported by an agent or host we cannot check, or estimated by us (price table,
+ * text length).
+ */
+export type Provenance = "measured" | "reported" | "estimated";
+
+/** Tokens and cost of one call can differ: tokens measured while the cost is priced from the table. */
+export interface UsageProvenance {
+  tokens: Provenance;
+  usd: Provenance;
+}
 
 export interface UsageRecord {
   source: BudgetSource;
+  /** Stable call identity: later records replace this call's reservation or prior report. */
+  call_id?: string;
+  dissent_id?: string;
+  /** True while a dispatched call has not settled; its USD is explicitly estimated. */
+  reservation?: boolean;
   agent?: string;
   task?: string;
   provider?: string;
@@ -59,6 +77,16 @@ export interface UsageRecord {
   usd: number;
   /** True when usd came from the pricing table (or is unknown) rather than a provider-reported cost. */
   estimated: boolean;
+  /**
+   * Added in WS15. Absent on older events, which read as {tokens: "measured", usd: estimated ?
+   * "estimated" : "measured"} (what 1.0 meant); see usageProvenance().
+   */
+  provenance?: UsageProvenance;
+}
+
+/** The provenance of a usage record, with the 1.0 reading for a record that carries none. */
+export function usageProvenance(u: Pick<UsageRecord, "estimated" | "provenance">): UsageProvenance {
+  return u.provenance ?? { tokens: "measured", usd: u.estimated ? "estimated" : "measured" };
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +162,23 @@ export interface ContractBudget {
   max_attempts: number;
 }
 
+/** Non-executing predicates over recorded execution state. */
+export type DissentTripwire =
+  | { kind: "check_failed"; check: string; task?: string }
+  | { kind: "path_touched"; paths: string[]; task?: string }
+  | { kind: "task_state"; task: string; state: "rejected" | "blocked" };
+
+export interface Dissent {
+  id: string;
+  by: string;
+  source: { kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "manual"; ref?: string };
+  claim: string;
+  predicted_failure: string;
+  /** May be absent only while drafting; freeze requires arming or explicit excusal. */
+  tripwire?: DissentTripwire;
+  on_fire: "notify" | "huddle" | "pause_and_huddle";
+}
+
 export interface Contract {
   schema: typeof CONTRACT_SCHEMA;
   id: string;
@@ -154,11 +199,14 @@ export interface Contract {
   tasks: TaskSpec[];
   interfaces: InterfaceSpec[];
   decisions: Decision[];
+  dissents: Dissent[];
   validation: { commands: CommandSpec[]; final: string[] };
   budget: ContractBudget;
   authority: { lead: string; may: AuthorityAction[]; budget_extension_pct: number };
   sandbox: { backend: SandboxBackendId; image: string; install?: { argv: string[]; egress: string[] } };
   workers: { driver: WorkerDriverId; model?: string; fallback_model?: string };
+  /** Postmortem mode (docs/design/postmortem.md §2): set by propose_contract when the project has it enabled. */
+  postmortem?: { enabled: boolean };
   consent: Array<{ agent: string; verdict: ConsentVerdict; reason?: string }>;
   frozen?: { by: string; at: string; hash: string };
 }
@@ -236,11 +284,14 @@ export interface TaskRuntime {
   last_commit?: string;
   submitted_seq?: number;
   accepted_seq?: number;
+  /** Latest rejection, retained because rejection immediately returns the task to work. */
+  rejected_seq?: number;
+  blocked_seq?: number;
   /**
    * Why a blocked task waits. needs (added in WS07) are its open interface and artifact needs:
    * dependency.requested adds one, dependency.satisfied removes it. Task needs are in deps.
    */
-  blocked_by?: { escalation?: string; deps?: string[]; needs?: Array<{ kind: "interface" | "artifact"; ref: string }> };
+  blocked_by?: { escalation?: string; escalations?: string[]; deps?: string[]; needs?: Array<{ kind: "interface" | "artifact"; ref: string }> };
   started_at?: string;
   finished_at?: string;
 }
@@ -274,6 +325,8 @@ export interface EscalationDiagnostics {
 
 export interface Escalation {
   id: string;
+  /** Dissent requester identity is independent of the affected task. */
+  dissent_id?: string;
   task?: string;
   agent: string;
   kind: EscalationKind;
@@ -290,6 +343,39 @@ export interface Escalation {
   huddle?: string;
   resolution?: { action: ResolutionAction; decision: string; by: string };
   raised_seq: number;
+}
+
+// ---------------------------------------------------------------------------
+// Postmortems (docs/design/postmortem.md)
+// ---------------------------------------------------------------------------
+
+export type PostmortemCategory = "prompt_misread" | "project_misread" | "contract_ambiguity" | "implementation" | "test_gap" | "process";
+export type PostmortemFixStatus = "pending" | "fixed" | "abandoned";
+export type PostmortemFormat = "collaborate" | "waffle-house";
+export type PostmortemArtifactKind = "fix" | "rule" | "persona_addendum" | "agent_rule" | "contract_rule" | "memory" | "dissent_score";
+
+export interface PostmortemFinding {
+  id: string;
+  at: string;
+  /** What went wrong, at most 600 characters. */
+  summary: string;
+  /** The check, test or reviewer that caught it. */
+  detected_by: string;
+  /** Agents whose work was sent back (persona names, or "orchestrator"). */
+  responsible: string[];
+  task?: string;
+  category: PostmortemCategory;
+  /** References only: blob refs, event ids, commit shas, file paths. */
+  evidence?: string[];
+  fix?: { by?: string; status: PostmortemFixStatus; ref?: string };
+  /** How many times the same failure recurred after the first. */
+  repeats?: number;
+}
+
+/** A finding as the blackboard holds it: its fix is always set, and `pm` names the meeting that covered it. */
+export interface PostmortemFindingState extends PostmortemFinding {
+  fix: { by?: string; status: PostmortemFixStatus; ref?: string };
+  pm?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +412,7 @@ export interface EventPayloads {
   "contract.consent_requested": { contract: string; version: number; participants: string[]; round?: string; hash?: string; host?: string };
   /** `round` (WS04, optional): the round this answers; an answer to any other round is ignored. */
   "contract.consent_recorded": { contract: string; agent: string; verdict: ConsentVerdict; reason?: string; round?: string };
-  "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused"; reason: string };
+  "contract.objection_resolved": { contract: string; agent: string; how: "amended" | "withdrawn" | "excused" | "dissented"; reason: string; dissent_id?: string };
   /**
    * `blob` (added in WS03) is the full contract JSON at this version, stored with putBlob. The store
    * requires it at runtime: the blackboard reads the contract from it (heads-down.md §6). It is
@@ -364,7 +450,7 @@ export interface EventPayloads {
     agent: string;
     task?: string;
     code: number | null;
-    reason: "completed" | "error" | "killed" | "lost" | "stalled" | "budget" | "attestation";
+    reason: "completed" | "error" | "killed" | "lost" | "stalled" | "budget" | "attestation" | "stopped";
     result_subtype?: string;
     usage?: TokenUsage;
     /**
@@ -374,6 +460,10 @@ export interface EventPayloads {
     paused?: string;
   };
   "agent.left": { agent: string; reason: string };
+  /** Added in WS15: a human (or the orchestrator for a human) asked for one agent to be stopped; the runner applies it. */
+  "agent.stop_requested": { agent: string; by: string; surface: "dashboard" | "cli" | "tool"; reason?: string };
+  /** The stopped agent's exit was recorded; `request` is the id of the agent.stop_requested event, `escalation` the one raised for its task. */
+  "agent.stopped": { agent: string; task?: string; request: string; escalation?: string };
 
   "task.ready": { task: string };
   "task.claimed": { task: string; agent: string; attempt: number; ttl_s: number };
@@ -389,7 +479,7 @@ export interface EventPayloads {
   "task.merged": { task: string; integration_sha: string };
   "task.accepted": { task: string };
   "task.blocked": { task: string; escalation?: string; deps?: string[] };
-  "task.unblocked": { task: string };
+  "task.unblocked": { task: string; escalation?: string };
   "task.retried": { task: string; attempt: number; why: string };
   "task.reassigned": { task: string; from: string; to: string };
   "task.split": { task: string; into: TaskSpec[] };
@@ -440,6 +530,8 @@ export interface EventPayloads {
   "decision.recorded": { decision: Decision };
   "directive.issued": { id: string; to: string[]; text: string; requires_ack: boolean };
   "directive.acknowledged": { id: string; agent: string };
+  "dissent.tripwire_fired": { dissent_id: string; task?: string; tripped_by: string; evidence: string; generation?: number; notified?: string[]; orchestrator_woken?: boolean };
+  "dissent.scored": { dissent_id: string; outcome: "vindicated" | "refuted" | "untested" };
 
   "escalation.raised": { escalation: Escalation };
   "escalation.routed": { id: string; to: string; format?: HuddleFormat; wake: boolean };
@@ -465,6 +557,22 @@ export interface EventPayloads {
   "watchdog.stall_detected": { agent: string; task?: string };
 
   "sandbox.degraded": { backend: SandboxBackendId; reason: string };
+
+  // Postmortem mode (docs/design/postmortem.md §4)
+  "postmortem.finding_recorded": {
+    id: string;
+    summary: string;
+    detected_by: string;
+    responsible: string[];
+    task?: string;
+    category: PostmortemCategory;
+    evidence?: string[];
+    /** A repeat of the same finding (same id): how many times it has recurred. */
+    repeats?: number;
+  };
+  "postmortem.fix_updated": { id: string; by?: string; status: PostmortemFixStatus; ref?: string };
+  "postmortem.started": { id: string; format: PostmortemFormat; seats: string[] };
+  "postmortem.concluded": { id: string; artifacts: Partial<Record<PostmortemArtifactKind, number>>; flagged: number; record: string };
 }
 
 export type EventType = keyof EventPayloads;
@@ -477,6 +585,7 @@ export const EVENT_TYPES = [
   "contract.frozen", "contract.amended", "contract.superseded",
   "runner.started", "runner.takeover", "runner.stopped",
   "agent.registered", "agent.spawned", "agent.attested", "agent.exited", "agent.left",
+  "agent.stop_requested", "agent.stopped",
   "task.ready", "task.claimed", "task.released", "task.progress", "task.submitted", "task.checks_passed",
   "task.rejected", "task.merged", "task.accepted", "task.blocked", "task.unblocked", "task.retried",
   "task.reassigned", "task.split", "task.failed", "task.cancelled",
@@ -486,6 +595,7 @@ export const EVENT_TYPES = [
   "check.started", "check.passed", "check.failed", "check.timed_out",
   "command.completed",
   "merge.succeeded", "merge.conflicted",
+  "dissent.tripwire_fired", "dissent.scored",
   "note.posted", "decision.recorded", "directive.issued", "directive.acknowledged",
   "escalation.raised", "escalation.routed", "escalation.auto_resolved", "escalation.resolved",
   "escalation.awaiting_human", "escalation.withdrawn",
@@ -494,6 +604,7 @@ export const EVENT_TYPES = [
   "watchdog.action", "watchdog.circuit_opened", "watchdog.circuit_closed", "watchdog.deadlock_detected",
   "watchdog.stall_detected",
   "sandbox.degraded",
+  "postmortem.finding_recorded", "postmortem.fix_updated", "postmortem.started", "postmortem.concluded",
 ] as const satisfies readonly EventType[];
 
 // Compile-time check that EVENT_TYPES lists every key of EventPayloads.
@@ -583,12 +694,45 @@ export interface AgentRecord {
   budget_reserved_usd?: number;
   session_id?: string;
   status: "registered" | "running" | "exited" | "left";
+  /** Added in WS15: the latest stop request (agent.stop_requested), settled by agent.stopped. */
+  stop?: { request: string; by: string; surface: "dashboard" | "cli" | "tool"; reason?: string; at: string; seq: number; state: "requested" | "stopped"; escalation?: string };
+}
+
+/** Tokens by class, as the ledger sums them. */
+export interface TokenTotals {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+}
+
+/** A sum split by provenance (US dollars, or tokens). */
+export interface ProvenanceTotals {
+  measured: number;
+  reported: number;
+  estimated: number;
+}
+
+/**
+ * Added in WS15: what one agent has used, by model (usage-visibility.md §4). Spend that names no
+ * agent (huddles, consent rounds, the lead, structuring) is kept under "[<source>]". `tokens_prov`
+ * splits the model's tokens by provenance.
+ */
+export interface AgentUsage {
+  provider?: string;
+  models: Record<string, { tokens: TokenTotals; tokens_prov: ProvenanceTotals; usd: ProvenanceTotals }>;
+  last_at: string;
+  /** Keep driver and persona platforms distinct when both charge the same requester. */
+  platforms?: Record<string, AgentUsage>;
 }
 
 export interface BudgetLedger {
   spent_usd: number;
   estimated: boolean;
   by_agent: Record<string, number>;
+  by_agent_usage: Record<string, AgentUsage>;
+  /** Latest ledger entry per bounded call; optional for historical projections. */
+  calls?: Record<string, UsageRecord & { at: string }>;
   by_task: Record<string, number>;
   by_team: Record<string, number>;
   thresholds_crossed: number[];
@@ -601,6 +745,19 @@ export interface BudgetLedger {
   extensions_usd: number;
 }
 
+export interface DissentRuntime {
+  spec?: Dissent;
+  /** New/changed predicates match only evidence recorded after this amendment sequence. */
+  armed_seq?: number;
+  /** Set when changing a predicate (or reintroducing an id with historical escalations). */
+  generation?: number;
+  /** Deterministic tripwire keys retain every firing, including across amendments. */
+  fires: Record<string, EventPayloads["dissent.tripwire_fired"] & { seq: number }>;
+  /** Advisory only; never an input to consent or vote weighting. */
+  score?: EventPayloads["dissent.scored"]["outcome"];
+  scored_seq?: number;
+}
+
 export interface BlackboardState {
   execution: string;
   seq: number;
@@ -611,11 +768,12 @@ export interface BlackboardState {
   goal?: Contract["goal"];
   interfaces: Record<string, { spec?: InterfaceSpec; version: number; path?: string; blob?: string; task?: string }>;
   decisions: Decision[];
+  dissents: Record<string, DissentRuntime>;
   tasks: Record<string, TaskRuntime>;
   claims: Record<string, Claim>;
   leases: Record<string, Lease>;
   lease_queue: LeaseRequest[];
-  files: Record<string, { task: string; agent: string; last_commit: string; merged: boolean }>;
+  files: Record<string, { task: string; agent: string; last_commit: string; merged: boolean; at_seq?: number }>;
   diffs: Record<string, { stat: string; blob: string; commit: string }>;
   checks: Record<"task" | "integration", Record<string, CheckState>>;
   escalations: Record<string, Escalation>;
@@ -635,6 +793,17 @@ export interface BlackboardState {
    * is adopted, dependencies on a split task are rewritten to its parts.
    */
   splits?: Record<string, string[]>;
+  /**
+   * Added in WS14: the postmortem draft of this run (docs/design/postmortem.md §4). A finding's `pm`
+   * is the meeting that covered it; findings without one are the open draft. ready_seq is the seq of
+   * the event after which the draft became ready for a meeting (every fix settled, every task with a
+   * finding terminal); the watcher wakes the orchestrator on it.
+   */
+  postmortem?: {
+    findings: Record<string, PostmortemFindingState>;
+    meetings: Record<string, { format: PostmortemFormat; seats: string[]; concluded?: { artifacts: Partial<Record<PostmortemArtifactKind, number>>; flagged: number; record: string } }>;
+    ready_seq?: number;
+  };
 }
 
 // ---------------------------------------------------------------------------

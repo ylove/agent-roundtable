@@ -31,6 +31,7 @@ import {
 } from "../config.js";
 import type { LLMMessage } from "../providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "../providers/index.js";
+import { metered } from "../usage/session-scope.js";
 import { findExecutable } from "../executables.js";
 import { describeUrl } from "../security/url-guard.js";
 import {
@@ -63,6 +64,9 @@ import { COLLABORATION_MODES } from "../sessions/modes.js";
 import { startUltraplan, submitPlan, endUltraplan, ultraplans } from "../sessions/ultraplan.js";
 import { createAgent, improveAgent } from "../sessions/agent-creation.js";
 import { prototypeTrailer } from "../sessions/prototype-mode.js";
+import { assertAcceptsInput } from "../postmortem/sessions.js";
+import { ultraplanSection } from "../postmortem/lessons.js";
+import { resolveRepo } from "../execution/contract-lifecycle.js";
 import { prototypeDiagnostics } from "../prototypes/index.js";
 import {
   START_MEETING,
@@ -563,6 +567,7 @@ export const deliberationTools: ToolDefinition[] = [
         planner: { type: "string", description: "Optional persona that owns drafting and revision server-side; runs the whole loop in one call." },
         revision_rounds: { type: "number", description: "Planner only: review/revise cycles before sign-off, default 1, clamped to 1..3." },
         execution_ready: { type: "boolean", description: "Default false. True when the plan will be executed heads-down: planner drafts and revisions (and your next steps) must end with a fenced roundtable-tasks JSON block of tasks, commands and interfaces, and sign-offs check it." },
+        repo_dir: { type: "string", description: "A directory inside the repository the plan is for. When earlier postmortems of that project left lessons, a bounded \"Lessons from past postmortems\" section (misreadings first) is added to the context the agents plan with. Never posted publicly." },
         public: PUBLIC_PROP,
         ...PROVIDER_PROPS,
       },
@@ -700,6 +705,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         meeting_id: string;
         message: string;
       };
+      assertAcceptsInput(meeting_id, collaborations.get(meeting_id)?.origin);
       const response = await continueMeeting(meeting_id, message);
       const tracker = meetings.get(meeting_id)?.prototype;
       return {
@@ -755,6 +761,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         meeting_id: string;
         message: string;
       };
+      assertAcceptsInput(meeting_id, collaborations.get(meeting_id)?.origin);
       const response = await continueLocalMeeting(meeting_id, message);
       const tracker = localMeetings.get(meeting_id)?.prototype;
       return {
@@ -799,13 +806,13 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         base_url?: string;
       };
 
-      const result = await chatCompletion(messages, {
+      const result = await metered({ session: "chat", kind: "chat", agent: "chat_completion" }, () => chatCompletion(messages, {
         provider,
         model,
         maxTokens: max_tokens,
         temperature,
         baseUrl: base_url,
-      });
+      }));
 
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -856,6 +863,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         rounds?: number;
       };
 
+      assertAcceptsInput(collaboration_id, collaborations.get(collaboration_id)?.origin);
       const result = await continueCollaboration(collaboration_id, rounds ?? 1);
 
       return {
@@ -869,6 +877,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         message: string;
       };
 
+      assertAcceptsInput(collaboration_id, collaborations.get(collaboration_id)?.origin);
       const result = await nudgeCollaboration(collaboration_id, message);
 
       return {
@@ -950,10 +959,11 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Ultraplan Tools ===
     case START_ULTRAPLAN: {
-      const { agents, task, context, draft_plan, planner, revision_rounds, execution_ready, public: isPublic, provider, model, base_url } = (args ?? {}) as {
+      const { agents, task, context: given, draft_plan, planner, revision_rounds, execution_ready, repo_dir, public: isPublic, provider, model, base_url } = (args ?? {}) as {
         agents: string[];
         task: string;
         context?: string;
+        repo_dir?: string;
         draft_plan?: string;
         planner?: string;
         revision_rounds?: number;
@@ -963,6 +973,9 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         model?: string;
         base_url?: string;
       };
+      // What earlier postmortems of the project taught is read whether or not postmortem mode is on now.
+      const lessons = repo_dir ? ultraplanSection((await resolveRepo(repo_dir)).root) : "";
+      const context = [given, lessons].filter((x) => x?.trim()).join("\n\n") || undefined;
       const result = await startUltraplan(agents, task, {
         context,
         draftPlan: draft_plan,

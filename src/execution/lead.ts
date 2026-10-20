@@ -11,6 +11,7 @@
 // ============================================================================
 
 import { appendAudit } from "../security/audit.js";
+import { remainingUsd } from "./budget.js";
 import { readDiagnostics, buildContextBundle } from "./context-bundle.js";
 import {
   UsageMeter,
@@ -94,7 +95,11 @@ async function decide(ctx: HookCtx, id: string, opts: EscalationOptions): Promis
   const lead = c.authority.lead;
   const actor = { kind: "lead" as const, id: lead };
   const source = actorSource(actor);
-  const meter = new UsageMeter("lead", esc.task);
+  if (esc.dissent_id && remainingUsd(state, { agent: lead }) <= 0) {
+    await awaitHuman(ctx, id, { actor, class: "money", message: "No budget remains for the lead to resolve this dissent." });
+    return [];
+  }
+  const meter = new UsageMeter("lead", undefined, lead);
   const bundle = buildContextBundle(state, esc, { diagnostics: await readDiagnostics(ctx.store, esc) });
 
   let answer: string;

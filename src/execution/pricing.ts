@@ -78,6 +78,10 @@ export const BUILTIN_PRICING: PricingTable = Object.freeze({
 /** Providers that bill nothing per token (local inference). */
 const FREE_PROVIDERS: ReadonlySet<string> = new Set(["ollama"]);
 
+export function isFreeProvider(provider: string | undefined): boolean {
+  return provider !== undefined && FREE_PROVIDERS.has(provider);
+}
+
 // ---------------------------------------------------------------------------
 // Override file
 // ---------------------------------------------------------------------------

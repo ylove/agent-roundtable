@@ -73,6 +73,8 @@ export interface ArchivedSession {
   transcript: string;
   turns: ArchivedTurn[];
   summary?: string;
+  /** Each challenger's/attacker's own closing statement, separate from the proponent/defender summary. */
+  dissentSummaries?: Array<{ agent: string; content: string }>;
   /** Ultraplans only. */
   document?: ArchivedUltraplanDocument;
   /** Agent workshops only: the tool's structured result (without its public block). */
@@ -81,6 +83,8 @@ export interface ArchivedSession {
   public: { url: string | null; topic: string } | null;
   /** Sessions run on behalf of something else, e.g. a heads-down huddle ("huddle:<exe>:<escalation>"). */
   origin?: string;
+  /** Set when a person stopped the session (usage visibility): who and when. */
+  stopped?: { by: string; at: string; reason?: string };
 }
 
 export type ArchiveInput = Omit<ArchivedSession, "schema" | "ended" | "transcript"> & { ended?: string; transcript?: string };
@@ -119,6 +123,8 @@ function scrubRecord(r: ArchivedSession): ArchivedSession {
     transcript: scrub(r.transcript),
     turns: r.turns.map((turn) => ({ ...turn, content: scrub(turn.content) })),
     ...(r.summary !== undefined && { summary: scrub(r.summary) }),
+    ...(r.stopped && { stopped: { ...r.stopped, by: scrub(r.stopped.by), ...(r.stopped.reason !== undefined && { reason: scrub(r.stopped.reason) }) } }),
+    ...(r.dissentSummaries && { dissentSummaries: r.dissentSummaries.map((s) => ({ ...s, content: scrub(s.content) })) }),
     ...(r.document && {
       document: {
         ...r.document,
@@ -173,7 +179,8 @@ function publicOf(channel: PublicChannel | undefined): ArchivedSession["public"]
 }
 
 /** A meeting or local meeting at its end (history as the agent saw it). */
-export function archiveMeeting(kind: "meeting" | "local-meeting", meeting: Meeting | LocalMeeting, summary?: string): string | null {
+export function archiveMeeting(kind: "meeting" | "local-meeting", meeting: Meeting | LocalMeeting, summary?: string,
+  dissentSummaries?: ArchivedSession["dissentSummaries"]): string | null {
   return attempt(meeting.id, () => ({
     id: meeting.id,
     kind,
@@ -188,12 +195,15 @@ export function archiveMeeting(kind: "meeting" | "local-meeting", meeting: Meeti
         : { role: "agent", agent: meeting.agent, speaker: agentKey(meeting.agent), content };
     }),
     ...(summary && { summary }),
+    ...(dissentSummaries?.length && { dissentSummaries }),
     public: publicOf(meeting.publicChannel),
+    ...(meeting.stopped && { stopped: meeting.stopped }),
   }));
 }
 
 /** A collaboration at its end; `transcript` is the stubbed view end_collaboration returns. */
-export function archiveCollaboration(c: Collaboration, transcript: CollaborationMessage[], summary?: string): string | null {
+export function archiveCollaboration(c: Collaboration, transcript: CollaborationMessage[], summary?: string,
+  dissentSummaries?: ArchivedSession["dissentSummaries"]): string | null {
   return attempt(c.id, () => ({
     id: c.id,
     kind: "collaboration",
@@ -206,8 +216,10 @@ export function archiveCollaboration(c: Collaboration, transcript: Collaboration
       ? { role: "orchestrator", speaker: "orchestrator", content: m.content, at: m.timestamp.toISOString() }
       : { role: "agent", agent: m.agent, speaker: agentKey(m.agent), content: m.content, at: m.timestamp.toISOString() }),
     ...(summary && { summary }),
+    ...(dissentSummaries?.length && { dissentSummaries }),
     public: publicOf(c.publicChannel),
     ...(c.origin !== undefined && { origin: c.origin }),
+    ...(c.stopped && { stopped: c.stopped }),
   }));
 }
 
@@ -254,6 +266,7 @@ export function archiveUltraplan(
     },
     public: publicOf(u.publicChannel),
     ...(u.origin !== undefined && { origin: u.origin }),
+    ...(u.stopped && { stopped: u.stopped }),
   }));
 }
 
@@ -336,6 +349,7 @@ export function pruneArchivedSessions(retentionDays = 30, now = Date.now()): str
     if (!Number.isFinite(ended) || ended >= cutoff) continue;
     try {
       rmSync(archivePath(session.id), { force: true });
+      rmSync(join(SESSIONS_DIR, `${session.id}.handoff.md`), { force: true });
       removed.push(session.id);
     } catch (e) {
       console.error(`[Archive] Could not prune session ${session.id}: ${e instanceof Error ? e.message : String(e)}`);

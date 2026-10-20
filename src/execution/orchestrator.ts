@@ -10,7 +10,9 @@
 // control    pause / resume, for the run or for tasks (to_table: true records execution.mode_changed,
 //            to the table on pause and back on resume); steer (execution.steered + directive.issued);
 //            abort (execution.aborted, the workers' process groups stopped, worktrees and the log
-//            kept); purge (run-admin's purge: terminal runs only, confirm: true, audited).
+//            kept); purge (run-admin's purge: terminal runs only, confirm: true, audited);
+//            stop_agent (agent.stop_requested for each target; the runner stops the worker and the
+//            orchestrator is woken with the choices); handoff (pause a live run and write HANDOFF.md).
 // resolve    WS10's resolveEscalation in this process; its process operations go to the runner
 //            through handoff.ts.
 //
@@ -39,6 +41,8 @@ import { BUDGET_FALLBACK } from "./contract.js";
 import { resolveEscalation, type HookCtx, type HuddleLLM } from "./escalation.js";
 import { assertNoGitlinksInIndex, assertNoGitlinksInTree, openRepo, runGit, splitZ, SubmodulesUnsupportedError } from "./git.js";
 import { writeHandoff } from "./handoff.js";
+import { writeRunHandoff } from "../usage/handoff.js";
+import { requestAgentStop, StopRefusal, stopper } from "../usage/stop.js";
 import { PurgeRefusal, purgeExecution, stopLiveWorkers } from "./run-admin.js";
 import { ensureRunner, launchRunner, runnerLiveness, type EnsureRunnerResult } from "./runner-launch.js";
 import { executionDir, openExecutionStore, type FileExecutionStore } from "./store.js";
@@ -144,7 +148,7 @@ export function watchSpec(exe: string, orchestrator: string): { argv: string[]; 
     instructions:
       `Start the watcher now as a BACKGROUND shell command (in Claude Code: the Bash tool with run_in_background: true), exactly as given: ${command} ` +
       `(this is \`agent-roundtable watch ${exe} --as ${orchestrator}\`). It prints one JSON line and exits when you are needed: an escalation routed to you, ` +
-      `something awaiting the human, the budget past 80%, the end of the run, or ${WATCH_DEFAULT_TIMEOUT_MIN} minutes without news. ` +
+      `something awaiting the human, the budget past 80%, a postmortem ready to hold or concluded (only with postmortem mode), the end of the run, or ${WATCH_DEFAULT_TIMEOUT_MIN} minutes without news. ` +
       "When it wakes you, handle the reason (execution_status, resolve_escalation, control_execution, or ask the human), then start the same command again in the background: " +
       "re-arm it after every wake until the run has ended. While it waits, answer the human's questions about progress with execution_status (focus: \"nav\" answers \"how close is the nav?\") " +
       "instead of reading files or logs, and keep talking with the human as usual.",
@@ -561,7 +565,7 @@ export async function execute(a: ExecuteInput): Promise<Json> {
 // control_execution
 // ============================================================================
 
-export type ControlAction = "pause" | "resume" | "steer" | "abort" | "purge";
+export type ControlAction = "pause" | "resume" | "steer" | "abort" | "purge" | "stop_agent" | "handoff";
 
 export interface ControlInput {
   execution_id: string;
@@ -604,6 +608,7 @@ export async function controlExecution(a: ControlInput): Promise<Json> {
   const exe = a.execution_id;
   if (!existsSync(join(executionDir(exe), "execution.json"))) throw new Error(`Execution ${exe} not found`);
   if (a.action === "purge") return purge(exe, a);
+  if (a.action === "handoff") return handoff(exe, a);
   const store = await openExecutionStore(exe);
   const state = await store.state();
   const c = state.contract;
@@ -721,6 +726,35 @@ export async function controlExecution(a: ControlInput): Promise<Json> {
         next: "Workers see the directive on their next tool call and acknowledge it; execution_status(view: \"events\") shows directive.acknowledged.",
       };
     }
+    case "stop_agent": {
+      const targets = [...new Set((a.targets ?? []).map((t) => t.trim()).filter(Boolean))];
+      if (!targets.length) throw new Error('control_execution: "targets" is required for stop_agent: the ids of the agents to stop');
+      const requested: Json[] = [];
+      const refused: Array<{ agent: string; why: string }> = [];
+      for (const agent of targets) {
+        try {
+          const r = await requestAgentStop(store, { agent, by: stopper("tool", orchestrator), surface: "tool", ...(reason && { reason }) });
+          warnings.push(...r.warnings);
+          requested.push({ agent, ...(r.task !== undefined && { task: r.task }), ...(r.already && { already: true }) });
+        } catch (e) {
+          if (!(e instanceof StopRefusal)) throw e;
+          refused.push({ agent, why: e.message });
+        }
+      }
+      if (!requested.length) throw new Error(refused.map((r) => r.why).join(" "));
+      const runner = await runnerNote(exe, warnings);
+      return {
+        execution_id: exe,
+        action: "stop_agent",
+        requested,
+        refused,
+        ...(runner && { runner }),
+        warnings,
+        next:
+          "The runner stops each worker on its next tick (a second or two), keeps its branch and worktree, and blocks its task. " +
+          'The watcher then wakes you (reason agent_stopped) with two choices: rework around the stopped agent with resolve_escalation, or write a handoff with control_execution(action: "handoff").',
+      };
+    }
     case "abort": {
       const why = reason ?? `aborted by ${orchestrator}`;
       const r = await store.transact<boolean>(({ state: s }) => {
@@ -750,6 +784,39 @@ export async function controlExecution(a: ControlInput): Promise<Json> {
     default:
       throw new Error(`Unknown action ${JSON.stringify(a.action)}`);
   }
+}
+
+/** control_execution handoff: pause a live run, then write HANDOFF.md from the blackboard (usage-visibility.md §6). */
+async function handoff(exe: string, a: ControlInput): Promise<Json> {
+  const store = await openExecutionStore(exe);
+  const first = await store.state();
+  const orchestrator = first.contract?.scope.orchestrator ?? "orchestrator";
+  const source = orchestratorSource(orchestrator);
+  const warnings: string[] = [];
+  const reason = a.reason?.trim() ? cap(a.reason, 1000) : "paused for a handoff";
+  const r = await store.transact<boolean>(({ state: s }) =>
+    s.status === "running"
+      ? { events: [{ type: "execution.paused", source, payload: { scope: "all", reason } }], result: true }
+      : { events: [], result: false });
+  const state = await store.state();
+  const written = writeRunHandoff(state);
+  try {
+    await appendAudit({ actor: orchestrator, action: "execution.handoff", target: exe, details: { path: written.path, paused: r.result === true } });
+  } catch (e) {
+    warnings.push(`the audit entry could not be written: ${errText(e)}`);
+  }
+  return {
+    execution_id: exe,
+    action: "handoff",
+    status: state.status,
+    paused: r.result === true,
+    path: written.path,
+    document: written.document,
+    warnings,
+    next: TERMINAL.has(state.status)
+      ? "The run has ended; the handoff describes where it stopped."
+      : 'Show the human the document (or its path). The run stays paused until control_execution(action: "resume").',
+  };
 }
 
 async function purge(exe: string, a: ControlInput): Promise<Json> {

@@ -20,7 +20,7 @@ import { CONTRACT_ID_RE, consentHash, contractMarkdownPath, contractPath, contra
 import { executionDir, listExecutions, openExecutionStore, type FileExecutionStore } from "./store.js";
 import type { AnyEvent, Contract, ContractStatus, ConsentVerdict, EventSource, EventType, ExecutionStore } from "./types.js";
 
-export type ResolvedHow = "amended" | "withdrawn" | "excused";
+export type ResolvedHow = "amended" | "withdrawn" | "excused" | "dissented";
 
 export interface VerdictState {
   /** The latest answer (UNCLEAR also stands for "no answer" in an interrupted round). */
@@ -231,6 +231,23 @@ export async function contractRecord(store: ExecutionStore, contractId?: string,
         const p = e.payload;
         const v = own(verdicts, p.agent);
         const resolved = { how: p.how, reason: p.reason, seq: e.seq, version: e.contract_version ?? latestVersion() };
+        if (p.how === "dissented") {
+          // The objector explicitly consents to the new draft containing their dissent.
+          const version = versions.at(-1);
+          const c = version && await parseBlob(store, version.blob);
+          const previous = versions.at(-2);
+          const prior = previous && await parseBlob(store, previous.blob);
+          if (!v || v.verdict !== "OBJECT" || !c || !prior || frozen ||
+              e.source.id !== p.agent || !["agent", "orchestrator"].includes(e.source.kind) ||
+              !isCurrent({ version: prior.version, hash: consentHash(prior) }, v) ||
+              resolved.version !== version!.version || resolved.version !== prior.version + 1 ||
+              !c.dissents?.some((d) => d.id === p.dissent_id && d.by === p.agent)) {
+            ignored++;
+            break;
+          }
+          put(verdicts, p.agent, { ...v, version: resolved.version, hash: consentHash(c), resolved });
+          break;
+        }
         if (!v) put(verdicts, p.agent, { verdict: "EXCUSED", reason: p.reason, version: resolved.version, seq: e.seq, resolved });
         else if (p.how === "excused" || v.verdict === "OBJECT" || v.verdict === "UNCLEAR") v.resolved = resolved;
         break;
@@ -315,7 +332,7 @@ export function effectiveConsent(rec: Pick<ContractRecord, "contract" | "verdict
     const s = standing(rec, agent);
     if (s.kind === "excused") out.push({ agent, verdict: "EXCUSED", reason: s.reason });
     else if (s.kind === "stale") out.push({ agent, verdict: v.verdict, reason: `on v${v.version}${v.reason ? `: ${v.reason}` : ""}` });
-    else out.push({ agent, verdict: v.verdict, ...(v.reason !== undefined && { reason: v.reason }) });
+    else out.push({ agent, verdict: s.kind === "agree" && v.resolved?.how === "dissented" ? "AGREE" : v.verdict, ...(v.reason !== undefined && { reason: v.reason }) });
   }
   return out;
 }

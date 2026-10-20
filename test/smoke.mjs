@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
-const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract", "resolve_escalation"];
+const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract", "resolve_escalation", "hold_postmortem"];
 const NEW_START_TOOLS = ["start_ultraplan", "create_agent", "improve_agent"];
 const root = mkdtempSync(join(tmpdir(), "roundtable-smoke-"));
 const agentsDir = join(root, "agents");
@@ -48,7 +48,7 @@ const PROTOTYPE_START_TOOLS = ["start_meeting", "start_local_meeting", "start_co
 const RUN_TOOLS = ["execute", "execution_status", "control_execution", "resolve_escalation"];
 const WORKER_TOOLS = ["read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"];
 
-// A worker server (mcp --worker) for a registered agent lists exactly the seven worker tools.
+// A worker server (mcp --worker) for a registered agent lists dissent filing and the seven execution tools.
 async function checkWorkerServer() {
   console.log("worker server");
   Object.assign(process.env, smokeEnv);
@@ -67,8 +67,8 @@ async function checkWorkerServer() {
   try {
     await worker.init();
     const listed = await worker.listTools();
-    check("worker-mode listTools returns exactly the 7 worker tools", () =>
-      assert(JSON.stringify(listed.map((t) => t.name)) === JSON.stringify(WORKER_TOOLS), listed.map((t) => t.name).join(", ")));
+    check("worker-mode listTools returns dissent filing and the 7 execution tools", () =>
+      assert(JSON.stringify(listed.map((t) => t.name)) === JSON.stringify(["file_dissent", ...WORKER_TOOLS]), listed.map((t) => t.name).join(", ")));
     check("the worker server consumed its token file", () => assert(!existsSync(files.tokenPath), files.tokenPath));
     check("the worker server writes only JSON-RPC to stdout", () => assert(worker.noise().length === 0, JSON.stringify(worker.noise())));
   } finally {
@@ -339,9 +339,9 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 37 distinct tools", () => assert(tools.length === 37 && new Set(tools.map((t) => t.name)).size === 37, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 42 distinct tools", () => assert(tools.length === 42 && new Set(tools.map((t) => t.name)).size === 42, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
   check("contract and run tools are strict (additionalProperties: false)", () => {
-    for (const name of ["propose_contract", "amend_contract", "freeze_contract", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
+    for (const name of ["propose_contract", "amend_contract", "freeze_contract", "file_dissent", "score_dissent", "postmortem", "hold_postmortem", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });
   check("the orchestrator's worker tools take execution_id and agent_token", () => {
     for (const name of WORKER_TOOLS) {

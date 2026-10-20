@@ -19,19 +19,25 @@
 // ============================================================================
 
 import { ID_RE, preview } from "./events.js";
+import { POSTMORTEM_HANDLERS, postmortemAfter } from "./postmortem-state.js";
+import { blockingIds, taskHeld, tripwireKey } from "./task-holds.js";
 import {
   CONTRACT_SCHEMA,
   GENESIS_HASH,
   type AgentRecord,
+  type AgentUsage,
   type AnyEvent,
   type BlackboardState,
   type CheckState,
   type Contract,
   type EventEnvelope,
+  type EventPayloads,
   type EventType,
   type TaskRuntime,
   type TaskSpec,
   type TaskState,
+  type UsageProvenance,
+  usageProvenance,
 } from "./types.js";
 
 /**
@@ -41,8 +47,13 @@ import {
  * 4: blocked_by.needs; task.blocked keeps the other reasons; checks bound to an older submission
  *    are ignored and a bound task.checks_passed for one is refused.
  * 5: worker start identities and budget reservations; bound amendment rechecks while merging.
+ * 6: dissent firings and advisory scores; retained task rejection evidence.
+ * 7: source-specific holds, pipeline-safe dissent pauses, amendment generations and delivery records.
+ * 8: escalation resolution releases its own hold, including historical retries without an unblock.
+ * 9: WS14 combines dissent state with postmortem findings, fix transitions and meetings.
+ * 10: WS15 per-agent, per-model usage with provenance (budget.by_agent_usage); agent.stop_requested / agent.stopped.
  */
-export const REDUCER_VERSION = 5;
+export const REDUCER_VERSION = 10;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -63,6 +74,7 @@ export function initialState(executionId: string): BlackboardState {
     paused_tasks: [],
     interfaces: {},
     decisions: [],
+    dissents: {},
     tasks: {},
     claims: {},
     leases: {},
@@ -74,11 +86,12 @@ export function initialState(executionId: string): BlackboardState {
     huddles: {},
     agents: {},
     teams: {},
-    budget: { spent_usd: 0, estimated: false, by_agent: {}, by_task: {}, by_team: {}, thresholds_crossed: [], extensions_usd: 0 },
+    budget: { spent_usd: 0, estimated: false, by_agent: {}, by_agent_usage: {}, by_task: {}, by_team: {}, thresholds_crossed: [], extensions_usd: 0 },
     notes: [],
     inbox: {},
     watchdog: { circuits: {}, deadlocks: [] },
     splits: {},
+    postmortem: { findings: {}, meetings: {} },
   };
 }
 
@@ -160,6 +173,39 @@ function put<V>(map: Record<string, V>, key: string, value: V): V {
 
 function addUsd(map: Record<string, number>, key: string, usd: number): void {
   put(map, key, (own(map, key) ?? 0) + usd);
+}
+
+const round9 = (n: number): number => Math.round(n * 1e9) / 1e9;
+
+/** budget.by_agent_usage: the record's tokens and money under its agent (else "[<source>]") and model, by provenance. */
+function recordAgentUsage(s: BlackboardState, ts: string, p: EventPayloads["budget.usage_recorded"], sign = 1): void {
+  const prov = usageProvenance(p);
+  const key = p.agent ?? `[${p.source}]`;
+  const byAgent = (s.budget.by_agent_usage ??= {});
+  const u = own(byAgent, key) ?? put(byAgent, key, { models: {}, last_at: ts });
+  // Seed older version-10 snapshots from their existing aggregate before recording new calls.
+  if (!u.platforms) u.platforms = Object.keys(u.models).length ? { [u.provider ?? "unknown"]: { models: clone(u.models), last_at: u.last_at } } : {};
+  const provider = p.provider ?? u.provider ?? "unknown";
+  const platform = own(u.platforms, provider) ?? put(u.platforms, provider, { models: {}, last_at: ts });
+  if (p.provider !== undefined) u.provider = p.provider;
+  u.last_at = ts;
+  platform.last_at = ts;
+  for (const ledger of [u, platform]) recordModelUsage(ledger, p, prov, sign);
+}
+
+function recordModelUsage(u: AgentUsage, p: EventPayloads["budget.usage_recorded"], prov: UsageProvenance, sign: number): void {
+  const zero = () => ({ measured: 0, reported: 0, estimated: 0 });
+  const m =
+    own(u.models, p.model) ??
+    put(u.models, p.model, { tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, tokens_prov: zero(), usd: zero() });
+  const t = p.tokens;
+  m.tokens.input += sign * t.inputTokens;
+  m.tokens.output += sign * t.outputTokens;
+  m.tokens.cache_read += sign * (t.cacheReadTokens ?? 0);
+  m.tokens.cache_write += sign * (t.cacheWriteTokens ?? 0);
+  m.tokens_prov[prov.tokens] += sign * (t.inputTokens + t.outputTokens + (t.cacheReadTokens ?? 0) + (t.cacheWriteTokens ?? 0));
+  m.usd[prov.usd] = round9(m.usd[prov.usd] + sign * p.usd);
+  if (sign < 0 && Object.values(m.tokens).every((n) => n === 0) && Object.values(m.usd).every((n) => n === 0)) delete u.models[p.model];
 }
 
 const TERMINAL: ReadonlySet<TaskState> = new Set(["accepted", "failed", "cancelled"]);
@@ -247,9 +293,30 @@ function addMember(s: BlackboardState, team: string, agent: string): void {
 }
 
 /** Install a contract version: goal, teams, interfaces, decisions and tasks (new tasks start pending or ready). */
-function adoptContract(s: BlackboardState, c: Contract): void {
+function adoptContract(s: BlackboardState, c: Contract, seq: number): void {
+  const amended = s.contract !== undefined;
   s.contract = c;
   s.goal = clone(c.goal);
+  for (const id of Object.keys(s.dissents)) {
+    if ((c.dissents ?? []).some((d) => d.id === id)) continue;
+    delete s.dissents[id];
+    for (const e of Object.values(s.escalations)) {
+      if (e.dissent_id !== id || e.status === "resolved" || e.status === "withdrawn") continue;
+      e.status = "withdrawn";
+      if (e.task && own(s.tasks, e.task)) releaseBlock(s, e.task, e.id);
+    }
+  }
+  for (const d of c.dissents ?? []) {
+    let rec = own(s.dissents, d.id);
+    if (!rec) {
+      rec = put(s.dissents, d.id, { fires: {}, armed_seq: amended ? seq : 0 });
+      if (Object.values(s.escalations).some((e) => e.dissent_id === d.id)) rec.generation = seq;
+    } else if (JSON.stringify(rec.spec?.tripwire) !== JSON.stringify(d.tripwire)) {
+      rec.generation = seq;
+      rec.armed_seq = seq;
+    }
+    rec.spec = clone(d);
+  }
   for (const t of c.teams) {
     const team = own(s.teams, t.id) ?? put(s.teams, t.id, { members: [] });
     for (const m of t.members) if (!team.members.includes(m)) team.members.push(m);
@@ -267,6 +334,30 @@ function adoptContract(s: BlackboardState, c: Contract): void {
     else put(s.tasks, spec.id, { spec: next, state: "pending", attempt: 0 });
   }
   refreshReadiness(s, true);
+}
+
+/** Release only the named source. Dependency/need waits survive an escalation resolution. */
+function releaseBlock(s: BlackboardState, task: string, escalation?: string): void {
+  const rt = s.tasks[task];
+  const by = { ...rt.blocked_by };
+  const ids = blockingIds(rt).filter((id) => escalation !== undefined ? id !== escalation :
+    own(s.escalations, id) && !["resolved", "withdrawn"].includes(s.escalations[id].status));
+  delete by.escalation;
+  delete by.escalations;
+  if (ids.length) by.escalation = ids[0];
+  if (ids.length > 1) by.escalations = ids;
+  const deps = expandSplits(s, by.deps ?? []).filter((id) => {
+    const dep = own(s.tasks, id);
+    return dep ? dep.state !== "accepted" : !((own(s.interfaces, id)?.version ?? 0) >= 1);
+  });
+  if (deps.length) by.deps = deps;
+  else delete by.deps;
+  if (by.needs?.length === 0) delete by.needs;
+  if (Object.keys(by).length) rt.blocked_by = by;
+  else delete rt.blocked_by;
+  if (rt.state === "blocked" && !rt.blocked_by) {
+    rt.state = own(s.claims, task) ? "in_progress" : depsAccepted(s, rt.spec) ? "ready" : "pending";
+  }
 }
 
 /** Key of a check in BlackboardState.checks[scope]: "<task>/<command_id>" for task checks, else the command id. */
@@ -354,7 +445,7 @@ const HANDLERS: Handlers = {
   /** Sets contract (stamped frozen with by and hash) and goal; creates or updates tasks. */
   "contract.frozen": (s, e, x) => {
     const c = clone(assertResolved(e, x.resolved));
-    adoptContract(s, { ...c, status: "frozen", frozen: { by: e.payload.by, at: c.frozen?.at ?? e.ts, hash: e.payload.hash } });
+    adoptContract(s, { ...c, status: "frozen", frozen: { by: e.payload.by, at: c.frozen?.at ?? e.ts, hash: e.payload.hash } }, e.seq);
   },
   /** Sets contract (status frozen; freeze record from the blob, else kept) and goal. New tasks are
    *  added; existing tasks get the new spec and keep their runtime state; dependencies on split
@@ -363,7 +454,7 @@ const HANDLERS: Handlers = {
   "contract.amended": (s, e, x) => {
     const c = clone(assertResolved(e, x.resolved));
     const frozen = c.frozen ?? (s.contract?.frozen ? clone(s.contract.frozen) : undefined);
-    adoptContract(s, { ...c, status: "frozen", ...(frozen ? { frozen } : {}) });
+    adoptContract(s, { ...c, status: "frozen", ...(frozen ? { frozen } : {}) }, e.seq);
   },
   "contract.superseded": (s, { payload: p }) => {
     if (s.contract?.id === p.contract) s.contract.status = "superseded";
@@ -388,6 +479,8 @@ const HANDLERS: Handlers = {
     };
     if (p.budget_usd !== undefined) rec.budget_reserved_usd = p.budget_usd;
     else delete rec.budget_reserved_usd;
+    // A re-registration (retry, resume) starts a worker a settled stop no longer applies to; a stop still waiting is kept.
+    if (rec.stop?.state !== "requested") delete rec.stop;
     if (p.team !== undefined) rec.team = p.team;
     put(s.agents, p.agent, rec);
     if (p.team !== undefined) addMember(s, p.team, p.agent);
@@ -418,6 +511,21 @@ const HANDLERS: Handlers = {
     delete rec.pid;
     delete rec.started;
     delete rec.budget_reserved_usd;
+  },
+
+  /** The latest stop request of a live agent; unknown or finished agents are ignored (the requester refuses those). */
+  "agent.stop_requested": (s, e) => {
+    const p = e.payload;
+    const rec = own(s.agents, p.agent);
+    if (!rec || (rec.status !== "running" && rec.status !== "registered")) return;
+    rec.stop = { request: e.id, by: p.by, surface: p.surface, at: e.ts, seq: e.seq, state: "requested", ...(p.reason !== undefined && { reason: p.reason }) };
+  },
+  /** Settles the request it names. */
+  "agent.stopped": (s, { payload: p }) => {
+    const rec = own(s.agents, p.agent);
+    if (!rec?.stop || rec.stop.request !== p.request) return;
+    rec.stop.state = "stopped";
+    if (p.escalation !== undefined) rec.stop.escalation = p.escalation;
   },
 
   // --- tasks and claims (unknown or terminal tasks are refused; see liveTask) ---
@@ -466,13 +574,14 @@ const HANDLERS: Handlers = {
     const p = e.payload;
     const rt = liveTask(s, e, x);
     if (!rt) return;
+    if (taskHeld(s, p.task, true)) return refuse(x, `task.submitted: task ${p.task} is held by an escalation`);
     rt.state = "submitted";
     rt.last_commit = p.commit;
     rt.submitted_seq = e.seq;
     const patched = own(s.diffs, p.task)?.blob !== p.diff_blob;
     put(s.diffs, p.task, { stat: p.stat, blob: p.diff_blob, commit: p.commit });
     const agent = rt.agent ?? e.source.id;
-    for (const f of p.files) put(s.files, f, { task: p.task, agent, last_commit: p.commit, merged: false });
+    for (const f of p.files) put(s.files, f, { task: p.task, agent, last_commit: p.commit, merged: false, at_seq: e.seq });
     if (!patched) return;
     for (const [key, c] of Object.entries(s.checks.task)) {
       if (checkTask(key) === p.task) {
@@ -499,8 +608,9 @@ const HANDLERS: Handlers = {
     const p = e.payload;
     const rt = liveTask(s, e, x);
     if (!rt) return;
-    rt.state = own(s.claims, p.task) ? "in_progress" : "ready";
+    rt.state = taskHeld(s, p.task) || rt.blocked_by?.deps?.length || rt.blocked_by?.needs?.length ? "blocked" : own(s.claims, p.task) ? "in_progress" : "ready";
     rt.last_note = p.reasons.join("; ");
+    rt.rejected_seq = e.seq;
   },
   /** Accepted (claim dropped, files merged); integration streaks reset; dependents whose deps are all accepted become ready. */
   "task.merged": (s, e, x) => {
@@ -518,29 +628,32 @@ const HANDLERS: Handlers = {
     const rt = liveTask(s, e, x, ["accepted"]);
     if (rt) accept(s, e.payload.task, rt, e);
   },
-  /** A task already blocked keeps its other reasons (a new escalation replaces the old one; deps are added); open needs are always kept. */
+  /** Accumulate source-specific reasons; a dissent hold preserves an in-flight pipeline state. */
   "task.blocked": (s, e, x) => {
     const p = e.payload;
     const rt = liveTask(s, e, x);
     if (!rt) return;
-    const prev = rt.state === "blocked" ? rt.blocked_by : undefined;
-    rt.state = "blocked";
+    const prev = rt.blocked_by;
+    const dissent = own(s.escalations, p.escalation)?.dissent_id;
+    if (!dissent || !["submitted", "checking", "merging"].includes(rt.state)) rt.state = "blocked";
+    rt.blocked_seq = e.seq;
     const by: NonNullable<TaskRuntime["blocked_by"]> = {};
     const escalation = p.escalation ?? prev?.escalation;
     if (escalation !== undefined) by.escalation = escalation;
+    const ids = [...new Set([...blockingIds(rt), ...(p.escalation ? [p.escalation] : [])])];
+    if (ids.length > 1) by.escalations = ids;
     const deps = [...new Set([...(prev?.deps ?? []), ...(p.deps ?? [])])];
     if (deps.length || p.deps !== undefined) by.deps = deps;
     if (rt.blocked_by?.needs?.length) by.needs = rt.blocked_by.needs;
     rt.blocked_by = by;
   },
-  /** in_progress while claimed, else ready or pending by its dependencies; a task that is not blocked is unchanged. */
+  /** Release one escalation source (or satisfied dependency reasons); resume only after every reason clears. */
   "task.unblocked": (s, e, x) => {
     const rt = liveTask(s, e, x);
-    if (!rt || rt.state !== "blocked") return;
-    delete rt.blocked_by;
-    rt.state = own(s.claims, e.payload.task) ? "in_progress" : depsAccepted(s, rt.spec) ? "ready" : "pending";
+    if (!rt) return;
+    releaseBlock(s, e.payload.task, e.payload.escalation);
   },
-  /** New attempt: ready again (also from failed), claim dropped. */
+  /** New attempt (also from failed), claim dropped; unrelated blocking sources survive. */
   "task.retried": (s, e, x) => {
     const p = e.payload;
     const rt = liveTask(s, e, x, ["failed"]);
@@ -550,8 +663,9 @@ const HANDLERS: Handlers = {
     rt.last_note = p.why;
     delete rt.agent;
     delete rt.finished_at;
-    delete rt.blocked_by;
     dropClaim(s, p.task);
+    releaseBlock(s, p.task);
+    rt.state = rt.blocked_by ? "blocked" : "ready";
   },
   "task.reassigned": (s, e, x) => {
     const p = e.payload;
@@ -702,10 +816,11 @@ const HANDLERS: Handlers = {
     else s.decisions.push(d);
     for (const a of decisionTargets(s, d.scope)) deliver(s, a, { seq: e.seq, kind: "decision", id: d.id, text: d.text });
   },
-  /** Delivered to each addressed agent; team ids expand to their members. */
+  /** Dissent notifications address literal identity inboxes; ordinary team directives expand. */
   "directive.issued": (s, e) => {
     const p = e.payload;
-    for (const a of expandTargets(s, p.to)) {
+    const targets = e.correlation?.startsWith("tripwire:") ? [...new Set(p.to)] : expandTargets(s, p.to);
+    for (const a of targets) {
       deliver(s, a, { seq: e.seq, kind: "directive", id: p.id, text: p.text, requires_ack: p.requires_ack });
     }
   },
@@ -713,6 +828,18 @@ const HANDLERS: Handlers = {
     for (const item of own(s.inbox, p.agent) ?? []) {
       if (item.kind === "directive" && item.id === p.id && item.requires_ack) item.requires_ack = false;
     }
+  },
+
+  "dissent.tripwire_fired": (s, e) => {
+    const p = e.payload;
+    const rec = own(s.dissents, p.dissent_id) ?? put(s.dissents, p.dissent_id, { fires: {} });
+    const key = tripwireKey(p.dissent_id, p.task, p.generation);
+    if (!own(rec.fires, key)) put(rec.fires, key, { ...clone(p), seq: e.seq });
+  },
+  "dissent.scored": (s, e) => {
+    const rec = own(s.dissents, e.payload.dissent_id) ?? put(s.dissents, e.payload.dissent_id, { fires: {} });
+    rec.score = e.payload.outcome;
+    rec.scored_seq = e.seq;
   },
 
   // --- escalations and huddles -----------------------------------------------
@@ -733,12 +860,14 @@ const HANDLERS: Handlers = {
     if (!esc) return;
     esc.status = "resolved";
     esc.resolution = { action: "decide", decision: e.payload.rule, by: e.source.id };
+    if (esc.task && own(s.tasks, esc.task)) releaseBlock(s, esc.task, esc.id);
   },
   "escalation.resolved": (s, { payload: p }) => {
     const esc = own(s.escalations, p.id);
     if (!esc) return;
     esc.status = "resolved";
     esc.resolution = { action: p.action, decision: p.decision, by: p.by };
+    if (esc.task && own(s.tasks, esc.task)) releaseBlock(s, esc.task, esc.id);
   },
   "escalation.awaiting_human": (s, { payload: p }) => {
     const esc = own(s.escalations, p.id);
@@ -768,14 +897,27 @@ const HANDLERS: Handlers = {
 
   // --- budget --------------------------------------------------------------
   /** Adds usd to the execution total and to the agent, the task, and the team (the agent's, else the task's). */
-  "budget.usage_recorded": (s, { payload: p }) => {
+  "budget.usage_recorded": (s, e, x) => {
+    const p = e.payload;
     const b = s.budget;
+    const prior = p.call_id ? own(b.calls ?? {}, p.call_id) : undefined;
+    if (prior) {
+      if (prior.source !== p.source || prior.agent !== p.agent || prior.task !== p.task || prior.dissent_id !== p.dissent_id) return refuse(x, "Usage settlement must preserve call attribution");
+      b.spent_usd -= prior.usd;
+      recordAgentUsage(s, e.ts, prior, -1);
+      if (prior.agent !== undefined) addUsd(b.by_agent, prior.agent, -prior.usd);
+      if (prior.task !== undefined) addUsd(b.by_task, prior.task, -prior.usd);
+      const team = own(s.agents, prior.agent)?.team ?? own(s.tasks, prior.task)?.spec.team;
+      if (team !== undefined) addUsd(b.by_team, team, -prior.usd);
+    }
+    if (p.call_id) put(b.calls ??= {}, p.call_id, { ...clone(p), at: e.ts });
     b.spent_usd += p.usd;
     if (p.source === "worker" && p.agent !== undefined) {
       const agent = own(s.agents, p.agent);
       if (agent) delete agent.budget_reserved_usd;
     }
-    if (p.estimated) b.estimated = true;
+    recordAgentUsage(s, e.ts, p);
+    b.estimated = Object.values(b.by_agent_usage).some((u) => Object.values(u.models).some((m) => m.usd.estimated > 0));
     if (p.agent !== undefined) addUsd(b.by_agent, p.agent, p.usd);
     if (p.task !== undefined) addUsd(b.by_task, p.task, p.usd);
     const team = own(s.agents, p.agent)?.team ?? own(s.tasks, p.task)?.spec.team;
@@ -817,6 +959,8 @@ const HANDLERS: Handlers = {
   },
   "watchdog.stall_detected": none,
   "sandbox.degraded": none,
+
+  ...POSTMORTEM_HANDLERS,
 };
 
 /** Lease gone: removed from leases, from the queue (a withdrawn request), and from every request's blocking list. */
@@ -836,6 +980,7 @@ export function applyInPlace(state: BlackboardState, event: AnyEvent, resolved: 
   const handler = Object.hasOwn(HANDLERS, event.type) ? (HANDLERS[event.type] as Handler<EventType>) : undefined;
   if (!handler) throw new Error(`Blackboard: unknown event type ${preview(event.type)} at seq ${event.seq}`);
   handler(state, event as EventEnvelope, { resolved, strict: opts.strict === true });
+  postmortemAfter(state, event);
   state.seq = event.seq;
   state.hash = event.hash;
   return state;

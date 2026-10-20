@@ -738,3 +738,76 @@ export function writeImprovedAgent(spec: AgentSpec, opts: ImproveWriteOptions): 
   atomicReplace(plan.agentPath, content, mode);
   return result(plan);
 }
+
+// ----------------------------------------------------------------------------
+// Postmortem addenda: one more line under "## Postmortem addenda", through the same safe write path
+// ----------------------------------------------------------------------------
+
+export const ADDENDA_HEADING = "## Postmortem addenda";
+
+export interface AddendumResult {
+  agentPath: string;
+  /** The copy of the persona taken before the write; absent when the line was already there. */
+  backupPath?: string;
+  changed: boolean;
+}
+
+/** The persona text with `bullet` added under ADDENDA_HEADING (created at the end when missing); undefined when it is already there. */
+function withAddendum(content: string, bodyStart: number, bullet: string): string | undefined {
+  const lines = content.split("\n");
+  let offset = 0;
+  let fence: string | undefined;
+  let heading = -1;
+  for (const [i, text] of lines.entries()) {
+    const start = offset;
+    offset += text.length + 1;
+    if (start < bodyStart) continue;
+    const f = /^\s*(`{3,}|~{3,})/.exec(text);
+    if (f) fence = fence === undefined ? f[1] : f[1][0] === fence[0] && f[1].length >= fence.length ? undefined : fence;
+    else if (fence === undefined && text.trimEnd() === ADDENDA_HEADING) heading = i;
+  }
+  if (heading < 0) return content.replace(/\s+$/, "") + "\n\n" + ADDENDA_HEADING + "\n\n" + bullet + "\n";
+  let end = lines.length;
+  let inFence: string | undefined;
+  for (let i = heading + 1; i < lines.length; i++) {
+    const f = /^\s*(`{3,}|~{3,})/.exec(lines[i]);
+    if (f) inFence = inFence === undefined ? f[1] : f[1][0] === inFence[0] && f[1].length >= inFence.length ? undefined : inFence;
+    else if (inFence === undefined && /^#{1,2}\s/.test(lines[i])) { end = i; break; }
+  }
+  if (lines.slice(heading + 1, end).some((l) => l.trim() === bullet.trim())) return undefined;
+  let last = end - 1;
+  while (last > heading && lines[last].trim() === "") last--;
+  lines.splice(last + 1, 0, bullet);
+  return lines.join("\n");
+}
+
+/**
+ * Append a postmortem addendum to a persona file the way improve_agent writes one: the file must have
+ * readable frontmatter (which stays byte for byte as it is), the copy is taken first
+ * (<file>.bak-<timestamp>, exclusive create, contained), and the replacement is an atomic rename that
+ * keeps the file's mode. Nothing is written when the same line is already under the heading.
+ */
+export function appendPersonaAddendum(agentPath: string, bullet: string, opts: { timestamp: string }): AddendumResult {
+  if (!/\.md$/i.test(agentPath)) throw new Error(`Postmortem addenda go into .md persona files; ${agentPath} is not one`);
+  const raw = fs.readFileSync(agentPath, "utf8");
+  const meta = parseAgentFrontmatter(raw);
+  assertReadableFrontmatter(meta, agentPath);
+  const mode = fs.statSync(agentPath).mode;
+  const next = withAddendum(raw, meta.hasFrontmatter ? meta.blockEnd : 0, bullet);
+  if (next === undefined) return { agentPath, changed: false };
+  inside(path.dirname(agentPath), agentPath);
+  let backupPath = backupName(agentPath, opts.timestamp);
+  for (;;) {
+    inside(path.dirname(agentPath), backupPath);
+    try {
+      fs.copyFileSync(agentPath, backupPath, fs.constants.COPYFILE_EXCL);
+      break;
+    } catch (e) {
+      if (code(e) !== "EEXIST") throw e;
+      backupPath = backupName(agentPath, opts.timestamp);
+    }
+  }
+  if (fs.readFileSync(agentPath, "utf8") !== raw) throw new Error(`${agentPath} changed while the addendum was being prepared; nothing was written (the copy is at ${backupPath})`);
+  atomicReplace(agentPath, next, mode);
+  return { agentPath, backupPath, changed: true };
+}

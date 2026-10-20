@@ -37,9 +37,11 @@ import { globWithin } from "./contract.js";
 import { goalReview } from "./goal-review.js";
 import { huddleAction, runFormatHuddle, runMicroHuddle } from "./huddle.js";
 import { leadFallback } from "./lead.js";
+import { cardLessons } from "../postmortem/lessons.js";
 import { acquireLock } from "./lock.js";
 import { normalizeGlob } from "./leases.js";
-import { estimateUsd } from "./pricing.js";
+import { isFreeProvider, estimateUsd, priceFor } from "./pricing.js";
+import { blockingIds, taskHeld } from "./task-holds.js";
 import { buildTaskCard } from "./task-card.js";
 import type { RunnerContext, RunnerHooks } from "./runner-hook-types.js";
 export type { RunnerContext, RunnerHooks, GoalReviewInput, GoalReview } from "./runner-hook-types.js";
@@ -190,50 +192,132 @@ export function dependentsOf(state: Readonly<BlackboardState>, task: string): st
 
 const blockedBy = (state: Readonly<BlackboardState>, esc: Escalation): boolean => {
   const rt = own(state.tasks, esc.task);
-  return rt?.state === "blocked" && rt.blocked_by?.escalation === esc.id;
+  return blockingIds(rt).includes(esc.id);
 };
 
 // ============================================================================
 // Usage: every provider call made here becomes budget.usage_recorded
 // ============================================================================
 
+/** Conservative micro-huddle rates, including long-context and cache prompt charges. */
+function microRates(model: string, provider?: string): { input: number; output: number } {
+  if (provider === "ollama") return { input: 0, output: 0 };
+  const p = priceFor(model);
+  return {
+    input: Math.max(p?.input ?? 20, p?.long?.input ?? 0, p?.cache_read ?? 0, p?.long?.cache_read ?? 0, p?.cache_write ?? 0, p?.long?.cache_write ?? 0),
+    output: Math.max(p?.output ?? 100, p?.long?.output ?? 0),
+  };
+}
+
 /**
  * Collects the usage of the calls run through it (withUsageSink), priced from the pricing table,
  * and of driver answers. take() turns what was collected into drafts, so usage spent by a call
  * that later failed is still recorded.
  */
+interface MeterLifecycle {
+  dissent_id?: string;
+  huddle?: string;
+  signal?: AbortSignal;
+  beforeDispatch?: () => Promise<void>;
+  persist?: (records: UsageRecord[]) => Promise<void>;
+}
+
 export class UsageMeter {
   private records: UsageRecord[] = [];
+  private calls = 0;
 
-  constructor(readonly source: BudgetSource, readonly task?: string) {}
+  constructor(readonly source: BudgetSource, readonly task?: string, readonly agent?: string, readonly bounded = false, private readonly lifecycle: MeterLifecycle = {}) {}
 
-  run<T>(fn: () => Promise<T>): Promise<T> {
-    return withUsageSink((r) => this.records.push(this.price(r)), fn);
+  async run<T>(fn: () => Promise<T>, reservation?: { provider: string; model: string; usd: number }, usageOf?: (result: T) => UsageRecord | undefined): Promise<T> {
+    const signal = this.lifecycle.signal;
+    signal?.throwIfAborted();
+    const callId = this.bounded ? this.lifecycle.huddle ? `${this.lifecycle.huddle}:${++this.calls}` : newId("call") : undefined;
+    let current: UsageRecord | undefined;
+    let finished = false;
+    let dispatched = false;
+    const accept = (record: UsageRecord) => {
+      const u = { ...record, source: this.source,
+        ...(this.task !== undefined && { task: this.task }), ...(this.agent !== undefined && { agent: this.agent }),
+        ...(callId && { call_id: callId }), ...(this.lifecycle.dissent_id && { dissent_id: this.lifecycle.dissent_id }) };
+      if (this.task === undefined) delete u.task;
+      if (current) Object.assign(current, u);
+      else { current = u; this.records.push(u); }
+      // A stopped driver may report its final result after abort has already routed the huddle.
+      // Replace the retained estimate without resuming discussion or holding up Stop.
+      if (finished) void this.lifecycle.persist?.([{ ...current }]).catch((e) => console.error(`Micro-huddle usage settlement: ${errText(e)}`));
+    };
+    if (this.bounded && reservation && !isFreeProvider(reservation.provider)) {
+      accept({ ...this.price({ provider: reservation.provider, model: reservation.model }, reservation.usd), reservation: true });
+      // Durable before dispatch: readers and a restarted runner retain the conservative charge.
+      await this.lifecycle.persist?.([current!]);
+    }
+    const sink = (r: UsageReport) => {
+      if (finished && !this.bounded) return;
+      const priced = this.price(r, reservation?.usd);
+      if (this.bounded) accept({ ...priced, reservation: false });
+      else this.records.push(priced);
+    };
+    let abort: (() => void) | undefined;
+    try {
+      signal?.throwIfAborted();
+      await this.lifecycle.beforeDispatch?.();
+      signal?.throwIfAborted();
+      const work = withUsageSink(sink, async () => {
+        dispatched = true;
+        const result = await fn();
+        const u = usageOf?.(result);
+        if (u) accept({ ...u, reservation: false, provenance: u.provenance ?? { tokens: "measured", usd: u.estimated ? "estimated" : "measured" },
+          ...(u.estimated && u.usd === 0 && reservation && !isFreeProvider(reservation.provider) ? { usd: reservation.usd, provenance: { tokens: u.provenance?.tokens ?? "measured", usd: "estimated" } } : {}) });
+        return result;
+      });
+      // A driver/provider that ignores abort must not leave the huddle hanging.
+      return signal ? await Promise.race([work, new Promise<never>((_resolve, reject) => {
+        abort = () => reject(signal.reason ?? new Error("Micro-huddle stopped"));
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      })]) : await work;
+    } finally {
+      finished = true;
+      if (abort) signal?.removeEventListener("abort", abort);
+      if (current) {
+        if (!dispatched) current.usd = 0; // Stop won before dispatch: release the unused reservation.
+        current.reservation = false;
+        await this.lifecycle.persist?.([current]);
+      }
+    }
   }
 
   add(u: UsageRecord | undefined): void {
-    if (u) this.records.push({ ...u, source: this.source });
+    if (u) this.records.push({ ...u, source: this.source, ...(this.task !== undefined && { task: this.task }), ...(this.agent !== undefined && { agent: this.agent }) });
   }
 
-  private price(r: UsageReport): UsageRecord {
+  private price(r: UsageReport, missingUsageUsd?: number): UsageRecord {
     const tokens: TokenUsage = { inputTokens: r.usage?.inputTokens ?? 0, outputTokens: r.usage?.outputTokens ?? 0 };
     if (r.usage?.cacheReadTokens !== undefined) tokens.cacheReadTokens = r.usage.cacheReadTokens;
     if (r.usage?.cacheWriteTokens !== undefined) tokens.cacheWriteTokens = r.usage.cacheWriteTokens;
     const model = r.model || "unknown";
+    const estimate = estimateUsd(model, tokens, { provider: r.provider });
+    const rates = this.bounded && estimate.estimated ? microRates(model, r.provider) : undefined;
+    const reserved = this.bounded && r.usage === undefined && r.provider !== "ollama" ? missingUsageUsd : undefined;
     return {
       source: this.source,
       ...(this.task !== undefined && { task: this.task }),
+      ...(this.agent !== undefined && { agent: this.agent }),
       ...(r.provider && { provider: r.provider }),
       model,
       tokens,
-      usd: estimateUsd(model, tokens, { provider: r.provider }).usd,
-      estimated: true,
+      usd: r.usd ?? reserved ?? (rates ? ((tokens.inputTokens + (tokens.cacheReadTokens ?? 0) + (tokens.cacheWriteTokens ?? 0)) * rates.input + tokens.outputTokens * rates.output) / 1_000_000 : estimate.usd),
+      estimated: r.usd === undefined,
+      // Provider tokens are measured; dollar costs are estimated unless the driver measured them.
+      provenance: { tokens: r.usage ? "measured" : "estimated", usd: r.usd === undefined ? "estimated" : "measured" },
     };
   }
 
+  get pendingUsd(): number { return this.records.reduce((sum, r) => sum + r.usd, 0); }
+
   /** Drafts for everything collected since the last take. */
   take(source: EventSource, correlation: string): AnyEventDraft[] {
-    const out = this.records.map((u) => ev("budget.usage_recorded", u, source, correlation));
+    const out = this.lifecycle.persist ? [] : this.records.map((u) => ev("budget.usage_recorded", u, source, correlation));
     this.records = [];
     return out;
   }
@@ -244,10 +328,22 @@ export function callOptions(llm: HuddleLLM): { provider: LLMProvider; model: str
 }
 
 /** One stateless persona call: the persona (body and skills) plus `directive` as the system prompt. */
-export async function askPersona(meter: UsageMeter, llm: HuddleLLM, persona: string, directive: string, prompt: string): Promise<string> {
+export async function askPersona(meter: UsageMeter, llm: HuddleLLM, persona: string, directive: string, prompt: string, allowance?: number): Promise<string> {
+  if (meter.bounded && allowance === undefined) throw new Error("A bounded persona call requires a budget allowance");
   const a = await loadAgent(persona);
   const system = a.body + renderSkillsSection(a.skills) + directive;
-  return meter.run(() => callLLM(system, [{ role: "user", content: prompt }], callOptions(llm)));
+  let maxTokens: number | undefined;
+  if (allowance !== undefined) {
+    const { input: inputRate, output: outputRate } = microRates(llm.model, llm.provider);
+    // UTF-8 bytes plus protocol overhead conservatively bound prompt tokens without a tokenizer.
+    const inputCost = (Buffer.byteLength(system + prompt, "utf8") + 512) * inputRate / 1_000_000;
+    const left = allowance - inputCost;
+    if (left <= 0) throw new Error("Micro-huddle budget cannot cover the next prompt");
+    maxTokens = outputRate ? Math.min(8192, Math.floor(left * 1_000_000 / outputRate)) : 8192;
+    if (maxTokens < 1) throw new Error("Micro-huddle budget is exhausted");
+  }
+  return meter.run(() => callLLM(system, [{ role: "user", content: prompt }], { ...callOptions(llm), ...(maxTokens !== undefined && { maxTokens }) }),
+    allowance === undefined ? undefined : { provider: llm.provider, model: llm.model, usd: allowance });
 }
 
 // ============================================================================
@@ -345,7 +441,7 @@ export function fencedJson(text: string): Record<string, unknown> | undefined {
 // ============================================================================
 
 /** Resume only pauses owned by this escalation, preserving other emergencies and manual pauses. */
-async function pausedBy(store: ExecutionStore, state: Readonly<BlackboardState>, id: string): Promise<string[]> {
+export async function pausedBy(store: ExecutionStore, state: Readonly<BlackboardState>, id: string, releasing: readonly string[] = [id]): Promise<string[]> {
   const owners = new Map<string, Set<string>>();
   for (const e of await store.events({ types: ["execution.paused", "execution.resumed"] })) {
     if (e.type === "execution.paused" && Array.isArray(e.payload.scope)) {
@@ -365,7 +461,7 @@ async function pausedBy(store: ExecutionStore, state: Readonly<BlackboardState>,
   return state.paused_tasks.filter((task) => {
     const set = owners.get(task);
     if (!set?.has(id)) return false;
-    return ![...set].some((other) => other !== id &&
+    return ![...set].some((other) => !releasing.includes(other) &&
       (other.startsWith("manual:") || UNRESOLVED.includes(own(state.escalations, other)?.status ?? "resolved")));
   });
 }
@@ -456,7 +552,9 @@ export async function commitResolution(store: ExecutionStore, id: string, plan: 
     if (plan.directive && to.length) {
       events.push(ev("directive.issued", { id: newId("dir"), to, text: cap(plan.directive, DECISION_MAX + 500), requires_ack: false }, src, id));
     }
-    if (plan.unblock !== false && wasBlocked) events.push(ev("task.unblocked", { task: e.task! }, src, id));
+    if (plan.unblock !== false && wasBlocked) {
+      events.push(ev("task.unblocked", { task: e.task!, escalation: e.id }, src, id));
+    }
     const paused = await pausedBy(store, state, id);
     if (paused.length) events.push(ev("execution.resumed", { scope: paused, reason: `escalation ${id} was resolved` }, src, id));
     return events;
@@ -472,10 +570,10 @@ export function resumeOps(state: Readonly<BlackboardState>, esc: Escalation, tex
   const task = esc.task;
   const rt = own(state.tasks, task);
   const claim = own(state.claims, task);
-  if (!task || !rt || rt.state !== "in_progress" || !claim) return [];
+  if (!task || !rt || rt.state !== "in_progress" || !claim || taskHeld(state, task)) return [];
   const rec = own(state.agents, claim.agent);
   if (!rec || rec.external || rec.driver === "external") return [];
-  const card = buildTaskCard(state, task, { immediate: { kind: "resolution", text: `Escalation ${esc.id}: ${text}` } });
+  const card = buildTaskCard(state, task, { immediate: { kind: "resolution", text: `Escalation ${esc.id}: ${text}` }, ...cardLessons(state, task) });
   return [{ type: "resume_worker", rule, key: `${esc.id}:resume`, target: claim.agent, agent: claim.agent, task, why: oneLine(`Resolution of escalation ${esc.id}: ${text}`, 300), card }];
 }
 
@@ -942,7 +1040,7 @@ function retryPlan(state: Readonly<BlackboardState>, esc: Escalation, text: stri
   }
   ops.push({ type: "spawn_retry", rule: "escalation", key: `${esc.id}:retry:${attempt}`, target: esc.task, task: esc.task, attempt });
   return {
-    action: "retry", decision: text, by, source, unblock: false, resume: false, ops,
+    action: "retry", decision: text, by, source, resume: false, ops,
     before: [ev("task.retried", { task: esc.task, attempt, why: cap(text, 1000) }, source, esc.id)],
   };
 }
@@ -964,7 +1062,7 @@ function reassignPlan(state: Readonly<BlackboardState>, esc: Escalation, persona
     }
     ops.push({ type: "spawn_retry", rule: "escalation", key: `${esc.id}:reassign:${attempt}`, target: task, task, attempt });
   }
-  return { action: "reassign", decision: text, by, source, unblock: !started, resume: false, before, ops, directive: started ? `Task ${task} was reassigned to ${persona}: stop working on it.` : undefined };
+  return { action: "reassign", decision: text, by, source, resume: false, before, ops, directive: started ? `Task ${task} was reassigned to ${persona}: stop working on it.` : undefined };
 }
 
 /** The huddle action: a micro-huddle, or a format run through the engines and concluded by the lead. */

@@ -23,6 +23,7 @@ import { scrub } from "../security/secrets.js";
 import { executionBudgetUsd } from "./budget.js";
 import { BUNDLE_LIMIT, buildContextBundle, readDiagnostics } from "./context-bundle.js";
 import { orchestratorDeps, dashboardUrl } from "./orchestrator.js";
+import { postmortemBlockers, postmortemReady } from "./postmortem-state.js";
 import { readRunnerInfo, runnerLiveness } from "./runner-launch.js";
 import { executionDir, listExecutions, openExecutionStore, type FileExecutionStore } from "./store.js";
 import type { AnyEvent, BlackboardState, Escalation, TaskRuntime, Visibility } from "./types.js";
@@ -514,6 +515,8 @@ export async function executionStatusReport(a: StatusInput, now = Date.now()): P
       }
       if (open.some((e) => e.status === "awaiting_human")) next.push("Something awaits the human: view \"escalations\" has the question; ask them, then resolve_escalation.");
       else if (open.some((e) => e.status === "routed" && e.routed_to === orchestrator)) next.push("An escalation is routed to you: view \"escalations\", then resolve_escalation.");
+      const pm = postmortemBlockers(state);
+      if (postmortemReady(state)) next.push("The postmortem draft is ready: hold the meeting with hold_postmortem (project, execution_id, opening), or leave it.");
       return {
         ...head,
         completion_pct: focus && matches.length ? weightedCompletion(scope) : completion(state).percent,
@@ -528,6 +531,9 @@ export async function executionStatusReport(a: StatusInput, now = Date.now()): P
         eta: estimateEta(state, scope, now),
         budget: budgetSection(state),
         escalations: { open: open.length, awaiting_human: open.filter((e) => e.status === "awaiting_human").length, list: open.slice(0, 5).map((e) => escalationLine(e)) },
+        ...((pm.findings > 0 || Object.keys(state.postmortem?.meetings ?? {}).length > 0) && {
+          postmortem: { draft_findings: pm.findings, pending_fixes: pm.pending.length, tasks_in_flight: pm.tasks.length, ready: postmortemReady(state), meetings: Object.keys(state.postmortem?.meetings ?? {}).length },
+        }),
         runner: health,
         dashboard: { requested: started?.visibility?.dashboard === true, ...(url && { url }) },
         ...(started?.visibility?.github && { github: githubHealth(exe, state, started.visibility) }),

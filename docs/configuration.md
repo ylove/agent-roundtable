@@ -50,7 +50,7 @@
 | `ROUNDTABLE_EXECUTION_MODEL` | model of those calls | the provider's default model |
 | `ROUNDTABLE_EXECUTION_BASE_URL` | `base_url` of those calls (an `openai_compatible` or `ollama` endpoint) | — (the provider's configured URL) |
 | `ROUNDTABLE_EXECUTION_RETENTION_DAYS` | days a completed, failed or aborted run (worktrees, branches, log) is kept; swept at server start | `30` (`0` or `off` keeps all) |
-| `ROUNDTABLE_SESSION_RETENTION_DAYS` | days an archived at-the-table session is kept after it ended; swept at server start | `30` (`0` or `off` keeps all) |
+| `ROUNDTABLE_SESSION_RETENTION_DAYS` | days an archived at-the-table session, and a postmortem draft that was never held, is kept; swept at server start | `30` (`0` or `off` keeps all) |
 | `ROUNDTABLE_AUDIT_RETENTION_DAYS` | days the audit log keeps a month file after the month ended; swept at server start | `365` (`0` or `off` keeps all) |
 
 `.env` is loaded from the package directory (next to `package.json`) with `override: true`, so values there win over anything the MCP host passes in its `env` block. `.env` is gitignored and is the single source of truth for secrets. See [`.env.example`](../.env.example).

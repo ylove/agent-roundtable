@@ -4,6 +4,7 @@
 
 import { PARALLEL_TURNS } from "../config.js";
 import { callLLM, type CallLLMOptions } from "../providers/index.js";
+import { metered, type SessionScope } from "../usage/session-scope.js";
 
 /** Settle every item before reporting the first failure in input order. */
 export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
@@ -122,6 +123,8 @@ export interface VerdictRoundOptions<A> {
    * it the round settles every call and then throws the first error in agent order (mapLimit).
    */
   catchErrors?: boolean;
+  /** Meter each agent's calls under this usage scope (at-the-table sessions: usage/session-scope.ts). */
+  scope?: (agent: A, index: number) => SessionScope;
 }
 
 export interface VerdictAnswer<A> {
@@ -149,13 +152,14 @@ export async function runVerdictRound<A extends { systemPrompt: string }>(
 ): Promise<VerdictAnswer<A>[]> {
   return mapLimit([...agents], options.limit ?? PARALLEL_TURNS, async (agent, index) => {
     const messages: Array<{ role: "user" | "assistant"; content: string }> = [{ role: "user", content: buildPrompt(agent, index) }];
+    const call = <T>(fn: () => Promise<T>): Promise<T> => (options.scope ? metered(options.scope(agent, index), fn) : fn());
     try {
-      let content = await callLLM(agent.systemPrompt, messages, options.llm);
+      let content = await call(() => callLLM(agent.systemPrompt, messages, options.llm));
       let verdict = parseVerdict(content, label, options.verdicts);
       let reasked = false;
       if (verdict === "UNCLEAR" && options.reask !== undefined) {
         const again = typeof options.reask === "function" ? options.reask(agent, index) : options.reask;
-        content = await callLLM(agent.systemPrompt, [...messages, { role: "assistant", content }, { role: "user", content: again }], options.llm);
+        content = await call(() => callLLM(agent.systemPrompt, [...messages, { role: "assistant", content }, { role: "user", content: again }], options.llm));
         verdict = parseVerdict(content, label, options.verdicts);
         reasked = true;
       }

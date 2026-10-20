@@ -31,8 +31,11 @@ import {
   staticPrefix,
   type LeaseDecision,
 } from "../execution/leases.js";
+import { estimateUsd } from "../execution/pricing.js";
+import { REPORT_MAX_TOKENS, REPORT_MAX_USD } from "../usage/types.js";
 import { openExecutionStore, type FileExecutionStore } from "../execution/store.js";
 import { buildTaskCard } from "../execution/task-card.js";
+import { cardLessons } from "../postmortem/lessons.js";
 import type {
   AnyEvent,
   AnyEventDraft,
@@ -66,6 +69,7 @@ import {
   tailForTool,
 } from "../sandbox/index.js";
 import { localSandboxAllowed } from "../sandbox/common.js";
+import { taskHeld } from "../execution/task-holds.js";
 import { appendAudit } from "../security/audit.js";
 import { normalizeRelPath, writeFileAtomic } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
@@ -122,7 +126,10 @@ export const BLACKBOARD_SECTIONS = [
   "diffs", "checks", "escalations", "notes", "inbox", "budget", "agents", "teams", "events", "blob", "query",
 ] as const;
 
-const POST_KINDS = ["progress", "note", "interface", "need", "ack"] as const;
+const POST_KINDS = ["progress", "note", "interface", "need", "ack", "usage"] as const;
+/** Most one usage report may claim (usage-visibility.md §9): larger values are clamped and labelled as such. */
+export const USAGE_REPORT_MAX_USD = REPORT_MAX_USD;
+export const USAGE_REPORT_MAX_TOKENS = REPORT_MAX_TOKENS;
 const ESCALATION_KINDS = ["blocker", "ambiguity", "resource", "conflict", "assistance", "emergency"] as const;
 const ESCALATION_WITH = ["orchestrator", "management", "team", "agent", "path_owner"] as const;
 const EMERGENCIES = ["money", "credentials", "scope", "human_action"] as const;
@@ -186,14 +193,28 @@ export const workerTools: ToolDefinition[] = [
     name: POST_UPDATE,
     description:
       "Post to the blackboard. kind progress: percent and text. note: a broadcast note (topic, refs). interface: publish an interface you own (name, text = its definition, path), which unblocks tasks waiting on it. " +
-      "need: say you are waiting for a task, interface or artifact (name; topic = task | interface | artifact), which blocks your task until it arrives. ack: acknowledge a directive (directive_id).",
+      "need: say you are waiting for a task, interface or artifact (name; topic = task | interface | artifact), which blocks your task until it arrives. ack: acknowledge a directive (directive_id). " +
+      "usage (external workers only): report what you have used since your last report (tokens, usd, model); it is recorded as reported, not measured, and counts toward the budget.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["kind", "text"],
+      required: ["kind"],
       properties: {
         kind: { type: "string", enum: [...POST_KINDS] },
-        text: { type: "string", maxLength: 16000 },
+        text: { type: "string", maxLength: 16000, description: "Required for every kind except usage." },
+        tokens: {
+          type: "object",
+          additionalProperties: false,
+          description: "usage: tokens used since your last report.",
+          properties: {
+            input: { type: "integer", minimum: 0 },
+            output: { type: "integer", minimum: 0 },
+            cache_read: { type: "integer", minimum: 0 },
+            cache_write: { type: "integer", minimum: 0 },
+          },
+        },
+        usd: { type: "number", minimum: 0, description: "usage: the cost in US dollars since your last report, if you know it (else it is priced from the table)." },
+        model: { type: "string", maxLength: 200, description: "usage: the model that did the work." },
         percent: { type: "number", minimum: 0, maximum: 100 },
         topic: { type: "string", maxLength: 100 },
         name: { type: "string", maxLength: 200, description: "interface: its name; need: the task, interface or artifact you wait for." },
@@ -204,6 +225,8 @@ export const workerTools: ToolDefinition[] = [
       },
     },
     precheck: (a) => {
+      if (a.kind !== "usage" && typeof a.text !== "string") throw new Error(`${POST_UPDATE}: kind ${String(a.kind)} needs "text"`);
+      if (a.kind === "usage" && a.tokens === undefined && a.usd === undefined) throw new Error(`${POST_UPDATE}: kind usage needs "tokens" or "usd"`);
       if ((a.kind === "interface" || a.kind === "need") && typeof a.name !== "string") throw new Error(`${POST_UPDATE}: kind ${a.kind} needs "name"`);
       if (a.kind === "ack" && typeof a.directive_id !== "string") throw new Error(`${POST_UPDATE}: kind ack needs "directive_id"`);
     },
@@ -362,6 +385,9 @@ async function resolveActor(args: Record<string, unknown>, mode: ToolMode): Prom
   throw new Error(`agent_token does not belong to any agent of ${execution}`);
 }
 
+/** Reuse the token-bound identity for draft contract tools; never accept a caller-supplied agent id. */
+export { resolveActor as resolveWorkerActor };
+
 function sourceOf(state: Readonly<BlackboardState>, a: Actor, task?: string): EventSource {
   const team = own(state.agents, a.agent)?.team ?? own(state.tasks, task)?.spec.team;
   return { kind: "agent", id: a.agent, ...(team !== undefined && { team }), ...(task !== undefined && { task }), pid: process.pid };
@@ -381,6 +407,7 @@ function requireActive(state: Readonly<BlackboardState>, task?: string): void {
   if (TERMINAL_RUN.has(state.status)) throw new Refusal(`The run is ${state.status}`);
   if (state.status === "paused") throw new Refusal("The run is paused; wait for it to resume");
   if (task && state.paused_tasks.includes(task)) throw new Refusal(`Task ${task} is paused; wait for it to resume`);
+  if (taskHeld(state, task, true)) throw new Refusal(`Task ${task} is held by an escalation; wait for resolution`);
 }
 
 // ============================================================================
@@ -881,7 +908,7 @@ async function claimTask(a: Actor, args: Record<string, unknown>): Promise<Json>
     claimed: claimedTask,
     worktree: wt.path,
     branch: wt.branch,
-    task_card: buildTaskCard(after, claimedTask, { external: own(after.agents, a.agent)?.external !== false, worktree: wt.path }),
+    task_card: buildTaskCard(after, claimedTask, { external: own(after.agents, a.agent)?.external !== false, worktree: wt.path, ...cardLessons(after, claimedTask) }),
   };
 }
 
@@ -1005,10 +1032,67 @@ async function waitingOn(a: Actor, ref: string, kinds: ReadonlySet<string>): Pro
   return [...open.values()];
 }
 
+/** A non-negative finite number no larger than `max`, and whether it had to be cut. */
+function clampReport(v: unknown, max: number): { value: number; clamped: boolean } {
+  const n = typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+  return n > max ? { value: max, clamped: true } : { value: n, clamped: false };
+}
+
+/** post_update kind usage: an external worker reports its own spend (reported, never measured). */
+async function postUsage(a: Actor, state: Readonly<BlackboardState>, args: Record<string, unknown>): Promise<Json> {
+  const rec = own(state.agents, a.agent);
+  if (!rec?.external) {
+    throw new Refusal("Only external workers report their own usage: the runner measures the usage of the workers it starts");
+  }
+  const task = agentTask(state, a.agent);
+  const raw = (args.tokens ?? {}) as Record<string, unknown>;
+  const clamps = [
+    clampReport(raw.input, USAGE_REPORT_MAX_TOKENS),
+    clampReport(raw.output, USAGE_REPORT_MAX_TOKENS),
+    clampReport(raw.cache_read, USAGE_REPORT_MAX_TOKENS),
+    clampReport(raw.cache_write, USAGE_REPORT_MAX_TOKENS),
+  ];
+  const [input, output, cacheRead, cacheWrite] = clamps.map((c) => Math.floor(c.value));
+  const tokens = { inputTokens: input, outputTokens: output, ...(cacheRead > 0 && { cacheReadTokens: cacheRead }), ...(cacheWrite > 0 && { cacheWriteTokens: cacheWrite }) };
+  const model = cap(typeof args.model === "string" && args.model.trim() ? args.model : "unreported", 200);
+  const given = args.usd === undefined ? undefined : clampReport(args.usd, USAGE_REPORT_MAX_USD);
+  const usd = given ? given.value : estimateUsd(model, tokens).usd;
+  const clamped = clamps.some((c) => c.clamped) || given?.clamped === true;
+  const r = await a.store.transact(({ state: s }) => {
+    requireActive(s, task);
+    return {
+      events: [{
+        type: "budget.usage_recorded" as const,
+        source: sourceOf(s, a, task),
+        payload: {
+          source: "worker" as const,
+          agent: a.agent,
+          ...(task !== undefined && { task }),
+          provider: "external",
+          model,
+          tokens,
+          usd,
+          estimated: false,
+          provenance: { tokens: "reported" as const, usd: given ? ("reported" as const) : ("estimated" as const) },
+        },
+      }],
+    };
+  });
+  return {
+    posted: "usage",
+    seq: r.events[0]?.seq,
+    tokens: { input, output, cache_read: cacheRead, cache_write: cacheWrite },
+    usd,
+    provenance: { tokens: "reported", usd: given ? "reported" : "estimated" },
+    ...(clamped && { clamped: true, note: `A report is cut to at most $${USAGE_REPORT_MAX_USD} and ${USAGE_REPORT_MAX_TOKENS} tokens per class.` }),
+  };
+}
+
 async function postUpdate(a: Actor, args: Record<string, unknown>): Promise<Json> {
   const state = await a.store.state();
-  const text = String(args.text);
   const kind = args.kind as (typeof POST_KINDS)[number];
+  if (kind === "usage") return postUsage(a, state, args);
+  const text = String(args.text);
   if (kind !== "ack") requireActive(state, agentTask(state, a.agent));
 
   if (kind === "note") {
@@ -1281,6 +1365,7 @@ async function submitLocked(a: Actor, args: Record<string, unknown>, ctx: ToolCa
   const sum = await taskDiffSummary(wt, integration, head);
   let attempt = 0;
   const recorded = await a.store.transact(({ state: s }) => {
+    requireActive(s, task);
     const claim = own(s.claims, task);
     if (!claim || claim.agent !== a.agent) throw new Refusal(`You no longer hold the claim on ${task}; nothing was submitted`);
     const rec = own(s.agents, a.agent);
@@ -1442,7 +1527,7 @@ async function joinExecution(args: Record<string, unknown>): Promise<Json> {
     agent_token: token,
     token_note: "Shown once: keep it for this run and pass it as agent_token with execution_id to every worker tool. Joining again issues a new token and voids this one.",
     ...(wt && { worktree: wt.path, branch: wt.branch }),
-    ...(taskId && { task_card: buildTaskCard(after, taskId, { external: true, ...(wt && { worktree: wt.path }) }) }),
+    ...(taskId && { task_card: buildTaskCard(after, taskId, { external: true, ...(wt && { worktree: wt.path }), ...cardLessons(after, taskId) }) }),
     ...(!taskId && { ready_tasks: readyTasks }),
     next: taskId ? `Call claim_task(task_id: "${taskId}") before you edit anything.` : "Pick a ready task and call claim_task(task_id).",
   };

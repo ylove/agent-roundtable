@@ -9,8 +9,10 @@
 //
 // A tick (every 1–2 s):
 //   1. catch up on the log (and rewrite leases.json for every lease the new events changed);
-//   2. poll each live worker's RunMonitor and append its drafts (agent.attested,
-//      budget.usage_recorded, agent.exited); a failed attestation kills the worker and escalates;
+//   2. stop the workers a person asked to stop (agent.stop_requested), then poll each live worker's
+//      RunMonitor and append its drafts (agent.attested, budget.usage_recorded, agent.exited); a
+//      failed attestation kills the worker and escalates; a stopped worker's exit is settled with
+//      agent.stopped and an escalation to the orchestrator (usage-visibility.md §6);
 //   3. evaluate the watchdog inside transact, append its drafts, then perform its process
 //      operations after the commit (every one idempotent; standing ones repeat each pass);
 //   4. hand new open escalations to the escalation router (a WS10 hook);
@@ -38,10 +40,13 @@ import { agentDir, writeAgentLeases, prepareWorkerFiles } from "../workers/files
 import { RunMonitor, type ExitReason, type MonitorCheckpoint } from "../workers/monitor.js";
 import { reconcileLaunch } from "../workers/launch-intent.js";
 import { stopGroup, workerExit, type WorkerExit } from "../workers/process.js";
+import { autoFindings } from "../postmortem/auto.js";
+import { cardLessons } from "../postmortem/lessons.js";
 import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
 import { classifyFailure } from "./circuit.js";
 import { createRunnerHooks } from "./escalation.js";
+import { stopMicroHuddles } from "./huddle.js";
 import { integrationBranch, SubmodulesUnsupportedError } from "./git.js";
 import { acknowledgeHandoff, takeHandoffs } from "./handoff.js";
 import { decideLeaseRequest, leaseDrafts, leasesFor } from "./leases.js";
@@ -56,7 +61,7 @@ import {
   writeRunnerInfo,
   type RunnerInfo,
 } from "./runner-launch.js";
-import { runnerEscalation, withDefaults, type ProcessOp, type RunnerContext, type RunnerEscalationSpec, type RunnerHooks } from "./runner-hooks.js";
+import { runnerEscalation, runnerEscalationId, withDefaults, type ProcessOp, type RunnerContext, type RunnerEscalationSpec, type RunnerHooks } from "./runner-hooks.js";
 import { executionDir, openExecutionStore, type FileExecutionStore } from "./store.js";
 import { buildTaskCard, interruptedContext, respawnContext, type Immediate, type TaskCardOptions } from "./task-card.js";
 import type {
@@ -89,6 +94,7 @@ import {
 } from "./watchdog.js";
 import { ensureIntegrationWorktree, taskDiffSummary, taskStartPoint, ensureTaskWorktree, snapshotWip, taskWorktreePath } from "./worktrees.js";
 import { startDashboard, type Dashboard } from "../dashboard/server.js";
+import { taskHeld, blockingIds } from "./task-holds.js";
 import { GitHubSync } from "../github/sync.js";
 
 // ============================================================================
@@ -320,6 +326,8 @@ export class Runner {
   readonly abort = new AbortController();
   /** Non-standing process operations already performed by this process. */
   private readonly opsDone = new Set<string>();
+  /** Stop requests (agent.stop_requested event ids) this process has applied. */
+  private readonly stopApplied = new Set<string>();
   private readonly routed = new Set<string>();
   private readonly leadInFlight = new Set<string>();
   /** The hooks' escalation pass: one at a time, when the log moved or every PASS_MS. */
@@ -331,6 +339,8 @@ export class Runner {
   private readonly renewed: Record<string, { renewedAt: number }> = {};
   private spawnBlocked = false;
   private snapSeq = 0;
+  /** The last event seq the postmortem pass has scanned (docs/design/postmortem.md §4). */
+  private pmScanned = 0;
   private snapAt = Date.now();
   private sandboxP?: Promise<SandboxBackend>;
   private driverChecked?: Promise<{ ok: boolean; missing: string[] }>;
@@ -626,10 +636,12 @@ export class Runner {
       await this.reconcile();
     }
     await this.stopSuperseded();
+    await this.applyStops();
     await this.pollWorkers();
+    await this.settleStops();
     state = await this.store.state();
     for (const claim of Object.values(state.claims)) {
-      if (["submitted", "checking"].includes(state.tasks[claim.task]?.state) &&
+      if (!taskHeld(state, claim.task) && ["submitted", "checking"].includes(state.tasks[claim.task]?.state) &&
           !state.agents[claim.agent]?.external && !this.hasLiveWorker(claim.task) && !this.busy.has(claim.agent)) {
         await this.recoverLost(claim.agent, claim.task, readRunFile(this.execution, claim.agent), true);
       }
@@ -643,12 +655,29 @@ export class Runner {
 
     this.routeEscalations(state);
     this.passEscalations();
+    await this.postmortemPass();
     await this.retireMerged();
     await this.schedule(state);
     this.merge.feed(await this.store.state());
     await this.checkFailure(await this.store.state());
     this.checkIdle(state);
     await this.maybeSnapshot();
+  }
+
+  /** Postmortem mode: record a finding for each submission that testing sent back (autoFindings; idempotent). */
+  private async postmortemPass(): Promise<void> {
+    try {
+      // Scan a fresh, locked tail so a recovery cannot land between the scan and its findings.
+      const scanned = await this.store.transact(async ({ state }) => {
+        const tail = await this.store.events({ sinceSeq: this.log.at(-1)?.seq ?? 0 });
+        const log = [...this.log, ...tail];
+        const seq = log.at(-1)?.seq ?? 0;
+        return { events: seq === this.pmScanned ? [] : autoFindings(log, state, this.pmScanned, this.source), result: seq };
+      });
+      this.pmScanned = scanned.result!;
+    } catch (e) {
+      this.say(`postmortem pass: ${errText(e)}`);
+    }
   }
 
   /** Retry/reassignment drops a claim durably, so a lost handoff can never orphan its worker. */
@@ -664,7 +693,89 @@ export class Runner {
     }
   }
 
+  /**
+   * Stop the workers a person asked to stop (agent.stop_requested), before anything is scheduled: the
+   * same stop as a superseded worker's. The next poll records the exit with reason "stopped".
+   */
+  private async applyStops(): Promise<void> {
+    const state = await this.store.state();
+    for (const rec of Object.values(state.agents)) {
+      const stop = rec.stop;
+      if (stop) await stopMicroHuddles(this.store, rec.id, this.source);
+      // A worker with a kill, resume or spawn in flight is tried again next tick.
+      if (stop?.state !== "requested" || rec.status !== "running" || rec.external || this.stopApplied.has(stop.request) || this.busy.has(rec.id)) continue;
+      this.stopApplied.add(stop.request);
+      this.say(`stopping ${rec.id} (asked by ${stop.by}, from the ${stop.surface})`);
+      await this.killWorker(rec.id, "stopped", `stopped by ${stop.by}`);
+    }
+  }
+
+  /**
+   * A stopped worker has exited: record agent.stopped and, when it held a task, raise a blocking
+   * escalation to the orchestrator and block the task (never retried automatically; its WIP branch and
+   * worktree are kept). The orchestrator's watcher wakes with the choices: rework around the stopped
+   * agent with resolve_escalation, or write a handoff with control_execution.
+   */
+  private async settleStops(): Promise<void> {
+    let state = await this.store.state();
+    if (!Object.values(state.agents).some((a) => a.stop?.state === "requested" && a.status === "exited")) return;
+    await this.refreshLog();
+    state = await this.store.state();
+    for (const rec of Object.values(state.agents)) {
+      const stop = rec.stop;
+      if (stop?.state !== "requested" || rec.status !== "exited" || this.busy.has(rec.id)) continue;
+      // Any exit after the request settles it, whatever its reason (stopped, or lost with a runner that died
+      // mid-stop): the log alone says so, so a restarted runner finishes what an earlier one began.
+      const exit = [...this.log].reverse().find((e) => e.type === "agent.exited" && e.payload.agent === rec.id);
+      if (exit?.type !== "agent.exited" || exit.seq < stop.seq) continue;
+      const task = exit.payload.task ?? rec.task;
+      const key = `agent_stopped:${stop.request}`;
+      await this.store.transact(({ state: s }) => {
+        const cur = own(s.agents, rec.id);
+        if (cur?.stop?.request !== stop.request || cur.stop.state !== "requested") return { events: [] };
+        const taskState = task !== undefined ? own(s.tasks, task)?.state : undefined;
+        const working = taskState === "claimed" || taskState === "in_progress" || taskState === "blocked";
+        const held = taskState !== undefined && !["accepted", "failed", "cancelled"].includes(taskState);
+        const escalation = held
+          ? runnerEscalation(
+              s,
+              {
+                key,
+                task,
+                kind: "blocker",
+                summary: `${rec.id} was stopped by ${stop.by}.`,
+                question: `Rework around ${rec.id}, or write a handoff?`,
+                options: [
+                  "Rework around the stopped agent with resolve_escalation (reassign, retry, amend or decide)",
+                  'Write a handoff with control_execution(action: "handoff")',
+                ],
+                block: working,
+              },
+              this.source
+            )
+          : [];
+        return {
+          events: [
+            {
+              type: "agent.stopped",
+              source: this.source,
+              payload: { agent: rec.id, ...(task !== undefined && { task }), request: stop.request, ...(escalation.length && { escalation: runnerEscalationId(key) }) },
+            },
+            ...escalation,
+          ],
+        };
+      });
+      this.say(`${rec.id} stopped by ${stop.by}${task ? `; task ${task} waits for the orchestrator` : ""}`);
+    }
+  }
+
+  /** Run the next tick now (a request arrived: the dashboard wakes the runner it lives in). */
+  wakeNow(): void {
+    this.wake?.();
+  }
+
   private async finish(state: BlackboardState): Promise<void> {
+    await this.postmortemPass();
     if (state.status === "failed") this.exitCode = 1;
     if (state.status === "aborted") {
       for (const t of this.workers.values()) if (!t.exit) await this.killWorker(t.agent, "killed", "the run was aborted");
@@ -794,6 +905,10 @@ export class Runner {
    * its agent.exited names the pause, so the watchdog resumes it on the same attempt.
    */
   private markPaused(t: Tracked, drafts: AnyEventDraft[], state: Readonly<BlackboardState>): AnyEventDraft[] {
+    if (taskHeld(state, t.task)) {
+      const paused = blockingIds(state.tasks[t.task])[0] ?? "dissent hold";
+      return drafts.map((d) => d.type === "agent.exited" ? { ...d, payload: { ...d.payload, paused } } : d);
+    }
     if (state.status !== "paused" && !state.paused_tasks.includes(t.task)) return drafts;
     const pause = [...this.log].reverse().find((e) => e.type === "execution.paused" && (e.payload.scope === "all" || e.payload.scope.includes(t.task)));
     const paused = pause?.type === "execution.paused" ? scrubAndCap(pause.correlation ?? pause.payload.reason, 300) : "paused";
@@ -1187,9 +1302,12 @@ export class Runner {
     if (this.stopping) return "the runner is stopping";
     if (s.status !== "running") return `the run is ${s.status}`;
     if (s.paused_tasks.includes(task)) return `task ${task} is paused`;
+    if (taskHeld(s, task)) return `task ${task} is held by an escalation`;
     const rt = own(s.tasks, task);
     if (!rt) return `unknown task ${task}`;
     if (own(s.agents, agent)?.external) return `${agent} is an external agent`;
+    // A person asked for this agent to stop: whatever lost or resumed it must not undo that. The stop settles first.
+    if (own(s.agents, agent)?.stop?.state === "requested") return `a stop for ${agent} is waiting`;
     if (this.hasLiveWorker(task)) return `a worker already runs on ${task}`;
     const active = Object.values(s.tasks).filter((t) => t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id))).length;
     if (active >= (s.contract?.budget.max_parallel ?? 1)) return "max_parallel workers already run";
@@ -1323,7 +1441,7 @@ export class Runner {
       const sinceSeq = this.lastSeq((e) => e.type === "agent.spawned" && e.payload.task === task);
       const immediate: TaskCardOptions["immediate"] | undefined =
         o.immediate ?? (sinceSeq > 0 ? respawnContext(after, task, { sinceSeq, why: o.why ?? rt.last_note ?? "Your previous worker run ended before the task was done." }) : undefined);
-      const card = buildTaskCard(after, task, { ...(immediate && { immediate }) });
+      const card = buildTaskCard(after, task, { ...(immediate && { immediate }), ...cardLessons(after, task) });
       const outputPath = join(files.runsDir, `${attempt}.jsonl`);
       const startOffset = fileSize(outputPath);
       const launch: WorkerLaunch = {
@@ -1609,7 +1727,8 @@ export class Runner {
         task, reasons: ["Submission checks were interrupted by process loss; submit again to rerun checks of the committed work."],
       } });
     }
-    this.say(`${agent} on ${task} is gone${wipCommit ? ` (WIP saved as ${wipCommit.slice(0, 12)})` : ""}; resuming it`);
+    const stopWaiting = own(state.agents, agent)?.stop?.state === "requested";
+    this.say(`${agent} on ${task} is gone${wipCommit ? ` (WIP saved as ${wipCommit.slice(0, 12)})` : ""}; ${stopWaiting ? "a stop for it is waiting, so it is not resumed" : "resuming it"}`);
     const why = wasRunning
       ? "The runner restarted and your worker process was gone. Your session is resumed."
       : "The runner restarted before your worker was started.";
@@ -1663,7 +1782,7 @@ export class Runner {
     const v = this.visibility();
     if (v?.dashboard) {
       try {
-        this.dashboard = await startDashboard(this.execution, { store: this.store });
+        this.dashboard = await startDashboard(this.execution, { store: this.store, onStopRequested: () => this.wakeNow() });
         this.say("dashboard started (its URL is in dashboard.json)");
       } catch (e) {
         this.say(`dashboard: ${errText(e)}`);

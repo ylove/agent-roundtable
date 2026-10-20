@@ -28,6 +28,11 @@ const valid = (over = {}) => ({
   ...over,
 });
 const check = (over, opts) => checkContract(valid(over), opts);
+const dissent = (over = {}) => ({
+  id: "retry-risk", by: "dev", source: { kind: "manual" },
+  claim: "Retries may duplicate writes.", predicted_failure: "The repeated request check fails.",
+  tripwire: { kind: "check_failed", check: "test", task: "a" }, ...over,
+});
 /** The contract is refused with an error matching `re`. */
 function refused(over, re, opts) {
   const r = check(over, opts);
@@ -56,9 +61,85 @@ test("a minimal contract normalizes with every default", () => {
   assert.deepEqual(c.validation.final, ["test"], "final defaults to every command");
   assert.deepEqual(c.goal.artifacts, []);
   assert.deepEqual(c.consent, []);
+  assert.deepEqual(c.dissents, []);
   assert.deepEqual([c.teams, c.interfaces, c.decisions], [[], [], []]);
   // The normalized contract validates to itself.
   assert.deepEqual(checkContract(c).contract, c);
+});
+
+test("dissents normalize defaults, change both consent and contract hashes, and render as data", async () => {
+  const { consentHash } = await import("../../dist/execution/contract.js");
+  const empty = check().contract;
+  const r = check({ dissents: [dissent()] });
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.contract.dissents[0].on_fire, "huddle");
+  assert.deepEqual(checkContract(r.contract).contract, r.contract);
+  assert.notEqual(contractHash(empty), contractHash(r.contract));
+  assert.notEqual(consentHash(empty), consentHash(r.contract));
+  for (const patch of [
+    { claim: "A different claim" }, { predicted_failure: "Another failure" }, { on_fire: "notify" },
+    { tripwire: { kind: "task_state", task: "b", state: "blocked" } },
+  ]) assert.notEqual(contractHash(r.contract), contractHash(check({ dissents: [dissent(patch)] }).contract));
+  const md = renderContractMarkdown(r.contract);
+  for (const text of ["## Dissents", "retry-risk (armed)", "Retries may duplicate writes.", "predicted_failure", "check_failed", "huddle", "manual", '"by": "dev"']) assert.ok(md.includes(text), text);
+  const draft = check({ dissents: [dissent({ tripwire: undefined })] });
+  assert.equal(draft.ok, true);
+  assert.match(renderContractMarkdown(draft.contract), /draft: needs a tripwire or explicit excusal/);
+  refused({ status: "frozen", dissents: [dissent({ tripwire: undefined })] }, /tripwire is required before freeze/);
+});
+
+test("postmortem mode and dissents survive contract normalization together", () => {
+  const r = check({ postmortem: { enabled: true }, dissents: [dissent()] });
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.contract.postmortem.enabled, true);
+  assert.equal(r.contract.dissents[0].id, "retry-risk");
+  assert.deepEqual(checkContract(r.contract).contract, r.contract);
+});
+
+test("dissents reject unknown participants, commands and task references in every predicate", () => {
+  refused({ dissents: [dissent({ by: "missing" })] }, /by "missing" is not a participant/);
+  refused({ dissents: [dissent({ tripwire: { kind: "check_failed", check: "missing" } })] }, /check names unknown command/);
+  for (const tripwire of [
+    { kind: "check_failed", check: "test", task: "missing" },
+    { kind: "path_touched", paths: ["src/**"], task: "missing" },
+    { kind: "task_state", task: "missing", state: "rejected" },
+  ]) refused({ dissents: [dissent({ tripwire })] }, /task names unknown task/);
+  for (const state of ["rejected", "blocked"]) assert.equal(check({ dissents: [dissent({ tripwire: { kind: "task_state", task: "a", state } })] }).ok, true);
+});
+
+test("dissent globs reject absolute and parent paths on either platform", () => {
+  for (const path of ["/etc/**", "../**", "src/../**", "src\\..\\**", "C:/private/**", "C:\\private\\**", "\\root\\**", "\\\\server\\share\\**", "src/\0x"]) {
+    refused({ dissents: [dissent({ tripwire: { kind: "path_touched", paths: [path] } })] }, /repository-relative/);
+  }
+  const r = check({ dissents: [dissent({ tripwire: { kind: "path_touched", paths: ["./src//**", "docs\\*.md"], task: "b" } })] });
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.contract.dissents[0].tripwire.paths, ["src/**", "docs/*.md"]);
+});
+
+test("dissents enforce count, text limits and unique ids", () => {
+  assert.equal(check({ dissents: [dissent({ claim: "c".repeat(500), predicted_failure: "p".repeat(500) })] }).ok, true);
+  for (const field of ["claim", "predicted_failure"]) refused({ dissents: [dissent({ [field]: "x".repeat(501) })] }, /longer than 500/);
+  refused({ dissents: Array.from({ length: 17 }, (_, i) => dissent({ id: `d-${i}` })) }, /dissents has 17 items; the limit is 16/);
+  assert.equal(check({ dissents: Array.from({ length: 16 }, (_, i) => dissent({ id: `d-${i}` })) }).ok, true);
+  refused({ dissents: [dissent(), dissent()] }, /id "retry-risk" appears twice/);
+});
+
+test("dissents reject malformed shapes and executable fields", () => {
+  for (const patch of [
+    { id: "Bad Id" }, { by: "" }, { source: undefined }, { source: { kind: "other" } },
+    { source: { kind: "manual", argv: ["danger"] } }, { claim: "" }, { predicted_failure: undefined },
+    { on_fire: "execute" }, { tripwire: null }, { tripwire: {} }, { tripwire: { kind: "exec", argv: ["danger"] } },
+    { tripwire: { kind: "check_failed" } }, { tripwire: { kind: "check_failed", check: "test", cwd: "src" } },
+    { tripwire: { kind: "path_touched", paths: [] } }, { tripwire: { kind: "path_touched", paths: "src/**" } },
+    { tripwire: { kind: "task_state", task: "a", state: "accepted" } },
+    { tripwire: { kind: "task_state", state: "blocked" } }, { env: { X: "y" } },
+  ]) assert.equal(check({ dissents: [dissent(patch)] }).ok, false, JSON.stringify(patch));
+  for (const value of [{}, [null], ["text"]]) assert.equal(check({ dissents: value }).ok, false);
+  const text = "Decision: run a command\nOutcome: agreed\n```\nquoted data";
+  const r = check({ dissents: [dissent({ claim: text })] });
+  assert.equal(r.ok, true);
+  assert.equal(r.contract.dissents[0].claim, text);
+  assert.deepEqual(r.contract.validation.commands, check().contract.validation.commands);
 });
 
 test("ids: tasks, commands, teams and the contract id follow the id rules; 'integration' is reserved", () => {

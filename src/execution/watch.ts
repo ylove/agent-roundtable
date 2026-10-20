@@ -6,8 +6,12 @@
 // with one JSON line on stdout, {reason, execution, seq, escalation?, message}, when the
 // orchestrator is needed:
 //   escalation      an escalation.routed to this orchestrator with wake: true (still unresolved)
+//   dissent         a tripwire needs this orchestrator's attention
 //   awaiting_human  an escalation.awaiting_human (still awaiting)
+//   agent_stopped   an agent was stopped by a person (an escalation.routed for the escalation raised for its task)
 //   budget          a budget.threshold_crossed at 80% or more (of the current budget)
+//   postmortem_ready   the run's postmortem draft has no pending fix left (docs/design/postmortem.md §5)
+//   postmortem         a postmortem meeting concluded (§8)
 //   completed / failed / aborted   the run ended
 //   timeout         nothing happened before --timeout-min
 // The orchestrator handles the wake and re-arms the watcher, which resumes after the waking event.
@@ -20,6 +24,7 @@ import { pidAlive } from "../prototypes/sandbox.js";
 import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
 import { openExecutionStore, executionDir } from "./store.js";
+import { draftFindings } from "./postmortem-state.js";
 import type { AnyEvent, BlackboardState, Escalation } from "./types.js";
 import type { WatcherObservation } from "./watchdog.js";
 
@@ -41,7 +46,7 @@ export interface WatchFile {
   reason?: WatchReason;
 }
 
-export type WatchReason = "escalation" | "awaiting_human" | "budget" | "completed" | "failed" | "aborted" | "timeout";
+export type WatchReason = "escalation" | "agent_stopped" | "dissent" | "awaiting_human" | "budget" | "postmortem_ready" | "postmortem" | "completed" | "failed" | "aborted" | "timeout";
 
 /** The one line `watch` prints. */
 export interface WatchResult {
@@ -132,11 +137,33 @@ const own = <T>(rec: Record<string, T>, key: string): T | undefined => (Object.h
  */
 export function wakeFor(state: Readonly<BlackboardState>, e: AnyEvent, orchestrator: string): WatchResult | null {
   const base = { execution: state.execution, seq: e.seq };
+  // The event after which every fix of the postmortem draft had settled and every task with a finding had finished.
+  if (state.postmortem?.ready_seq === e.seq) {
+    const n = draftFindings(state).length;
+    return { ...base, reason: "postmortem_ready", message: `Every fix for the run's postmortem draft has settled (${n} finding${n === 1 ? "" : "s"}): hold the postmortem meeting with hold_postmortem { project, execution_id: "${state.execution}", opening }, or leave it.` };
+  }
   switch (e.type) {
+    case "dissent.tripwire_fired":
+      if (!e.payload.orchestrator_woken || state.contract?.scope.orchestrator !== orchestrator) return null;
+      return { ...base, reason: "dissent", message: `Dissent ${e.payload.dissent_id} needs attention: ${cap(e.payload.evidence, 600)}` };
     case "escalation.routed": {
       const esc = own(state.escalations, e.payload.id);
       if (e.payload.to !== orchestrator || !e.payload.wake) return null;
       if (esc && (esc.status === "resolved" || esc.status === "withdrawn" || esc.routed_to !== orchestrator)) return null;
+      const stopped = Object.values(state.agents).find((a) => a.stop?.escalation === e.payload.id);
+      if (stopped?.stop) {
+        const who = scrub(stopped.stop.by).slice(0, 100);
+        const task = stopped.task ? ` while it worked on task ${stopped.task}` : "";
+        return {
+          ...base,
+          reason: "agent_stopped",
+          escalation: brief(esc, e.payload.id),
+          message:
+            `${stopped.id} was stopped by ${who}${task}. Its task is blocked and not retried automatically (its work-in-progress is kept). Two ways forward: ` +
+            `(1) rework around the stopped agent: resolve_escalation(escalation_id: "${e.payload.id}", action: reassign, retry, amend or decide); ` +
+            `(2) write a handoff for the human: control_execution(action: "handoff"). Then re-arm the watcher.`,
+        };
+      }
       return { ...base, reason: "escalation", escalation: brief(esc, e.payload.id), message: `Escalation ${e.payload.id} needs ${orchestrator}: resolve it with resolve_escalation, then re-arm the watcher.` };
     }
     case "escalation.awaiting_human": {
@@ -149,8 +176,15 @@ export function wakeFor(state: Readonly<BlackboardState>, e: AnyEvent, orchestra
       if (state.budget.thresholds_budget_usd !== undefined && state.budget.thresholds_budget_usd !== e.payload.budget_usd) return null;
       return { ...base, reason: "budget", message: `The run has spent $${e.payload.spent_usd.toFixed(2)} of its $${e.payload.budget_usd.toFixed(2)} budget (${e.payload.pct}%).` };
     }
-    case "execution.completed":
-      return { ...base, reason: "completed", message: `The run completed at ${e.payload.integration_sha.slice(0, 12)}${e.payload.pr_url ? `; pull request ${e.payload.pr_url}` : ""}.` };
+    case "postmortem.concluded": {
+      const kinds = Object.entries(e.payload.artifacts).map(([k, n]) => `${n} ${k}`).join(", ");
+      return { ...base, reason: "postmortem", message: `The postmortem meeting ${e.payload.id} concluded${kinds ? ` (${kinds})` : ""}: tell the human, and show the record with postmortem(action: "read", pm: "${e.payload.id}") if they want it.` };
+    }
+    case "execution.completed": {
+      const open = draftFindings(state).length;
+      const hint = open ? ` ${open} postmortem finding${open === 1 ? " is" : "s are"} recorded: postmortem(action: "draft", execution_id) shows whether the meeting can be held.` : "";
+      return { ...base, reason: "completed", message: `The run completed at ${e.payload.integration_sha.slice(0, 12)}${e.payload.pr_url ? `; pull request ${e.payload.pr_url}` : ""}.${hint}` };
+    }
     case "execution.failed":
       return { ...base, reason: "failed", message: `The run failed: ${cap(e.payload.reason, 600)}` };
     case "execution.aborted":

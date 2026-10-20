@@ -58,6 +58,8 @@ export const DEBUG_ENV = "debug_env";
 export const PROPOSE_CONTRACT = "propose_contract";
 export const AMEND_CONTRACT = "amend_contract";
 export const FREEZE_CONTRACT = "freeze_contract";
+export const FILE_DISSENT = "file_dissent";
+export const SCORE_DISSENT = "score_dissent";
 
 // Run (orchestrator server only)
 export const EXECUTE = "execute";
@@ -65,6 +67,12 @@ export const EXECUTION_STATUS = "execution_status";
 export const CONTROL_EXECUTION = "control_execution";
 export const RESOLVE_ESCALATION = "resolve_escalation";
 export const JOIN_EXECUTION = "join_execution";
+
+// Usage (orchestrator server only)
+export const USAGE = "usage";
+// Postmortem mode (orchestrator server only)
+export const POSTMORTEM = "postmortem";
+export const HOLD_POSTMORTEM = "hold_postmortem";
 
 // Worker tools: bound to the token on the worker server; on the orchestrator server they take agent_token
 export const READ_BLACKBOARD = "read_blackboard";
@@ -75,5 +83,5 @@ export const RUN_COMMAND = "run_command";
 export const SUBMIT_WORK = "submit_work";
 export const ESCALATE = "escalate";
 
-/** The worker server's whole tool list. */
+/** Execution tools authenticated with agent_token. Draft FILE_DISSENT also supports worker mode. */
 export const WORKER_TOOL_NAMES = [READ_BLACKBOARD, CLAIM_TASK, LEASE, POST_UPDATE, RUN_COMMAND, SUBMIT_WORK, ESCALATE] as const;

@@ -20,6 +20,7 @@ import { stopLocalMeetingProcesses } from "./sessions/local-meetings.js";
 import { destroyAllPrototypes, prototypeDiagnostics, sweepStaleSessionDirs } from "./prototypes/index.js";
 import { killAllSandboxed } from "./sandbox/index.js";
 import { bindWorkerIdentity } from "./tools/worker.js";
+import { startTableService } from "./usage/table-service.js";
 import { consumeWorkerToken } from "./workers/token.js";
 
 // ============================================================================
@@ -104,10 +105,13 @@ async function startOrchestrator(): Promise<void> {
   // own process groups, so they get no signal of ours: stop them (SIGTERM, then SIGKILL); an exit hook in
   // local-meetings.ts SIGKILLs any still left when the process exits. Sandboxed commands of external
   // workers' run_command and submit_work calls are killed too.
+  // Usage visibility: the live file other processes read, and the stop requests they leave for this server's sessions.
+  const table = startTableService();
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    table.close();
     Promise.allSettled([finalizeOpenChannels(), destroyAllPrototypes("shutdown"), stopLocalMeetingProcesses(), killAllSandboxed()])
       .finally(() => process.exit(0));
   };
@@ -125,6 +129,12 @@ async function startOrchestrator(): Promise<void> {
   import("./execution/retention.js")
     .then(async ({ sweepRetention, describeRetention }) => console.error(describeRetention(await sweepRetention())))
     .catch((e) => console.error(`[Retention] startup sweep skipped: ${e instanceof Error ? e.message : String(e)}`));
+  import("./postmortem/retention.js")
+    .then(({ sweepPostmortemDrafts }) => {
+      const removed = sweepPostmortemDrafts();
+      if (removed.length) console.error(`[Retention] pruned ${removed.length} postmortem draft${removed.length === 1 ? "" : "s"}`);
+    })
+    .catch((e) => console.error(`[Retention] postmortem draft sweep skipped: ${e instanceof Error ? e.message : String(e)}`));
 
   // Check if claude CLI is available for local meetings (PATH scan, no shell)
   const claudeCliAvailable = findExecutable("claude") !== null;

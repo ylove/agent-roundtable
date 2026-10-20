@@ -48,6 +48,9 @@ const VERDICT = "'AGREE'|'OBJECT'|'UNCLEAR'|'EXCUSED'";
 const EMERGENCY = "'money'|'credentials'|'scope'|'human_action'";
 const HUDDLE_FORMAT = "'micro'|'meeting'|'collaborate'|'debate'|'waffle-house'|'conversation'|'replan'|'ultraplan'";
 const RESOLUTION = "'decide'|'huddle'|'retry'|'reassign'|'amend'|'dismiss'|'await_human'";
+const PROVENANCE = "'measured'|'reported'|'estimated'";
+const PM_CATEGORY = "'prompt_misread'|'project_misread'|'contract_ambiguity'|'implementation'|'test_gap'|'process'";
+const PM_FIX_STATUS = "'pending'|'fixed'|'abandoned'";
 
 const SOURCE: Shape = {
   kind: "'orchestrator'|'agent'|'runner'|'watchdog'|'human'|'system'",
@@ -108,6 +111,7 @@ const LEASE_REQUEST: Shape = {
 const DECISION: Shape = { id: "s", scope: "s", text: "t", "rationale?": "t", by: "s", "supersedes?": "s" };
 const ESCALATION: Shape = {
   id: "s",
+  "dissent_id?": "id",
   "task?": "id",
   agent: "s",
   kind: "'blocker'|'ambiguity'|'resource'|'conflict'|'assistance'|'emergency'",
@@ -154,7 +158,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "contract.proposed": { contract: "s", version: "int", source: "s", blob: "s", "reason?": "t", "patch_blob?": "s" },
   "contract.consent_requested": { contract: "s", version: "int", participants: "s[]", "round?": "s", "hash?": "s", "host?": "s" },
   "contract.consent_recorded": { contract: "s", agent: "s", verdict: VERDICT, "reason?": "t", "round?": "s" },
-  "contract.objection_resolved": { contract: "s", agent: "s", how: "'amended'|'withdrawn'|'excused'", reason: "t" },
+  "contract.objection_resolved": { contract: "s", agent: "s", how: "'amended'|'withdrawn'|'excused'|'dissented'", reason: "t", "dissent_id?": "s" },
   // `blob` (the full contract at this version) is optional in the type but required here: the
   // blackboard reads the contract from it (see blackboard.ts).
   "contract.frozen": { contract: "s", version: "int", by: "s", hash: "s", blob: "s" },
@@ -172,12 +176,14 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
     agent: "s",
     "task?": "id",
     code: "int|null",
-    reason: "'completed'|'error'|'killed'|'lost'|'stalled'|'budget'|'attestation'",
+    reason: "'completed'|'error'|'killed'|'lost'|'stalled'|'budget'|'attestation'|'stopped'",
     "result_subtype?": "s",
     "usage?": TOKENS,
     "paused?": "t",
   },
   "agent.left": { agent: "s", reason: "t" },
+  "agent.stop_requested": { agent: "s", by: "s", surface: "'dashboard'|'cli'|'tool'", "reason?": "t" },
+  "agent.stopped": { agent: "s", "task?": "id", request: "s", "escalation?": "s" },
 
   "task.ready": { task: "id" },
   "task.claimed": { task: "id", agent: "s", attempt: "int", ttl_s: "n" },
@@ -189,7 +195,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "task.merged": { task: "id", integration_sha: "s" },
   "task.accepted": { task: "id" },
   "task.blocked": { task: "id", "escalation?": "s", "deps?": "id[]" },
-  "task.unblocked": { task: "id" },
+  "task.unblocked": { task: "id", "escalation?": "s" },
   "task.retried": { task: "id", attempt: "int", why: "t" },
   "task.reassigned": { task: "id", from: "s", to: "s" },
   "task.split": { task: "id", into: [TASK_SPEC] },
@@ -238,6 +244,8 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "decision.recorded": { decision: DECISION },
   "directive.issued": { id: "s", to: "s[]", text: "t", requires_ack: "b" },
   "directive.acknowledged": { id: "s", agent: "s" },
+  "dissent.tripwire_fired": { dissent_id: "id", "task?": "id", tripped_by: "s", evidence: "t", "generation?": "n", "notified?": "s[]", "orchestrator_woken?": "b" },
+  "dissent.scored": { dissent_id: "id", outcome: "'vindicated'|'refuted'|'untested'" },
 
   "escalation.raised": { escalation: ESCALATION },
   "escalation.routed": { id: "s", to: "s", "format?": HUDDLE_FORMAT, wake: "b" },
@@ -255,7 +263,10 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   },
 
   "budget.usage_recorded": {
-    source: "'worker'|'huddle'|'consent'|'lead'|'structuring'",
+    source: "'worker'|'huddle'|'postmortem'|'dissent micro-huddle'|'consent'|'lead'|'structuring'",
+    "call_id?": "s",
+    "dissent_id?": "s",
+    "reservation?": "b",
     "agent?": "s",
     "task?": "id",
     "provider?": "s",
@@ -263,6 +274,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
     tokens: TOKENS,
     usd: "n",
     estimated: "b",
+    "provenance?": { tokens: PROVENANCE, usd: PROVENANCE },
   },
   "budget.threshold_crossed": { pct: "n", spent_usd: "n", budget_usd: "n" },
   "budget.exhausted": { scope: "'execution'|'task'|'agent'", "ref?": "s" },
@@ -275,6 +287,25 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "watchdog.stall_detected": { agent: "s", "task?": "id" },
 
   "sandbox.degraded": { backend: SANDBOX, reason: "t" },
+
+  "postmortem.finding_recorded": {
+    id: "s",
+    summary: "t",
+    detected_by: "t",
+    responsible: "t[]",
+    "task?": "id",
+    category: PM_CATEGORY,
+    "evidence?": "t[]",
+    "repeats?": "int",
+  },
+  "postmortem.fix_updated": { id: "s", "by?": "t", status: PM_FIX_STATUS, "ref?": "t" },
+  "postmortem.started": { id: "s", format: "'collaborate'|'waffle-house'", seats: "s[]" },
+  "postmortem.concluded": {
+    id: "s",
+    artifacts: { "fix?": "int", "rule?": "int", "persona_addendum?": "int", "agent_rule?": "int", "contract_rule?": "int", "memory?": "int", "dissent_score?": "int" },
+    flagged: "int",
+    record: "s",
+  },
 };
 
 const DRAFT: Shape = {
@@ -454,6 +485,9 @@ export function validateDraft(draft: AnyEventDraft): AnyEventDraft {
     const { payload, ...rest } = raw;
     out = checkShape(rest, DRAFT, "draft");
     out.payload = checkField(payload, PAYLOAD_SPECS[type], "payload");
+    if (type === "contract.objection_resolved" && isPlainObject(out.payload) && out.payload.how === "dissented" && !out.payload.dissent_id) {
+      throw new Invalid("payload.dissent_id", "is required for how: dissented");
+    }
   } catch (e) {
     if (e instanceof Invalid) throw new Error(`Invalid ${type} event: ${e.message}`);
     throw e;

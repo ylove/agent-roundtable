@@ -48,7 +48,8 @@ const DRIVERS = ["claude-code", "codex"] as const;
 export const COMMAND_TIMEOUT_S = { min: 1, max: 900, default: 300 } as const;
 export const MAX_PARALLEL_LIMIT = 16;
 /** Size caps: a contract is a plan for one run, not a backlog. */
-export const CONTRACT_LIMITS = { tasks: 200, commands: 100, participants: 50, interfaces: 200, decisions: 200, globs: 64 } as const;
+export const CONTRACT_LIMITS = { tasks: 200, commands: 100, participants: 50, interfaces: 200, decisions: 200, globs: 64,
+  dissents: 16, dissent_claim: 500, dissent_prediction: 500 } as const;
 
 /**
  * Env names a contract command may not set: broader than SECRET_NAME_RE on purpose, since a
@@ -417,7 +418,7 @@ export function findCycle(tasks: ReadonlyArray<Pick<TaskSpec, "id" | "depends_on
 function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   const c = isObj(input) ? input : (ck.err("", "the contract must be a JSON object"), {} as Obj);
   ck.known(c, ["schema", "id", "version", "status", "title", "goal", "scope", "participants", "teams", "tasks", "interfaces",
-    "decisions", "validation", "budget", "authority", "sandbox", "workers", "consent", "frozen"], "");
+    "decisions", "dissents", "validation", "budget", "authority", "sandbox", "workers", "postmortem", "consent", "frozen"], "");
   if (c.schema !== undefined && c.schema !== CONTRACT_SCHEMA) ck.err("schema", `must be ${q(CONTRACT_SCHEMA)}`);
   let id = "";
   if (c.id === undefined || c.id === null) ck.err("id", "is required");
@@ -466,6 +467,15 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   const fallback = ck.str(wk.fallback_model, "workers.fallback_model");
   if (model !== undefined) workers.model = model;
   if (fallback !== undefined) workers.fallback_model = fallback;
+
+  // --- postmortem mode (docs/design/postmortem.md §2): kept out of the contract unless enabled, so older hashes stand ---
+  const pm = ck.obj(c.postmortem, "postmortem");
+  let postmortem: Contract["postmortem"];
+  if (pm) {
+    ck.known(pm, ["enabled"], "postmortem");
+    if (pm.enabled !== undefined && typeof pm.enabled !== "boolean") ck.err("postmortem.enabled", "must be true or false");
+    if (pm.enabled === true) postmortem = { enabled: true };
+  }
 
   // --- validation commands (tasks reference them) ---
   const val = ck.obj(c.validation, "validation") ?? {};
@@ -678,6 +688,60 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     if (d.supersedes !== undefined && !decisions.some((x) => x.id === d.supersedes)) ck.warn(`decisions[${i}].supersedes`, `names a decision not in this contract (${q(d.supersedes)})`);
   }
 
+  // --- dissents: data only; a missing predicate is a draft freeze blocker ---
+  const dissents: Contract["dissents"] = [];
+  for (const [i, raw] of ck.arr(c.dissents, "dissents", CONTRACT_LIMITS.dissents).entries()) {
+    const p = `dissents[${i}]`;
+    const o = ck.obj(raw, p, true);
+    if (!o) continue;
+    ck.known(o, ["id", "by", "source", "claim", "predicted_failure", "tripwire", "on_fire"], p);
+    const did = ck.id(o.id, `${p}.id`);
+    if (did && dissents.some((d) => d.id === did)) ck.err(`${p}.id`, `${q(did)} appears twice`);
+    const by = ck.str(o.by, `${p}.by`, { required: true });
+    if (by && !agents.has(by)) ck.err(`${p}.by`, `${q(by)} is not a participant`);
+    const src = ck.obj(o.source, `${p}.source`, true) ?? {};
+    ck.known(src, ["kind", "ref"], `${p}.source`);
+    const kind = ck.oneOf(src.kind, `${p}.source.kind`, ["ultraplan", "consent", "debate", "waffle_house", "manual"] as const);
+    if (!kind) ck.err(`${p}.source.kind`, "is required");
+    const ref = ck.str(src.ref, `${p}.source.ref`);
+    const claim = ck.str(o.claim, `${p}.claim`, { required: true, max: CONTRACT_LIMITS.dissent_claim });
+    const prediction = ck.str(o.predicted_failure, `${p}.predicted_failure`, { required: true, max: CONTRACT_LIMITS.dissent_prediction });
+    const onFire = ck.oneOf(o.on_fire, `${p}.on_fire`, ["notify", "huddle", "pause_and_huddle"] as const, "huddle")!;
+    let tripwire: Contract["dissents"][number]["tripwire"];
+    if (o.tripwire === undefined) {
+      if (status !== "draft" && status !== "consenting") ck.err(`${p}.tripwire`, "is required before freeze; arm or explicitly excuse the dissent");
+    } else {
+      const tw = ck.obj(o.tripwire, `${p}.tripwire`, true);
+      if (tw) {
+        const tp = `${p}.tripwire`;
+        const k = ck.oneOf(tw.kind, `${tp}.kind`, ["check_failed", "path_touched", "task_state"] as const);
+        if (!k) ck.err(`${tp}.kind`, "is required");
+        ck.known(tw, k === "check_failed" ? ["kind", "check", "task"] : k === "path_touched" ? ["kind", "paths", "task"] : ["kind", "task", "state"], tp);
+        const task = ck.id(tw.task, `${tp}.task`, k === "task_state");
+        if (task && !tasks.some((t) => t.id === task)) ck.err(`${tp}.task`, `names unknown task ${q(task)}`);
+        if (k === "check_failed") {
+          const check = ck.id(tw.check, `${tp}.check`);
+          if (check && !commandIds.has(check)) ck.err(`${tp}.check`, `names unknown command ${q(check)}`);
+          if (check) tripwire = { kind: k, check, ...(task && { task }) };
+        } else if (k === "path_touched") {
+          // Normalize separators before checking absoluteness, including rooted Windows paths.
+          const rawPaths = Array.isArray(tw.paths) ? tw.paths.map((x) => typeof x === "string" ? x.replace(/\\/g, "/") : x) : tw.paths;
+          const paths = globs(ck, rawPaths, `${tp}.paths`);
+          if (!paths.length) ck.err(`${tp}.paths`, "must list at least one relative glob");
+          tripwire = { kind: k, paths, ...(task && { task }) };
+        } else if (k === "task_state") {
+          const state = ck.oneOf(tw.state, `${tp}.state`, ["rejected", "blocked"] as const);
+          if (!state) ck.err(`${tp}.state`, "is required");
+          if (task && state) tripwire = { kind: k, task, state };
+        }
+      }
+    }
+    if (did && by && kind && claim && prediction) dissents.push({
+      id: did, by, source: { kind, ...(ref && { ref }) }, claim, predicted_failure: prediction,
+      ...(tripwire && { tripwire }), on_fire: onFire,
+    });
+  }
+
   // --- budget ---
   const b = ck.obj(c.budget, "budget") ?? {};
   ck.known(b, ["usd", "per_task_usd", "per_agent_usd", "wall_clock_min", "max_parallel", "max_attempts"], "budget");
@@ -744,9 +808,10 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   }
 
   const out: Contract = {
-    schema: CONTRACT_SCHEMA, id, version, status, title, goal, scope, participants, teams, tasks, interfaces, decisions,
+    schema: CONTRACT_SCHEMA, id, version, status, title, goal, scope, participants, teams, tasks, interfaces, decisions, dissents,
     validation: { commands, final }, budget, authority, sandbox, workers, consent,
   };
+  if (postmortem) out.postmortem = postmortem;
   if (frozen) out.frozen = frozen;
   if (scope.parent) checkChild(ck, out, opts);
   return out;
@@ -937,6 +1002,10 @@ export function renderContractMarkdown(c: Contract, opts: RenderOptions = {}): s
     ? c.participants.map((p) => `- ${p.agent}${p.agent === opts.mark ? " (you)" : ""}${p.role ? ` — ${p.role}` : ""}${p.team ? ` · team ${p.team}` : ""}`).join("\n")
     : "(none)"));
   if (c.teams.length) out.push("## Teams\n\n" + c.teams.map((t) => `- **${t.id}**${t.lead ? `, lead ${t.lead}` : ""}: ${list(t.members)}`).join("\n"));
+  if (c.dissents?.length) out.push("## Dissents\n\n" + c.dissents.map((d) =>
+    `### ${d.id} (${d.tripwire ? "armed" : "draft: needs a tripwire or explicit excusal"})\n\n` +
+    JSON.stringify(d, null, 2).split("\n").map((line) => `    ${line}`).join("\n")
+  ).join("\n\n"));
   out.push("## Tasks\n\n" + c.tasks.map((t, i) => {
     const lines = [`### ${i + 1}. \`${t.id}\` — ${t.title}${opts.mark !== undefined && t.persona === opts.mark ? " (yours)" : ""}`];
     lines.push(`- Persona: ${t.persona}${t.team ? ` · team ${t.team}` : ""} · kind ${t.kind}${t.effort ? ` · effort ${t.effort}` : ""}${t.budget_usd !== undefined ? ` · budget ${usd(t.budget_usd)}` : ""}`);
@@ -962,7 +1031,8 @@ export function renderContractMarkdown(c: Contract, opts: RenderOptions = {}): s
     `${b.wall_clock_min} min wall clock · max parallel ${b.max_parallel} · max attempts ${b.max_attempts}\n\n` +
     `Lead ${c.authority.lead} may: ${list(c.authority.may)} · budget extension up to ${c.authority.budget_extension_pct}%\n\n` +
     `Sandbox: ${c.sandbox.backend} (\`${c.sandbox.image}\`)${c.sandbox.install ? ` · install \`${argvText(c.sandbox.install.argv)}\` (egress ${list(c.sandbox.install.egress)})` : ""} · ` +
-    `workers: ${c.workers.driver}${c.workers.model ? ` (${c.workers.model}${c.workers.fallback_model ? `, fallback ${c.workers.fallback_model}` : ""})` : ""}`);
+    `workers: ${c.workers.driver}${c.workers.model ? ` (${c.workers.model}${c.workers.fallback_model ? `, fallback ${c.workers.fallback_model}` : ""})` : ""}` +
+    (c.postmortem?.enabled ? "\n\nPostmortem mode: on (findings are kept while testing sends fixers back; a postmortem meeting follows)" : ""));
   if (!opts.omitConsent) {
     out.push("## Consent\n\n" + (c.consent.length
       ? c.consent.map((x) => `- ${x.agent}: ${x.verdict}${x.reason ? ` — ${x.reason.split(/\r?\n/)[0].slice(0, 300)}` : ""}`).join("\n")

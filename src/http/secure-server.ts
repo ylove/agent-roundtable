@@ -7,7 +7,13 @@
 //     nothing about how close the guess was. The token is never logged.
 //   - the Host header must name this server (127.0.0.1:<port> or localhost:<port>), else 421:
 //     a DNS-rebinding page cannot read anything
-//   - GET and HEAD only (405 otherwise): the server is read-only, so no CSRF protection is needed
+//   - GET and HEAD only (405 otherwise), except for a route that names its own methods (Route.methods):
+//     the one mutating route of the execution dashboard allows POST and nothing else. A method no
+//     route allows is a plain 405 before anything else; a method some route allows still needs the
+//     token (404 without it) and a route that allows it (405 with that route's Allow). The route
+//     itself must defend against cross-site requests (the dashboard's stop route follows
+//     docs/design/usage-visibility.md §7: a per-start nonce in a custom header, Origin and
+//     Sec-Fetch-Site checks, no body, a rate limit)
 //   - strict headers on every response (COMMON_HEADERS) and a Content-Security-Policy per
 //     response (DEFAULT_CSP unless the route sets its own)
 //   - CONNECT and upgrades are always refused. Absolute-form (proxy) requests are refused too,
@@ -62,10 +68,13 @@ export function tokenMatches(candidate: string, token: string): boolean {
 
 export type Headers = Record<string, string | null>;
 
+/** The methods a route may allow besides GET and HEAD. */
+export type MutatingMethod = "POST";
+
 export interface RouteContext {
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
-  readonly method: "GET" | "HEAD";
+  readonly method: "GET" | "HEAD" | MutatingMethod;
   /** The path after the token, starting with "/" ("/" is the root page). Not percent-decoded. */
   readonly path: string;
   readonly query: URLSearchParams;
@@ -100,7 +109,25 @@ export type RouteHandler = (ctx: RouteContext) => void | Promise<void>;
 export interface Route {
   /** Exact path ("/state.json") or a RegExp tested against the path after the token. */
   path: string | RegExp;
+  /** The methods this route answers. Default GET and HEAD; a route that mutates lists POST alone. */
+  methods?: readonly ("GET" | "HEAD" | MutatingMethod)[];
   handler: RouteHandler;
+}
+
+const READ_METHODS: readonly string[] = ["GET", "HEAD"];
+
+/** Same-origin checks for a mutating request (usage-visibility.md §7): Origin and Sec-Fetch-Site, when the browser sent them. */
+export function sameOriginProblem(req: IncomingMessage, origins: readonly string[]): string | null {
+  const origin = req.headers.origin;
+  if (origin !== undefined && !(typeof origin === "string" && origins.includes(origin))) return "Cross-origin request refused.";
+  const site = req.headers["sec-fetch-site"];
+  if (site !== undefined && site !== "same-origin") return "Cross-site request refused.";
+  return null;
+}
+
+/** A request that carries a body (a Content-Length other than 0, or any Transfer-Encoding). */
+export function hasBody(req: IncomingMessage): boolean {
+  return req.headers["transfer-encoding"] !== undefined || req.headers["content-length"] !== "0";
 }
 
 export interface SecureServerOptions {
@@ -131,12 +158,16 @@ export class SecureServer {
   private port = 0;
   private closing?: Promise<void>;
   private readonly token = newCapabilityToken();
+  /** The methods beyond GET and HEAD that some route allows. */
+  private readonly mutating: ReadonlySet<string>;
   private readonly streams = new Set<ResponseStream>();
 
   private constructor(
     private readonly opts: SecureServerOptions,
     private readonly server: Server
-  ) {}
+  ) {
+    this.mutating = new Set(opts.routes.flatMap((r) => (r.methods ?? READ_METHODS).filter((m) => !READ_METHODS.includes(m))));
+  }
 
   /** Listen on 127.0.0.1 with a random port. */
   static start(opts: SecureServerOptions): Promise<SecureServer> {
@@ -265,7 +296,8 @@ export class SecureServer {
     if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) {
       return this.text(req, res, 421, "Misdirected request: this server only answers on its own local address.");
     }
-    if (req.method !== "GET" && req.method !== "HEAD") {
+    const method = req.method ?? "";
+    if (!READ_METHODS.includes(method) && !this.mutating.has(method)) {
       return this.text(req, res, 405, "Method not allowed: this server is read-only.", { Allow: "GET, HEAD" });
     }
     let url: URL;
@@ -291,6 +323,12 @@ export class SecureServer {
         match = r.path.exec(sub);
         if (!match) continue;
       }
+      const allowed = r.methods ?? READ_METHODS;
+      if (!(allowed as readonly string[]).includes(method)) {
+        return this.text(req, res, 405, "Method not allowed.", { Allow: allowed.join(", ") });
+      }
+      // A mutating request over a proxy is never served: the deny-all proxy mode is for reading.
+      if (proxied && !READ_METHODS.includes(method)) return this.refuseProxied(res);
       return r.handler(this.context(req, res, sub, url.searchParams, match, proxied));
     }
     return this.text(req, res, 404, "Not found");
@@ -308,7 +346,7 @@ export class SecureServer {
     return {
       req,
       res,
-      method: req.method === "HEAD" ? "HEAD" : "GET",
+      method: req.method === "HEAD" ? "HEAD" : req.method === "POST" ? "POST" : "GET",
       path,
       query,
       match,

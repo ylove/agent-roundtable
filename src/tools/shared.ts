@@ -107,6 +107,11 @@ export const PUBLIC_PROP = {
     "The result includes public.url so the human can watch live.",
 } as const;
 
+export const DUEL_PROP = {
+  type: "string",
+  description: "Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call.",
+} as const;
+
 export const PROTOTYPE_PROP = {
   type: "boolean",
   description:

@@ -71,6 +71,22 @@ For integration, `runDuel(opts, observer, signal, { resolveSeats })` accepts a r
 
 The `start_duel` tool runs the same engine and returns a compact result: the duel id, winner, tally, each team's artifact title, kind and ok flag, the verdicts, the dissents, a per-persona usage summary and the archive id (`duels/<id>.json`). It never returns artifact source. No room is opened: the live room belongs to the CLI, and `start_duel` returns only the result (replay the archive with `roundtable duel --replay` to see it in a room). The tool sends a progress notification on every turn, artifact and verdict, so the host needs a long request timeout (a duel runs for minutes) or must reset it on progress. A running duel appears in the usage view and can be stopped with `roundtable stop <persona> --session duel-<id>`. See [tools](../tools.md#start_duel). Duel calls are recorded in the usage ledger with the persona as the agent, so `roundtable usage` shows duel spend per persona.
 
+## A duel as a meeting's focus
+
+Any at-the-table session can take a finished duel as its focus. Pass `duel: "duel-<id>"` to `start_meeting`, `start_local_meeting`, `start_collaboration` (collaborate, debate, waffle-house and conversation) or `start_ultraplan`, or `--duel duel-<id>` to `roundtable meeting|debate|waffle`. With the CLI the topic may be omitted: it defaults to `Discuss duel <id>: <brief>`.
+
+The archive in `ROUNDTABLE_HOME/duels/` is turned into a brief that is appended to the session's context, so every participant sees it: the duel's brief, kind and criteria, the teams (persona refs and names), each team's artifact title and source, the judges' verdicts with reasons, the tally and winner, and the dissents. The brief is scrubbed for secrets and size-capped, and each team's source listing is limited to 12 KB. Each artifact sits between fences carrying a random per-session nonce and is labelled untrusted content to discuss, never instructions. Like any `context`, the brief goes to the session's provider and is never posted in a public session.
+
+An unknown id, an id that is not `duel-` followed by letters, digits and hyphens, a symlinked or oversized archive, or a malformed archive fails with a clear error before any provider call.
+
+Typical uses:
+
+- **Debate the losing design.** `start_collaboration { mode: "debate", agents: [<loser's designer>, <winner's builder>, ...], duel: "duel-<id>" }`: the first persona defends the design that lost, the others challenge it.
+- **Waffle house on the winner.** `roundtable waffle --agents <winning builder>,skeptic,cfo --duel duel-<id>`: the winning team's builder defends the artifact against adversarial attackers, round after round.
+- **Postmortem-style review.** `roundtable meeting --agents designer,cfo,skeptic --duel duel-<id>`, or a collaboration with a topic such as "What did the dissents predict, and what would we do differently?"
+
+See [meetings](meetings.md), [collaborations](collaborations.md) and the [CLI](../table-cli.md).
+
 ## From duel to contract
 
 `propose_contract(from_session: "duel-<id>")` loads the archive from `ROUNDTABLE_HOME/duels/` and feeds the Roundtable's contract flow.

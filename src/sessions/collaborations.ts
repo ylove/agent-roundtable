@@ -17,6 +17,7 @@ import { metered, stoppedOutcome, type StoppedInfo } from "../usage/session-scop
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
 import type { CollaborationMode, CollaborationRole, ConversationAngle } from "./modes.js";
+import { withDuelFocus } from "./duel-focus.js";
 import { buildGrounding, type Grounding } from "./grounding.js";
 import {
   NUDGE_HELD_ERROR,
@@ -299,6 +300,8 @@ export async function startCollaboration(
     grounding?: boolean;
     prototype?: boolean;
     origin?: string;
+    /** A duel id whose brief is added to the context every participant sees. */
+    duel?: string;
   } = {}
 ): Promise<{
   collaborationId: string;
@@ -310,6 +313,8 @@ export async function startCollaboration(
   /** Prototype sessions only. */
   prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
+  // A bad or unknown duel fails here, before a session exists or any provider is called.
+  if (options.duel !== undefined) options = { ...options, context: withDuelFocus(options.context, options.duel) };
   const collaborationId = newId("collab");
   return withSessionLock(collaborationId, collaborationBusy(collaborationId), () =>
     openCollaboration(collaborationId, agentNames, topic, options)

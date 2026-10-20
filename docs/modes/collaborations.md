@@ -29,3 +29,5 @@ Private conversations default to grounding: workspace excerpts (package metadata
 See [Conversation tool calls](../tools.md#conversation-tool-calls).
 
 See [collaboration tool calls](../tools.md#tool-call-examples), [public sessions](public-sessions.md), and [session archives](../sessions.md).
+
+A finished duel can be the focus of a session: pass `duel: "duel-<id>"` (see [a duel as a meeting's focus](duel.md#a-duel-as-a-meetings-focus)).

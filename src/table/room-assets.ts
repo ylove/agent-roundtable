@@ -14,6 +14,7 @@ export const ROOM_CSS = `:root{color-scheme:dark;font-family:system-ui,sans-seri
 export const ROOM_JS = `"use strict";
 const byId = id => document.getElementById(id);
 const node = (tag, text, className) => { const element = document.createElement(tag); if(text !== undefined) element.textContent = text; if(className) element.className = className; return element; };
+const spendText = (usd, tokens, unit) => { tokens = tokens || 0; const money = "$" + usd.toFixed(4); if (tokens <= 0) return money; const count = tokens < 1000 ? String(tokens) : (tokens / 1000).toFixed(1).replace(/\\.0$/, "") + "k"; const rest = count + " tok" + (unit ? " unpriced" : " (no price)"); return usd > 0 ? money + " + " + rest : rest; };
 const gameCards = new Map();
 function render(state) {
   byId("topic").textContent = state.topic || "Waiting for the duel";
@@ -22,7 +23,7 @@ function render(state) {
   byId("seats").replaceChildren(...state.seats.map(seat => {
     const card = node("article", undefined, "seat");
     const spend = state.usage.perSeat.find(item => item.seatId === seat.id);
-    card.append(node("strong", seat.name), node("p", (seat.team === "judge" ? "Judge" : "Team " + seat.team) + " · " + (seat.role || "participant")), node("p", seat.provider + " / " + seat.model), node("p", "$" + (spend ? spend.costUsd : 0).toFixed(4)));
+    card.append(node("strong", seat.name), node("p", (seat.team === "judge" ? "Judge" : "Team " + seat.team) + " · " + (seat.role || "participant")), node("p", seat.provider + " / " + seat.model), node("p", spendText(spend ? spend.costUsd : 0, spend && spend.unpricedTokens, false)));
     return card;
   }));
   for (const team of ["A", "B"]) {
@@ -44,7 +45,7 @@ function render(state) {
   }));
   byId("dissents").replaceChildren(...state.dissents.map(item => node("article", item.seat.name + " · Team " + item.team + "\\n" + item.text, "dissent")));
   byId("turns").replaceChildren(...state.turns.map(item => node("p", item.seat.name + " · " + item.round + "\\n" + item.text)));
-  byId("spend").textContent = "Estimated spend: $" + state.usage.totalCostUsd.toFixed(4);
+  byId("spend").textContent = "Estimated spend: " + spendText(state.usage.totalCostUsd, state.usage.totalUnpricedTokens, true);
 }
 async function poll() {
   try { const response = await fetch("state.json", {cache:"no-store"}); if(response.ok) render(await response.json()); }

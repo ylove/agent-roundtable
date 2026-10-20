@@ -46,8 +46,19 @@ export type TableEvent =
   /** Token usage and cost totals for the duel. */
   | {
       type: "usage";
-      perSeat: { seatId: string; inputTokens: number; outputTokens: number; costUsd: number }[];
+      perSeat: {
+        seatId: string;
+        inputTokens: number;
+        outputTokens: number;
+        /** Cost of the priced calls only; a model with no known price adds nothing here. */
+        costUsd: number;
+        /** Tokens from calls with no known price: shown as tokens with "no price", never as $0.00. */
+        unpricedTokens?: number;
+        /** True when any of the seat's token counts were estimated rather than reported by the provider. */
+        estimated?: boolean;
+      }[];
       totalCostUsd: number;
+      totalUnpricedTokens?: number;
     }
   /** The final outcome, including an optional archive location. */
   | {

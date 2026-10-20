@@ -35,6 +35,13 @@ test('prototype is a single summary line, assessments have verdict chips, and en
   assert.match(output.read(), /\[APPROVE\]/); assert.match(output.read(), /Dissent/);
   assert.match(output.read(), /Tie · A 1 \/ B 1/); assert.match(output.read(), /Spend: \$0.0123 \(designer \$0.0123\)/);
 });
+test('unpriced seats print tokens with no price, never $0.0000', () => {
+  const output = sink(), obs = createTerminalObserver({ output });
+  obs.onEvent({ type: 'usage', perSeat: [{ seatId: 'priced', inputTokens: 10, outputTokens: 20, costUsd: 0.0123, unpricedTokens: 0 }, { seatId: 'glm', inputTokens: 30000, outputTokens: 11200, costUsd: 0, unpricedTokens: 41200, estimated: true }], totalCostUsd: 0.0123, totalUnpricedTokens: 41200 });
+  obs.onEvent({ type: 'end', winner: 'A', tally: { A: 1, B: 0 } });
+  assert.match(output.read(), /Spend: \$0\.0123 \+ 41\.2k tok unpriced \(priced \$0\.0123, glm 41\.2k tok \(no price\)\)/);
+  assert.doesNotMatch(output.read(), /glm \$0/);
+});
 test('failed prototype never dumps its error or files, and aborted end is labeled', () => {
   const output = sink(), obs = createTerminalObserver({ output });
   obs.onEvent({ type: 'prototype', team: 'B', seat, ok: false, error: 'private detail', files: [] });

@@ -42,7 +42,8 @@ function validEvent(event: TableEvent): boolean {
       ["APPROVE", "REVISE", "REJECT", "UNCLEAR"].includes(event.verdict) && text(event.reason);
     case "dissent": return seat(event.seat) && text(event.text) && (event.team === undefined || team(event.team));
     case "usage": return count(event.totalCostUsd) && Array.isArray(event.perSeat) && event.perSeat.every(item =>
-      item && text(item.seatId) && count(item.inputTokens) && count(item.outputTokens) && count(item.costUsd));
+      item && text(item.seatId) && count(item.inputTokens) && count(item.outputTokens) && count(item.costUsd) &&
+      (item.unpricedTokens === undefined || count(item.unpricedTokens)) && (item.estimated === undefined || typeof item.estimated === "boolean"));
     case "end": return ["A", "B", "tie", "none"].includes(event.winner) && !!event.tally &&
       Number.isInteger(event.tally.A) && Number.isInteger(event.tally.B) &&
       (event.aborted === undefined || typeof event.aborted === "boolean") && (event.archivePath === undefined || text(event.archivePath));

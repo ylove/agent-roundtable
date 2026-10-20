@@ -11,6 +11,7 @@
 
 import { createHash } from "node:crypto";
 import type { ProcessOp } from "./escalation.js";
+import { blockingIds } from "./task-holds.js";
 import type { TaskCardOptions } from "./task-card.js";
 import type {
   AnyEventDraft,
@@ -108,7 +109,7 @@ export interface RunnerEscalationSpec {
   summary: string;
   question?: string;
   options?: string[];
-  /** Add this escalation's hold (task.blocked {escalation}) unless the task is finished. */
+  /** Block the task (task.blocked {escalation}) unless it is finished. A task another hold already blocks gains this one as a further reason, so releasing either leaves the other. */
   block?: boolean;
   diagnosticsBlob?: string;
 }
@@ -139,7 +140,7 @@ export function runnerEscalation(state: Readonly<BlackboardState>, spec: RunnerE
     ...(spec.diagnosticsBlob && { diagnostics_blob: spec.diagnosticsBlob }),
   };
   const out: AnyEventDraft[] = [{ type: "escalation.raised", source, correlation: id, payload: { escalation: esc } }];
-  if (block) out.push({ type: "task.blocked", source, correlation: id, payload: { task: spec.task!, escalation: id } });
+  if (block && !blockingIds(rt).includes(id)) out.push({ type: "task.blocked", source, correlation: id, payload: { task: spec.task!, escalation: id } });
   return out;
 }
 

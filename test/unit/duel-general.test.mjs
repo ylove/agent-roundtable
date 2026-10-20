@@ -323,3 +323,16 @@ test("start_duel validates, runs, and returns a compact result with no source", 
   }
   assert.ok(!(await handleToolCall("start_duel", args, "worker")).content[0].text.startsWith("{"));
 });
+
+test("a code artifact with token and key identifiers stays intact in the archive and the room", async t => {
+  const bucket = "export class Bucket {\n  private readonly state: Map<string, { tokens: number; lastRefill: number }> = new Map();\n  take(key: string, password: string) {\n    let tokens = 5;\n    const secretKey = key;\n    const apiKeyHeader = \"X-Api-Key\";\n    const token = getToken();\n    const tokensToAdd = (Date.now() / 1000) * this.rate;\n    return tokens + tokensToAdd;\n  }\n}";
+  const room = await startRoom({ hold: false });
+  t.after(() => room.close());
+  const { events, result } = await run(t, { kind: "code" }, { build: team => `<prototype kind="code" title="Bucket ${team}"><file path="src/bucket.ts">${bucket}</file></prototype>` });
+  for (const event of events) await room.observer.onEvent(event);
+  const archive = JSON.parse(await readFile(result.archivePath, "utf8"));
+  assert.equal(archive.prototypes[0].files[0].content, bucket);
+  assert.ok(!(await readFile(result.archivePath, "utf8")).includes("[redacted:secret]"));
+  const served = await get(new URL("p/A/src/bucket.ts", new URL(room.url)));
+  assert.equal(served.text, bucket);
+});

@@ -5,7 +5,7 @@
 // shape), then the pattern-based credential rules shared with public redaction.
 // ============================================================================
 
-import { redactSecrets } from "./redaction-rules.js";
+import { redactArtifactSecrets, redactSecrets } from "./redaction-rules.js";
 import { SECRET_NAME_RE } from "./child-env.js";
 
 const MIN_SECRET_LENGTH = 8;
@@ -49,6 +49,23 @@ export function scrubSecrets(input: string, source: NodeJS.ProcessEnv = process.
   const patterns = redactSecrets(text);
   for (const n of Object.values(patterns.counts)) redactions += n;
   return { text: patterns.text, redactions };
+}
+
+/**
+ * Artifact-content mode: exact configured secret values plus credential-shaped patterns (vendor keys,
+ * PEM blocks, JWTs, bearer/basic headers, URL credentials). Skips the generic name-based assignment
+ * rule so ordinary identifiers in source code and documents survive byte for byte.
+ */
+export function scrubArtifactSecrets(input: string, source: NodeJS.ProcessEnv = process.env): ScrubResult {
+  let { text, redactions } = scrubConfiguredSecrets(input, source);
+  const patterns = redactArtifactSecrets(text);
+  for (const n of Object.values(patterns.counts)) redactions += n;
+  return { text: patterns.text, redactions };
+}
+
+/** Convenience: artifact-content scrubbed text only. */
+export function scrubArtifact(input: string): string {
+  return scrubArtifactSecrets(input).text;
 }
 
 /** Convenience: scrubbed text only. */

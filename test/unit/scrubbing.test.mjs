@@ -103,3 +103,31 @@ test("a numeric max_tokens in a validation error survives while real secrets are
   assert.match(scrubSecrets("max_tokens: hunter2hunter2").text, /redacted/);
   assert.match(scrubSecrets("access_token: 123456789012").text, /redacted/);
 });
+
+test("artifact scrubbing keeps ordinary identifiers byte for byte and still redacts credential shapes", async () => {
+  const { scrubArtifact, scrub } = await import("../../dist/security/secrets.js");
+  const code = [
+    "private readonly state: Map<string, { tokens: number; lastRefill: number }>;",
+    "let tokens = 5;",
+    "const secretKey = options.secretKey;",
+    "password: string;",
+    'const apiKeyHeader = "X-Api-Key";',
+    'apiKeyHeader = "X-Api-Key"',
+    "const token = getToken();",
+    "const tokensToAdd = (elapsed / 1000) * this.refillRate;",
+  ].join("\n");
+  assert.equal(scrubArtifact(code), code);
+  assert.notEqual(scrub('let tokens = 5; apiKeyHeader = "X-Api-Key"'), 'let tokens = 5; apiKeyHeader = "X-Api-Key"', "turn text keeps the full scrubber");
+
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.abcDEF123_-";
+  const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----";
+  const doc = [
+    "key = sk-ant-api03-ABCDEFGHIJKLMNOP", "gh ghp_abcdefghijklmnopqrstuvwxyz0123", pem, jwt,
+    "Authorization: Bearer abcdef1234567890xyz", "postgres://admin:hunter2pw@db.example.com/x", `const k = "${PATTERN_ONLY}"; // ${ANTHROPIC}`,
+  ].join("\n");
+  const out = scrubArtifact(doc);
+  for (const leaked of ["sk-ant-api03-ABCDEFGHIJKLMNOP", "ghp_abcdefghijklmnopqrstuvwxyz0123", "MIIEowIBAAKCAQEA", jwt, "abcdef1234567890xyz", "hunter2pw", ANTHROPIC]) {
+    assert.ok(!out.includes(leaked), `${leaked} leaked: ${out}`);
+  }
+  assert.ok(out.includes("[redacted:env:ANTHROPIC_API_KEY]"));
+});

@@ -6,7 +6,7 @@ Check the room layout without spending tokens:
 
 ```sh
 npm run build
-roundtable duel --replay test/fixtures/duel/demo.json --speed 2 --open
+roundtable duel --replay examples/duel/demo.json --speed 2 --open
 ```
 
 This synthetic fixture contains two tiny playable games, judges' verdicts, a dissent, and example usage. Try both games, show the seat cards, then show the winner and dissent. Press Ctrl-C to close the room.

@@ -69,7 +69,7 @@ test('replay and dry-run skip all seat loading, provider calls and credentials',
 });
 test('missing keys return 2 and missing merge-time runner returns a clear build error', async () => {
   const streams = io();
-  const code = await runTableCli('duel', [...roster.filter((_, i) => i < 7), '--seat', 'designer=replicate:fixture-model', '--no-room'], streams);
+  const code = await runTableCli('duel', [...roster.filter((_, i) => i < 7), '--seat', 'designer=replicate:fixture-model', '--no-room', '--no-preflight'], streams);
   assert.equal(code, 2); assert.match(streams.error.read(), /Missing REPLICATE_API_TOKEN/);
   const { modules } = fixtureModules(); modules.duel = async () => { throw new Error('duel not available in this build'); };
   const missing = io(modules);
@@ -139,7 +139,7 @@ test('discussion timeout cuts the active provider call, emits aborted end and ar
     ? json(200, { choices: [{ message: { content: 'A concise opening.' } }] })
     : new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('Stopped.')), { once: true })));
   const streams = io();
-  assert.equal(await runTableCli('meeting', ['Timed discussion', '--agents', 'designer,skeptic', '--seat', 'designer=openai:fixture-model,skeptic=openai:fixture-model', '--turn-timeout', '0.02', '--json'], streams), 1);
+  assert.equal(await runTableCli('meeting', ['Timed discussion', '--agents', 'designer,skeptic', '--seat', 'designer=openai:fixture-model,skeptic=openai:fixture-model', '--turn-timeout', '0.02', '--json', '--no-preflight'], streams), 1);
   assert.equal(calls.length, 2); assert.equal(calls[1].signal.aborted, true);
   const events = streams.output.read().trim().split('\n').map(JSON.parse);
   assert.equal(events.at(-1).aborted, true);

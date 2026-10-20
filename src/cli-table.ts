@@ -1,9 +1,22 @@
-import type { DuelOptions, DuelResult, RunDuel, Seat, TableObserver } from "./table/events.js";
+import type { DuelOptions, DuelResult, Seat, TableObserver } from "./table/events.js";
 import { parseFlags } from "./cli.js";
 import { createNdjsonObserver, createTerminalObserver, type TerminalOutput } from "./table/terminal.js";
 import { readUserConfig, setUserConfig } from "./user-config.js";
 import { isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
+import { scrubAndCap } from "./security/secrets.js";
+import { agentKey } from "./agents.js";
 
+const HELP = `roundtable duel <topic> --team-a <a,b> --team-b <c,d> --judges <j,...> [options]
+  --open --no-room --no-hold   open the live room, skip it, or exit when the duel ends
+  --json                       NDJSON events instead of the terminal view
+  --seat <agent=provider:model,...>  --mix auto|cheap  --preflight | --no-preflight
+  --rounds 1|2  --turn-timeout <s>  --max-seconds <s>  --agents-dir <abs-path>
+  --dry-run                    replay the bundled synthetic duel (no keys)
+  --replay <archive.json> [--speed <n>]   replay a saved duel
+roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...]
+roundtable config show | config set env-file|agents-dir <absolute-path>
+`;
 class UsageError extends Error { readonly exitCode = 2; }
 type Flags = Record<string, string | true>;
 export interface ParsedTableArgs { topic: string; flags: Flags; options: DuelOptions; agents: string[] }
@@ -40,7 +53,7 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   if (command === "duel" && parsed.agents) throw new UsageError("duel uses --team-a, --team-b and --judges.");
   if (command !== "duel" && (parsed["team-a"] || parsed["team-b"] || parsed.judges || parsed.open || parsed["no-room"] || parsed["no-hold"])) throw new UsageError("Team and room flags are available for duel.");
   const turnTimeoutMs = positive(parsed, "turn-timeout", 90) * 1000;
-  const maxSeconds = positive(parsed, "max-seconds", 420);
+  const maxSeconds = positive(parsed, "max-seconds", 600);
   positive(parsed, "speed", 1);
   return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, rounds: rounds as 1 | 2, turnTimeoutMs, maxSeconds, ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }) } };
 }
@@ -48,19 +61,49 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
 /** Merge-time module contracts. String imports let the CLI build before the duel modules land. */
 export interface TableRoom extends TableObserver { url?: string; close(): void | Promise<void> }
 export interface TableCliModules {
-  duel(): Promise<{ runDuel: RunDuel }>;
+  duel(): Promise<{ runDuel: (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, seats?: Map<string, Seat>) => Promise<DuelResult> }>;
   room(): Promise<{ createRoom(options: { open: boolean }): Promise<TableRoom> }>;
   replay(): Promise<{ replayDuel(options: { archivePath?: string; dryRun: boolean; speed: number }, observer: TableObserver, signal: AbortSignal): Promise<DuelResult> }>;
 }
-async function optionalModule<T>(name: string): Promise<T> {
+const unavailable = (name: string) => new Error(`${name} not available in this build`);
+async function load<T>(name: string): Promise<T> {
   try { return await import(`./table/${name}.js`) as T; }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ERR_MODULE_NOT_FOUND") throw new Error(`${name} not available in this build`);
+    if ((error as NodeJS.ErrnoException).code === "ERR_MODULE_NOT_FOUND") throw unavailable(name);
     throw error;
   }
 }
 const defaultModules: TableCliModules = {
-  duel: () => optionalModule("duel"), room: () => optionalModule("room"), replay: () => optionalModule("replay"),
+  duel: async () => {
+    const real = await load<typeof import("./table/duel.js")>("duel");
+    return {
+      // The CLI already resolved every seat (flags, mix, frontmatter, preflight); apply those to the loaded personas.
+      runDuel: (opts, obs, signal, seats) => real.runDuel(opts, obs, signal, seats ? {
+        resolveSeats: async o => {
+          const loaded = await real.resolveSeatsLocal(o);
+          const chosen = new Map([...seats].map(([id, seat]) => [agentKey(id), seat]));
+          return loaded.map(seat => {
+            const pick = chosen.get(seat.id.slice(seat.id.indexOf(":") + 1));
+            return pick ? { ...seat, provider: pick.provider, model: pick.model } : seat;
+          });
+        },
+      } : {}),
+    };
+  },
+  room: async () => {
+    const real = await load<typeof import("./table/room.js")>("room");
+    return { createRoom: async ({ open }) => {
+      const room = await real.startRoom({ open, hold: false });
+      return { url: room.url, onEvent: e => room.observer.onEvent(e), close: () => room.close() };
+    } };
+  },
+  replay: async () => {
+    const real = await load<typeof import("./table/replay.js")>("replay");
+    return { replayDuel: (options, obs, signal) => {
+      const archivePath = options.archivePath ?? fileURLToPath(new URL("../examples/duel/demo.json", import.meta.url));
+      return real.replayDuel(archivePath, obs, { speed: options.speed, signal });
+    } };
+  },
 };
 interface CliIO { output?: TerminalOutput; error?: TerminalOutput; modules?: TableCliModules }
 
@@ -82,6 +125,7 @@ function configCommand(args: string[], output: TerminalOutput): number {
 export async function runTableCli(command: string, args: string[], io: CliIO = {}): Promise<number> {
   const output = io.output ?? process.stdout, error = io.error ?? process.stderr;
   try {
+    if (args.includes("--help") || args.includes("-h")) { output.write(HELP); return 0; }
     if (command === "config") return configCommand(args, output);
     const parsed = parseTableArgs(command, args);
     if (parsed.options.agentsDir) process.env.ROUNDTABLE_AGENTS_DIR = parsed.options.agentsDir;
@@ -90,7 +134,7 @@ export async function runTableCli(command: string, args: string[], io: CliIO = {
   } catch (e) {
     const code = (e as { exitCode?: number }).exitCode === 2 ? 2 : 1;
     // Usage messages are locally generated; remote bodies may contain credentials or private paths.
-    error.write(`roundtable: ${code === 2 || (e instanceof Error && /^(duel|room|replay) not available in this build$/.test(e.message)) ? (e as Error).message : "The session failed; check provider configuration and try again."}\n`);
+    error.write(`roundtable: ${code === 2 || (e instanceof Error && /^(duel|room|replay) not available in this build$/.test(e.message)) ? (e as Error).message : `The session failed (${e instanceof Error ? scrubAndCap(`${e.name}: ${e.message}`.replace(/\s+/g, " "), 200) : "unknown error"}).`}\n`);
     return code;
   }
 }
@@ -115,7 +159,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
       const { prepareSeats } = await import("./table/seats.js");
       seats = await prepareSeats(
         { ...(command === "duel" ? parsed.options : { agents: parsed.agents, agentsDir: parsed.options.agentsDir }), seat: parsed.flags.seat as string | undefined, mix: parsed.options.mix },
-        { preflight: !parsed.flags["no-preflight"] && !!(parsed.flags.preflight || parsed.options.mix), signal: controller.signal, report: message => { error.write(`${message}\n`); } },
+        { preflight: !parsed.flags["no-preflight"], signal: controller.signal, report: message => { error.write(`${message}\n`); } },
       );
       parsed.options.seats = Object.fromEntries([...seats].map(([id, seat]) => [id, { agent: id, provider: seat.provider, model: seat.model }]));
     }
@@ -135,7 +179,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
     }
     const result = "replayDuel" in runner
       ? await runner.replayDuel({ archivePath: parsed.flags.replay as string | undefined, dryRun: !!parsed.flags["dry-run"], speed: positive(parsed.flags, "speed", 1) }, observer, controller.signal)
-      : await runner.runDuel(parsed.options, observer, controller.signal);
+      : await runner.runDuel(parsed.options, observer, controller.signal, seats);
     if (room && !parsed.flags["no-hold"]) {
       error.write("Room stays open; press Ctrl-C to exit.\n");
       holding = true;

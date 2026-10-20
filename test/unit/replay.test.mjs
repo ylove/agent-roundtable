@@ -7,7 +7,7 @@ import { replayDuel, getPrototypeFiles } from "../../dist/table/replay.js";
 import { ROOM_HTML, ROOM_JS, ROOM_CSP } from "../../dist/table/room-assets.js";
 import { inlineProblems, stubFetch } from "./helpers.mjs";
 
-const fixture = new URL("../fixtures/duel/demo.json", import.meta.url);
+const fixture = new URL("../../examples/duel/demo.json", import.meta.url);
 
 test("synthetic replay reproduces events and prototype contents without any provider calls or keys", async t => {
   for (const key of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY", "OPENAI_COMPATIBLE_API_KEY"]) {

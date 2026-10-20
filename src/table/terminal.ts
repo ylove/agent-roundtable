@@ -33,11 +33,11 @@ export function createTerminalObserver(options: TerminalOptions = {}): TableObse
       case "start": output.write(`At the table: ${oneLine(event.topic)}\n`); break;
       case "turn": output.write(`\n● ${label(event.seat)}\n${wrapped(event.text, width).join("\n")}\n`); break;
       case "prototype": output.write(`Prototype ${event.team}: ${event.ok ? `${oneLine(event.title ?? "playable game")} (${event.files.length} files, ${event.files.reduce((n, f) => n + f.bytes, 0)} bytes)` : "unavailable"}\n`); break;
-      case "assessment": output.write(`${oneLine(event.judge.name)} → ${event.team} ${paint(event.verdict === "APPROVE" ? 32 : event.verdict === "REJECT" ? 31 : 33, `[${event.verdict}]`)} ${wrapped(event.reason, width)[0] ?? ""}\n`); break;
+      case "assessment": output.write(`${oneLine(event.judge.name)} → ${event.team} ${paint(event.verdict === "APPROVE" ? 32 : event.verdict === "REJECT" ? 31 : 33, `[${event.verdict}]`)} ${(lines => (lines[0] ?? "") + (lines.length > 1 ? "…" : ""))(wrapped(event.reason, width))}\n`); break;
       case "dissent": output.write(`Dissent · ${label(event.seat)}\n${wrapped(event.text, width).join("\n")}\n`); break;
       case "usage": spend = event.totalCostUsd; perSeat = event.perSeat; break;
       case "end":
-        output.write(`\n${event.aborted ? "Aborted" : event.winner === "tie" ? "Tie" : event.winner === "none" ? "No winner" : `Winner: ${event.winner}`} · A ${event.tally.A} / B ${event.tally.B}\nSpend: $${spend.toFixed(4)}${perSeat.length ? ` (${perSeat.map(s => `${clean(s.seatId)} $${s.costUsd.toFixed(4)}`).join(", ")})` : ""}\n`);
+        output.write(`\n${event.aborted ? "Aborted" : event.winner === "tie" ? "Tie" : event.winner === "none" ? "No verdict" : `Winner: ${event.winner}`} · A ${event.tally.A} / B ${event.tally.B}\nSpend: $${spend.toFixed(4)}${perSeat.length ? ` (${perSeat.map(s => `${clean(s.seatId)} $${s.costUsd.toFixed(4)}`).join(", ")})` : ""}\n`);
     }
   } };
 }

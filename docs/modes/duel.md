@@ -18,14 +18,14 @@ The rounds are:
 4. With `--rounds 2`, R3 gives each team receiving REVISE or REJECT one revision, with the same validation retry. The original judging tally determines the result; revisions remain available to play. A failed revision preserves an earlier valid game.
 5. R4: designers give closing statements; the losing team is asked to file a dissent. Complete `<DISSENT>` blocks become separate cards. Equal scores stay a tie.
 
-Calls time out after 90 seconds, or sooner with `--turn-timeout`. The `--max-seconds` deadline defaults to 420 seconds. It cancels pending work and skips ahead to closing statements; closing calls have their own turn timeout. Ctrl-C cancellation ends provider work and archives the partial result. The room remains available after the end until Ctrl-C; `--no-hold` lets automation finish without waiting.
+Concept, judging and closing calls time out after 90 seconds (set with `--turn-timeout`); build calls get at least 240 seconds. The `--max-seconds` deadline defaults to 600 seconds. It cancels pending work and skips ahead to closing statements; closing calls have their own turn timeout. Ctrl-C cancellation ends provider work and archives the partial result. The room remains available after the end until Ctrl-C; `--no-hold` lets automation finish without waiting.
 
 Archives live at `ROUNDTABLE_HOME/duels/<id>.json` with mode 0600. They contain the event list and the prototype files as text, including revisions. The duel owns its sandbox until process exit; games survive judging and have no TTL. Real archives belong in local state and must stay out of the repository.
 
 Usage updates include per-seat token totals and estimated spend throughout the run. Estimates use the existing pricing table; models without rates contribute zero to the displayed total. Configure `ROUNDTABLE_PRICING_FILE` to provide rates for those models before recording a cost comparison.
 
 ```sh
-roundtable duel --replay test/fixtures/duel/demo.json --speed 2 --open
+roundtable duel --replay examples/duel/demo.json --speed 2 --open
 roundtable duel --dry-run --no-hold --json
 ```
 

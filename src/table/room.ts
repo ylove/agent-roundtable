@@ -99,8 +99,7 @@ export async function startRoom({ state = createRoomState(), open = false, hold 
         files.clear();
         break;
       case "turn":
-        // Source code belongs in the sandbox, not the live transcript panel.
-        state.turns.push(event.round === "R1b" || event.round === "R3" ? { ...event, text: "Prototype submitted for validation." } : event);
+        state.turns.push(event);
         break;
       case "prototype": {
         const content = getPrototypeFiles(event);

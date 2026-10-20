@@ -62,6 +62,14 @@ async function metadataAt(id: string, dir?: string): Promise<{ frontmatter: Reco
   throw new SeatUsageError(`Agent prompt not found for seat ${agentKey(id)}.`);
 }
 
+/** A persona's own model, unless it is unset, "inherit", or a Claude name aimed at another provider. */
+function frontmatterModel(frontmatter: Record<string, unknown>, provider: LLMProvider): string | undefined {
+  const value = frontmatter.model;
+  if (typeof value !== "string" || !value.trim() || value.trim().toLowerCase() === "inherit") return undefined;
+  if (provider !== "anthropic" && /^(opus|sonnet|haiku|claude-)/i.test(value.trim())) return undefined;
+  return value.trim();
+}
+
 /** Resolve the complete roster before any provider call. Higher precedence replaces a whole assignment. */
 export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<string, Seat>> {
   if (opts.mix !== undefined && opts.mix !== "auto" && opts.mix !== "cheap") throw new SeatUsageError("--mix must be auto or cheap.");
@@ -96,7 +104,7 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
     const provider = override?.provider ?? mixed ?? (Object.hasOwn(frontmatter, "provider") ? frontmatter.provider : opts.provider ?? "anthropic");
     if (!PROVIDER_IDS.includes(provider as LLMProvider)) throw new SeatUsageError("Invalid seat provider.");
     const p = provider as LLMProvider;
-    const model = override?.model ?? (override?.provider || mixed ? DEFAULT_MODELS[p] : Object.hasOwn(frontmatter, "model") ? frontmatter.model : (p === (opts.provider ?? "anthropic") ? opts.model : undefined) ?? DEFAULT_MODELS[p]);
+    const model = override?.model ?? (override?.provider || mixed ? DEFAULT_MODELS[p] : frontmatterModel(frontmatter, p) ?? (p === (opts.provider ?? "anthropic") ? opts.model : undefined) ?? DEFAULT_MODELS[p]);
     if (typeof model !== "string" || !model.trim()) throw new SeatUsageError("Seat model must be a non-empty string.");
     out.set(id, { id, name: agentKey(id), ...(team && { team }), provider: p, model: p === "anthropic" ? resolveAnthropicModel(model.trim()) : model.trim(), ...(typeof frontmatter.role === "string" && { role: frontmatter.role }) });
   }

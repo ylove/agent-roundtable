@@ -67,7 +67,7 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | `--seat` | One comma-separated set of per-agent assignments; repeated flags are refused |
 | `--mix` | `auto` or `cheap`, using providers that pass automatic preflight |
 | `--turn-timeout` | Per-turn timeout in seconds (default 90) |
-| `--max-seconds` | Overall deadline in seconds (default 420) |
+| `--max-seconds` | Overall deadline in seconds (default 600) |
 | `--preflight` | Check each distinct provider/model and report pass/fail; automatic for mixes |
 | `--no-preflight` | Skip automatic mix preflight and provider exclusion |
 | `--open` | Duel only: open the local room |

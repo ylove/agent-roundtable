@@ -43,7 +43,7 @@ test('mix gives the teams different first providers, even with two agents per te
 test('only frontmatter keys actually present affect defaults, and provider changes choose the matching model', async () => {
   const seats = await resolveSeats({ agents: ['designer'], load: async () => ({ frontmatter: { provider: 'together' } }), provider: 'openai', model: 'fixture-model' });
   assert.equal(seats.get('designer').model, DEFAULT_MODELS.together);
-  for (const frontmatter of [{ provider: '' }, { model: '' }, { model: null }]) await assert.rejects(resolveSeats({ agents: ['designer'], load: async () => ({ frontmatter }) }), /seat|Seat/);
+  for (const frontmatter of [{ provider: '' }]) await assert.rejects(resolveSeats({ agents: ['designer'], load: async () => ({ frontmatter }) }), /seat|Seat/);
 });
 test('invalid overrides, duplicate seats, empty mix and missing credentials fail before calls', async () => {
   for (const options of [{ seat: 'designer=unknown:model' }, { seat: 'designer=openai:' }, { seat: 'designer' }, { seat: 'designer=openai,designer=together' }, { seat: 'skeptic=openai' }, { seats: { designer: null } }, { mix: 'auto', env: {} }]) await assert.rejects(resolveSeats({ agents: ['designer'], load, ...options }), e => e.exitCode === 2);
@@ -117,4 +117,15 @@ test('mix refuses to run when every configured provider fails preflight', async 
   providerEnvironment(t);
   stubFetch(t, () => json(401, { error: { message: 'do-not-print-this' } }));
   await assert.rejects(prepareSeats({ agents: ['designer', 'skeptic'], load, mix: 'auto' }), e => e.exitCode === 2 && /preflight/.test(e.message));
+});
+
+test('model inherit, empty, or a Claude name on another provider falls back to the provider default', async () => {
+  const resolve = (frontmatter, extra = {}) => resolveSeats({ agents: ['designer'], load: async () => ({ frontmatter }), ...extra }).then(m => m.get('designer'));
+  assert.equal((await resolve({ model: 'inherit' })).model, DEFAULT_MODELS.anthropic);
+  assert.equal((await resolve({ model: '' })).model, DEFAULT_MODELS.anthropic);
+  assert.equal((await resolve({ model: null })).model, DEFAULT_MODELS.anthropic);
+  assert.equal((await resolve({ provider: 'openai', model: 'opus' })).model, DEFAULT_MODELS.openai);
+  assert.equal((await resolve({ provider: 'openai', model: 'claude-sonnet-5-5' })).model, DEFAULT_MODELS.openai);
+  assert.equal((await resolve({ provider: 'openai', model: 'fixture-model' })).model, 'fixture-model');
+  assert.equal((await resolve({ model: 'sonnet' })).model, DEFAULT_MODELS.anthropic);
 });

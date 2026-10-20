@@ -39,9 +39,8 @@ export function redactWith(input: string, rules: (rep: Replace) => void): Redact
   return { text, counts };
 }
 
-/** Credentials only: keys, tokens, private keys, URL and HTTP credentials, key=value secrets. */
-export function redactSecrets(input: string): RedactionResult {
-  return redactWith(input, (rep) => {
+/** Secret-shaped rules only: private keys, URL and HTTP credentials, JWTs and vendor key formats. */
+function shapedSecretRules(rep: Replace): void {
     // PEM private keys first (whole block, including JSON-escaped "\\n" bodies; then a dangling
     // header whose END marker was cut off), so the key=value rule below only sees the marker.
     rep(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "private_key");
@@ -70,6 +69,12 @@ export function redactSecrets(input: string): RedactionResult {
       "basic_auth",
       (_m, p) => p + mark("basic_auth")
     );
+}
+
+/** Credentials only: keys, tokens, private keys, URL and HTTP credentials, key=value secrets. */
+export function redactSecrets(input: string): RedactionResult {
+  return redactWith(input, (rep) => {
+    shapedSecretRules(rep);
 
     // generic key=value secrets (keeps the key name, drops the value). The secret keyword may sit
     // anywhere inside the identifier (AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN_READONLY, client_secret_value).
@@ -94,3 +99,12 @@ export function redactSecrets(input: string): RedactionResult {
   });
 }
 
+
+/**
+ * Artifact content (model-written code and documents): only the secret-shaped rules. The name-based
+ * key=value rule is left out because identifiers such as `tokens`, `secretKey` or `password: string`
+ * are ordinary source, not credentials.
+ */
+export function redactArtifactSecrets(input: string): RedactionResult {
+  return redactWith(input, shapedSecretRules);
+}

@@ -7,7 +7,7 @@ import { callLLM } from "../providers/index.js";
 import { activeUsageSink, withAbortSignal, withUsageSink } from "../providers/usage.js";
 import { parsePrototypeBlock, type PrototypeFile } from "../prototypes/parse.js";
 import { createSessionDir, ensurePrototypeRoot, materializeFiles, releaseSessionDir, removeDirSync, sweepStaleSessionDirs } from "../prototypes/sandbox.js";
-import { scrub, scrubAndCap } from "../security/secrets.js";
+import { scrub, scrubAndCap, scrubArtifact } from "../security/secrets.js";
 import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { parseDissentBlocks } from "../sessions/dissents.js";
 import { mapLimit } from "../sessions/workshop.js";
@@ -295,7 +295,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
         if (!sandbox) throw new Error("Prototype sandbox unavailable.");
         const dir = join(sandbox, `submission-${++version}`);
         await mkdir(dir, { mode: 0o700 });
-        prototype.files = await materializeFiles(dir, prototype.files.map(f => ({ ...f, content: scrub(f.content) })), { redactContent: false });
+        prototype.files = await materializeFiles(dir, prototype.files.map(f => ({ ...f, content: scrubArtifact(f.content) })), { redactContent: false });
         submissions[team] = prototype;
         const event: TableEvent = { type: "prototype", team, seat: publicSeat(seat), title: prototype.title, kind, ok: true,
           files: prototype.files.map(f => ({ path: f.path, bytes: Buffer.byteLength(f.content) })) };

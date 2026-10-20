@@ -307,6 +307,16 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   const orchestrator = o.orchestrator.trim();
   const duel = isDuelId(o.fromSession) ? importDuel(o.fromSession) : undefined;
   const session = o.fromSession && !duel ? archived(o.fromSession) : undefined;
+  if (duel) {
+    // An author who is not a loadable persona cannot be a participant: skip that dissent and say so.
+    const kept: typeof duel.dissents = [];
+    for (const d of duel.dissents) {
+      try { await loadAgent(d.by); kept.push(d); }
+      catch { warnings.push(`duel dissent by "${d.by}" was not imported: that persona does not resolve (${duel.id})`); }
+    }
+    duel.dissents = kept;
+    duel.summary.dissents = kept.length;
+  }
   const sessionDissents = duel ? duel.dissents : session ? sessionDissentDrafts(session) : [];
   // A duel has no plan or task block: only its topic seeds the prompt. Its seats are not contract participants.
   const src: SessionSource | undefined = duel
@@ -368,15 +378,20 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
     ...(o.participants?.length && { participants: o.participants }),
     ...(postmortemOn && { postmortem: { enabled: true } }),
   };
+  let dropped: string | undefined;
   const assemble = (structure: Obj): Obj => {
     const c = applyMergePatch<Obj>(applyMergePatch(structure, explicit ?? {}), fixed);
     if (lessons) {
       const have = Array.isArray(c.decisions) ? c.decisions : [];
       c.decisions = [...have, ...lessons.decisions.filter((d) => !have.some((x) => isObj(x) && x.id === d.id))];
     }
-    if (duel?.decision && (c.decisions == null || Array.isArray(c.decisions))) {
-      const have = Array.isArray(c.decisions) ? c.decisions : [];
-      if (!have.some((x) => isObj(x) && x.id === duel.decision!.id)) c.decisions = [...have, duel.decision];
+    if (duel?.decision) {
+      if (c.decisions != null && !Array.isArray(c.decisions)) dropped = "decisions is not an array";
+      else {
+        const have = Array.isArray(c.decisions) ? c.decisions : [];
+        if (have.some((x) => isObj(x) && x.id === duel.decision!.id)) dropped = `the contract already has a decision with id ${duel.decision.id}`;
+        else c.decisions = [...have, duel.decision];
+      }
     }
     if (c.title === undefined) c.title = firstLine(o.goal);
     if (c.participants === undefined && src && Array.isArray(c.tasks)) {
@@ -451,6 +466,7 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
   const v = await validateContract(assemble(structure), checkOpts);
   if (!v.ok) throw new Error(`The contract is not valid:\n- ${listErrors(v.errors)}`);
   warnings.push(...v.warnings);
+  if (dropped) warnings.push(`the duel's winning decision was not added: ${dropped}`);
 
   const store = await createExecutionStore({ repoRoot: root, baseSha: sha, agentsDir: resolve(AGENTS_DIR), id: executionId });
   const by = orchestratorSource(orchestrator);

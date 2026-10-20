@@ -1194,11 +1194,13 @@ test("verdicts are stored as own properties, whatever the agent name", async () 
 
 // Duel archives (WS21d-2): the winner becomes a decision, archived dissents become draft concerns.
 {
-  const { ROUNDTABLE_HOME } = await import("../../dist/config.js");
+  const { ROUNDTABLE_HOME, AGENTS_DIR } = await import("../../dist/config.js");
+  mkdirSync(AGENTS_DIR, { recursive: true });
+  writeFileSync(join(AGENTS_DIR, "duel-skeptic.md"), "---\nname: The Skeptic\ndescription: test persona\n---\nYou are a skeptic.\n");
   const demo = JSON.parse(readFileSync(fileURLToPath(new URL("../../examples/duel/demo.json", import.meta.url)), "utf8"));
   const saveDuel = (id, edit = (a) => a) => {
     mkdirSync(join(ROUNDTABLE_HOME, "duels"), { recursive: true });
-    writeFileSync(join(ROUNDTABLE_HOME, "duels", `${id}.json`), JSON.stringify(edit(JSON.parse(JSON.stringify(demo).replaceAll("marketer", skeptic)))));
+    writeFileSync(join(ROUNDTABLE_HOME, "duels", `${id}.json`), JSON.stringify(edit(JSON.parse(JSON.stringify(demo).replaceAll("marketer", "duel-skeptic")))));
     return id;
   };
   const setEnd = (a, patch) => { Object.assign(a.events.find((e) => e.type === "end"), patch); return a; };
@@ -1217,12 +1219,12 @@ test("verdicts are stored as own properties, whatever the agent name", async () 
     assert.equal(r.duelImport.artifact_title, "Ten Coins");
     assert.equal(r.contract.dissents.length, 1);
     const [dis] = r.contract.dissents;
-    assert.equal(dis.by, skeptic);
+    assert.equal(dis.by, "duel-skeptic");
     assert.deepEqual(dis.source, { kind: "duel", ref: id });
     assert.match(dis.claim, /different family budgets/);
     assert.match(dis.predicted_failure, /every household has coins left/);
     assert.equal(dis.tripwire, undefined);
-    assert.ok(r.contract.participants.some((p) => p.agent === skeptic));
+    assert.ok(r.contract.participants.some((p) => p.agent === "duel-skeptic"));
     // Freeze is blocked until the dissent has a tripwire or an excusal.
     const store = await openContractStore(r.contractId);
     await requestConsent(store, r.contractId, { by: "main", llm });
@@ -1257,8 +1259,29 @@ test("verdicts are stored as own properties, whatever the agent name", async () 
     const id = saveDuel("duel-dupe-0001", (a) => { a.events.splice(-1, 0, structuredClone(a.events.find((e) => e.type === "dissent"))); return a; });
     const first = await propose({ fromSession: id });
     assert.equal(first.contract.dissents.length, 1, "a repeated archived dissent counts once");
-    const again = await propose({ fromSession: id, participants: [cfo, skeptic], contract: explicit({ dissents: first.contract.dissents.map(({ id: i, ...rest }) => ({ id: i, ...rest })) }) });
+    const again = await propose({ fromSession: id, participants: [cfo, "duel-skeptic"], contract: explicit({ dissents: first.contract.dissents.map(({ id: i, ...rest }) => ({ id: i, ...rest })) }) });
     assert.equal(again.contract.dissents.length, 1, "an already-carried dissent is not added twice");
+  });
+
+  test("a dissent's author is the persona ref from the seat id, not the display name; unresolvable authors are skipped with a warning", async () => {
+    const reseat = (a, ref, name) => {
+      const fix = (seat) => { if (seat.id === "duel-skeptic") { seat.id = `B:${ref}`; seat.name = name; } };
+      for (const e of a.events) { if (e.type === "start") e.seats.forEach(fix); if (e.seat) fix(e.seat); }
+      return a;
+    };
+    const id = saveDuel("duel-names-0001", (a) => reseat(a, "duel-skeptic", "The Skeptic"));
+    const r = await propose({ fromSession: id });
+    assert.equal(r.contract.dissents[0].by, "duel-skeptic");
+    assert.ok(r.contract.participants.some((p) => p.agent === "duel-skeptic"));
+    assert.ok(!JSON.stringify(r.contract.participants).includes("The Skeptic"));
+    const bad = saveDuel("duel-names-0002", (a) => reseat(a, "no-such-persona-xyz", "Design Architect"));
+    const r2 = await propose({ fromSession: bad });
+    assert.equal(r2.contract.dissents.length, 0);
+    assert.ok(r2.warnings.some((w) => /no-such-persona-xyz.*does not resolve/.test(w)));
+    // An explicit contract that already has duel-winner is kept, with a warning.
+    const r3 = await propose({ fromSession: id, contract: explicit({ decisions: [{ id: "duel-winner", text: "mine" }] }) });
+    assert.equal(r3.contract.decisions.find((x) => x.id === "duel-winner").text, "mine");
+    assert.ok(r3.warnings.some((w) => /duel's winning decision was not added/.test(w)));
   });
 
   test("an archive without the newer optional fields still imports, and a missing artifact imports no decision", async () => {

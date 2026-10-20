@@ -64,7 +64,14 @@ export function importDuel(id: string): DuelImport {
 
   const start = events.find((e) => e.type === "start");
   const seats = (Array.isArray(start?.seats) ? start.seats : []).filter(isObj);
-  const nameOf = (s: unknown): string | undefined => (isObj(s) ? str(s.name) ?? str(s.id) : undefined);
+  // The persona ref is the seat id without its "<A|B|judge>:" prefix; the display name is frontmatter and may not resolve.
+  const refOf = (s: unknown): string | undefined => {
+    const id = isObj(s) ? str(s.id) : undefined;
+    const ref = id ? id.replace(/^(?:A|B|judge):/, "") : isObj(s) ? str(s.name) : undefined;
+    return ref ? clean(ref, 80) || undefined : undefined;
+  };
+  const labelOf = (s: unknown): string | undefined => (isObj(s) ? clean(str(s.name) ?? "", 80) || refOf(s) : undefined);
+  const nameOf = refOf;
   const agents = [...new Set(seats.map(nameOf).filter((n): n is string => !!n))];
   const topic = clean(str(start?.topic) ?? "", 2000);
   const end = [...events].reverse().find((e) => e.type === "end");
@@ -100,7 +107,7 @@ export function importDuel(id: string): DuelImport {
   const proto = [...events].reverse().find((e) => e.type === "prototype" && e.team === winner && e.ok !== false);
   const title = clean(str(proto?.title) ?? "", 120);
   const kind = clean(str(proto?.kind) ?? str(start?.kind) ?? (isObj(archive) ? str(archive.kind) : undefined) ?? "", 60);
-  const members = seats.filter((s) => s.team === winner).map(nameOf).filter((n): n is string => !!n);
+  const members = seats.filter((s) => s.team === winner).map(labelOf).filter((n): n is string => !!n);
   const approvals = [...new Set(events
     .filter((e) => e.type === "assessment" && e.team === winner && e.verdict === "APPROVE")
     .map((e) => clean(str(e.reason) ?? "", 240)).filter(Boolean))];

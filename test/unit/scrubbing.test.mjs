@@ -95,3 +95,11 @@ test("replicate: echoed error bodies and prediction errors are scrubbed", async 
   const failed = await createReplicateCall({ pollIntervalMs: 1 })(messages, opts({ model: "meta/llama" })).then(() => null, (e) => e);
   assert.match(failed.message, /prediction failed .*crashed with \[redacted:env:REPLICATE_API_TOKEN\]/);
 });
+
+test("a numeric max_tokens in a validation error survives while real secrets are still redacted", async () => {
+  const { scrubSecrets } = await import("../../dist/security/secrets.js");
+  assert.equal(scrubSecrets("422 input.max_tokens: 32768 is too large").text, "422 input.max_tokens: 32768 is too large");
+  assert.match(scrubSecrets("api_key: sk-abcdefghijklmnopqrstuvwxyz0123").text, /redacted/);
+  assert.match(scrubSecrets("max_tokens: hunter2hunter2").text, /redacted/);
+  assert.match(scrubSecrets("access_token: 123456789012").text, /redacted/);
+});

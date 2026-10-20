@@ -105,7 +105,7 @@ test("a non-build turn that ran out of tokens thinking is retried once at double
   assert.equal(concepts.length, 2);
   assert.equal(concepts[0].body.max_tokens, 8192);
   assert.equal(concepts[1].body.max_tokens, 16_384);
-  assert.ok(calls.filter(c => c.body.messages.at(-1).content.startsWith("R1b BUILD")).every(c => c.body.max_tokens === 32_768));
+  assert.ok(calls.filter(c => c.body.messages.at(-1).content.startsWith("R1b BUILD")).every(c => c.body.max_tokens === 16_384));
   assert.ok(!events.some(e => e.type === "turn" && /did not complete/.test(e.text)));
   assert.match(events.find(e => e.type === "turn" && e.round === "R1" && e.seat.team === "A").text, /Concept for A/);
 });
@@ -304,4 +304,23 @@ test("configured secrets and local paths never reach events or the archive", asy
   const archive = await readFile(result.archivePath, "utf8");
   assert.ok(!archive.includes(secret));
   assert.ok(events.at(-1).archivePath.startsWith("duels/"));
+});
+
+test("per-provider caps keep build and retry token limits within what each provider accepts", async t => {
+  const { turnTokens } = await import("../../dist/table/duel.js");
+  assert.equal(turnTokens("replicate", "R1b"), 16_384);
+  assert.equal(turnTokens("replicate", "R1"), 8192);
+  assert.equal(turnTokens("anthropic", "R1b"), 32_000);
+  assert.equal(turnTokens("openai", "R3"), 32_768);
+  assert.equal(turnTokens("ollama", "R1"), 8192);
+  process.env.TOGETHER_API_KEY = "k";
+  t.after(() => { delete process.env.TOGETHER_API_KEY; });
+  const together = seats.map(s => ({ ...s, provider: "together", model: "zai-org/GLM-5.3" }));
+  const calls = stubFetch(t, async (_url, init) => {
+    const request = JSON.parse(init.body);
+    return json(200, { choices: [{ message: { content: game("A") }, finish_reason: "stop" }], model: request.model, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+  });
+  await runDuel(options, { onEvent() {} }, new AbortController().signal, { resolveSeats: () => together });
+  assert.ok(calls.length > 0 && calls.every(c => c.body.max_tokens <= 16_384));
+  assert.ok(calls.some(c => c.body.max_tokens === 16_384));
 });

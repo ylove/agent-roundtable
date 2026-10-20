@@ -83,6 +83,8 @@ export function redactSecrets(input: string): RedactionResult {
       ),
       "secret",
       (m, p) => {
+        // A numeric output-token limit (provider validation errors echo "input.max_tokens: 32768") is not a secret.
+        if (/(?:^|[.\s"'])max_(?:new_|completion_)?tokens["']?\s*[:=]\s*$/i.test(p) && /^["']?\d+["']?$/.test(m.slice(p.length))) return null;
         const q = m.charAt(p.length);
         const quote = q === '"' || q === "'" ? q : "";
         return p + quote + mark("secret") + quote;

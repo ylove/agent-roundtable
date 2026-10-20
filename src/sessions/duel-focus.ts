@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
-import { scrub } from "../security/secrets.js";
+import { scrub, scrubArtifact } from "../security/secrets.js";
 import { isDuelId } from "./duel-import.js";
 
 /** Per-team cap on the artifact listing, in bytes of source shown to the participants. */
@@ -66,7 +66,7 @@ function artifactBlock(team: "A" | "B", title: string, files: Array<{ path: stri
     const remaining = DUEL_FOCUS_TEAM_BYTES - used;
     const path = clean(f.path, 120) || "file";
     if (remaining <= 0) { omitted++; continue; }
-    let content = scrub(f.content);
+    let content = scrubArtifact(f.content);
     let cut = false;
     if (Buffer.byteLength(content) > remaining) { content = Buffer.from(content).subarray(0, remaining).toString("utf8").replace(/�$/, ""); cut = true; }
     used += Buffer.byteLength(content);

@@ -190,3 +190,10 @@ test("artifact text cannot forge a fence, and a missing eventIndex falls back to
   assert.equal(brief.split(`<<<END FILE ${nonce}>>>`).length, 3, "one real closing fence per team");
   assert.ok(!brief.includes("(no source archived)\n") || brief.includes("Ten Coins"));
 });
+
+test("artifact source keeps code identifiers while real keys are still redacted", () => {
+  writeDuel("duel-focus-code", (a) => { a.prototypes[0].files[0].content += `\nlet tokens = 5; const note = "${SECRET}";`; return a; });
+  const brief = loadDuelFocus("duel-focus-code").brief;
+  assert.match(brief, /let tokens = 5;/);
+  assert.ok(!brief.includes(SECRET));
+});

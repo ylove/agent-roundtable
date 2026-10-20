@@ -38,7 +38,7 @@ export const USAGE = [
   "  agent-roundtable usage [--json] [--watch]       who is using what, on which platform, measured or estimated",
   "  agent-roundtable stop <agent> [--execution <exe> | --session <id>] [--reason <text>]",
   "                                                  stop one agent (a heads-down worker or an at-the-table session)",
-  "  roundtable duel <topic> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--open]",
+  "  roundtable duel <brief> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--kind web|code|diagram|text] [--criteria a,b] [--open]",
   "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2]",
   "  roundtable config set env-file|agents-dir <absolute-path> | config show",
   "  agent-roundtable help                           this text",

@@ -1,6 +1,6 @@
 import { SecureServer, type Route } from "../http/secure-server.js";
 import { APP_CSP, openInBrowser } from "../prototypes/board.js";
-import { validatePath, type PrototypeFile } from "../prototypes/parse.js";
+import { MAX_FILES, MAX_TOTAL_BYTES, validatePath, type PrototypeFile } from "../prototypes/parse.js";
 import type { Seat, TableEvent, TableObserver } from "./events.js";
 import { getPrototypeFiles } from "./replay.js";
 import { ROOM_CSP, ROOM_CSS, ROOM_HTML, ROOM_JS } from "./room-assets.js";
@@ -40,8 +40,11 @@ export async function startRoom({ state = createRoomState(), open = false, hold 
   let closed = false;
   const setPrototypeFiles = (team: "A" | "B", input: PrototypeFile[]) => {
     const map = new Map<string, string>();
+    let total = 0;
+    if (input.length > MAX_FILES) throw new Error("Invalid room prototype file.");
     for (const file of input) {
-      if (validatePath(file.path) || file.path !== "index.html" || typeof file.content !== "string" || Buffer.byteLength(file.content) > 40 * 1024 || map.has(file.path)) {
+      total += typeof file.content === "string" ? Buffer.byteLength(file.content) : 0;
+      if (validatePath(file.path) || typeof file.content !== "string" || total > MAX_TOTAL_BYTES || map.has(file.path)) {
         throw new Error("Invalid room prototype file.");
       }
       map.set(file.path, file.content);
@@ -62,7 +65,11 @@ export async function startRoom({ state = createRoomState(), open = false, hold 
       if (!prototype?.files.some(file => file.path === path)) return ctx.notFound();
       const content = files.get(team)?.get(path);
       if (content === undefined) return ctx.notFound();
-      ctx.send(200, content, "text/html; charset=utf-8", { "Content-Security-Policy": APP_CSP, "X-Frame-Options": "SAMEORIGIN" });
+      // Only a web artifact is ever served as a page. Everything else is inert text for the room to display.
+      if (!prototype.kind || prototype.kind === "web") {
+        if (path !== "index.html") return ctx.notFound();
+        ctx.send(200, content, "text/html; charset=utf-8", { "Content-Security-Policy": APP_CSP, "X-Frame-Options": "SAMEORIGIN" });
+      } else ctx.send(200, content, "text/plain; charset=utf-8", { "Content-Security-Policy": "default-src 'none'; sandbox", "X-Content-Type-Options": "nosniff" });
     } },
   ];
   const server = await SecureServer.start({ name: "Duel room", routes: routes.map(route => ({

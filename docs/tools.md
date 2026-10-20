@@ -192,6 +192,36 @@ Example: `start_collaboration`
 }
 ```
 
+### start_duel
+
+Run a duel and return its result: two teams each build an artifact for the same brief (a web page, code, a Mermaid diagram or a text document), judges assess both against a rubric, and the losing side files dissents. The call runs the whole duel, which can take several minutes. The result has the duel id, winner, tally, each team's artifact title, kind and ok flag, the judges' verdicts, the dissents, a usage summary and the archive id (duels/<id>.json, replayable with roundtable duel --replay). It never includes artifact source. The tool sends an MCP progress notification on every turn, artifact and verdict, so a host must either allow a long request timeout (default 600 seconds of duel, more for large teams) or reset its timeout on progress; a client with a fixed 60-second timeout will cancel the duel. No room is opened. Orchestrator server only. See [duel](modes/duel.md).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `topic` | string | yes | The brief both teams answer, for example a landing page for a product, a module with a given interface, or a written policy. maxLength: `4000`. |
+| `team_a` | array of string | yes | Team A personas, 1 to 4. The first writes the concept, the last builds, anyone between critiques the concept. A one-person team does both. |
+| `team_b` | array of string | yes | Team B personas, 1 to 4. Same roles as team_a. No persona may appear twice across both teams and the judges. |
+| `judges` | array of string | yes | Judge personas, 1 to 5. |
+| `kind` | string | no | What the teams build: web (a self-contained index.html, inline CSS, optional inline JS; default), code (source files, shown as read-only text and never executed), diagram (Mermaid source) or text (markdown or plain text). Values: `web`, `code`, `diagram`, `text`. |
+| `criteria` | array of string | no | Judging rubric, up to 8 items. Default: fit to the brief, quality, usability and accessibility, and risk or safety within the judge's own remit. |
+| `rounds` | number | no | 1 (default) judges once; 2 lets a team the judges did not approve revise once and keeps the original tally. minimum: `1`, maximum: `2`. |
+| `seats` | object | no | Optional assignments keyed by exact persona identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider and model. |
+| `turn_timeout_s` | number | no | Seconds allowed for each turn. Default 90 (builds get at least 240). maximum: `3600`. |
+| `max_seconds` | number | no | Time limit for the whole duel before it moves to closings. Default 600, plus 120 per member beyond two on the larger team. minimum: `1`, maximum: `3600`. |
+
+Example: `start_duel`
+
+```json
+{
+  "topic": "One-page remote-work expenses policy",
+  "team_a": ["counsel"],
+  "team_b": ["hr-lead", "editor"],
+  "judges": ["cfo", "employee-advocate"],
+  "kind": "text",
+  "criteria": ["legal accuracy", "plain language"]
+}
+```
+
 ### continue_collaboration
 
 Continue an active collaboration for additional rounds. Agents take turns responding. In a prototype session it also resumes a paused session while a prototype is under assessment.

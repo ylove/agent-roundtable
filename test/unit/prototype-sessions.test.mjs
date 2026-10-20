@@ -114,7 +114,7 @@ after(() => prototypes.destroyAllPrototypes("shutdown"));
 
 describe("schemas", () => {
   test("the three start tools expose a boolean prototype flag; tool count unchanged", () => {
-    assert.equal(deliberationTools.length, 22, "prototype mode adds no tool");
+    assert.equal(deliberationTools.length, 23, "prototype mode adds no tool (start_duel is the 23rd)");
     for (const name of ["start_meeting", "start_local_meeting", "start_collaboration"]) {
       const p = tools.find((x) => x.name === name).inputSchema.properties.prototype;
       assert.equal(p?.type, "boolean", name);

@@ -32,11 +32,12 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [Ultraplan](docs/modes/ultraplan.md) | Collect input, review revisions and record sign-offs on a plan. | “Ultraplan the launch with product-lead, cfo and skeptic; show the final document verbatim.” |
 | [Agent workshops](docs/modes/agent-workshops.md) | Specialists create or improve an agent and reusable skills. | “Have cfo and skeptic create a budget agent, then improve product-lead's escalation rules; preview both.” |
 | [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local blackboard for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
+| [Duel](docs/modes/duel.md) | Two teams build competing artifacts (a page, code, a diagram or a document); judges assess them; dissents are recorded. | “Run a duel on a rate limiter module with architect and engineer against pragmatist and reviewer, judged by security-lead.” |
 | [Public sessions](docs/modes/public-sessions.md) | Mirror an explicitly public session to ntfy or a webhook. | “Make that pricing debate public and give me the viewing link.” |
 
 | Terminal command | Purpose |
 | --- | --- |
-| [`roundtable duel`](docs/modes/duel.md) | Two teams build playable games and judges assess them in a local room. |
+| [`roundtable duel`](docs/modes/duel.md) | Two teams build competing artifacts; judges assess them; dissents are recorded. |
 | [`roundtable debate`, `waffle`, `meeting`](docs/table-cli.md) | Stream a discussion with per-seat models and spend. |
 | [`roundtable config`](docs/configuration.md#saved-cli-settings-and-env-files) | Save env-file and persona-directory settings; show set/unset status. |
 
@@ -48,7 +49,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 ## Tools
 
-**42 tools on the orchestrator server; 8 on worker servers.** The seven execution worker tools appear in both; the orchestrator's copies also require `execution_id` and `agent_token`. Dissent filing is also available on both servers. The table follows the registered definitions in `src/tools/*.ts`; [full arguments and examples](docs/tools.md).
+**43 tools on the orchestrator server; 8 on worker servers.** The seven execution worker tools appear in both; the orchestrator's copies also require `execution_id` and `agent_token`. Dissent filing is also available on both servers. The table follows the registered definitions in `src/tools/*.ts`; [full arguments and examples](docs/tools.md).
 
 | Group | Tool | Purpose |
 | --- | --- | --- |
@@ -67,6 +68,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | Collaborations | [`end_collaboration`](docs/tools.md#end_collaboration) | End a discussion and return its transcript and optional summary. |
 | Collaborations | [`get_collaboration_transcript`](docs/tools.md#get_collaboration_transcript) | Read a discussion without ending it. |
 | Collaborations | [`list_collaborations`](docs/tools.md#list_collaborations) | List active collaborations. |
+| Duel | [`start_duel`](docs/tools.md#start_duel) | Run a duel: two teams build competing artifacts, judges assess them, dissents are recorded. |
 | Ultraplan | [`start_ultraplan`](docs/tools.md#start_ultraplan) | Collect input and begin a reviewed plan. |
 | Ultraplan | [`submit_plan`](docs/tools.md#submit_plan) | Review a full plan version or collect final sign-offs. |
 | Ultraplan | [`end_ultraplan`](docs/tools.md#end_ultraplan) | Close a plan without sign-offs. |

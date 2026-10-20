@@ -86,6 +86,7 @@ import {
   END_COLLABORATION,
   GET_COLLABORATION_TRANSCRIPT,
   LIST_COLLABORATIONS,
+  START_DUEL,
   START_ULTRAPLAN,
   SUBMIT_PLAN,
   END_ULTRAPLAN,
@@ -93,6 +94,7 @@ import {
   IMPROVE_AGENT,
   DEBUG_ENV,
 } from "./names.js";
+import { START_DUEL_DESCRIPTION, START_DUEL_SCHEMA, startDuelTool } from "./duel.js";
 import {
   ORCHESTRATOR_ONLY,
   READ_ONLY_LOCAL,
@@ -106,6 +108,7 @@ import {
   formatUltraplanResult,
   formatAgentWorkshopResult,
   type ToolArgs,
+  type ToolCallContext,
   type ToolDefinition,
 } from "./shared.js";
 
@@ -460,6 +463,13 @@ export const deliberationTools: ToolDefinition[] = [
     },
   },
   {
+    name: START_DUEL,
+    modes: ORCHESTRATOR_ONLY,
+    annotations: { title: "Start duel", ...SESSION_TURN },
+    description: START_DUEL_DESCRIPTION,
+    inputSchema: START_DUEL_SCHEMA,
+  },
+  {
     name: CONTINUE_COLLABORATION,
     modes: ORCHESTRATOR_ONLY,
     annotations: { title: "Continue collaboration", ...SESSION_TURN },
@@ -695,8 +705,11 @@ export const deliberationTools: ToolDefinition[] = [
 ];
 
 /** Dispatch one deliberation tool. Errors are thrown to handleToolCall, which formats them. */
-export async function handleDeliberationTool(name: string, args: ToolArgs): Promise<CallToolResult> {
+export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?: ToolCallContext): Promise<CallToolResult> {
   switch (name) {
+    case START_DUEL:
+      return startDuelTool(args ?? {}, ctx);
+
     // === Meeting Tools ===
     case START_MEETING: {
       const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype } = args as {

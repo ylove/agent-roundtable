@@ -236,7 +236,7 @@ function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string
       else if (!e.priced) e.money.unpriced = true;
     }
     const models = [...e.models].sort((a, b) => b[1] - a[1]).map(([m]) => m);
-    const stoppable = !!l && !wasStopped && ["meeting", "local-meeting", "collaboration", "ultraplan"].includes(e.kind);
+    const stoppable = !!l && !wasStopped && ["meeting", "local-meeting", "collaboration", "ultraplan", "duel"].includes(e.kind);
     const stopping = pending.has(e.session);
     agents.push({
       id: e.id,

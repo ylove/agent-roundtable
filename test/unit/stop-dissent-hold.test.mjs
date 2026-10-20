@@ -23,7 +23,7 @@ function raise(state, key, extra = {}) {
   return reduce(drafts.map((d) => [d.type, d.payload]), state);
 }
 
-test("a stop escalation raised on a task a dissent already holds joins the hold and survives its release", () => {
+for (const releaseFirst of ["dissent", "stop"]) test(`a Stop joins a dissent hold exactly once; releasing ${releaseFirst} preserves the other`, () => {
   let s = reduce([
     ["contract.frozen", { contract: CONTRACT_ID, version: 1, by: "main", hash: "h", blob: "b" }, { contract: makeContract() }],
     ["task.claimed", { task: "a", agent: "w1", attempt: 1, ttl_s: 900 }],
@@ -37,11 +37,13 @@ test("a stop escalation raised on a task a dissent already holds joins the hold 
 
   s = raise(s, "agent_stopped:req-1");
   assert.deepEqual(s.tasks.a.blocked_by.escalations?.slice().sort(), [dissentId, stopId].sort(), "both holds are recorded");
+  assert.deepEqual(runnerEscalation(s, { key: "agent_stopped:req-1", task: "a", kind: "blocker", summary: "held", block: true }, runner), [], "replaying the Stop emits no duplicate hold");
 
-  s = reduce([["escalation.resolved", { id: dissentId, action: "decide", decision: "ok", by: "main" }]], s);
-  assert.equal(s.tasks.a.state, "blocked", "the stop escalation still holds the task");
-  assert.equal(s.tasks.a.blocked_by.escalation, stopId);
+  const [firstId, remainingId] = releaseFirst === "dissent" ? [dissentId, stopId] : [stopId, dissentId];
+  s = reduce([["escalation.resolved", { id: firstId, action: "decide", decision: "ok", by: "main" }]], s);
+  assert.equal(s.tasks.a.state, "blocked", "the other escalation still holds the task");
+  assert.equal(s.tasks.a.blocked_by.escalation, remainingId);
 
-  s = reduce([["escalation.resolved", { id: stopId, action: "decide", decision: "reworked", by: "main" }]], s);
+  s = reduce([["escalation.resolved", { id: remainingId, action: "decide", decision: "reworked", by: "main" }]], s);
   assert.equal(s.tasks.a.state, "in_progress");
 });

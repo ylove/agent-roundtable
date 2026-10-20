@@ -116,7 +116,8 @@ export interface RunnerEscalationSpec {
 
 /**
  * escalation.raised (to the contract's orchestrator) plus task.blocked, or nothing when the
- * blackboard already has this escalation.
+ * blackboard already has this escalation. This is the sole writer of runner escalation holds;
+ * callers choose block eligibility and must not append another task.blocked for this id.
  */
 export function runnerEscalation(state: Readonly<BlackboardState>, spec: RunnerEscalationSpec, source: EventSource): AnyEventDraft[] {
   const id = runnerEscalationId(spec.key);

@@ -30,9 +30,10 @@ const HOST = {
   cost: { total_cost_usd: 3.5 },
   rate_limits: { five_hour: { used_percentage: 0, resets_at: 1893448200 }, seven_day: { used_percentage: 82, resets_at: 1893900000 } },
 };
+const HOST_LINE = `Opus 5.5 | agent-mcp | 5h 0%→${clock(HOST.rate_limits.five_hour.resets_at * 1000)} | 7d 82%`;
 
 function run(args, { input = "", env = {} } = {}) {
-  const r = spawnSync(process.execPath, [BIN, ...args], { input, encoding: "utf8", env: { ...process.env, TZ: "UTC", ROUNDTABLE_HOME: HOME, ...env } });
+  const r = spawnSync(process.execPath, [BIN, ...args], { input, encoding: "utf8", env: { ...process.env, ROUNDTABLE_HOME: HOME, ...env } });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
 
@@ -55,10 +56,10 @@ const plain = { host: true, agents: 4, color: false, cols: 120 };
 // --- line 1 -----------------------------------------------------------------------------------------
 
 test("statusline line 1 reproduces the owner's format exactly from the host's JSON", () => {
-  assert.equal(hostLine(parseHost(JSON.stringify(HOST))), "Opus 5.5 | agent-mcp | 5h 0%→21:50 | 7d 82%");
+  assert.equal(hostLine(parseHost(JSON.stringify(HOST))), HOST_LINE);
   const r = run(["statusline", "--plain"], { input: JSON.stringify(HOST), env: { ROUNDTABLE_HOME: join(tmpdir(), "no-such-roundtable-home") } });
   assert.equal(r.code, 0);
-  assert.equal(r.out, "Opus 5.5 | agent-mcp | 5h 0%→21:50 | 7d 82%\n");
+  assert.equal(r.out, `${HOST_LINE}\n`);
   assert.equal(r.err, "");
 });
 
@@ -67,9 +68,9 @@ test("statusline line 1: project is the project directory's basename (else the c
   assert.match(h({ workspace: { current_dir: "/work/other/" } }), /^Opus 5\.5 \| other \|/);
   assert.match(h({ workspace: undefined, cwd: "C:\\work\\win-proj" }), /\| win-proj \|/);
   for (const resets_at of [1893448200, 1893448200000, "2029-12-31T21:50:00Z"]) {
-    assert.match(h({ rate_limits: { five_hour: { used_percentage: 12.4, resets_at } } }), /5h 12%→21:50$/, String(resets_at));
+    assert.ok(h({ rate_limits: { five_hour: { used_percentage: 12.4, resets_at } } }).endsWith(`5h 12%→${clock(1893448200000)}`), String(resets_at));
   }
-  assert.equal(clock(Date.UTC(2029, 0, 1, 7, 5)), "07:05", "zero padded, local time");
+  assert.equal(clock(new Date(2029, 0, 1, 7, 5).getTime()), "07:05", "zero padded, local time");
 });
 
 test("statusline tolerates missing fields: a missing field is left out with its separator", () => {
@@ -118,14 +119,14 @@ test("statusline never fails: invalid JSON, empty stdin, junk flags and a missin
 
 test("statusline answers as soon as the host's JSON is complete, even if the host keeps stdin open", async () => {
   const { spawn } = await import("node:child_process");
-  const child = spawn(process.execPath, [BIN, "statusline", "--plain"], { env: { ...process.env, TZ: "UTC", ROUNDTABLE_HOME: join(tmpdir(), "no-such-roundtable-home") }, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [BIN, "statusline", "--plain"], { env: { ...process.env, ROUNDTABLE_HOME: join(tmpdir(), "no-such-roundtable-home") }, stdio: ["pipe", "pipe", "pipe"] });
   let out = "";
   child.stdout.on("data", (d) => (out += d));
   const started = Date.now();
   child.stdin.write(JSON.stringify(HOST));
   const code = await new Promise((resolve) => child.on("close", resolve));
   assert.equal(code, 0);
-  assert.equal(out, "Opus 5.5 | agent-mcp | 5h 0%→21:50 | 7d 82%\n");
+  assert.equal(out, `${HOST_LINE}\n`);
   assert.ok(Date.now() - started < 3000, "no waiting for stdin to close");
 });
 
@@ -162,7 +163,7 @@ test("statusline line 3: the stop hint names the exact command for one stoppable
   const none = renderStatusline(view({ agents: [agent({ stoppable: false })] }), {}, plain);
   assert.doesNotMatch(none[1], /stop:/);
   const empty = renderStatusline(view({ runs: [], agents: [], table: { ...view().table, agents: 0, sessions: 0 } }), parseHost(JSON.stringify(HOST)), plain);
-  assert.deepEqual(empty, ["Opus 5.5 | agent-mcp | 5h 0%→21:50 | 7d 82%"]);
+  assert.deepEqual(empty, [HOST_LINE]);
   // A finished run is not at a glance.
   const done = renderStatusline(view({ runs: [{ ...view().runs[0], live: false }], table: { ...view().table, agents: 0 } }), {}, plain);
   assert.deepEqual(done, []);
@@ -201,7 +202,7 @@ test("statusline colour: ANSI by default, none with --plain or NO_COLOR, and the
   const withColour = run(["statusline"], { input: JSON.stringify(HOST), env: { NO_COLOR: "" } });
   assert.match(withColour.out, /\u001b\[33m82%/, "82% of the 7-day window is amber");
   const noColour = run(["statusline"], { input: JSON.stringify(HOST), env: { NO_COLOR: "1" } });
-  assert.equal(noColour.out, "Opus 5.5 | agent-mcp | 5h 0%→21:50 | 7d 82%\n");
+  assert.equal(noColour.out, `${HOST_LINE}\n`);
   assert.doesNotMatch(noColour.out, /\u001b/);
 });
 

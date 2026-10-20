@@ -1256,7 +1256,7 @@ test("dissent Stop integration: Stop during conclusion retains both charges and 
   assert.equal(state.tasks.b.state, "blocked");
 });
 
-test("dissent Stop integration: resolving every dissent hold cannot release an unresolved Stop hold", async (t) => {
+for (const releaseFirst of ["dissents", "Stop"]) test(`dissent Stop integration: resolving ${releaseFirst} preserves the other hold without resuming`, async (t) => {
   const f = await setup(t);
   const first = await fireDissent(f, { on_fire: "pause_and_huddle" });
   const second = await fireDissent(f, { dissent_id: "second-risk", on_fire: "pause_and_huddle" });
@@ -1272,15 +1272,21 @@ test("dissent Stop integration: resolving every dissent hold cannot release an u
   await r.settleStops();
   const stopId = (await f.events("agent.stopped"))[0].payload.escalation;
   assert.ok(stopId);
-  for (const id of [first, second]) {
+  assert.equal((await f.events("task.blocked")).filter((e) => e.payload.escalation === stopId).length, 1, "Stop emits exactly one task.blocked for its escalation");
+  for (const id of releaseFirst === "dissents" ? [first, second] : [stopId]) {
     const result = await resolveEscalation(f.ctx, id, { action: "decide", decision: "Concern addressed", resolved_by: "main" });
     assert.ok(!result.ops.some((op) => op.type === "resume_worker"));
   }
   const state = await f.store.state();
-  assert.equal(state.escalations[stopId].status, "open");
   assert.equal(state.escalations[stopId].blocking, true);
   assert.equal(state.tasks.b.state, "blocked");
-  assert.equal(state.tasks.b.blocked_by.escalation, stopId);
+  if (releaseFirst === "dissents") {
+    assert.equal(state.escalations[stopId].status, "open");
+    assert.equal(state.tasks.b.blocked_by.escalation, stopId);
+  } else {
+    assert.equal(state.escalations[stopId].status, "resolved");
+    assert.deepEqual(state.tasks.b.blocked_by.escalations.slice().sort(), [first, second].sort());
+  }
   assert.deepEqual(await owedResumeOps(f.ctx), []);
   assert.equal((await f.events("agent.stopped")).length, 1, "Stop is settled once");
 });

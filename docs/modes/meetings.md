@@ -20,3 +20,5 @@ Local meetings require `--restricted`, explicit `--settings` with `disableAllHoo
 Requires `claude` on `PATH` and its own login. Follow up with `say_local` and close with `end_local_meeting`. API meetings use `say` and `end_meeting`; `list_meetings` and `list_local_meetings` list their respective active sessions.
 
 One turn runs per session at a time; overlapping turns fail with a busy error. See [tool calls and concurrency](../tools.md) and [session archives](../sessions.md).
+
+A finished duel can be the focus of a session: pass `duel: "duel-<id>"` (see [a duel as a meeting's focus](duel.md#a-duel-as-a-meetings-focus)).

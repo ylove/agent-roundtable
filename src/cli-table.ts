@@ -6,6 +6,7 @@ import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scrubAndCap } from "./security/secrets.js";
 import { validateDuelOptions } from "./table/duel-options.js";
+import { isDuelId } from "./sessions/duel-import.js";
 import { DUEL_KINDS } from "./table/prompts.js";
 
 const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges <j,...> [options]
@@ -18,14 +19,15 @@ const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges
   --rounds 1|2  --turn-timeout <s>  --max-seconds <s>  --agents-dir <abs-path>
   --dry-run                    replay the bundled synthetic duel (no keys)
   --replay <archive.json> [--speed <n>]   replay a saved duel
-roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...]
+roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...] [--duel <duel-id>]
+  --duel makes a saved duel the focus (its brief joins the context); the topic may then be omitted
 roundtable config show | config set env-file|agents-dir <absolute-path>
 `;
 class UsageError extends Error { readonly exitCode = 2; }
 type Flags = Record<string, string | true>;
-export interface ParsedTableArgs { topic: string; flags: Flags; options: DuelOptions; agents: string[] }
-const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed"];
-const switches = ["open", "no-room", "no-hold", "json", "dry-run", "preflight", "no-preflight"];
+export interface ParsedTableArgs { duelFocus?: import("./sessions/duel-focus.js").DuelFocus; topic: string; flags: Flags; options: DuelOptions; agents: string[] }
+const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed", "duel"];
+const switches = ["open", "no-room", "no-hold", "json", "dry-run", "preflight", "no-preflight", "no-duel-source"];
 const list = (value: string | true | undefined): string[] => {
   if (value === undefined) return [];
   if (typeof value !== "string" || value.split(",").some(s => !s.trim())) throw new UsageError("Agent lists must be comma-separated non-empty identifiers.");
@@ -42,7 +44,9 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const parsed = parseFlags(topic ? args.slice(1) : args, { values, flags: switches });
   if (typeof parsed === "string") throw new UsageError(parsed);
   const replay = !!(parsed.replay || parsed["dry-run"]);
-  if (!topic.trim() && !replay) throw new UsageError(`${command} requires a topic.`);
+  if (parsed.duel !== undefined && (command === "duel" || typeof parsed.duel !== "string" || !isDuelId(parsed.duel))) throw new UsageError(command === "duel" ? "--duel is available for debate, waffle and meeting." : "--duel requires a duel id such as duel-<id>.");
+  if (parsed["no-duel-source"] && parsed.duel === undefined) throw new UsageError("--no-duel-source requires --duel.");
+  if (!topic.trim() && !replay && !(parsed.duel && command !== "duel")) throw new UsageError(`${command} requires a topic.`);
   if (replay && command !== "duel") throw new UsageError("Replay and dry-run are available for duel.");
   if (parsed.replay && parsed["dry-run"]) throw new UsageError("Use either --replay or --dry-run.");
   if (parsed.open && parsed["no-room"]) throw new UsageError("--open requires the room.");
@@ -161,6 +165,14 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
     let observer = terminal;
     const replay = !!(parsed.flags.replay || parsed.flags["dry-run"]);
     let seats = new Map<string, Seat>();
+    // A bad or unknown duel fails here, before seats are prepared or any provider is called.
+    if (!replay && command !== "duel" && typeof parsed.flags.duel === "string") {
+      const { loadDuelFocus, defaultDuelTopic } = await import("./sessions/duel-focus.js");
+      let focus;
+      try { focus = loadDuelFocus(parsed.flags.duel, { source: !parsed.flags["no-duel-source"] }); } catch (e) { throw new UsageError(e instanceof Error ? e.message : "Unable to read the duel."); }
+      parsed.duelFocus = focus;
+      if (!parsed.topic.trim()) parsed.topic = defaultDuelTopic(focus);
+    }
     if (!replay) {
       const { prepareSeats } = await import("./table/seats.js");
       seats = await prepareSeats(
@@ -225,7 +237,7 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
     resetTurn();
     const started = await sessions.startCollaboration(parsed.agents, parsed.topic, {
       mode: command === "debate" ? "debate" : command === "waffle" ? "waffle-house" : "collaborate",
-      maxRounds: Number(parsed.flags.rounds ?? 2), seats: parsed.options.seats, origin, signal: stop,
+      maxRounds: Number(parsed.flags.rounds ?? 2), ...(parsed.duelFocus && { duel: parsed.duelFocus }), seats: parsed.options.seats, origin, signal: stop,
     });
     id = started.collaborationId;
     const collaboration = sessions.collaborations.get(id)!;

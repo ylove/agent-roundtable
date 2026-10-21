@@ -24,6 +24,15 @@ roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...
 roundtable config show | config set env-file|agents-dir <absolute-path>
 `;
 class UsageError extends Error { readonly exitCode = 2; }
+/** A turn or session deadline passed: reported as a timeout, never as a person stopping the session. */
+class TimeoutReport extends Error { constructor(message: string) { super(message); this.name = "TimeoutReport"; } }
+/** A closed pipe (`... | head`) ends the process quietly instead of printing a stack trace. */
+const guarded = new WeakSet<object>();
+function quietOnClosedPipe(stream: NodeJS.WriteStream): void {
+  if (guarded.has(stream)) return;
+  guarded.add(stream);
+  stream.on("error", error => { if ((error as NodeJS.ErrnoException).code === "EPIPE") process.exit(0); throw error; });
+}
 type Flags = Record<string, string | true>;
 export interface ParsedTableArgs { duelFocus?: import("./sessions/duel-focus.js").DuelFocus; topic: string; flags: Flags; options: DuelOptions; agents: string[] }
 const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed", "duel"];
@@ -134,6 +143,8 @@ function configCommand(args: string[], output: TerminalOutput): number {
 
 export async function runTableCli(command: string, args: string[], io: CliIO = {}): Promise<number> {
   const output = io.output ?? process.stdout, error = io.error ?? process.stderr;
+  if (!io.output) quietOnClosedPipe(process.stdout);
+  if (!io.error) quietOnClosedPipe(process.stderr);
   try {
     if (args.includes("--help") || args.includes("-h")) { output.write(HELP); return 0; }
     if (command === "config") return configCommand(args, output);
@@ -144,7 +155,7 @@ export async function runTableCli(command: string, args: string[], io: CliIO = {
   } catch (e) {
     const code = (e as { exitCode?: number }).exitCode === 2 ? 2 : 1;
     // Usage messages are locally generated; remote bodies may contain credentials or private paths.
-    error.write(`roundtable: ${code === 2 || (e instanceof Error && /^(duel|room|replay) not available in this build$/.test(e.message)) ? (e as Error).message : `The session failed (${e instanceof Error ? scrubAndCap(`${e.name}: ${e.message}`.replace(/\s+/g, " "), 200) : "unknown error"}).`}\n`);
+    error.write(`roundtable: ${code === 2 || e instanceof TimeoutReport || (e instanceof Error && /^(duel|room|replay) not available in this build$/.test(e.message)) ? (e as Error).message : `The session failed (${e instanceof Error ? scrubAndCap(`${e.name}: ${e.message}`.replace(/\s+/g, " "), 200) : "unknown error"}).`}\n`);
     return code;
   }
 }
@@ -160,6 +171,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
     controller.abort();
   };
   process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
   let room: TableRoom | undefined;
   try {
     let observer = terminal;
@@ -201,11 +213,14 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
     if (room && !parsed.flags["no-hold"]) {
       error.write("Room stays open; press Ctrl-C to exit.\n");
       holding = true;
-      await new Promise<void>(resolve => { releaseHold = resolve; });
+      // The room's server is unref'd, so a ref'd timer is what keeps the process (and the room) alive until Ctrl-C.
+      const keeper = setInterval(() => {}, 60_000);
+      try { await new Promise<void>(resolve => { releaseHold = resolve; }); } finally { clearInterval(keeper); }
     }
     return result.aborted || controller.signal.aborted || result.winner === "none" ? 1 : 0;
   } finally {
     process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
     await room?.close();
   }
 }
@@ -219,10 +234,11 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
   let id: string | undefined;
   let pending = Promise.resolve();
   const days = new Set([day()]);
-  const abort = () => limits.abort(new Error("Session time limit reached."));
-  const deadline = setTimeout(abort, parsed.options.maxSeconds! * 1000);
+  let timedOut: string | undefined;
+  const abort = (message: string) => { timedOut ??= message; limits.abort(new Error(message)); };
+  const deadline = setTimeout(() => abort(`timed out after ${parsed.options.maxSeconds} s; raise --max-seconds`), parsed.options.maxSeconds! * 1000);
   let turnTimer: ReturnType<typeof setTimeout> | undefined;
-  const resetTurn = () => { clearTimeout(turnTimer); turnTimer = setTimeout(abort, parsed.options.turnTimeoutMs); };
+  const resetTurn = () => { clearTimeout(turnTimer); turnTimer = setTimeout(() => abort(`timed out after ${parsed.options.turnTimeoutMs! / 1000} s without a turn; raise --turn-timeout`), parsed.options.turnTimeoutMs); };
   sessions.setCollaborationRecordHook((c, message) => {
     if (c.origin !== origin) return;
     id = c.id;
@@ -247,6 +263,10 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
     }
     await pending;
     return stop.aborted ? 1 : 0;
+  } catch (e) {
+    // A deadline surfaces inside the provider call as a stop; only a real Stop keeps that wording.
+    if (timedOut && !signal.aborted) throw new TimeoutReport(timedOut);
+    throw e;
   } finally {
     clearTimeout(deadline); clearTimeout(turnTimer);
     sessions.setCollaborationRecordHook(undefined);
@@ -254,13 +274,16 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
     await pending;
     if (id) {
       days.add(day());
-      const totals = new Map<string, { seatId: string; inputTokens: number; outputTokens: number; costUsd: number }>();
+      const totals = new Map<string, { seatId: string; inputTokens: number; outputTokens: number; costUsd: number; unpricedTokens: number }>();
       for (const line of readTableLines([...days]).filter(line => line.session === id)) {
-        const entry = totals.get(line.agent) ?? { seatId: line.agent, inputTokens: 0, outputTokens: 0, costUsd: 0 };
+        const entry = totals.get(line.agent) ?? { seatId: line.agent, inputTokens: 0, outputTokens: 0, costUsd: 0, unpricedTokens: 0 };
+        const used = (line.tokens?.input ?? 0) + (line.tokens?.cache_read ?? 0) + (line.tokens?.cache_write ?? 0) + (line.tokens?.output ?? 0);
         entry.inputTokens += line.tokens?.input ?? 0; entry.outputTokens += line.tokens?.output ?? 0; entry.costUsd += line.usd ?? 0;
+        // Tokens with no known price stay visible as tokens, as in a completed duel, never as $0.0000.
+        if (line.usd === undefined) entry.unpricedTokens += used;
         totals.set(line.agent, entry);
       }
-      await observer.onEvent({ type: "usage", perSeat: [...totals.values()], totalCostUsd: [...totals.values()].reduce((n, s) => n + s.costUsd, 0) });
+      await observer.onEvent({ type: "usage", perSeat: [...totals.values()], totalCostUsd: [...totals.values()].reduce((n, s) => n + s.costUsd, 0), totalUnpricedTokens: [...totals.values()].reduce((n, s) => n + s.unpricedTokens, 0) });
       await observer.onEvent({ type: "end", winner: "none", tally: { A: 0, B: 0 }, aborted: stop.aborted });
     }
   }

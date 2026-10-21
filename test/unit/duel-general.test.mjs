@@ -8,7 +8,8 @@ import { runDuel, resolveSeatsLocal, validateDuelOptions } from "../../dist/tabl
 import { getPrototypeFiles, replayDuel } from "../../dist/table/replay.js";
 import { startRoom } from "../../dist/table/room.js";
 import { ROOM_JS } from "../../dist/table/room-assets.js";
-import { ROUNDTABLE_HOME, AGENTS_DIR } from "../../dist/config.js";
+import { ROUNDTABLE_HOME, AGENTS_DIR, DEFAULT_MODELS } from "../../dist/config.js";
+import { resolveSeats } from "../../dist/table/seats.js";
 import { readTableLines } from "../../dist/usage/table.js";
 import { json, stubFetch } from "./helpers.mjs";
 
@@ -25,12 +26,13 @@ const artifacts = {
   diagram: team => `<prototype kind="diagram" title="Flow ${team}"><file path="flow.mmd">flowchart TD\n  A[Start ${team}] --> B[End]</file></prototype>`,
 };
 
-function stub(t, { kind = "web", verdicts, build } = {}) {
+function stub(t, { kind = "web", verdicts, build, missingModel } = {}) {
   const original = process.env.OPENAI_COMPATIBLE_BASE_URL;
   process.env.OPENAI_COMPATIBLE_BASE_URL = "http://127.0.0.1:1/v1";
   t.after(() => { if (original === undefined) delete process.env.OPENAI_COMPATIBLE_BASE_URL; else process.env.OPENAI_COMPATIBLE_BASE_URL = original; });
   return stubFetch(t, async (_url, init) => {
     const request = JSON.parse(init.body);
+    if (missingModel && request.model === missingModel) return json(404, { error: { message: "model not found" } });
     const prompt = request.messages.at(-1).content;
     const team = /Team ([AB])/.exec(prompt)?.[1];
     let content;
@@ -67,6 +69,26 @@ for (const [kind, topic] of [["web", "A landing page for a bike-repair subscript
     assert.ok(events.filter(e => e.type === "turn" && e.round === "R1b").every(e => !e.text.includes("<")));
   });
 }
+
+test("duel dispatch retries frontmatter models once and updates later turns and displayed seats", async t => {
+  const old = (await resolveSeats({ agents: ["legacy-duel"], load: async () => ({
+    frontmatter: { provider: "openai_compatible", model: "missing-duel-model" },
+  }) })).get("legacy-duel");
+  const seats = [{ ...old, id: "A:legacy-duel", team: "A", prompt: "You are the designer." },
+    ...mkSeats([["reviewer", "B"], ["judge", "judge"]])];
+  const warnings = [];
+  t.mock.method(process.stderr, "write", line => { warnings.push(line); return true; });
+  const { calls, events, result } = await run(t,
+    { teamA: ["legacy-duel"], teamB: ["reviewer"], judges: ["judge"], kind: "text" },
+    { missingModel: "missing-duel-model" }, seats);
+  assert.equal(result.winner, "A");
+  assert.equal(calls.filter(c => c.body.model === "missing-duel-model").length, 1);
+  assert.equal(seats[0].model, DEFAULT_MODELS.openai_compatible);
+  const turns = events.filter(e => e.type === "turn" && e.seat.id === "A:legacy-duel");
+  assert.ok(turns.length >= 2);
+  assert.ok(turns.every(e => e.seat.model === DEFAULT_MODELS.openai_compatible));
+  assert.equal(warnings.length, 1);
+});
 
 test("a 3-member team runs one critique turn that is fed to the builder; a solo team does both jobs", async t => {
   const seats = mkSeats([["lead", "A"], ["critic", "A"], ["maker", "A"], ["solo", "B"], ["cfo", "judge"]]);

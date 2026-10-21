@@ -255,6 +255,11 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
           `${duelSystem(kind)}\n\n${seat.prompt ?? `Your role is ${seat.role ?? seat.name}.`}`,
           [{ role: "user", content: prompt }],
           { provider: seat.provider, model: seat.model, maxTokens: tokens, estimateUsageOnFailure: true },
+          { agent: seat.id.replace(/^(?:A|B|judge):/, ""), onModelFallback: model => {
+            seat.model = model;
+            const shown = seats.find(s => s.id === seat.id);
+            if (shown) shown.model = model;
+          } },
         )));
       });
       // A deadline also settles a misbehaving provider stub that ignores its AbortSignal.

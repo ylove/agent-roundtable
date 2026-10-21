@@ -276,3 +276,37 @@ test('timeout, abort and overflow bound draining when a detached helper holds ou
     }
   }
 });
+
+
+test('frontmatter model fallback is not applied to runtime seats with an unknown model', async t => {
+  const previousHome = process.env.ROUNDTABLE_HOME;
+  const home = mkdtempSync(join(tmpdir(), 'runtime-no-model-fallback-'));
+  process.env.ROUNDTABLE_HOME = home;
+  t.after(() => { process.env.ROUNDTABLE_HOME = previousHome; rmSync(home, { recursive: true, force: true }); });
+  const script = join(home, 'model-check.mjs'), log = join(home, 'calls.jsonl');
+  writeFileSync(script, String.raw`import { appendFileSync } from 'node:fs';
+const args = process.argv.slice(3);
+appendFileSync(process.argv[2], JSON.stringify(args) + '\n');
+if (args.includes('missing-model')) { console.error('unknown model: missing-model (404 model not found)'); process.exitCode = 23; }
+else console.log('Default model would succeed.');
+`);
+  writeFileSync(join(home, 'config.json'), JSON.stringify({ runtimes: {
+    'model-check': { argv: [process.execPath, script, log], modelFlag: '--model', versionArgv: ['--version'], output: { mode: 'text' } },
+  } }), { mode: 0o600 });
+  const warnings = [], replacements = [];
+  t.mock.method(process.stderr, 'write', line => { warnings.push(line); return true; });
+  let apiCalls = 0;
+  t.mock.method(globalThis, 'fetch', () => { apiCalls++; throw new Error('Unexpected API call'); });
+  const metadata = async () => ({ frontmatter: { provider: 'openai', model: 'missing-model' } });
+  // Even the same persona/model previously resolved for an API provider must not affect the runtime.
+  await resolveSeats({ agents: ['runtime-agent'], load: metadata });
+  const seat = (await prepareSeats({ agents: ['runtime-agent'], load: metadata, seat: 'runtime-agent=model-check:missing-model', env: {} }, { preflight: true })).get('runtime-agent');
+  await assert.rejects(callSeat('Persona', [{ role: 'user', content: 'Reply.' }], seat, {
+    agent: 'runtime-agent', onModelFallback: model => replacements.push(model),
+  }), /Runtime exited with 23; stderr tail: unknown model: missing-model/);
+  assert.equal(seat.model, 'missing-model');
+  assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse), [['--model', 'missing-model']]);
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(replacements, []);
+  assert.equal(apiCalls, 0);
+});

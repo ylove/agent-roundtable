@@ -119,7 +119,9 @@ export const MAX_COLLABORATION_ROUNDS = 20;
 
 function callAgent(collaboration: Collaboration, agent: CollaborationAgent, messages: Parameters<typeof callSeat>[1]): Promise<string> {
   return metered({ session: collaboration.id, kind: "collaboration", agent: agent.name }, () => {
-    const call = () => callSeat(agent.systemPrompt, messages, agentCallOptions(collaboration, agent));
+    const call = () => callSeat(agent.systemPrompt, messages, agentCallOptions(collaboration, agent), {
+      agent: agent.name, onModelFallback: model => { agent.model = model; },
+    });
     if (!collaboration.signal) return call();
     const sessionStop = activeAbortSignal();
     const signal = sessionStop ? AbortSignal.any([sessionStop, collaboration.signal]) : collaboration.signal;

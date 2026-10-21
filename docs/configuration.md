@@ -10,7 +10,7 @@
 | `OPENAI_COMPATIBLE_API_KEY` | optional | — |
 | `OPENAI_COMPATIBLE_MODEL` | `openai_compatible` | `default` |
 | `OLLAMA_URL` | `ollama` | `http://localhost:11434` |
-| `ROUNDTABLE_AGENTS_DIR` | agent prompt lookup | `.claude/agents` (relative to the server's working directory — use an absolute path) |
+| `ROUNDTABLE_AGENTS_DIR` | agent prompt lookup; also set from the `agentsDir` saved with `roundtable config`, or per command with `--agents-dir` | `.claude/agents` (relative to the server's working directory — use an absolute path) |
 | `ROUNDTABLE_SKILLS_DIR` | last skill lookup location after personal/project skills; new create skills and improve skills outside `.claude/agents` | `skills` beside the agents directory (normally `.claude/skills`) |
 | `ROUNDTABLE_WORKSPACE_DIR` | conversation grounding | project containing `.claude/agents`, otherwise server working directory |
 | `ROUNDTABLE_ACTIVITY_LOG` | stored session activity; excerpts in private conversation grounding and private improve prompts | `~/.agent-roundtable/activity.jsonl`; `off`, `false`, `0` or `no` disables it |
@@ -43,6 +43,7 @@
 | `ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS` | comma-separated origins (`https://host:port`) besides `OPENAI_COMPATIBLE_BASE_URL`'s that receive `OPENAI_COMPATIBLE_API_KEY` when passed as `base_url` | — (the key goes only to the configured origin) |
 | `ROUNDTABLE_AGENT_PATHS` | extra directories (separated by `:`, or `;` on Windows) that path-like agent refs may point into | — (the agents directory, `<workspace>/.claude/agents` and `~/.claude/agents` are always allowed) |
 | `ROUNDTABLE_PROVIDER_RETRIES` | retries after a provider call fails with 408, 409, 429, 5xx or a network error (backoff with jitter, `Retry-After` honored up to 60 s, always within `ROUNDTABLE_LLM_TIMEOUT_MS`) | `2` (`0` disables, at most `5`) |
+| `ROUNDTABLE_ENV_FILE` | absolute path of a private env file that supplies provider keys and model defaults the shell did not set; overrides the `envFile` saved with `roundtable config`. Rules: [saved CLI settings and env files](#saved-cli-settings-and-env-files) | the saved `envFile`, otherwise none |
 | `ROUNDTABLE_DOTENV` | `off` skips loading `.env` entirely (worker MCP servers start keyless) | `.env` is loaded |
 | `ROUNDTABLE_DEFAULT_VISIBILITY` | how `execute` shows a run when the call names no channel: a comma list of `dashboard`, `chat_only` and `github:<owner/name>` | — (`execute` asks) |
 | `ROUNDTABLE_DEFAULT_BUDGET_USD` | a run's budget when neither `execute` nor the contract sets one | — (`execute` asks) |
@@ -66,6 +67,10 @@ roundtable config show
 Settings are saved as `{ "envFile": "…", "agentsDir": "…" }` in `~/.agent-roundtable/config.json`, or `ROUNDTABLE_HOME/config.json` when a state root is configured. Writes use mode 0600. `config show` prints only `env-file: set|unset` and `agents-dir: set|unset`; it never displays paths or values.
 
 `ROUNDTABLE_ENV_FILE` overrides the saved `envFile`. The target must be an absolute path to an accessible regular file. A file readable by group or world produces a warning without revealing its path. Restrict it to mode 0600. Invalid targets are skipped with a path-free warning.
+
+**Owner-only rule.** Both `config.json` and the pointed env file are read only when you own them and neither group nor world can write to them (mode 0600 or 0644 passes; 0666, or a file owned by another user, does not). A file that fails the rule is skipped with a path-free warning: the settings and keys in it are not used. The package `.env` is not subject to this rule.
+
+**OpenAI-compatible pair rule.** `OPENAI_COMPATIBLE_BASE_URL` and `OPENAI_COMPATIBLE_API_KEY` travel together. From the pointed file they are imported only as a pair, and only when the shell set neither of them, so a key from a file can never be sent to an endpoint the shell chose. Set both in the file, or both in the shell.
 
 Only these key names may be copied from the pointed file:
 
@@ -132,13 +137,27 @@ The child allowlists in `src/security/child-env.ts` additionally recognize these
 
 Claude children set `TERM=dumb`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`; worker Claude also sets `MCP_TOOL_TIMEOUT=1200000`. Codex sets `TERM=dumb` and `NO_COLOR=1`. The local sandbox inherits only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and sets `CI=1`. The trusted runner deliberately inherits the full environment. No per-command contract `env` key may look credential-shaped or carry a recognized secret value.
 
+## Set by the server (do not set)
+
+The server and runner set these for the processes they start. They are not operator configuration; setting them yourself has no supported effect.
+
+| Name | Where | Meaning |
+| --- | --- | --- |
+| `ROUNDTABLE_EXECUTION_ID`, `ROUNDTABLE_AGENT_ID` | worker and hook processes | The run and agent identity a worker or the lease hook acts as. |
+| `ROUNDTABLE_LAUNCH_INTENT`, `ROUNDTABLE_LAUNCH_SHA` | the detached output relay of a worker launch | Path of the launch record in the agent's directory and the hash of the agent's token. The relay checks them (under a lock) before it starts, so a launch cancelled in the meantime never begins, and writes a receipt. |
+| `RT_EGRESS_ALLOW`, `RT_PROXY_PORT` | the Docker install-egress proxy container | The allowed HTTPS hosts (comma-separated) from the contract's install step, and the port the proxy listens on. |
+| `RT_PROXY_HOST` | the same proxy | Listen address; defaults to `0.0.0.0` inside the container, and the runner does not set it. |
+
+`RT_HOME` is not an environment variable: it is the name of a parameter the macOS local-sandbox profile receives, hiding the state root from local commands. `ROUNDTABLE_LABEL`, `ROUNDTABLE_SERVER` and `ROUNDTABLE_TOOL_PREFIX` in the source are constants (the `roundtable` GitHub issue label, the `roundtable` server name in generated worker configuration, and the `mcp__roundtable__` tool prefix), not variables.
+
+Terminal output honors the standard `NO_COLOR` (any value turns colors off in the table commands, `usage` and `statusline`) and `COLUMNS` (the status line width).
+
 ## Test and internal environment
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `NODE_TEST_CONTEXT` | Set by Node's test runner; config uses fresh temp state and warns once if `ROUNDTABLE_HOME` is unset | absent outside tests; do not set manually |
 | `ROUNDTABLE_RUNNER_TICK_MS` | Runner tick for tests/demos, 50–10000 ms | `1500` |
-| `ROUNDTABLE_EXECUTION_ID` / `ROUNDTABLE_AGENT_ID` | Generated worker/hook identity; not operator configuration | set by the runner |
 | `ROUNDTABLE_TEST_CHROME` | `1` enables real-browser screenshot tests | off |
 | `ROUNDTABLE_LIVE_TEST` | `1` permits paid live-provider smoke tests | off |
 | `ROUNDTABLE_LIVE_PROVIDERS` | Comma-separated live test providers | `anthropic,openai,together` |

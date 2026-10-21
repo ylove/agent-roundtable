@@ -27,28 +27,32 @@ ROUNDTABLE_LIVE_TEST=1 ROUNDTABLE_LIVE_PROVIDERS=replicate npm run test:live
 
 ## Registering with Claude Code
 
-Use absolute paths. Any of the three forms works.
+Use absolute paths in the config forms. Any of the four forms works. The server name is yours to choose; the examples use `roundtable`, so tools appear as `mcp__roundtable__<tool>`.
 
-**(a) `claude mcp add`** (add `--scope user` to make it global):
+**(a) Global install** (`npm install -g agent-roundtable` puts `roundtable` and `agent-roundtable` on your PATH). `roundtable mcp` starts the orchestrator server, exactly like running the binary with no arguments:
 
 ```sh
-claude mcp add agent-roundtable \
+claude mcp add --scope user roundtable \
   -e ROUNDTABLE_AGENTS_DIR=/absolute/path/to/.claude/agents \
-  -- node /absolute/path/to/agent-mcp/dist/index.js
+  -- roundtable mcp
 ```
 
-**(b) `claude mcp add-json`:**
+Scope: `--scope user` registers it for you in every project; `--scope project` writes a shared `.mcp.json`; the default (`local`) is just you, in the current project.
+
+**(b) Without the bin on PATH:** replace the last line with `-- npx -y agent-roundtable`, or, from a source checkout, `-- node /absolute/path/to/agent-mcp/dist/index.js`.
+
+**(c) `claude mcp add-json`:**
 
 ```sh
-claude mcp add-json agent-roundtable '{"type":"stdio","command":"node","args":["/absolute/path/to/agent-mcp/dist/index.js"],"env":{"ROUNDTABLE_AGENTS_DIR":"/absolute/path/to/.claude/agents"}}'
+claude mcp add-json roundtable '{"type":"stdio","command":"node","args":["/absolute/path/to/agent-mcp/dist/index.js"],"env":{"ROUNDTABLE_AGENTS_DIR":"/absolute/path/to/.claude/agents"}}'
 ```
 
-**(c) A project `.mcp.json`:**
+**(d) A project `.mcp.json`:**
 
 ```json
 {
   "mcpServers": {
-    "agent-roundtable": {
+    "roundtable": {
       "type": "stdio",
       "command": "node",
       "args": ["/absolute/path/to/agent-mcp/dist/index.js"],
@@ -60,17 +64,17 @@ claude mcp add-json agent-roundtable '{"type":"stdio","command":"node","args":["
 }
 ```
 
-Tools then appear as `mcp__agent-roundtable__<tool>`. After a rebuild, reload with `/mcp` → Reconnect.
+**After installing**, check it: run `claude mcp list` (the server should be connected), or in Claude Code run `/mcp`, or ask "list the roundtable tools" (43 on the orchestrator server). After a rebuild, reload with `/mcp` → Reconnect.
 
 Any other MCP client: run `node dist/index.js` over stdio.
 
 ## Using it from a chat session
 
-Once the server is registered you do not call the tools yourself: you ask for what you want in plain language and the model calls them. Claude Code lists them as `mcp__agent-roundtable__<tool>`, so naming the server ("via agent-roundtable", "using the roundtable") is enough to steer the model to it when several MCP servers are connected. Persona names are file names in `ROUNDTABLE_AGENTS_DIR` — the shipped `examples/` give you `cfo`, `product-lead` and `skeptic` — and a file path works too.
+Once the server is registered you do not call the tools yourself: you ask for what you want in plain language and the model calls them. Claude Code lists them as `mcp__<server name>__<tool>` (`mcp__roundtable__<tool>` with the commands above), so naming the server ("via roundtable", "using the roundtable") is enough to steer the model to it when several MCP servers are connected. Persona names are file names in `ROUNDTABLE_AGENTS_DIR` — the shipped `examples/` give you `cfo`, `product-lead` and `skeptic` — and a file path works too.
 
 **Meetings** — one persona, back and forth. Each prompt is one message in the chat:
 
-> Start a meeting via agent-roundtable with the cfo agent. Agenda: Q3 budget review. Use Anthropic Sonnet.
+> Start a meeting via roundtable with the cfo agent. Agenda: Q3 budget review. Use Anthropic Sonnet.
 
 > Tell the CFO that runway is 14 months at current burn and ask what they would cut first.
 
@@ -118,6 +122,6 @@ Once the server is registered you do not call the tools yourself: you ask for wh
 
 > Run debug_env on agent-roundtable and tell me which providers are configured.
 
-What to expect: meetings and collaborations return a session id together with the first reply, and the model keeps that id for the follow-ups, so "tell the CFO…" and "end the meeting" need nothing from you. Sessions live in the server's memory and end when it restarts. Claude Code asks before each tool call unless you allow the server in its permission settings: the rule `mcp__agent-roundtable` allows every tool on it, `mcp__agent-roundtable__start_meeting` allows one.
+What to expect: meetings and collaborations return a session id together with the first reply, and the model keeps that id for the follow-ups, so "tell the CFO…" and "end the meeting" need nothing from you. Sessions live in the server's memory and end when it restarts. Claude Code asks before each tool call unless you allow the server in its permission settings: the rule `mcp__roundtable` allows every tool on it, `mcp__roundtable__start_meeting` allows one.
 
 See the [mode index](../README.md#modes), [tool reference](tools.md), and [configuration](configuration.md).

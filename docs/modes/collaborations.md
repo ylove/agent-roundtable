@@ -2,7 +2,7 @@
 
 At the table, two or more personas take turns on a topic using one provider and model. Start with `start_collaboration`, then continue, nudge, pause, inspect the transcript, or end it. `max_rounds` and requested continuation `rounds` are capped at 20. Nudges never count as agent turns.
 
-> Run a collaboration via agent-roundtable between cfo and skeptic on “Should we raise now?”, three rounds max, and run the first round immediately.
+> Run a collaboration via roundtable between cfo and skeptic on “Should we raise now?”, three rounds max, and run the first round immediately.
 
 ## Formats
 

@@ -395,14 +395,14 @@ export const deliberationTools: ToolDefinition[] = [
         },
         seats: {
           type: "object",
-          description: 'Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider and model.',
+          description: 'Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (a provider or explicit runtime name) and model.',
           additionalProperties: true,
           patternProperties: {
             "^.+$": {
               type: "object",
               properties: {
                 agent: { type: "string" },
-                provider: { type: "string", enum: PROVIDER_IDS },
+                provider: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,31}$", description: "Provider or explicit configured runtime name." },
                 model: { type: "string", minLength: 1 },
               },
               additionalProperties: false,

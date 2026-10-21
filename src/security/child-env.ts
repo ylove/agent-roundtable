@@ -6,6 +6,7 @@
 // ============================================================================
 
 export type ChildEnvProfile =
+  | "runtime"
   | "claude-worker"
   | "codex-worker"
   | "local-meeting"
@@ -64,6 +65,7 @@ function claudeCliNames(source: NodeJS.ProcessEnv): string[] {
 }
 
 const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: string[]; set: Record<string, string> }> = {
+  runtime: () => ({ pass: ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TMPDIR", ...PROXY, "ALL_PROXY", "all_proxy", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"], set: { TERM: "dumb", NO_COLOR: "1" } }),
   "claude-worker": (s) => ({
     pass: claudeCliNames(s),
     set: { TERM: "dumb", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1", MCP_TOOL_TIMEOUT: "1200000" },

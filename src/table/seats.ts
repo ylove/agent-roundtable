@@ -1,3 +1,6 @@
+import { getRuntime } from "../runtimes/registry.js";
+import { RUNTIME_MODEL } from "../runtimes/spec.js";
+import { detectRuntime } from "../runtimes/runner.js";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { agentKey, loadAgent, parseAgentFrontmatter } from "../agents.js";
@@ -7,7 +10,7 @@ import { ProviderHttpError } from "../providers/retry.js";
 import { parseSeat, type Seat, type SeatSpec } from "./events.js";
 
 export class SeatUsageError extends Error { readonly exitCode = 2; }
-export const PROVIDER_KEYS: Partial<Record<LLMProvider, string>> = {
+export const PROVIDER_KEYS: Partial<Record<string, string>> = {
   anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", together: "TOGETHER_API_KEY", replicate: "REPLICATE_API_TOKEN",
 };
 export function availableProviders(env: NodeJS.ProcessEnv = process.env): LLMProvider[] {
@@ -18,7 +21,7 @@ export function availableProviders(env: NodeJS.ProcessEnv = process.env): LLMPro
 }
 export function assertSeatCredentials(seats: Iterable<Seat>, env: NodeJS.ProcessEnv = process.env): void {
   for (const seat of seats) {
-    const key = PROVIDER_KEYS[seat.provider];
+    const key = Object.hasOwn(PROVIDER_KEYS, seat.provider) ? PROVIDER_KEYS[seat.provider] : undefined;
     if (key && !env[key]?.trim()) throw new SeatUsageError(`Missing ${key} for seat ${seat.id}.`);
     if (seat.provider === "openai_compatible" && !env.OPENAI_COMPATIBLE_BASE_URL?.trim()) throw new SeatUsageError("Missing OPENAI_COMPATIBLE_BASE_URL.");
   }
@@ -39,7 +42,7 @@ export function validateSeatSpecs(raw: Record<string, SeatSpec>): void {
     if (!spec || typeof spec !== "object" || Array.isArray(spec) ||
         Object.keys(spec).some(key => !["agent", "provider", "model"].includes(key)) ||
         (spec.agent !== undefined && spec.agent !== id) ||
-        (spec.provider !== undefined && !PROVIDER_IDS.includes(spec.provider)) ||
+        (spec.provider !== undefined && !(PROVIDER_IDS as readonly string[]).includes(spec.provider) && !getRuntime(spec.provider)) ||
         (spec.model !== undefined && (typeof spec.model !== "string" || !spec.model.trim()))) {
       throw new SeatUsageError("Invalid seat assignment.");
     }
@@ -84,8 +87,8 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
   if (typeof raw === "string") {
     for (const value of raw.split(",")) {
       let spec: SeatSpec;
-      try { spec = parseSeat(value); } catch { throw new SeatUsageError("Invalid --seat assignment; use agent=provider:model."); }
-      if (!spec.provider) throw new SeatUsageError("--seat requires agent=provider:model or agent=provider.");
+      try { spec = parseSeat(value); } catch { throw new SeatUsageError("Invalid --seat assignment; use agent=provider[:model] or agent=runtime[:model]."); }
+      if (!spec.provider) throw new SeatUsageError("--seat requires agent=provider[:model] or agent=runtime[:model].");
       if (overrides.has(spec.agent)) throw new SeatUsageError("Repeated seat assignment.");
       overrides.set(spec.agent, spec);
     }
@@ -102,6 +105,13 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
     const override = overrides.get(id);
     const mixed = opts.mix ? available[(index + (team === "B" ? 1 : team === "judge" ? 2 : 0)) % available.length] : undefined;
     const provider = override?.provider ?? mixed ?? (Object.hasOwn(frontmatter, "provider") ? frontmatter.provider : opts.provider ?? "anthropic");
+    const runtime = override?.provider ? getRuntime(override.provider) : undefined;
+    if (runtime) {
+      const model = override?.model ?? "";
+      if (model && (!RUNTIME_MODEL.test(model) || !runtime.modelFlag)) throw new SeatUsageError("Invalid runtime model override.");
+      out.set(id, { id, name: agentKey(id), ...(team && { team }), provider: override!.provider!, model });
+      continue;
+    }
     if (!PROVIDER_IDS.includes(provider as LLMProvider)) throw new SeatUsageError("Invalid seat provider.");
     const p = provider as LLMProvider;
     const model = override?.model ?? (override?.provider || mixed ? DEFAULT_MODELS[p] : frontmatterModel(frontmatter, p) ?? (p === (opts.provider ?? "anthropic") ? opts.model : undefined) ?? DEFAULT_MODELS[p]);
@@ -113,10 +123,10 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
 }
 
 export interface SeatPreflightResult {
-  provider: LLMProvider;
+  provider: string;
   model: string;
   ok: boolean;
-  reason?: "auth failed" | "missing credentials" | "request timed out" | "request failed";
+  reason?: "auth failed" | "missing credentials" | "request timed out" | "request failed" | "runtime unavailable";
 }
 
 /** Check every pair even after failures; return only local, credential-free diagnostics. */
@@ -134,8 +144,14 @@ export async function preflightSeats(
     const stop = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const result: SeatPreflightResult = { provider: seat.provider, model: seat.model, ok: true };
     try {
-      assertSeatCredentials([seat]);
-      await withAbortSignal(stop, () => callLLM("Reply briefly.", [{ role: "user", content: "Reply OK." }], { provider: seat.provider, model: seat.model, maxTokens: 64 }));
+      const runtime = getRuntime(seat.provider);
+      if (runtime) {
+        const detected = await detectRuntime(runtime, { signal: stop });
+        if (!detected.ok) { result.ok = false; result.reason = "runtime unavailable"; }
+      } else {
+        assertSeatCredentials([seat]);
+        await withAbortSignal(stop, () => callLLM("Reply briefly.", [{ role: "user", content: "Reply OK." }], { provider: seat.provider as LLMProvider, model: seat.model, maxTokens: 64 }));
+      }
     } catch (error) {
       signal?.throwIfAborted();
       result.ok = false;
@@ -166,9 +182,9 @@ export async function prepareSeats(opts: ResolveSeatsOptions, options: {
     }
   }
   const results = await preflightSeats(probes, options.signal, result => {
-    options.report?.(`${result.provider}/${result.model}: ${result.ok ? "pass" : `fail (${result.reason})`}`);
+    options.report?.(`${result.provider}/${result.model || "default"}: ${result.ok ? "pass" : `fail (${result.reason})`}`);
   });
-  const failed = new Map<LLMProvider, SeatPreflightResult>();
+  const failed = new Map<string, SeatPreflightResult>();
   for (const result of results) {
     if (!result.ok && (!failed.has(result.provider) || result.reason === "auth failed")) failed.set(result.provider, result);
   }
@@ -185,7 +201,7 @@ export async function prepareSeats(opts: ResolveSeatsOptions, options: {
     if (!availableProviders(opts.env).some(provider => !failed.has(provider) && !opts.excludeProviders?.includes(provider))) {
       throw new SeatUsageError("No providers passed preflight for --mix.");
     }
-    seats = await resolveSeats({ ...opts, excludeProviders: [...(opts.excludeProviders ?? []), ...failed.keys()] });
+    seats = await resolveSeats({ ...opts, excludeProviders: [...(opts.excludeProviders ?? []), ...[...failed.keys()].filter((p): p is LLMProvider => (PROVIDER_IDS as readonly string[]).includes(p))] });
   }
   assertSeatCredentials(seats.values(), opts.env);
   return seats;

@@ -3,7 +3,8 @@ import { mkdir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { agentKey, listAgents, loadAgent, readFrontmatter } from "../agents.js";
 import { DEFAULT_MODELS, PARALLEL_TURNS, ROUNDTABLE_HOME } from "../config.js";
-import { callLLM } from "../providers/index.js";
+import { callSeat } from "./dispatch.js";
+import type { LLMProvider } from "../config.js";
 import { activeUsageSink, withAbortSignal, withUsageSink } from "../providers/usage.js";
 import { parsePrototypeBlock, type PrototypeFile } from "../prototypes/parse.js";
 import { createSessionDir, ensurePrototypeRoot, materializeFiles, releaseSessionDir, removeDirSync, sweepStaleSessionDirs } from "../prototypes/sandbox.js";
@@ -62,7 +63,7 @@ export async function resolveSeatsLocal(opts: DuelOptions): Promise<ResolvedDuel
       const provider = override?.provider ?? "anthropic";
       seats.push({ id: `${team}:${agentKey(ref)}`, name, team,
         role: team === "judge" ? "judge" : refs.length === 1 ? "designer and builder" : index === 0 ? "designer" : index === refs.length - 1 ? "builder" : "critic",
-        provider, model: override?.model ?? DEFAULT_MODELS[provider], prompt: body });
+        provider, model: override?.model ?? (Object.hasOwn(DEFAULT_MODELS, provider) ? DEFAULT_MODELS[provider as LLMProvider] : ""), prompt: body });
     }
   }
   return seats;
@@ -154,7 +155,7 @@ const BUILD_TOKENS = 32_768;
 const PROVIDER_MAX_TOKENS: Partial<Record<Seat["provider"], number>> = {
   anthropic: 32_000, openai: 32_768, replicate: 16_384, together: 16_384, openai_compatible: 16_384, ollama: 8192,
 };
-const clampTokens = (provider: Seat["provider"], tokens: number): number => Math.min(tokens, PROVIDER_MAX_TOKENS[provider] ?? Infinity);
+const clampTokens = (provider: Seat["provider"], tokens: number): number => Math.min(tokens, Object.hasOwn(PROVIDER_MAX_TOKENS, provider) ? PROVIDER_MAX_TOKENS[provider] ?? Infinity : Infinity);
 export const turnTokens = (provider: Seat["provider"], round: string): number => clampTokens(provider, round === "R1b" || round === "R3" ? BUILD_TOKENS : TURN_TOKENS);
 
 /** A short, secret-free cause for a failed provider call. */
@@ -250,7 +251,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
           if (usd === undefined) total.unpricedTokens += input + output;
           if (line.tokens_prov === "estimated") total.estimated = true;
           ledger?.(report);
-        }, () => withAbortSignal(callStop, () => callLLM(
+        }, () => withAbortSignal(callStop, () => callSeat(
           `${duelSystem(kind)}\n\n${seat.prompt ?? `Your role is ${seat.role ?? seat.name}.`}`,
           [{ role: "user", content: prompt }],
           { provider: seat.provider, model: seat.model, maxTokens: tokens, estimateUsageOnFailure: true },

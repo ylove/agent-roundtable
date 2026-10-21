@@ -169,7 +169,7 @@ Start a collaboration where agents take turns responding; returns a collaboratio
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
 | `agents` | array of string | yes | Array of agent identifiers. Examples: ["cfo", "fpa"], ["product", "engineering", "design"] minItems: `2`. |
-| `seats` | object | no | Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider and model. |
+| `seats` | object | no | Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (an API provider or explicit [CLI runtime](runtimes.md) name) and model. |
 | `topic` | string | no | Required except in conversation mode, where it is an optional loose theme, not an agenda. |
 | `context` | string | no | Optional background for all agents. In conversation mode, share what you know about their current situation: what was just built, what each agent last did, and current problems. |
 | `grounding` | boolean | no | Conversation only, default true: send workspace, agent-memory and local activity excerpts to the session's provider as background. Set false to disable. Always disabled in public conversations. |
@@ -212,7 +212,7 @@ Run a duel and return its result: two teams each build an artifact for the same 
 | `kind` | string | no | What the teams build: web (a self-contained index.html, inline CSS, optional inline JS; default), code (source files, shown as read-only text and never executed), diagram (Mermaid source) or text (markdown or plain text). Values: `web`, `code`, `diagram`, `text`. |
 | `criteria` | array of string | no | Judging rubric. Default: fit to the brief, quality, usability and accessibility, and risk or safety within the judge's own remit. maxItems: `8`; each item up to 120 characters. |
 | `rounds` | number | no | 1 (default) judges once; 2 lets a team the judges did not approve revise once and keeps the original tally. minimum: `1`, maximum: `2`. |
-| `seats` | object | no | Optional assignments keyed by exact persona identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider and model. |
+| `seats` | object | no | Optional assignments keyed by exact persona identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (an API provider or explicit [CLI runtime](runtimes.md) name) and model. |
 | `turn_timeout_s` | number | no | Seconds allowed for each turn. Default 90 (builds get at least 240). maximum: `3600`. |
 | `max_seconds` | number | no | Time limit for the whole duel before it moves to closings. Default 600, plus 120 per member beyond two on the larger team. minimum: `1`, maximum: `3600`. |
 

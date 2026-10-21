@@ -92,7 +92,9 @@ test('env bootstrap applies agentsDir before config module evaluation', t => {
 test('package loader and pointed loader compose in a fresh isolated package', t => {
   const { home, file } = fixture(t);
   mkdirSync(join(home, 'dist'));
-  for (const name of ['env.js', 'user-config.js']) copyFileSync(resolve('dist', name), join(home, 'dist', name));
+  for (const name of ['env.js', 'user-config.js', 'provider-ids.js']) copyFileSync(resolve('dist', name), join(home, 'dist', name));
+  mkdirSync(join(home, 'dist', 'runtimes'));
+  copyFileSync(resolve('dist/runtimes/spec.js'), join(home, 'dist/runtimes/spec.js'));
   symlinkSync(resolve('node_modules'), join(home, 'node_modules'), 'dir');
   writeFileSync(join(home, 'package.json'), '{"type":"module"}');
   writeFileSync(join(home, '.env'), 'OPENAI_API_KEY=package\n');

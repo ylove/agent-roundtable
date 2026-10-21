@@ -1,4 +1,5 @@
-import { PROVIDER_IDS, type LLMProvider as Provider } from "../config.js";
+import { PROVIDER_IDS } from "../config.js";
+import { getRuntime } from "../runtimes/registry.js";
 import type { PrototypeKind } from "../prototypes/parse.js";
 
 /** What a duel's teams build: the same kinds prototype mode supports. */
@@ -10,7 +11,9 @@ export interface Seat {
   name: string;
   role?: string;
   team?: "A" | "B" | "judge";
-  provider: Provider;
+  /** API provider or explicit runtime registry name. */
+  provider: string;
+  /** Empty for a runtime whose own default model is selected. */
   model: string;
 }
 
@@ -100,10 +103,10 @@ export function fanout(...observers: TableObserver[]): TableObserver {
   };
 }
 
-/** An agent reference with optional provider and model overrides. */
+/** An agent reference with optional provider/runtime and model overrides. */
 export interface SeatSpec {
   agent: string;
-  provider?: Provider;
+  provider?: string;
   model?: string;
 }
 
@@ -116,9 +119,9 @@ export function parseSeat(s: string): SeatSpec {
 
   const override = s.slice(equals + 1);
   const colon = override.indexOf(":");
-  const provider = (colon === -1 ? override : override.slice(0, colon)).trim() as Provider;
-  if (!PROVIDER_IDS.includes(provider)) {
-    throw new Error(`Unknown provider "${provider}". Valid providers: ${PROVIDER_IDS.join(", ")}`);
+  const provider = (colon === -1 ? override : override.slice(0, colon)).trim();
+  if (!(PROVIDER_IDS as readonly string[]).includes(provider) && !getRuntime(provider)) {
+    throw new Error(`Unknown provider or runtime "${provider}". Valid providers: ${PROVIDER_IDS.join(", ")}; list runtimes with roundtable runtimes.`);
   }
   if (colon === -1) return { agent, provider };
 

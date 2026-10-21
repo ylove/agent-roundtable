@@ -3,7 +3,9 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parse } from "dotenv";
 
-export interface UserConfig { envFile?: string; agentsDir?: string }
+import { validateRuntimeConfig, type RuntimeSpec } from "./runtimes/spec.js";
+
+export interface UserConfig { envFile?: string; agentsDir?: string; runtimes?: Record<string, Partial<RuntimeSpec>> }
 type Environment = Record<string, string | undefined>;
 const allowedKeys = new Set(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY", "REPLICATE_API_TOKEN"]);
 export function allowedEnvKey(key: string): boolean {
@@ -38,7 +40,8 @@ export function readUserConfig(home = userConfigHome()): UserConfig {
     for (const key of ["envFile", "agentsDir"]) {
       if (config[key] !== undefined && (typeof config[key] !== "string" || !isAbsolute(config[key] as string))) throw new Error();
     }
-    return { ...(typeof config.envFile === "string" && { envFile: config.envFile }), ...(typeof config.agentsDir === "string" && { agentsDir: config.agentsDir }) };
+    const runtimes = config.runtimes === undefined ? undefined : validateRuntimeConfig(config.runtimes);
+    return { ...(runtimes && { runtimes }), ...(typeof config.envFile === "string" && { envFile: config.envFile }), ...(typeof config.agentsDir === "string" && { agentsDir: config.agentsDir }) };
   } catch {
     try { statSync(join(home, "config.json")); } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};

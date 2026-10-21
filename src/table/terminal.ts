@@ -30,6 +30,13 @@ export function totalSpendText(costUsd: number, unpricedTokens = 0): string {
   if (unpricedTokens <= 0) return `$${costUsd.toFixed(4)}`;
   return costUsd > 0 ? `$${costUsd.toFixed(4)} + ${tokensShort(unpricedTokens)} tok unpriced` : `${tokensShort(unpricedTokens)} tok unpriced`;
 }
+/** A routed seat's reason is "excluded...; excluded...; chosen: ...": the exclusions are shared, the choice is the seat's. */
+export function splitRoutingReason(reason: string | undefined): { excluded: string[]; chosen?: string } {
+  if (!reason) return { excluded: [] };
+  const parts = reason.split("; ");
+  return /chosen: /.test(parts[parts.length - 1]) ? { excluded: parts.slice(0, -1), chosen: parts[parts.length - 1] } : { excluded: [], chosen: reason };
+}
+
 export function createTerminalObserver(options: TerminalOptions = {}): TableObserver {
   const output = options.output ?? process.stdout;
   const env = options.env ?? process.env;
@@ -37,12 +44,20 @@ export function createTerminalObserver(options: TerminalOptions = {}): TableObse
   const width = Math.max(20, Math.min(options.width ?? output.columns ?? 88, 120));
   const paint = (code: number, text: string) => color ? `\x1b[${code}m${text}\x1b[0m` : text;
   const seatColor = (seat: Seat) => 31 + ([...seat.id].reduce((n, ch) => (n * 31 + ch.charCodeAt(0)) >>> 0, 0) % 6);
-  const label = (seat: Seat) => paint(seatColor(seat), oneLine(`${seat.name} · ${seat.role ?? seat.team ?? "at the table"} · [${seat.provider}/${seat.model || "default"}]`));
+  const label = (seat: Seat, reason?: string) => paint(seatColor(seat), oneLine(`${seat.name} · ${seat.role ?? seat.team ?? "at the table"} · [${seat.provider}/${seat.model || "default"}]${reason ? ` · ${reason}` : ""}`));
   let spend = 0, unpriced = 0;
   let perSeat: Extract<TableEvent, { type: "usage" }>["perSeat"] = [];
   return { onEvent(event) {
     switch (event.type) {
-      case "start": output.write(`At the table: ${oneLine(event.topic)}\n`); break;
+      case "start": {
+        output.write(`At the table: ${oneLine(event.topic)}\n`);
+        // Exclusions are shared by every routed seat: print each once, then only the per-seat choice.
+        const split = event.seats.map(seat => splitRoutingReason(seat.reason));
+        const shared = [...new Set(split.flatMap(s => s.excluded))];
+        if (shared.length) output.write(`  Routing: ${oneLine(shared.join("; "))}\n`);
+        event.seats.forEach((seat, i) => output.write(`  ${label(seat, split[i].chosen)}\n`));
+        break;
+      }
       case "turn": output.write(`\n● ${label(event.seat)}\n${wrapped(event.text, width).join("\n")}\n`); break;
       case "prototype": output.write(`Prototype ${event.team}: ${event.ok ? `${oneLine(event.title ?? "untitled artifact")}${event.kind && event.kind !== "web" ? ` [${event.kind}]` : ""} (${event.files.length} files, ${event.files.reduce((n, f) => n + f.bytes, 0)} bytes)` : "unavailable"}\n`); break;
       case "assessment": output.write(`${oneLine(event.judge.name)} → ${event.team} ${paint(event.verdict === "APPROVE" ? 32 : event.verdict === "REJECT" ? 31 : 33, `[${event.verdict}]`)} ${(lines => (lines[0] ?? "") + (lines.length > 1 ? "…" : ""))(wrapped(event.reason, width))}\n`); break;

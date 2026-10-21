@@ -6,7 +6,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { runDuel, validateDuelOptions, withChosenSeats } from "../table/duel.js";
 import type { DuelKind, DuelOptions, SeatSpec, TableEvent } from "../table/events.js";
 import { DUEL_KINDS, MAX_CRITERIA } from "../table/prompts.js";
-import { assertSeatCredentials, resolveSeats } from "../table/seats.js";
+import { prepareSeats } from "../table/seats.js";
 import type { ToolCallContext } from "./shared.js";
 import type { JsonSchema } from "../validate.js";
 import { MAX_JUDGES, MAX_TEAM_SIZE } from "../table/duel-options.js";
@@ -19,6 +19,8 @@ const personaList = (what: string, max: number): JsonSchema => ({
 export const START_DUEL_SCHEMA: JsonSchema & { type: "object" } = {
   type: "object",
   properties: {
+    provider: { type: "string", enum: ["auto", "anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"], description: "Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url)." },
+    model: { type: "string", minLength: 1 },
     topic: { type: "string", minLength: 1, maxLength: 4000, description: "The brief both teams answer, for example a landing page for a product, a module with a given interface, or a written policy." },
     team_a: personaList(`Team A personas, 1 to ${MAX_TEAM_SIZE}. The first writes the concept, the last builds, anyone between critiques the concept. A one-person team does both.`, MAX_TEAM_SIZE),
     team_b: personaList(`Team B personas, 1 to ${MAX_TEAM_SIZE}. Same roles as team_a. No persona may appear twice across both teams and the judges.`, MAX_TEAM_SIZE),
@@ -62,6 +64,7 @@ export function summarizeDuel(events: TableEvent[], result: { id: string; winner
     kind: start?.kind ?? "web",
     criteria: start?.criteria,
     teams,
+    routing: start?.seats.map(({ id, provider, model, reason }) => ({ id, provider, model, reason })),
     verdicts: events.flatMap(e => e.type === "assessment" ? [{ judge: e.judge.name, judge_key: personaKey(e.judge.id), team: e.team, verdict: e.verdict, reason: one(e.reason, 300) }] : []),
     dissents: events.flatMap(e => e.type === "dissent" ? [{ team: e.team, persona: e.seat.name, persona_key: personaKey(e.seat.id), text: e.text.slice(0, 600) }] : []),
     usage: usage && {
@@ -74,7 +77,7 @@ export function summarizeDuel(events: TableEvent[], result: { id: string; winner
 }
 
 export async function startDuelTool(args: Record<string, unknown>, ctx?: ToolCallContext): Promise<CallToolResult> {
-  const a = args as { topic: string; team_a: string[]; team_b: string[]; judges: string[]; kind?: DuelKind; criteria?: string[]; rounds?: number; seats?: Record<string, SeatSpec>; turn_timeout_s?: number; max_seconds?: number };
+  const a = args as { topic: string; team_a: string[]; team_b: string[]; judges: string[]; kind?: DuelKind; criteria?: string[]; rounds?: number; seats?: Record<string, SeatSpec>; provider?: import("../config.js").LLMProvider | "auto"; model?: string; turn_timeout_s?: number; max_seconds?: number };
   const opts: DuelOptions = {
     topic: a.topic, teamA: a.team_a, teamB: a.team_b, judges: a.judges,
     ...(a.kind && { kind: a.kind }), ...(a.criteria && { criteria: a.criteria }),
@@ -84,8 +87,7 @@ export async function startDuelTool(args: Record<string, unknown>, ctx?: ToolCal
   };
   if (a.rounds !== undefined && a.rounds !== 1 && a.rounds !== 2) throw new Error("rounds must be 1 or 2.");
   validateDuelOptions(opts);
-  const seats = await resolveSeats({ teamA: opts.teamA, teamB: opts.teamB, judges: opts.judges, seats: a.seats });
-  assertSeatCredentials(seats.values());
+  const seats = await prepareSeats({ teamA: opts.teamA, teamB: opts.teamB, judges: opts.judges, seats: a.seats, provider: a.provider, model: a.model }, { signal: ctx?.signal, preflight: a.provider && a.provider !== "auto" ? false : undefined });
   const events: TableEvent[] = [];
   let step = 0;
   const observer = { onEvent(event: TableEvent) {

@@ -31,19 +31,15 @@ roundtable debate "A spending limit" --agents designer,skeptic \
 Assignments resolve in this order:
 
 1. `--seat agent=provider:model` (or `agent=provider` for that provider's default).
-2. `--mix auto` or `--mix cheap`.
-3. The persona's `provider` and `model` frontmatter, only when those keys exist.
-4. The default provider and its configured model.
+2. Healthy persona `provider`/`model` frontmatter.
+3. `--mix auto` or `--mix cheap`, aliases for provider judgment with a cost bias.
+4. Automatic [provider judgment](providers.md#provider-judgment), using role, health, budget, recent failures/latency and provider spread.
 
-An explicit provider chooses its matching default model unless a model is specified with it. A model-only frontmatter key uses the default provider. `--mix` replaces the frontmatter assignment and cycles through providers with configured credentials; team B starts one provider later than team A. With a single configured provider all seats use that provider. A configured compatible endpoint or explicitly configured local endpoint can participate without a key.
+Without flags, the router chooses each seat; `--mix auto` and `--mix cheap` run the same router with a cost bias that still spreads seats across providers. Builders avoid reasoning models when an eligible alternative remains; judge and critique seats prefer known cheaper models; designer and persona chat seats use balanced defaults. Explicit providers retain their defaults and aliases. Runtime seats are never selected automatically.
 
-Both mixes use the configured provider defaults. The default for `anthropic` is `claude-sonnet-5-5`; aliases `sonnet`, `haiku` and `opus` resolve to the current model IDs. Opus requires an explicit model choice or configured model override. `cheap` does not promise a price or select Opus automatically.
+Preflight sends a brief request for each selected provider/model pair, caches successful pairs and provider health for ten minutes, and retries automatic seats on surviving providers. Diagnostics contain local reasons, never keys or remote error bodies. Probes can incur a small charge. If no candidate survives, startup exits 2 with every provider and its reason.
 
-`--preflight` sends one brief request for every distinct provider/model pair before starting and reports pass or fail on stderr. Diagnostics never include keys or remote error bodies. These are live calls and can incur a small charge. Missing keys produce exit code 2 before the run.
-
-Both `--mix auto` and `--mix cheap` run preflight automatically. Each configured candidate provider is checked, including candidates not used by the initial roster. Any provider with a failed check is excluded, with one warning such as `anthropic: auth failed, excluded from mix`. Seats are then reassigned across the remaining providers; the teams start on different providers when at least two remain. If no provider passes, the command exits 2.
-
-Explicit `--seat` assignments are preserved: if their provider fails preflight, the command exits 2 and names the seat and provider. Use `--no-preflight` to skip automatic mix checks and exclusions. It cannot be combined with `--preflight`. Replay and dry-run never make preflight requests.
+Explicit assignments are preserved and fail by seat name when their requested preflight fails. `--no-preflight` skips probes while retaining cached health exclusions; it cannot be combined with `--preflight`. Replay and dry-run never probe providers. The terminal prints the routing exclusions once as a `Routing:` line and each seat's choice on its seat line; the NDJSON `start` event carries every seat's full routing reason, and duel room cards show it too.
 
 Runtime seats are explicit: `--seat designer=hermes,skeptic=codex:example-model`. `--mix` selects only configured API providers. `roundtable runtimes [--json]` lists runtime detection and versions. See [CLI runtimes](runtimes.md) for profiles, configuration and prompt exposure.
 
@@ -77,8 +73,8 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | `--mix` | `auto` or `cheap`, using providers that pass automatic preflight |
 | `--turn-timeout` | Per-turn timeout in seconds (default 90) |
 | `--max-seconds` | Overall deadline in seconds (default 600) |
-| `--preflight` | Check each distinct provider/model and report pass/fail; automatic for mixes |
-| `--no-preflight` | Skip automatic mix preflight and provider exclusion |
+| `--preflight` | Check selected provider/model pairs and report pass/fail; automatic for routed seats |
+| `--no-preflight` | Skip probes; retain known health exclusions |
 | `--open` | Duel only: open the local room |
 | `--no-room` | Duel only: terminal output without a room |
 | `--no-hold` | Duel only: close the room when the run finishes |

@@ -26,8 +26,9 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { executionLLM, PROVIDER_IDS, VERSION } from "../config.js";
+import { PROVIDER_IDS, VERSION } from "../config.js";
 import { executionTag } from "../ids.js";
+import { executionLLM, seedExecutionProvider } from "./provider-routing.js";
 import { loadAgent } from "../agents.js";
 import { pidAlive } from "../prototypes/sandbox.js";
 import { DockerBackend, LocalBackend, SANDBOX_ENV, selectBackend } from "../sandbox/index.js";
@@ -110,6 +111,8 @@ export interface RunnerOptions {
   hooks?: Partial<RunnerHooks>;
   /** Worker drivers by id (default ClaudeCodeDriver and CodexDriver). */
   drivers?: Partial<Record<WorkerDriverId, WorkerDriver>>;
+  /** First pause before a failed escalation route is retried; doubles per attempt (default 30 s). */
+  routeRetryBaseMs?: number;
   /** Tick interval (default 1500 ms). */
   tickMs?: number;
   heartbeatMs?: number;
@@ -138,6 +141,8 @@ const SNAPSHOT_MS = 60_000;
 const TERMINAL_RUN: ReadonlySet<string> = new Set(["completed", "failed", "aborted"]);
 /** As control_execution abort: the CLI's time to stop before its group is killed. */
 const ABORT_STOP_GRACE_MS = 5_000;
+const ROUTE_RETRY_BASE_MS = 30_000;
+const ROUTE_MAX_ATTEMPTS = 5;
 const OPEN_ESCALATION: ReadonlySet<string> = new Set(["open", "routed", "in_huddle", "awaiting_human"]);
 const ACTIVE_TASK: ReadonlySet<string> = new Set(["claimed", "in_progress", "submitted", "checking"]);
 const SESSION_GONE_RE = /no conversation found|session(?: id)?[^\n]{0,80}\bnot found|could not (?:find|resume) (?:the )?session/i;
@@ -329,6 +334,9 @@ export class Runner {
   /** Stop requests (agent.stop_requested event ids) this process has applied. */
   private readonly stopApplied = new Set<string>();
   private readonly routed = new Set<string>();
+  /** A failed route (for example no healthy provider) is offered again after a pause, not on every tick. */
+  private readonly routeRetryAt = new Map<string, number>();
+  private readonly routeAttempts = new Map<string, number>();
   private readonly leadInFlight = new Set<string>();
   /** The hooks' escalation pass: one at a time, when the log moved or every PASS_MS. */
   private passInFlight = false;
@@ -1212,16 +1220,30 @@ export class Runner {
     );
   }
 
+  /** Retry a failed route with exponential backoff (30 s, 60 s, 120 s...), then hand the escalation to a human. */
+  private routeFailed(id: string, e: unknown): void {
+    const attempts = (this.routeAttempts.get(id) ?? 0) + 1;
+    this.routeAttempts.set(id, attempts);
+    this.say(`escalation router on ${id} (attempt ${attempts} of ${ROUTE_MAX_ATTEMPTS}): ${errText(e)}`);
+    if (attempts < ROUTE_MAX_ATTEMPTS) {
+      this.routed.delete(id);
+      this.routeRetryAt.set(id, Date.now() + (this.opts.routeRetryBaseMs ?? ROUTE_RETRY_BASE_MS) * 2 ** (attempts - 1));
+      return;
+    }
+    const message = `The runner could not route this escalation after ${ROUTE_MAX_ATTEMPTS} attempts (${scrubAndCap(errText(e), 300)}). Check the provider keys, or resolve it by hand.`;
+    this.track(Promise.resolve(this.hooks.escalationGiveUp?.(this.ctx, id, message)).catch((err) => this.say(`escalation ${id} could not be handed to the human: ${errText(err)}`)));
+  }
+
   /** New open escalations go to the router once per process (a restarted runner offers them again). */
   private routeEscalations(state: Readonly<BlackboardState>): void {
     for (const esc of Object.values(state.escalations)) {
-      if (esc.status !== "open" || this.routed.has(esc.id)) continue;
+      if (esc.status !== "open" || this.routed.has(esc.id) || (this.routeRetryAt.get(esc.id) ?? 0) > Date.now()) continue;
       this.routed.add(esc.id);
       this.track(
         this.hooks
           .escalationRouter(this.ctx, structuredClone(esc))
-          .then((ops) => this.applyResolutionOps(ops ?? [], `escalation ${esc.id}`))
-          .catch((e) => this.say(`escalation router on ${esc.id}: ${errText(e)}`))
+          .then((ops) => { this.routeAttempts.delete(esc.id); this.routeRetryAt.delete(esc.id); return this.applyResolutionOps(ops ?? [], `escalation ${esc.id}`); })
+          .catch((e) => this.routeFailed(esc.id, e))
       );
     }
   }
@@ -1849,8 +1871,14 @@ export class Runner {
 
 /** Run the runner of an execution until it stops; resolves with the process exit code. */
 export async function runRunner(execution: string, opts: RunnerOptions = {}): Promise<number> {
-  const llm = executionLLM();
-  if (llm.unknown) console.error(`agent-roundtable run: ROUNDTABLE_EXECUTION_PROVIDER ${JSON.stringify(llm.unknown.slice(0, 40))} is not a provider (${PROVIDER_IDS.join(", ")}); using ${llm.provider}`);
+  const raw = process.env.ROUNDTABLE_EXECUTION_PROVIDER?.trim();
+  const llm = raw && raw !== "auto" ? executionLLM() : undefined;
+  // The health cache lives in this process: probe once so the runner does not route blind. Failure is not a refusal.
+  if (opts.hooks === undefined && process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT !== "1") {
+    const failure = await seedExecutionProvider();
+    if (failure) console.error(`agent-roundtable run: provider judgment found no healthy provider yet (${scrubAndCap(failure, 300)}); model calls will retry.`);
+  }
+  if (llm?.unknown) console.error(`agent-roundtable run: ROUNDTABLE_EXECUTION_PROVIDER ${JSON.stringify(llm.unknown.slice(0, 40))} is not a provider (${PROVIDER_IDS.join(", ")}); using ${llm.provider}`);
   // The real hooks: escalation routing, huddles, the lead fallback and goal review (WS10).
   const r = new Runner(execution, { ...opts, hooks: opts.hooks ?? createRunnerHooks(), signals: false });
   const onSignal = (sig: string) => r.stop(`signal ${sig}`);

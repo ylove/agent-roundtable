@@ -83,6 +83,11 @@ export const PROVIDER_PROPS = {
   },
 } as const;
 
+export const AUTO_PROVIDER_PROPS = {
+  ...PROVIDER_PROPS,
+  provider: { ...PROVIDER_PROPS.provider, enum: ["auto", ...PROVIDER_IDS], description: "LLM provider. Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url)." },
+} as const;
+
 export const MEETING_MODE_PROPS = {
   mode: {
     type: "string",
@@ -133,8 +138,12 @@ export const PROTOTYPE_PROP = {
 // ----------------------------------------------------------------------------
 
 /** Reject routing mistakes before a workshop loads personas or opens a public channel. */
-export function validateProviderOptions(provider: LLMProvider = "anthropic", baseUrl?: string): void {
-  if (!PROVIDER_IDS.includes(provider)) {
+export function validateProviderOptions(provider: LLMProvider | "auto" = "anthropic", baseUrl?: string, allowAuto = false): void {
+  if (provider === "auto" && allowAuto) {
+    if (baseUrl) throw new Error("base_url requires explicit provider openai_compatible.");
+    return;
+  }
+  if (!(PROVIDER_IDS as string[]).includes(provider)) {
     throw new Error(`Unknown provider "${provider}". Valid providers: ${PROVIDER_IDS.join(", ")}`);
   }
   if (baseUrl && provider !== "openai_compatible") {
@@ -148,7 +157,7 @@ export function validateProviderOptions(provider: LLMProvider = "anthropic", bas
  */
 export function formatUltraplanResult(result: UltraplanStepResult | UltraplanFinalResult): string {
   if (result.status !== "finalized") return JSON.stringify(result, null, 2);
-  const trailer = { ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally };
+  const trailer = { routing: result.routing, ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally };
   return result.finalPlan + (result.publicBlock ? `\n\n${result.publicBlock}` : "") +
     "\n\n```json\n" + JSON.stringify(trailer, null, 2) + "\n```";
 }

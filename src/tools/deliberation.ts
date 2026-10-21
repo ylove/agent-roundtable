@@ -102,6 +102,7 @@ import {
   SESSION_END,
   SESSION_TURN,
   PROVIDER_PROPS,
+  AUTO_PROVIDER_PROPS,
   MEETING_MODE_PROPS,
   PUBLIC_PROP,
   PROTOTYPE_PROP,
@@ -164,10 +165,10 @@ export const deliberationTools: ToolDefinition[] = [
         duel_source: DUEL_SOURCE_PROP,
         provider: {
           type: "string",
-          enum: PROVIDER_IDS,
+          enum: ["auto", ...PROVIDER_IDS],
           "x-advisory-enum": true,
           description:
-            "LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
+            "LLM provider. Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
         model: {
           type: "string",
@@ -453,10 +454,10 @@ export const deliberationTools: ToolDefinition[] = [
         duel_source: DUEL_SOURCE_PROP,
         provider: {
           type: "string",
-          enum: PROVIDER_IDS,
+          enum: ["auto", ...PROVIDER_IDS],
           "x-advisory-enum": true,
           description:
-            "LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
+            "LLM provider. Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
         model: {
           type: "string",
@@ -589,7 +590,7 @@ export const deliberationTools: ToolDefinition[] = [
   {
     name: START_ULTRAPLAN,
     modes: ORCHESTRATOR_ONLY,
-    precheck: checkProviderArgs,
+    precheck: args => validateProviderOptions(args.provider as LLMProvider | "auto" | undefined, args.base_url as string | undefined, true),
     annotations: { title: "Start ultraplan", ...SESSION_TURN },
     description:
       "Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: \"plan\" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. The final result ends with a JSON trailer {ultraplan_id, archived, tally}; signed off means no OBJECT and no UNCLEAR sign-off. With execution_ready: true, plans end with a roundtable-tasks block and sign-offs check it, so propose_contract { from_session: ultraplan_id } can build a contract from it. Public runs post the task and phase outputs, never context.",
@@ -607,7 +608,7 @@ export const deliberationTools: ToolDefinition[] = [
         execution_ready: { type: "boolean", description: "Default false. True when the plan will be executed heads-down: planner drafts and revisions (and your next steps) must end with a fenced roundtable-tasks JSON block of tasks, commands and interfaces, and sign-offs check it." },
         repo_dir: { type: "string", description: "A directory inside the repository the plan is for. When earlier postmortems of that project left lessons, a bounded \"Lessons from past postmortems\" section (misreadings first) is added to the context the agents plan with. Never posted publicly." },
         public: PUBLIC_PROP,
-        ...PROVIDER_PROPS,
+        ...AUTO_PROVIDER_PROPS,
       },
       required: ["agents", "task"],
     },
@@ -729,7 +730,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         context?: string;
         duel?: string;
         duel_source?: boolean;
-        provider?: LLMProvider;
+        provider?: LLMProvider | "auto";
         model?: string;
         base_url?: string;
         mode?: MeetingMode;
@@ -874,7 +875,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         duel_source?: boolean;
         max_rounds?: number;
         auto_run_rounds?: number;
-        provider?: LLMProvider;
+        provider?: LLMProvider | "auto";
         model?: string;
         seats?: Record<string, SeatSpec>;
         base_url?: string;
@@ -1022,7 +1023,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         revision_rounds?: number;
         execution_ready?: boolean;
         public?: boolean;
-        provider?: LLMProvider;
+        provider?: LLMProvider | "auto";
         model?: string;
         base_url?: string;
       };

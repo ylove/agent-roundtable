@@ -379,7 +379,7 @@ else console.log('Default model would succeed.');
   t.mock.method(globalThis, 'fetch', () => { apiCalls++; throw new Error('Unexpected API call'); });
   const metadata = async () => ({ frontmatter: { provider: 'openai', model: 'missing-model' } });
   // Even the same persona/model previously resolved for an API provider must not affect the runtime.
-  await resolveSeats({ agents: ['runtime-agent'], load: metadata });
+  await resolveSeats({ agents: ['runtime-agent'], env: { OPENAI_API_KEY: 'fixture-key' }, load: metadata });
   const seat = (await prepareSeats({ agents: ['runtime-agent'], load: metadata, seat: 'runtime-agent=model-check:missing-model', env: {} }, { preflight: true })).get('runtime-agent');
   await assert.rejects(callSeat('Persona', [{ role: 'user', content: 'Reply.' }], seat, {
     agent: 'runtime-agent', onModelFallback: model => replacements.push(model),

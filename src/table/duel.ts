@@ -1,10 +1,11 @@
+import { prepareSeats, resolveSeats } from "./seats.js";
+import { PROVIDER_MAX_TOKENS } from "../providers/limits.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { agentKey, listAgents, loadAgent, readFrontmatter } from "../agents.js";
-import { DEFAULT_MODELS, PARALLEL_TURNS, ROUNDTABLE_HOME } from "../config.js";
+import { PARALLEL_TURNS, ROUNDTABLE_HOME } from "../config.js";
 import { callSeat } from "./dispatch.js";
-import type { LLMProvider } from "../config.js";
 import { activeUsageSink, withAbortSignal, withUsageSink } from "../providers/usage.js";
 import { parsePrototypeBlock, type PrototypeFile } from "../prototypes/parse.js";
 import { createSessionDir, ensurePrototypeRoot, materializeFiles, releaseSessionDir, removeDirSync, sweepStaleSessionDirs } from "../prototypes/sandbox.js";
@@ -36,7 +37,9 @@ function keepSandboxUntilExit(dir: string): void {
 }
 
 /** Merge seam: the CLI's full resolver can replace this local default without changing RunDuel. */
-export async function resolveSeatsLocal(opts: DuelOptions): Promise<ResolvedDuelSeat[]> {
+export async function resolveSeatsLocal(opts: DuelOptions, selected?: Map<string, Seat>): Promise<ResolvedDuelSeat[]> {
+  const assignments = selected ?? await resolveSeats({ teamA: opts.teamA, teamB: opts.teamB, judges: opts.judges, seats: opts.seats, mix: opts.mix, agentsDir: opts.agentsDir });
+  const chosen = new Map([...assignments].map(([id, seat]) => [agentKey(id), seat]));
   const groups = [["A", opts.teamA], ["B", opts.teamB], ["judge", opts.judges]] as const;
   const found = opts.agentsDir ? listAgents(opts.agentsDir) : undefined;
   const seats: ResolvedDuelSeat[] = [];
@@ -59,11 +62,10 @@ export async function resolveSeatsLocal(opts: DuelOptions): Promise<ResolvedDuel
         body = loaded.body;
         if (typeof loaded.frontmatter.name === "string") name = loaded.frontmatter.name;
       }
-      const override = opts.seats?.[ref] ?? opts.seats?.[agentKey(ref)];
-      const provider = override?.provider ?? "anthropic";
+      const pick = chosen.get(agentKey(ref))!;
       seats.push({ id: `${team}:${agentKey(ref)}`, name, team,
         role: team === "judge" ? "judge" : refs.length === 1 ? "designer and builder" : index === 0 ? "designer" : index === refs.length - 1 ? "builder" : "critic",
-        provider, model: override?.model ?? (Object.hasOwn(DEFAULT_MODELS, provider) ? DEFAULT_MODELS[provider as LLMProvider] : ""), prompt: body });
+        provider: pick.provider, model: pick.model, reason: pick.reason, maxOutputTokens: pick.maxOutputTokens, prompt: body });
     }
   }
   return seats;
@@ -105,11 +107,11 @@ const listing = (files: PrototypeFile[], nonce: string): string => files.map(f =
 /** Map the CLI's or a tool's resolved seats onto the persona-loading resolver. */
 export function withChosenSeats(seats: Map<string, Seat>): DuelDependencies {
   return { resolveSeats: async o => {
-    const loaded = await resolveSeatsLocal(o);
+    const loaded = await resolveSeatsLocal(o, seats);
     const chosen = new Map([...seats].map(([id, seat]) => [agentKey(id), seat]));
     return loaded.map(seat => {
       const pick = chosen.get(seat.id.slice(seat.id.indexOf(":") + 1));
-      return pick ? { ...seat, provider: pick.provider, model: pick.model } : seat;
+      return pick ? { ...seat, provider: pick.provider, model: pick.model, reason: pick.reason, maxOutputTokens: pick.maxOutputTokens } : seat;
     });
   } };
 }
@@ -152,9 +154,6 @@ const NO_TEXT_LENGTH = /returned no text \(finish reason: (length|max_tokens)\)/
 const TURN_TOKENS = 8192;
 const BUILD_TOKENS = 32_768;
 /** Providers whose models cap output below the shared ceiling (Replicate rejects larger max_tokens with a 422). */
-const PROVIDER_MAX_TOKENS: Partial<Record<Seat["provider"], number>> = {
-  anthropic: 32_000, openai: 32_768, replicate: 16_384, together: 16_384, openai_compatible: 16_384, ollama: 8192,
-};
 const clampTokens = (provider: Seat["provider"], tokens: number): number => Math.min(tokens, Object.hasOwn(PROVIDER_MAX_TOKENS, provider) ? PROVIDER_MAX_TOKENS[provider] ?? Infinity : Infinity);
 export const turnTokens = (provider: Seat["provider"], round: string): number => clampTokens(provider, round === "R1b" || round === "R3" ? BUILD_TOKENS : TURN_TOKENS);
 
@@ -181,7 +180,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   if ((opts.rounds !== undefined && opts.rounds !== 1 && opts.rounds !== 2) ||
       !Number.isFinite(limitSeconds) || limitSeconds < 0 || limitSeconds > 3600 ||
       !Number.isFinite(opts.turnTimeoutMs ?? 90_000) || (opts.turnTimeoutMs ?? 90_000) <= 0 || (opts.turnTimeoutMs ?? 90_000) > 3_600_000) throw new Error("Invalid duel limits.");
-  const resolved = await (deps.resolveSeats ?? resolveSeatsLocal)(opts);
+  const resolved = deps.resolveSeats ? await deps.resolveSeats(opts) : await resolveSeatsLocal(opts, await prepareSeats(opts));
   const seats: Seat[] = resolved.map(({ prompt: _prompt, ...seat }) => seat);
   const teams = { A: resolved.filter(s => s.team === "A"), B: resolved.filter(s => s.team === "B") };
   const judges = resolved.filter(s => s.team === "judge");
@@ -254,7 +253,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
         }, () => withAbortSignal(callStop, () => callSeat(
           `${duelSystem(kind)}\n\n${seat.prompt ?? `Your role is ${seat.role ?? seat.name}.`}`,
           [{ role: "user", content: prompt }],
-          { provider: seat.provider, model: seat.model, maxTokens: tokens, estimateUsageOnFailure: true },
+          { provider: seat.provider, model: seat.model, maxTokens: Math.min(tokens, seat.maxOutputTokens ?? Infinity), estimateUsageOnFailure: true },
           { agent: seat.id.replace(/^(?:A|B|judge):/, ""), onModelFallback: model => {
             seat.model = model;
             const shown = seats.find(s => s.id === seat.id);

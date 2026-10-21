@@ -64,7 +64,7 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | --- | --- |
 | `--team-a`, `--team-b` | Duel only: 1 to 4 comma-separated agents per team; first writes the concept, last builds, any between critique |
 | `--kind` | Duel only: `web` (default), `code`, `diagram` or `text` |
-| `--criteria` | Duel only: comma-separated judging rubric (default: fit to the brief, quality, usability and accessibility, risk or safety) |
+| `--criteria` | Duel only: judging rubric of 1 to 8 items, comma-separated (separate with `;` instead when an item contains a comma); default: fit to the brief, quality, usability and accessibility, risk or safety |
 | `--judges` | Duel only: 1 to 5 comma-separated agents |
 | `--duel` | Debate, waffle or meeting only: a saved duel id (`duel-<id>`) to focus the session on; the topic may then be omitted |
 | `--no-duel-source` | With `--duel`: leave artifact file contents out of the brief to save tokens (titles, file names, verdicts, tally and dissents stay) |
@@ -85,7 +85,7 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | `--replay <archive>` | Duel only: replay an archived duel without provider calls or keys |
 | `--speed <N>` | Positive replay speed multiplier (default 1) |
 
-The topic is one positional argument before the flags; quote topics containing spaces. Terminal colors require a TTY and an unset `NO_COLOR`. Turns wrap to about six lines, prototype submissions print a short summary, and the closing footer shows spend. JSON output retains full events.
+`--help` (or `-h`) on any table command prints its usage. The topic is one positional argument before the flags; quote topics containing spaces. Terminal colors require a TTY and an unset `NO_COLOR`. Turns wrap to about six lines, prototype submissions print a short summary, and the closing footer shows spend. JSON output retains full events.
 
 A completed duel keeps its room open until Ctrl-C unless `--no-hold` is set. During a run, the first Ctrl-C aborts and lets the runner archive; its room stays available. A second Ctrl-C exits. Exit codes are 0 for completion or tie, 1 for failure or interruption, and 2 for usage errors or missing credentials.
 

@@ -2,7 +2,7 @@
 
 At the table, a meeting is a back-and-forth conversation between you and one persona. Provider and model are fixed at `start_meeting` (default provider `anthropic`).
 
-> Start a meeting via agent-roundtable with the cfo agent. Agenda: Q3 budget review. Use Anthropic Sonnet.
+> Start a meeting via roundtable with the cfo agent. Agenda: Q3 budget review. Use Anthropic Sonnet.
 
 Follow with “Tell the CFO that runway is 14 months at current burn and ask what they would cut first,” then “End the meeting and give me the summary.”
 

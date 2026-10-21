@@ -1,5 +1,7 @@
 # Record a duel
 
+A script for screen-recording a [duel](modes/duel.md) from the [terminal](table-cli.md). It uses only generic personas.
+
 Prepare six generic personas in the configured agents directory: `designer`, `builder`, `marketer`, `skeptic`, `cfo`, and `safety-reviewer`. Use the configured credential source and provider keys. Keep credentials, configuration paths, and real archives out of the recording.
 
 Check the room layout without spending tokens:
@@ -35,7 +37,7 @@ Narration and camera cues:
 4. Show each judge's verdict chips and reasons. Point out any disagreement.
 5. End on the winner or tie banner, dissent cards, and spend footer. Let the room stay visible after the terminal finishes.
 
-Reasoning models such as GLM are slow builders: their thinking tokens count against the output limit, so builds can time out or run out of tokens. For a recording, pin the builders to fast non-reasoning models with `--seat`, for example `--seat frontend-lead-dev=anthropic:sonnet,director-user-psychology=openai`. Duel output ceilings are also capped per provider (Replicate and Together 16384, Ollama 8192), because some models reject larger limits.
+Reasoning models such as GLM are slow builders: their thinking tokens count against the output limit, so builds can time out or run out of tokens. For a recording, pin the builders to fast non-reasoning models with `--seat`, for example `--seat builder=anthropic:sonnet,skeptic=openai`. Duel output ceilings are also capped per provider (Replicate and Together 16384, Ollama 8192), because some models reject larger limits.
 
 Allow roughly three to five minutes for a typical run; actual duration depends on provider responses and retries. Add `--rounds 2` for one revision round, or `--max-seconds 240` to move to closing statements sooner. Do not promise a winner: a tie stays a tie. If a prototype fails twice, show its placeholder and the automatic rejection.
 

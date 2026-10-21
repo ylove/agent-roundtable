@@ -2,7 +2,7 @@
 
 | Provider id | Backend | Default model | Notes |
 | --- | --- | --- | --- |
-| `anthropic` | Anthropic Messages API | `claude-opus-5` | Aliases `opus` / `sonnet` resolve to `claude-opus-5` / `claude-sonnet-5`. `temperature` is never sent. |
+| `anthropic` | Anthropic Messages API | `claude-sonnet-5-5` | Aliases `opus`, `sonnet` and `haiku` resolve to `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`. `temperature` is never sent. |
 | `openai` | OpenAI Chat Completions | `gpt-5.6-luna` | Uses `max_completion_tokens`. |
 | `together` | Together AI | `zai-org/GLM-5.3` | Any Together model id, e.g. `Qwen/Qwen3.8-2.4T-A95B`. |
 | `replicate` | Replicate predictions API | `qwen/qwen3-235b-a22b-instruct-2507` | `model` accepts `owner/name`, `owner/name:version`, or a `https://replicate.com/owner/name` URL. The server reads the model's input schema once and only sends fields the model declares (`prompt`, `system_prompt`, `max_tokens` or `max_new_tokens`, `temperature`). Cold starts are covered by the request timeout. |

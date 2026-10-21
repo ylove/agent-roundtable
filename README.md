@@ -8,10 +8,13 @@ Runs locally over stdio with Claude Code or any MCP client. Requires Node 22+.
 
 ```sh
 npm install -g agent-roundtable
-claude mcp add agent-roundtable \
+claude mcp add --scope user roundtable \
   -e ROUNDTABLE_AGENTS_DIR="$HOME/my-project/.claude/agents" \
-  -- agent-roundtable
+  -- roundtable mcp
+claude mcp list        # roundtable should show as connected
 ```
+
+`roundtable mcp` starts the orchestrator server, the same as running the binary with no arguments. Without the global install, use `-- npx -y agent-roundtable` or `-- node /absolute/path/to/dist/index.js` (a source checkout). `--scope user` makes it available in every project; leave it out (or use `--scope project`) to register it for one project only. Then ask Claude Code to "list the roundtable tools": you should see the 43 [tools](#tools), named `mcp__roundtable__<tool>`.
 
 Create personas in that directory or copy the [examples](examples/). Set keys for the [providers](docs/providers.md) you use; local meetings use your Claude CLI login. For source installs, `.env`, `add-json` and project `.mcp.json` registration, see [getting started](docs/getting-started.md) and [configuration](docs/configuration.md). After a rebuild, reconnect with `/mcp`.
 
@@ -23,7 +26,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 | Format | What it does | Example prompt |
 | --- | --- | --- |
-| [Meeting](docs/modes/meetings.md) | Talk with one persona on a chosen provider/model. | “Start a meeting via agent-roundtable with cfo about our Q3 budget.” |
+| [Meeting](docs/modes/meetings.md) | Talk with one persona on a chosen provider/model. | “Start a meeting via roundtable with cfo about our Q3 budget.” |
 | [Local meeting](docs/modes/meetings.md#local-meetings) | Talk with a persona through your installed Claude CLI and login. | “Start a local meeting with product-lead about onboarding.” |
 | [Collaboration: collaborate](docs/modes/collaborations.md) | Personas take turns building a shared idea. | “Have cfo and product-lead collaborate on launch priorities for three rounds.” |
 | [Collaboration: debate](docs/modes/collaborations.md#formats) | One proponent faces challengers. | “Have cfo defend our pricing plan against skeptic in a roundtable debate.” |
@@ -77,8 +80,8 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | Contracts | [`propose_contract`](docs/tools.md#propose_contract) | Turn a plan into a draft execution contract. |
 | Contracts | [`amend_contract`](docs/tools.md#amend_contract) | Apply a versioned contract merge patch. |
 | Contracts | [`freeze_contract`](docs/tools.md#freeze_contract) | Freeze the current contract after consent. |
-| Contracts (both servers) | [`file_dissent`](docs/dissents.md#file-or-update-a-concern) | File, complete or explicitly excuse a draft dissent. |
-| Contracts | [`score_dissent`](docs/dissents.md#advisory-scores) | Record an advisory assessment of a dissent's prediction. |
+| Contracts (both servers) | [`file_dissent`](docs/tools.md#file_dissent) | File, complete or explicitly excuse a draft dissent. |
+| Contracts | [`score_dissent`](docs/tools.md#score_dissent) | Record an advisory assessment of a dissent's prediction. |
 | Runs | [`execute`](docs/tools.md#execute) | Preflight and start an authorized frozen contract. |
 | Runs | [`execution_status`](docs/tools.md#execution_status) | Report progress, blockers, budget and context. |
 | Runs | [`control_execution`](docs/tools.md#control_execution) | Pause, resume, steer, abort or purge a run; stop an agent; write a handoff. |
@@ -99,21 +102,22 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 ## CLI
 
-No arguments starts the orchestrator MCP server. The **11 subcommands** are documented in the [CLI reference](docs/cli.md).
+No arguments starts the orchestrator MCP server. The binary has **11 subcommands**, plus **5 table commands** that run at the table from a terminal (`duel`, `debate`, `waffle`, `meeting`, `config`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
 
 | Subcommand | Purpose |
 | --- | --- |
 | `mcp` | Start an orchestrator or token-bound worker stdio server. |
 | `hook pre-tool-use` | Check worker file access and leases using stdin hook JSON. |
 | `run <exe>` | Run or recover a heads-down runner. |
-| `watch <exe> --as <name>` | Wait for one orchestrator wake, printing JSON. |
+| `watch <exe> --as <name> [--timeout-min N]` | Wait for one orchestrator wake, printing JSON. |
 | `status <exe> [--json]` | Inspect a run's tasks, budget and health. |
 | `verify <exe> [--json]` | Verify execution and audit chains. |
 | `purge <exe> --confirm` | Delete a finished run's worktrees, branches and log. |
 | `statusline [--agents N] [--plain] [--no-host]` | A Claude Code status line with the host and the roundtable's spend. |
 | `usage [--json] [--watch]` | Who is using what, on which platform, measured or estimated. |
-| `stop <agent> [--execution <exe> \| --session <id>]` | Stop one agent, heads-down or at the table. |
+| `stop <agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent, heads-down or at the table. |
 | `help` | Print usage. |
+| `duel`, `debate`, `waffle`, `meeting`, `config` | Table commands: see [at the table from the terminal](docs/table-cli.md). |
 
 ## Docs
 
@@ -122,6 +126,8 @@ No arguments starts the orchestrator MCP server. The **11 subcommands** are docu
 - [Heads-down user guide](docs/heads-down.md) and [design specification](docs/design/heads-down.md); [postmortem design specification](docs/design/postmortem.md)
 - [Usage visibility](docs/usage.md): the status line, the usage report, the dashboard Usage page and stopping an agent
 - [Dissents and tripwires](docs/dissents.md)
+- [At the table from the terminal](docs/table-cli.md): `duel`, `debate`, `waffle`, `meeting`, per-seat models and replay
+- [Duel](docs/modes/duel.md) and the [demo recording script](docs/demo.md)
 - [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)
 - [Configuration](docs/configuration.md) and [providers](docs/providers.md)
 - [Agent personas and skills](docs/agents.md) and [session archives](docs/sessions.md)

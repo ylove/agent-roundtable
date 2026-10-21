@@ -19,7 +19,7 @@ const personaList = (what: string, max: number): JsonSchema => ({
 export const START_DUEL_SCHEMA: JsonSchema & { type: "object" } = {
   type: "object",
   properties: {
-    provider: { type: "string", enum: ["auto", "anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"], description: "Omit or use auto for provider judgment." },
+    provider: { type: "string", enum: ["auto", "anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"], description: "Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url)." },
     model: { type: "string", minLength: 1 },
     topic: { type: "string", minLength: 1, maxLength: 4000, description: "The brief both teams answer, for example a landing page for a product, a module with a given interface, or a written policy." },
     team_a: personaList(`Team A personas, 1 to ${MAX_TEAM_SIZE}. The first writes the concept, the last builds, anyone between critiques the concept. A one-person team does both.`, MAX_TEAM_SIZE),

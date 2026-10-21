@@ -168,7 +168,7 @@ export const deliberationTools: ToolDefinition[] = [
           enum: ["auto", ...PROVIDER_IDS],
           "x-advisory-enum": true,
           description:
-            "LLM provider. Omit or use auto for provider judgment; explicit providers retain their defaults. Results include routing decisions.",
+            "LLM provider. Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
         model: {
           type: "string",
@@ -457,7 +457,7 @@ export const deliberationTools: ToolDefinition[] = [
           enum: ["auto", ...PROVIDER_IDS],
           "x-advisory-enum": true,
           description:
-            "LLM provider. Omit or use auto for provider judgment; explicit providers retain their defaults. Results include routing decisions.",
+            "LLM provider. Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
         model: {
           type: "string",

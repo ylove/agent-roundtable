@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
+const AUTO_TOOLS = ["start_meeting", "start_collaboration", "start_ultraplan", "start_duel"];
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
 const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract", "resolve_escalation", "hold_postmortem"];
 const NEW_START_TOOLS = ["start_ultraplan", "create_agent", "improve_agent"];
@@ -362,7 +363,8 @@ try {
   for (const name of PROVIDER_TOOLS) {
     check(`${name}.provider enum = ${EXPECTED_PROVIDERS.join("|")}`, () => {
       const e = byName[name]?.inputSchema?.properties?.provider?.enum;
-      assert(JSON.stringify(e) === JSON.stringify(EXPECTED_PROVIDERS), `got ${JSON.stringify(e)}`);
+      const want = AUTO_TOOLS.includes(name) ? ["auto", ...EXPECTED_PROVIDERS] : EXPECTED_PROVIDERS;
+      assert(JSON.stringify(e) === JSON.stringify(want), `got ${JSON.stringify(e)}`);
     });
     check(`${name}.model description names both Claude ids + aliases`, () => {
       const d = byName[name]?.inputSchema?.properties?.model?.description || "";

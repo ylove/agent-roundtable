@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.0 (unreleased)
+
+Work on `release/2.0.0` so far. `package.json` and `VERSION` stay at 1.0.0 until the 2.0 version bump.
+
+- **Table CLI and env file.** `roundtable duel`, `debate`, `waffle`, `meeting` and `config` run at the table from a terminal, streaming turns and spend (`--json` for NDJSON). `roundtable config set env-file|agents-dir` saves settings in `~/.agent-roundtable/config.json`; `ROUNDTABLE_ENV_FILE` points to a private env file that supplies only allowed provider keys and model defaults, under an owner-only rule and an OpenAI-compatible pair rule. See [the table CLI](docs/table-cli.md) and [configuration](docs/configuration.md#saved-cli-settings-and-env-files).
+- **Per-seat models.** `--seat agent=provider:model`, `--mix auto|cheap` and automatic preflight on the CLI; a `seats` argument on `start_collaboration` and `start_duel`; persona `provider`/`model` frontmatter.
+- **Duel mode.** Two teams build competing artifacts for any brief, judges assess them against a rubric and the losing side files dissents. Teams of 1 to 4, judges 1 to 5, four artifact kinds (`web`, `code`, `diagram`, `text`), custom `criteria`, one or two rounds. Available from the terminal (with a live local room and `--replay` of saved archives) and as the `start_duel` tool. See [duel](docs/modes/duel.md) and the [demo script](docs/demo.md).
+- **Duel to contract.** `propose_contract(from_session: "duel-<id>")` imports the winning decision and archived dissents, and by default drafts a task plan from the winning artifact (`draft_plan: false` opts out). `amend_contract(from_session: "duel-<id>")` adds a duel to an existing contract.
+- **A duel as a meeting's focus.** `duel` and `duel_source` arguments on `start_meeting`, `start_local_meeting`, `start_collaboration` and `start_ultraplan`, and `--duel` / `--no-duel-source` on the CLI, give a session a size-capped brief of a saved duel to discuss.
+- **Artifact-safe scrubbing.** Prototype and duel artifact content is scrubbed with credential-shaped rules only, so source identifiers stay intact while secrets are replaced.
+- **Hardening.** Duel archives, seat models and configuration loading were tightened ([#173](https://github.com/ylove/agent-roundtable/pull/173)).
+- **Documentation.** Every tool has its own reference section (43 orchestrator tools, 8 on worker servers), the CLI reference covers the table commands, and the environment variables are documented.
+
 ## 1.1.0 (not published to npm; ships with 2.0.0)
 
 Three features work together: dissents and tripwires carry concerns from planning into execution, postmortem mode reviews what happened and preserves lessons, and usage visibility shows their spend alongside the rest of the work.

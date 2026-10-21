@@ -1,4 +1,4 @@
-import { executionLLM, prepareExecutionProvider } from "./provider-routing.js";
+import { executionLLM } from "./provider-routing.js";
 // ============================================================================
 // The runner: `agent-roundtable run <exe>` (heads-down.md §2, §3, §10, §11)
 //
@@ -29,6 +29,7 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, sta
 import { join } from "node:path";
 import { PROVIDER_IDS, VERSION } from "../config.js";
 import { executionTag } from "../ids.js";
+import { executionLLM } from "./provider-routing.js";
 import { loadAgent } from "../agents.js";
 import { pidAlive } from "../prototypes/sandbox.js";
 import { DockerBackend, LocalBackend, SANDBOX_ENV, selectBackend } from "../sandbox/index.js";
@@ -109,8 +110,6 @@ export interface RunnerOptions {
    * DEFAULT_HOOKS, which only log and review COMPLETE (tests).
    */
   hooks?: Partial<RunnerHooks>;
-  /** Probe automatic persona providers after validating a live execution, before starting workers. */
-  providerPreflight?: boolean;
   /** Worker drivers by id (default ClaudeCodeDriver and CodexDriver). */
   drivers?: Partial<Record<WorkerDriverId, WorkerDriver>>;
   /** Tick interval (default 1500 ms). */
@@ -444,7 +443,6 @@ export class Runner {
         this.stopping = state.status;
         return;
       }
-      if (this.opts.providerPreflight) await prepareExecutionProvider({ remainingBudgetUsd: remainingUsd(state) });
       const takeover = previous && !previous.stoppedAt && previous.pid !== process.pid;
       await this.commit([
         ...(takeover ? [{ type: "runner.takeover", source: this.source, payload: { previous_pid: previous.pid } } as AnyEventDraft] : []),
@@ -1857,7 +1855,7 @@ export async function runRunner(execution: string, opts: RunnerOptions = {}): Pr
   const llm = raw && raw !== "auto" ? executionLLM() : undefined;
   if (llm?.unknown) console.error(`agent-roundtable run: ROUNDTABLE_EXECUTION_PROVIDER ${JSON.stringify(llm.unknown.slice(0, 40))} is not a provider (${PROVIDER_IDS.join(", ")}); using ${llm.provider}`);
   // The real hooks: escalation routing, huddles, the lead fallback and goal review (WS10).
-  const r = new Runner(execution, { ...opts, providerPreflight: opts.hooks === undefined && process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT !== "1", hooks: opts.hooks ?? createRunnerHooks(), signals: false });
+  const r = new Runner(execution, { ...opts, hooks: opts.hooks ?? createRunnerHooks(), signals: false });
   const onSignal = (sig: string) => r.stop(`signal ${sig}`);
   if (opts.signals) {
     process.on("SIGTERM", onSignal);

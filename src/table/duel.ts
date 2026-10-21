@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { agentKey, listAgents, loadAgent, readFrontmatter } from "../agents.js";
 import { DEFAULT_MODELS, PARALLEL_TURNS, ROUNDTABLE_HOME } from "../config.js";
 import { callLLM } from "../providers/index.js";
+import { callWithFrontmatterFallback } from "./seats.js";
 import { activeUsageSink, withAbortSignal, withUsageSink } from "../providers/usage.js";
 import { parsePrototypeBlock, type PrototypeFile } from "../prototypes/parse.js";
 import { createSessionDir, ensurePrototypeRoot, materializeFiles, releaseSessionDir, removeDirSync, sweepStaleSessionDirs } from "../prototypes/sandbox.js";
@@ -250,11 +251,11 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
           if (usd === undefined) total.unpricedTokens += input + output;
           if (line.tokens_prov === "estimated") total.estimated = true;
           ledger?.(report);
-        }, () => withAbortSignal(callStop, () => callLLM(
+        }, () => withAbortSignal(callStop, () => callWithFrontmatterFallback(seat, seat.id.replace(/^(?:A|B|judge):/, ""), () => callLLM(
           `${duelSystem(kind)}\n\n${seat.prompt ?? `Your role is ${seat.role ?? seat.name}.`}`,
           [{ role: "user", content: prompt }],
           { provider: seat.provider, model: seat.model, maxTokens: tokens, estimateUsageOnFailure: true },
-        )));
+        ), line => { process.stderr.write(`${line}\n`); const shown = seats.find(s => s.id === seat.id); if (shown) shown.model = seat.model; })));
       });
       // A deadline also settles a misbehaving provider stub that ignores its AbortSignal.
       const text = await cancellable(call(turnTokens(seat.provider, round)), callStop).catch(async e => {

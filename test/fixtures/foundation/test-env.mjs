@@ -22,4 +22,6 @@ process.env.HOME = join(root, "home");
 process.env.ROUNDTABLE_PROVIDER_RETRIES = "0";
 // Path-like agent refs must stay inside allowed roots; tests pass fixture paths under test/fixtures.
 process.env.ROUNDTABLE_AGENT_PATHS = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// execute probes its provider once; offline tests skip that call (the preflight test turns it back on).
+process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT = "1";
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));

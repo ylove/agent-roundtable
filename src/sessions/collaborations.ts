@@ -1,10 +1,12 @@
+import { MAX_TOKENS } from "../config.js";
+import type { Seat } from "../table/events.js";
 // ============================================================================
 // Collaboration Functions (Agent-to-Agent)
 // ============================================================================
 
 import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
-import { resolveSeats, validateSeatSpecs } from "../table/seats.js";
+import { prepareSeats, resolveSeats, validateSeatSpecs } from "../table/seats.js";
 import type { SeatSpec } from "../table/events.js";
 import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
@@ -54,6 +56,7 @@ export interface CollaborationAgent {
   name: string;
   provider?: string;
   model?: string;
+  maxOutputTokens?: number;
   systemPrompt: string;
   /** Set in debate (proponent/challenger) and waffle-house (defender/attacker) modes. */
   role?: CollaborationRole;
@@ -108,8 +111,9 @@ function agentCallOptions(collaboration: Collaboration, agent: CollaborationAgen
   const provider = agent.provider ?? collaboration.provider;
   return {
     provider,
-    model: agent.model ?? (provider === collaboration.provider ? collaboration.model : (Object.hasOwn(DEFAULT_MODELS, provider) ? DEFAULT_MODELS[provider as LLMProvider] : "")),
+    model: agent.model ?? (provider === collaboration.provider ? collaboration.model : (Object.hasOwn(DEFAULT_MODELS, provider ?? "") ? DEFAULT_MODELS[provider as LLMProvider] : "")),
     baseUrl: provider === "openai_compatible" ? collaboration.baseUrl : undefined,
+    ...(agent.maxOutputTokens !== undefined && { maxTokens: Math.min(MAX_TOKENS, agent.maxOutputTokens) }),
     estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin),
   };
 }
@@ -292,7 +296,7 @@ export async function startCollaboration(
     maxRounds?: number;
     autoRun?: boolean;
     runRounds?: number;
-    provider?: LLMProvider;
+    provider?: LLMProvider | "auto";
     model?: string;
     seats?: Record<string, SeatSpec>;
     signal?: AbortSignal;
@@ -310,6 +314,7 @@ export async function startCollaboration(
   } = {}
 ): Promise<{
   collaborationId: string;
+  routing?: Seat[];
   messages: CollaborationMessage[];
   status: string;
   public?: { url: string | null; topic: string };
@@ -340,8 +345,8 @@ async function openCollaboration(
     throw new Error(`max_rounds must be at most ${MAX_COLLABORATION_ROUNDS} (got ${options.maxRounds})`);
   }
 
-  const provider = options.provider || "anthropic";
-  const resolvedModel = options.model || (Object.hasOwn(DEFAULT_MODELS, provider) ? DEFAULT_MODELS[provider as LLMProvider] : "");
+  const provider = options.provider === "auto" ? undefined : options.provider;
+  const resolvedModel = options.model || (Object.hasOwn(DEFAULT_MODELS, provider ?? "") ? DEFAULT_MODELS[provider as LLMProvider] : "");
   const baseUrl = options.baseUrl;
   const mode: CollaborationMode = options.mode ?? "collaborate";
   assertCollaborationMode(mode);
@@ -359,7 +364,7 @@ async function openCollaboration(
 
   if (options.seats != null) validateSeatSpecs(options.seats);
   // Explicit session-wide assignments keep their established behavior; per-seat assignments win.
-  const assigned: Record<string, SeatSpec> | undefined = options.provider !== undefined || options.model !== undefined
+  const assigned: Record<string, SeatSpec> | undefined = provider !== undefined
     ? Object.fromEntries(agentNames.map(agent => {
         const override = options.seats?.[agent];
         const model = override?.model ?? (override?.provider ? (Object.hasOwn(DEFAULT_MODELS, override.provider) ? DEFAULT_MODELS[override.provider as LLMProvider] : "") : resolvedModel);
@@ -370,8 +375,12 @@ async function openCollaboration(
     throw new Error("Seat override names an agent outside the roster.");
   }
   const loadedAgents = new Map<string, Awaited<ReturnType<typeof loadAgent>>>();
-  const seats = await resolveSeats({
-    agents: [...new Set(agentNames)], seats: assigned, provider, model: resolvedModel,
+  // Explicit seats dispatch directly, retaining per-call endpoint and credential validation.
+  const explicitRoster = agentNames.every(name => assigned?.[name]?.provider !== undefined);
+  if (!explicitRoster && baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
+  const resolveRoster = explicitRoster ? resolveSeats : prepareSeats;
+  const seats = await resolveRoster({
+    agents: [...new Set(agentNames)], seats: assigned, provider: provider as LLMProvider | undefined, model: options.model,
     load: async name => {
       const loaded = await loadAgent(name);
       loadedAgents.set(name, loaded);
@@ -409,7 +418,7 @@ async function openCollaboration(
     }
     if (options.public) systemPrompt += publicDirectiveSuffix();
     if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: false, public: !!options.public });
-    agents.push({ name, systemPrompt, provider: seats.get(name)!.provider, model: seats.get(name)!.model, ...(role !== undefined && { role }) });
+    agents.push({ name, systemPrompt, provider: seats.get(name)!.provider, model: seats.get(name)!.model, maxOutputTokens: seats.get(name)!.maxOutputTokens, ...(role !== undefined && { role }) });
   }
 
   const maxRounds = options.maxRounds || 5;
@@ -444,8 +453,8 @@ async function openCollaboration(
     currentRound: 0,
     status: "running",
     startedAt: new Date(),
-    provider,
-    model: resolvedModel,
+    provider: (provider ?? seats.values().next().value!.provider) as LLMProvider,
+    model: resolvedModel || seats.values().next().value!.model,
     ...(baseUrl !== undefined && { baseUrl }),
     ...(options.signal && { signal: options.signal }),
     mode,
@@ -543,6 +552,7 @@ async function openCollaboration(
 
   return {
     collaborationId,
+    routing: [...seats.values()].map(seat => ({ ...seat, model: agents.find(a => a.name === seat.id)?.model ?? seat.model })),
     messages: collaboration.messages,
     status: collaboration.status,
     ...(autoRunError !== undefined && { error: `Auto-run stopped: ${autoRunError}. The session is paused; use nudge_collaboration to resume or end_collaboration to close it.` }),

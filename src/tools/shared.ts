@@ -83,6 +83,11 @@ export const PROVIDER_PROPS = {
   },
 } as const;
 
+export const AUTO_PROVIDER_PROPS = {
+  ...PROVIDER_PROPS,
+  provider: { ...PROVIDER_PROPS.provider, enum: ["auto", ...PROVIDER_IDS], description: "Omit or use auto for deterministic provider judgment; explicit providers retain their defaults. Results include routing decisions." },
+} as const;
+
 export const MEETING_MODE_PROPS = {
   mode: {
     type: "string",
@@ -133,8 +138,12 @@ export const PROTOTYPE_PROP = {
 // ----------------------------------------------------------------------------
 
 /** Reject routing mistakes before a workshop loads personas or opens a public channel. */
-export function validateProviderOptions(provider: LLMProvider = "anthropic", baseUrl?: string): void {
-  if (!PROVIDER_IDS.includes(provider)) {
+export function validateProviderOptions(provider: LLMProvider | "auto" = "anthropic", baseUrl?: string, allowAuto = false): void {
+  if (provider === "auto" && allowAuto) {
+    if (baseUrl) throw new Error("base_url requires explicit provider openai_compatible.");
+    return;
+  }
+  if (!(PROVIDER_IDS as string[]).includes(provider)) {
     throw new Error(`Unknown provider "${provider}". Valid providers: ${PROVIDER_IDS.join(", ")}`);
   }
   if (baseUrl && provider !== "openai_compatible") {
@@ -148,7 +157,7 @@ export function validateProviderOptions(provider: LLMProvider = "anthropic", bas
  */
 export function formatUltraplanResult(result: UltraplanStepResult | UltraplanFinalResult): string {
   if (result.status !== "finalized") return JSON.stringify(result, null, 2);
-  const trailer = { ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally };
+  const trailer = { routing: result.routing, ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally };
   return result.finalPlan + (result.publicBlock ? `\n\n${result.publicBlock}` : "") +
     "\n\n```json\n" + JSON.stringify(trailer, null, 2) + "\n```";
 }

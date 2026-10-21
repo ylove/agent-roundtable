@@ -1,3 +1,5 @@
+import { remainingUsd } from "./budget.js";
+import { executionLLM } from "./provider-routing.js";
 // ============================================================================
 // Escalations: routing, resolution and the runner hooks (heads-down.md §12)
 //
@@ -22,7 +24,7 @@
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { executionLLM, type LLMProvider } from "../config.js";
+import { type LLMProvider } from "../config.js";
 import { loadAgent, renderSkillsSection } from "../agents.js";
 import { newId } from "../ids.js";
 import { callLLM, withUsageSink, type UsageReport } from "../providers/index.js";
@@ -1212,23 +1214,24 @@ export async function finishConcludedHuddle(ctx: HookCtx, id: string, opts: Esca
 // ============================================================================
 
 export interface RunnerHookOptions extends EscalationOptions {
-  /** Defaults to executionLLM(): ROUNDTABLE_EXECUTION_PROVIDER, _MODEL and _BASE_URL, else anthropic. */
+  /** Defaults to executionLLM(): ROUNDTABLE_EXECUTION_PROVIDER, _MODEL and _BASE_URL, else provider judgment at judge tier. */
   llm?: HuddleLLM;
 }
 
-/** The persona-call settings from the environment (config.executionLLM), read when a hook runs. */
-export function executionHuddleLLM(): HuddleLLM {
-  const { provider, model, baseUrl } = executionLLM();
+/** The persona-call settings from the environment (executionLLM), read when a hook runs. */
+export function executionHuddleLLM(remainingBudgetUsd?: number): HuddleLLM {
+  const { provider, model, baseUrl } = executionLLM({ remainingBudgetUsd });
   return { provider, model, ...(baseUrl !== undefined && { baseUrl }) };
 }
 
 /** Adapt the WS08 controls to the context shared by WS10 and WS11. */
 export async function runnerHookContext(ctx: RunnerContext, opts: RunnerHookOptions = {}): Promise<HookCtx> {
+  const state = await ctx.store.state();
   return {
-    store: ctx.store, state: await ctx.store.state(), header: ctx.header,
+    store: ctx.store, state, header: ctx.header,
     // The run's driver: a live claude-code worker answers a micro-huddle through driver.answer().
     driver: ctx.driver(), worker: (agent) => ctx.worker(agent),
-    llm: opts.llm ?? executionHuddleLLM(),
+    llm: opts.llm ?? executionHuddleLLM(remainingUsd(state)),
   };
 }
 

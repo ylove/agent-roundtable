@@ -42,8 +42,10 @@ test("collaboration dispatch persists a frontmatter model fallback across turns 
   });
   assert.equal(messages.length, 3);
   await endCollaboration(collaborationId, true);
-  assert.deepEqual(calls.map(c => c.body.model), ["missing-collaboration-model", DEFAULT_MODELS.openai,
-    "fixture-model", DEFAULT_MODELS.openai, DEFAULT_MODELS.openai]);
+  assert.deepEqual(calls.filter(c => c.body.max_completion_tokens === 64).map(c => c.body.model),
+    ["missing-collaboration-model", "fixture-model", DEFAULT_MODELS.openai]);
+  assert.deepEqual(calls.filter(c => c.body.max_completion_tokens !== 64).map(c => c.body.model),
+    [DEFAULT_MODELS.openai, "fixture-model", DEFAULT_MODELS.openai, DEFAULT_MODELS.openai]);
   assert.equal(warnings.length, 1);
 });
 

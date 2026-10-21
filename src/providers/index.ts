@@ -1,3 +1,19 @@
+import { providerHealth } from "./health.js";
+import { ProviderHttpError } from "./retry.js";
+import { appendTableLine, newServerId } from "../usage/table.js";
+
+let outcomeServer: string | undefined;
+function recordOutcome(provider: LLMProvider, model: string, started: number, outcome: ProviderOutcome["outcome"], reportsUsage: boolean): ProviderOutcome {
+  const result: ProviderOutcome = { provider, model, outcome, latency_ms: Math.max(0, Date.now() - started) };
+  // A session or execution sink already owns this call. Never create a second table row for it.
+  if (activeUsageSink()) {
+    if (!reportsUsage) reportProviderFailure(result);
+  } else {
+    try { appendTableLine({ at: new Date(Date.now()).toISOString(), server: outcomeServer ??= newServerId(), session: "provider-calls", kind: "provider-call", agent: "provider", ...result }); }
+    catch { /* Health must work when the usage directory is read-only. */ }
+  }
+  return result;
+}
 // ============================================================================
 // LLM Completion Functions (provider table + routing)
 // ============================================================================
@@ -15,7 +31,7 @@ import { callAnthropic } from "./anthropic.js";
 import { callOpenAI, callTogether, callOpenAICompatible } from "./openai-compatible.js";
 import { callReplicate } from "./replicate.js";
 import { callOllama, isOllamaAvailable } from "./ollama.js";
-import { activeAbortSignal, reportUsage, StoppedError } from "./usage.js";
+import { activeAbortSignal, activeUsageSink, reportUsage, StoppedError, withProviderOutcome, reportProviderFailure, type ProviderOutcome } from "./usage.js";
 
 export type { LLMMessage, LLMCompletionResult, ProviderCall, ProviderCallOptions } from "./shared.js";
 export { isOllamaAvailable };
@@ -75,6 +91,8 @@ export async function chatCompletion(
 
   const stop = activeAbortSignal();
   let dispatched = false;
+  const started = Date.now();
+  let failedOutcome: ProviderOutcome | undefined;
   try {
     stop?.throwIfAborted();
     const timeout = AbortSignal.timeout(LLM_TIMEOUT_MS);
@@ -86,17 +104,27 @@ export async function chatCompletion(
       signal: stop ? AbortSignal.any([timeout, stop]) : timeout,
       ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
     });
+    providerHealth.recordCall(provider, true, undefined, process.env, options.baseUrl, model);
+    const outcome = recordOutcome(provider, model, started, "ok", true);
     // Every completion (engines via callLLM, and the chat_completion tool) reaches the active usage sink.
-    reportUsage({
+    withProviderOutcome(outcome, () => reportUsage({
       provider: result.provider,
       model: result.model,
       ...(result.usage && { usage: result.usage }),
       chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: result.content.length },
-    });
+    }));
     return result;
   } catch (error) {
+    if (dispatched && !stop?.aborted) {
+      const status = error instanceof ProviderHttpError ? error.status : undefined;
+      const outcome = status === 401 || status === 403 ? "auth" : status === 429 ? "rate_limit" : error instanceof Error && /timeout|timed out|abort/i.test(error.name + error.message) ? "timeout" : "error";
+      // Unknown persona models are handled by the existing model fallback, not provider exclusion.
+      if (outcome === "auth" || outcome === "timeout" || outcome === "rate_limit") providerHealth.recordCall(provider, false, outcome === "auth" ? "auth failed" : outcome === "timeout" ? "request timed out" : "rate limited", process.env, options.baseUrl);
+      failedOutcome = recordOutcome(provider, model, started, outcome, options.estimateUsageOnFailure === true);
+    }
     if (dispatched && options.estimateUsageOnFailure) {
-      reportUsage({ provider, model, chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });
+      const report = () => reportUsage({ provider, model, chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });
+      if (failedOutcome) withProviderOutcome(failedOutcome, report); else report();
     }
     if (stop?.aborted) throw new StoppedError();
     if (

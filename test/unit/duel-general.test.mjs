@@ -71,7 +71,7 @@ for (const [kind, topic] of [["web", "A landing page for a bike-repair subscript
 }
 
 test("duel dispatch retries frontmatter models once and updates later turns and displayed seats", async t => {
-  const old = (await resolveSeats({ agents: ["legacy-duel"], load: async () => ({
+  const old = (await resolveSeats({ agents: ["legacy-duel"], env: { OPENAI_COMPATIBLE_BASE_URL: "http://127.0.0.1:1/v1" }, load: async () => ({
     frontmatter: { provider: "openai_compatible", model: "missing-duel-model" },
   }) })).get("legacy-duel");
   const seats = [{ ...old, id: "A:legacy-duel", team: "A", prompt: "You are the designer." },

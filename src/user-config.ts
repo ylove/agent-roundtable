@@ -2,10 +2,32 @@ import { closeSync, fstatSync, openSync, readFileSync, statSync, constants, mkdi
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parse } from "dotenv";
+import { PROVIDER_IDS, type LLMProvider } from "./provider-ids.js";
 
 import { validateRuntimeConfig, type RuntimeSpec } from "./runtimes/spec.js";
 
-export interface UserConfig { envFile?: string; agentsDir?: string; runtimes?: Record<string, Partial<RuntimeSpec>> }
+export type RoutingTier = "builder" | "judge" | "balanced";
+export interface RoutingModel { model: string; reasoning?: boolean; maxOutputTokens?: number }
+export type RoutingConfig = Partial<Record<LLMProvider, Partial<Record<RoutingTier, RoutingModel>>>>;
+
+/** Operator configuration only: no endpoints, credentials, health or price overrides. */
+export function validateRoutingConfig(raw: unknown): RoutingConfig {
+  const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  if (!record(raw)) throw new Error("Invalid routing configuration.");
+  for (const [provider, tiers] of Object.entries(raw)) {
+    if (!(PROVIDER_IDS as string[]).includes(provider) || !record(tiers)) throw new Error("Invalid routing provider.");
+    for (const [tier, spec] of Object.entries(tiers)) {
+      if (!["builder", "judge", "balanced"].includes(tier) || !record(spec) ||
+          Object.keys(spec).some(k => !["model", "reasoning", "maxOutputTokens"].includes(k)) ||
+          typeof spec.model !== "string" || !/^[\x21-\x7e]{1,200}$/.test(spec.model) ||
+          (spec.reasoning !== undefined && typeof spec.reasoning !== "boolean") ||
+          (spec.maxOutputTokens !== undefined && (typeof spec.maxOutputTokens !== "number" || !Number.isSafeInteger(spec.maxOutputTokens) || spec.maxOutputTokens < 1))) throw new Error("Invalid routing model.");
+    }
+  }
+  return raw as RoutingConfig;
+}
+
+export interface UserConfig { routing?: RoutingConfig; envFile?: string; agentsDir?: string; runtimes?: Record<string, Partial<RuntimeSpec>> }
 type Environment = Record<string, string | undefined>;
 const allowedKeys = new Set(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY", "REPLICATE_API_TOKEN"]);
 export function allowedEnvKey(key: string): boolean {
@@ -40,8 +62,9 @@ export function readUserConfig(home = userConfigHome()): UserConfig {
     for (const key of ["envFile", "agentsDir"]) {
       if (config[key] !== undefined && (typeof config[key] !== "string" || !isAbsolute(config[key] as string))) throw new Error();
     }
+    const routing = config.routing === undefined ? undefined : validateRoutingConfig(config.routing);
     const runtimes = config.runtimes === undefined ? undefined : validateRuntimeConfig(config.runtimes);
-    return { ...(runtimes && { runtimes }), ...(typeof config.envFile === "string" && { envFile: config.envFile }), ...(typeof config.agentsDir === "string" && { agentsDir: config.agentsDir }) };
+    return { ...(routing && { routing }), ...(runtimes && { runtimes }), ...(typeof config.envFile === "string" && { envFile: config.envFile }), ...(typeof config.agentsDir === "string" && { agentsDir: config.agentsDir }) };
   } catch {
     try { statSync(join(home, "config.json")); } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};

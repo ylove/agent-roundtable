@@ -115,6 +115,8 @@ export interface VerdictRoundOptions<A> {
   /** The canonical verdicts after `<label>:` (parseVerdict). */
   verdicts: readonly string[];
   llm: CallLLMOptions;
+  /** Optional per-participant dispatch, retaining the same metering and verdict handling. */
+  ask?: (agent: A, messages: Array<{ role: "user" | "assistant"; content: string }>) => Promise<string>;
   /** Concurrent calls; default PARALLEL_TURNS. */
   limit?: number;
   /**
@@ -158,12 +160,12 @@ export async function runVerdictRound<A extends { systemPrompt: string }>(
     const messages: Array<{ role: "user" | "assistant"; content: string }> = [{ role: "user", content: buildPrompt(agent, index) }];
     const call = <T>(fn: () => Promise<T>): Promise<T> => (options.scope ? metered(options.scope(agent, index), fn) : fn());
     try {
-      let content = await call(() => callLLM(agent.systemPrompt, messages, options.llm));
+      let content = await call(() => (options.ask ? options.ask(agent, messages) : callLLM(agent.systemPrompt, messages, options.llm)));
       let verdict = parseVerdict(content, label, options.verdicts);
       let reasked = false;
       if (verdict === "UNCLEAR" && options.reask !== undefined) {
         const again = typeof options.reask === "function" ? options.reask(agent, index) : options.reask;
-        content = await call(() => callLLM(agent.systemPrompt, [...messages, { role: "assistant", content }, { role: "user", content: again }], options.llm));
+        content = await call(() => (options.ask ? options.ask(agent, [...messages, { role: "assistant", content }, { role: "user", content: again }]) : callLLM(agent.systemPrompt, [...messages, { role: "assistant", content }, { role: "user", content: again }], options.llm)));
         verdict = parseVerdict(content, label, options.verdicts);
         reasked = true;
       }

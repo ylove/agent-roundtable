@@ -1,8 +1,11 @@
+import { prepareSeats } from "../table/seats.js";
+import { callSeat } from "../table/dispatch.js";
+import type { Seat } from "../table/events.js";
 // ============================================================================
 // Ultraplan: specialist input, independent reviews and final sign-offs
 // ============================================================================
 
-import { DEFAULT_MODELS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
+import { DEFAULT_MODELS, MAX_TOKENS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
 import { agentKey, loadAgentPromptWithPath } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
@@ -35,6 +38,7 @@ export interface Ultraplan {
   context?: string;
   agents: Array<{ name: string; key: string; systemPrompt: string }>;
   planner?: { name: string; key: string; systemPrompt: string };
+  routing?: Seat[];
   provider: LLMProvider;
   model: string;
   baseUrl?: string;
@@ -56,6 +60,7 @@ type Verdict = Input & { verdict: string };
 type PlanVersion = Ultraplan["versions"][number];
 
 export interface UltraplanStepResult {
+  routing?: Seat[];
   ultraplanId: string;
   status: "awaiting_plan" | "awaiting_revision";
   phase: "input" | "review" | "plan";
@@ -72,6 +77,7 @@ export interface UltraplanStepResult {
 }
 
 export interface UltraplanFinalResult {
+  routing?: Seat[];
   ultraplanId: string;
   status: "finalized";
   /** True only when sign-offs were collected and none is OBJECT or UNCLEAR. */
@@ -262,9 +268,14 @@ export function renderUltraplanDocument(u: Ultraplan, signoffs: Verdict[], colle
 // Phase computation and atomic commits
 // ----------------------------------------------------------------------------
 
+function dispatch(u: Ultraplan, agent: string, system: string, messages: Array<{ role: "user" | "assistant"; content: string }>): Promise<string> {
+  const seat = u.routing?.find(s => s.id === agent);
+  return seat ? callSeat(system, messages, { provider: seat.provider, model: seat.model, baseUrl: u.baseUrl, ...(seat.maxOutputTokens !== undefined && { maxTokens: Math.min(MAX_TOKENS, seat.maxOutputTokens) }) }, {
+    agent, onModelFallback: model => { seat.model = model; },
+  }) : callLLM(system, messages, { provider: u.provider, model: u.model, baseUrl: u.baseUrl });
+}
 function ask(u: Ultraplan, agent: string, systemPrompt: string, prompt: string): Promise<string> {
-  return metered({ session: u.id, kind: "ultraplan", agent }, () =>
-    callLLM(systemPrompt, [{ role: "user", content: prompt }], { provider: u.provider, model: u.model, baseUrl: u.baseUrl }));
+  return metered({ session: u.id, kind: "ultraplan", agent }, () => dispatch(u, agent, systemPrompt, [{ role: "user", content: prompt }]));
 }
 
 function ownEntry(u: Ultraplan, phase: "input" | "review", index: number): string | undefined {
@@ -290,6 +301,7 @@ async function computePhase(u: Ultraplan, phase: "input" | "review" | "signoff",
   }, review ? "Verdict" : "Sign-off", {
     verdicts: review ? REVIEW_VERDICTS : SIGNOFF_VERDICTS,
     llm: { provider: u.provider, model: u.model, baseUrl: u.baseUrl },
+    ...(u.routing && { ask: (agent: Ultraplan["agents"][number], messages: Array<{ role: "user" | "assistant"; content: string }>) => dispatch(u, agent.name, agent.systemPrompt, messages) }),
     limit: PARALLEL_TURNS,
     scope: (agent) => ({ session: u.id, kind: "ultraplan", agent: agent.name }),
   });
@@ -345,6 +357,7 @@ function stepResult(u: Ultraplan): UltraplanStepResult {
     : undefined;
   return {
     ultraplanId: u.id,
+    ...(u.routing && { routing: u.routing }),
     ...(v ? {
       status: "awaiting_revision", version: v.version, reviews,
       ...(reviews.length
@@ -386,7 +399,7 @@ async function finalize(u: Ultraplan, signoffs: Verdict[], collected: boolean): 
   const archived = archiveUltraplan(u, { markdown: document, signedOff, version, signoffs, tally, outcome }) !== null;
   ultraplans.delete(u.id);
   const publicBlock = u.publicChannel ? formatPublicBlock(u.publicChannel, await u.publicChannel.finalize({ summary: document })) : undefined;
-  return { ultraplanId: u.id, status: "finalized", signedOff, archived, version, finalPlan: document, signoffs, tally,
+  return { ultraplanId: u.id, routing: u.routing, status: "finalized", signedOff, archived, version, finalPlan: document, signoffs, tally,
     ...(publicBlock !== undefined && { publicBlock }) };
 }
 
@@ -404,8 +417,9 @@ function available(id: string): Ultraplan {
 export async function startUltraplan(
   agents: string[], task: string,
   opts: { context?: string; draftPlan?: string; planner?: string; revisionRounds?: number; public?: boolean;
-    provider?: LLMProvider; model?: string; baseUrl?: string; executionReady?: boolean; origin?: string } = {}
+    provider?: LLMProvider | "auto"; model?: string; baseUrl?: string; executionReady?: boolean; origin?: string } = {}
 ): Promise<UltraplanStepResult | UltraplanFinalResult> {
+  if ((opts.provider === undefined || opts.provider === "auto") && opts.baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
   if (!Array.isArray(agents) || agents.length < 1) throw new Error("Ultraplan requires at least 1 agent");
   if (typeof task !== "string" || !task.trim()) throw new Error("task is required: describe what the plan is for");
   const suffix = opts.public ? publicDirectiveSuffix() : "";
@@ -416,14 +430,17 @@ export async function startUltraplan(
   const participants = [];
   for (const name of agents) participants.push(await load(name, buildUltraplanParticipantDirective()));
   const planner = opts.planner !== undefined ? await load(opts.planner, buildUltraplanPlannerDirective()) : undefined;
+  const seats = opts.provider === undefined || opts.provider === "auto"
+    ? await prepareSeats({ agents: [...new Set([...agents, ...(opts.planner ? [opts.planner] : [])])], model: opts.model, tier: "judge" }) : undefined;
   const id = newId("ultraplan");
   const publicChannel = opts.public ? openPublicChannel(id, {
     mode: "ultraplan", participants: [...participants.map((a) => publicLabel(a.name)),
       planner ? `planner: ${publicLabel(planner.name)}` : "planner: orchestrator"], topic: task,
   }) : undefined;
-  const provider = opts.provider || "anthropic";
+  const provider = (seats?.values().next().value?.provider ?? opts.provider) as LLMProvider;
   const u: Ultraplan = {
-    id, task, context: opts.context, agents: participants, planner, provider, model: opts.model || DEFAULT_MODELS[provider],
+    id, task, context: opts.context, agents: participants, planner, provider, model: seats?.values().next().value?.model ?? opts.model ?? DEFAULT_MODELS[provider],
+    ...(seats && { routing: [...seats.values()] }),
     ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }), status: "awaiting_plan",
     versions: [], entries: [], startedAt: new Date(), ...(publicChannel && { publicChannel }),
     ...(opts.executionReady === true && { executionReady: true }),

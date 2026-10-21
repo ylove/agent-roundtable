@@ -1,0 +1,363 @@
+import { test, beforeEach, afterEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { routeProvider, routingModels, recentPerformance, recentRoutingHistory } from '../../dist/providers/router.js';
+import { ProviderHealthCache, providerHealth, HEALTH_TTL_MS } from '../../dist/providers/health.js';
+import { PROVIDER_MAX_TOKENS } from '../../dist/providers/limits.js';
+import { resolveSeats, prepareSeats, preflightSeats } from '../../dist/table/seats.js';
+import { callLLM } from '../../dist/providers/index.js';
+import { DEFAULT_MODELS, PROVIDER_IDS, ROUNDTABLE_HOME } from '../../dist/config.js';
+import { validateRoutingConfig, readUserConfig } from '../../dist/user-config.js';
+import { createNdjsonObserver, createTerminalObserver } from '../../dist/table/terminal.js';
+import { summarizeDuel } from '../../dist/tools/duel.js';
+import { handleToolCall, tools } from '../../dist/tools.js';
+import { executionLLM, prepareExecutionProvider } from '../../dist/execution/provider-routing.js';
+import { executionHuddleLLM } from '../../dist/execution/escalation.js';
+import { preflightExecutionProvider } from '../../dist/execution/orchestrator.js';
+import { stubFetch, json } from './helpers.mjs';
+
+const NOW = Date.UTC(2026, 9, 20, 12);
+const env = { ANTHROPIC_API_KEY: 'fixture-a', OPENAI_API_KEY: 'fixture-b', TOGETHER_API_KEY: 'fixture-c', REPLICATE_API_TOKEN: 'fixture-d' };
+const empty = async () => ({ frontmatter: {} });
+const inputs = extra => ({ env, config: {}, history: [], health: new ProviderHealthCache(() => NOW), ...extra });
+const rates = (input, output) => ({ input, output, cache_read: 0, cache_write: 0 });
+const reply = text => json(200, { choices: [{ message: { content: text } }] });
+const originalEnv = {};
+const keys = [...Object.keys(env), 'OLLAMA_URL', 'OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY', 'ROUNDTABLE_EXECUTION_PROVIDER', 'ROUNDTABLE_EXECUTION_MODEL', 'ROUNDTABLE_EXECUTION_BASE_URL', 'ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT'];
+beforeEach(t => {
+  for (const key of keys) { originalEnv[key] = process.env[key]; delete process.env[key]; }
+  providerHealth.clear();
+  t.mock.method(Date, 'now', () => NOW);
+});
+afterEach(() => {
+  providerHealth.clear();
+  for (const key of keys) { if (originalEnv[key] === undefined) delete process.env[key]; else process.env[key] = originalEnv[key]; }
+});
+
+function fixtureAgents() {
+  mkdirSync(process.env.ROUNDTABLE_AGENTS_DIR, { recursive: true });
+  for (const id of ['judgment-a', 'judgment-b', 'judgment-judge']) writeFileSync(join(process.env.ROUNDTABLE_AGENTS_DIR, `${id}.md`), `---\nname: ${id}\n---\nOffer a brief review.\n`);
+}
+
+test('dead auth is learned only from real calls; cached bad provider is excluded, even when pinned by a persona', async t => {
+  Object.assign(process.env, env);
+  const calls = stubFetch(t, url => url.includes('/messages') ? json(401, { error: { message: 'fixture-secret-must-not-appear' } }) : reply('OK'));
+  const result = await preflightSeats([{ id: 'probe', name: 'probe', provider: 'anthropic', model: DEFAULT_MODELS.anthropic }]);
+  assert.equal(result[0].reason, 'auth failed');
+  const choice = routeProvider(inputs({ health: providerHealth, env: process.env }));
+  assert.notEqual(choice.provider, 'anthropic');
+  const seats = await resolveSeats({ agents: ['a'], env: process.env, routing: { config: {}, history: [] }, load: async () => ({ frontmatter: { provider: 'anthropic', model: 'sonnet' } }) });
+  assert.notEqual(seats.get('a').provider, 'anthropic');
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(choice.reason, /fixture-secret|fixture-a/);
+});
+
+test('automatic preparation retries another provider after a dead first key and preserves explicit pins', async t => {
+  Object.assign(process.env, { ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY, OPENAI_API_KEY: env.OPENAI_API_KEY });
+  const calls = stubFetch(t, url => url.includes('/messages') ? json(401, { error: { message: 'bad key' } }) : reply('OK'));
+  const seats = await prepareSeats({ agents: ['a'], load: empty, routing: { config: {}, history: [] } });
+  assert.equal(seats.get('a').provider, 'openai');
+  assert.match(seats.get('a').reason, /healthy/);
+  assert.equal(calls.length, 2);
+  await assert.rejects(prepareSeats({ agents: ['a'], provider: 'anthropic', load: empty }, { preflight: true }), /preflight auth failed/);
+});
+
+test('builds avoid reasoning models; shared output ceilings and strict overrides apply', () => {
+  const choice = routeProvider(inputs({ tier: 'builder', env: { TOGETHER_API_KEY: 'fixture', REPLICATE_API_TOKEN: 'fixture' } }));
+  assert.equal(choice.provider, 'replicate');
+  assert.match(choice.reason, /together.*excluded for build \(reasoning model\)/);
+  assert.equal(choice.maxOutputTokens, PROVIDER_MAX_TOKENS.replicate);
+  assert.equal(routeProvider(inputs({ tier: 'builder', env: { TOGETHER_API_KEY: 'fixture' } })).provider, 'together');
+  const config = validateRoutingConfig({ together: { builder: { model: 'fixture-builder', reasoning: false, maxOutputTokens: 2000 } } });
+  assert.equal(routingModels('together', 'builder', config).maxOutputTokens, 2000);
+  assert.equal(routingModels('together', 'builder', { together: { builder: { model: 'GLM-fixture', reasoning: false } } }).reasoning, true);
+  assert.equal(routingModels('replicate', 'builder', { replicate: { builder: { model: 'fixture', maxOutputTokens: 999999 } } }).maxOutputTokens, PROVIDER_MAX_TOKENS.replicate);
+});
+
+test('recent 429 and timeout history demotes providers; only the last 50 calls count, with median latency', () => {
+  const history = Array.from({ length: 60 }, (_, i) => ({ provider: 'anthropic', model: DEFAULT_MODELS.anthropic, outcome: i < 11 ? 'rate_limit' : 'ok', latency_ms: i }));
+  assert.deepEqual(recentPerformance(history, 'anthropic', DEFAULT_MODELS.anthropic), { failures: 1, rate: 0.02, medianMs: 34.5 });
+  assert.equal(routeProvider(inputs({ history })).provider, 'openai');
+  const timeout = [{ provider: 'anthropic', model: DEFAULT_MODELS.anthropic, outcome: 'timeout', latency_ms: 3000 }];
+  assert.equal(routeProvider(inputs({ history: timeout })).provider, 'openai');
+  assert.deepEqual(routeProvider(inputs()), routeProvider(inputs()));
+});
+
+test('budget is a hard cap; unknown prices are excluded and explained, including all explicit or persona pins', async () => {
+  const pricing = { [DEFAULT_MODELS.anthropic]: rates(100, 100), [DEFAULT_MODELS.openai]: rates(1, 1) };
+  const choice = routeProvider(inputs({ remainingBudgetUsd: 0.02, pricing }));
+  assert.equal(choice.provider, 'openai');
+  assert.match(choice.reason, /exceeds remaining budget/);
+  assert.match(choice.reason, /unknown price excluded with budget/);
+  assert.throws(() => routeProvider(inputs({ remainingBudgetUsd: 0, pricing })), /No healthy provider/);
+  assert.throws(() => routeProvider(inputs({ remainingBudgetUsd: NaN, pricing })), /No healthy provider/);
+  for (const bounds of [{ inputTokens: -1 }, { outputTokens: 0 }, { outputTokens: NaN }]) assert.throws(() => routeProvider(inputs({ ...bounds, remainingBudgetUsd: 1, pricing })), /token bounds/);
+  assert.throws(() => routeProvider(inputs({ env: { TOGETHER_API_KEY: 'fixture' }, remainingBudgetUsd: 100 })), /unknown price excluded with budget/);
+  const base = { agents: ['a'], env, load: empty, routing: { config: {}, history: [], remainingBudgetUsd: 0.02, pricing } };
+  await assert.rejects(resolveSeats({ ...base, seats: { a: { provider: 'anthropic', model: DEFAULT_MODELS.anthropic } } }), /exceeds remaining budget/);
+  await assert.rejects(resolveSeats({ ...base, provider: 'anthropic' }), /exceeds remaining budget/);
+  await assert.rejects(resolveSeats({ ...base, load: async () => ({ frontmatter: { provider: 'together' } }) }), /unknown price excluded with budget/);
+});
+
+test('judge and mix cost bias use known prices and stable provider order', () => {
+  const config = { anthropic: { judge: { model: DEFAULT_MODELS.anthropic } } };
+  const pricing = { [DEFAULT_MODELS.anthropic]: rates(10, 10), [DEFAULT_MODELS.openai]: rates(1, 1) };
+  assert.equal(routeProvider(inputs({ tier: 'judge', config, pricing })).provider, 'openai');
+  assert.equal(routeProvider(inputs({ costBias: true, pricing })).provider, 'openai');
+  assert.equal(routeProvider(inputs()).provider, 'anthropic');
+});
+
+test('precedence: seats and tool provider/model > healthy persona > mix alias > router; model-only persona is retained', async () => {
+  const load = async () => ({ frontmatter: { provider: 'together', model: 'persona-fixture' } });
+  const base = { agents: ['a'], env, load, routing: { config: {}, history: [] } };
+  assert.equal((await resolveSeats({ ...base, mix: 'cheap' })).get('a').model, 'persona-fixture');
+  const tool = (await resolveSeats({ ...base, mix: 'auto', provider: 'openai', model: 'tool-fixture' })).get('a');
+  assert.equal(tool.provider, 'openai'); assert.equal(tool.model, 'tool-fixture');
+  const seat = (await resolveSeats({ ...base, provider: 'openai', model: 'tool-fixture', seats: { a: { provider: 'replicate', model: 'seat-fixture' } } })).get('a');
+  assert.equal(seat.provider, 'replicate'); assert.equal(seat.model, 'seat-fixture');
+  assert.equal((await resolveSeats({ ...base, seat: 'a=replicate:seat-fixture' })).get('a').model, 'seat-fixture');
+  assert.equal((await resolveSeats({ ...base, model: 'explicit-model-only' })).get('a').model, 'explicit-model-only');
+  const modelOnly = (await resolveSeats({ ...base, load: async () => ({ frontmatter: { model: 'persona-model-only' } }) })).get('a');
+  assert.equal(modelOnly.model, 'persona-model-only');
+  assert.match((await resolveSeats({ ...base, provider: 'auto', load: empty })).get('a').reason, /chosen/);
+});
+
+test('teams spread across eligible providers; runtimes are never automatic candidates', async () => {
+  const seats = await resolveSeats({ teamA: ['a'], teamB: ['b'], judges: ['j'], env, load: empty, routing: { config: {}, history: [] } });
+  assert.notEqual(seats.get('a').provider, seats.get('b').provider);
+  for (const seat of seats.values()) assert.ok(PROVIDER_IDS.includes(seat.provider));
+  assert.throws(() => routeProvider(inputs({ env: { PATH: '/fixture/bin', ROUNDTABLE_EXECUTION_PROVIDER: 'fixture-runtime' } })), /No healthy provider/);
+});
+
+test('cache expires with an injected clock and isolates endpoint and credential identities', () => {
+  let now = 100;
+  const cache = new ProviderHealthCache(() => now);
+  const configured = { OPENAI_COMPATIBLE_BASE_URL: 'https://configured.invalid/v1', OPENAI_COMPATIBLE_API_KEY: 'fixture' };
+  cache.recordCall('openai_compatible', false, 'auth failed', configured);
+  assert.equal(cache.get('openai_compatible', configured).ok, false);
+  assert.equal(cache.get('openai_compatible', { ...configured, OPENAI_COMPATIBLE_BASE_URL: 'https://different.invalid/v1' }), undefined);
+  assert.equal(cache.get('openai_compatible', { ...configured, OPENAI_COMPATIBLE_API_KEY: 'replacement' }), undefined);
+  cache.recordCall('openai_compatible', true, undefined, configured, 'https://untrusted.invalid/v1');
+  assert.equal(cache.get('openai_compatible', configured).ok, false);
+  now += HEALTH_TTL_MS - 1;
+  assert.equal(cache.get('openai_compatible', configured).ok, false);
+  now++;
+  assert.equal(cache.get('openai_compatible', configured), undefined);
+});
+
+test('unsafe compatible endpoints are excluded and caller base_url cannot steer automatic calls', async t => {
+  for (const endpoint of ['http://untrusted.invalid/v1', 'https://token@untrusted.invalid/v1', 'file:///fixture', 'https://configured.invalid/v1?token=fixture']) {
+    assert.throws(() => routeProvider(inputs({ env: { OPENAI_COMPATIBLE_BASE_URL: endpoint, OPENAI_COMPATIBLE_API_KEY: 'fixture' } })), /untrusted base URL/);
+  }
+  const calls = stubFetch(t, () => { throw new Error('must not call'); });
+  for (const [name, args] of [
+    ['start_meeting', { agent: 'judgment-a', agenda: 'brief' }],
+    ['start_collaboration', { agents: ['judgment-a', 'judgment-b'], topic: 'brief' }],
+    ['start_ultraplan', { agents: ['judgment-a'], task: 'brief' }],
+  ]) {
+    const result = await handleToolCall(name, { ...args, provider: 'auto', base_url: 'https://untrusted.invalid/v1' });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /base_url/);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('failure names every provider and local diagnostics, without credential or remote error text', async t => {
+  Object.assign(process.env, { ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY, OPENAI_API_KEY: env.OPENAI_API_KEY });
+  stubFetch(t, () => json(401, { error: { message: 'remote-fixture-secret' } }));
+  await assert.rejects(prepareSeats({ agents: ['a'], load: empty, routing: { config: {}, history: [] } }), error => {
+    for (const provider of PROVIDER_IDS) assert.ok(error.message.includes(provider));
+    assert.match(error.message, /auth failed/); assert.doesNotMatch(error.message, /remote-fixture-secret|fixture-a/);
+    return true;
+  });
+});
+
+test('routing config validates strictly and is loaded from an isolated operator config', t => {
+  for (const raw of [null, [], { unknown: {} }, { openai: { typo: { model: 'x' } } }, { openai: { judge: {} } }, { openai: { judge: { model: 'x', health: true } } }, { openai: { judge: { model: 'x', reasoning: 'false' } } }, { openai: { judge: { model: 'x', maxOutputTokens: -1 } } }]) assert.throws(() => validateRoutingConfig(raw));
+  const home = mkdtempSync(join(tmpdir(), 'judgment-config-')); t.after(() => rmSync(home, { recursive: true, force: true }));
+  const routing = { openai: { judge: { model: 'fixture-cheap', reasoning: false, maxOutputTokens: 1000 } } };
+  writeFileSync(join(home, 'config.json'), JSON.stringify({ routing }), { mode: 0o600 });
+  assert.deepEqual(readUserConfig(home).routing, routing);
+  assert.equal(routeProvider(inputs({ env: { OPENAI_API_KEY: 'fixture', ROUNDTABLE_HOME: home }, config: undefined, tier: 'judge' })).model, 'fixture-cheap');
+});
+
+test('reason strings survive NDJSON, terminal seat lines, and the duel MCP routing block', async () => {
+  const seat = { id: 'a', name: 'a', ...routeProvider(inputs()) };
+  const event = { type: 'start', id: 'duel-fixture', topic: 'brief', mode: 'duel', seats: [seat], startedAt: new Date(NOW).toISOString() };
+  let ndjson = '', terminal = '';
+  await createNdjsonObserver({ write: s => { ndjson += s; } }).onEvent(event);
+  await createTerminalObserver({ output: { write: s => { terminal += s; } }, env: {} }).onEvent(event);
+  assert.equal(JSON.parse(ndjson).seats[0].reason, seat.reason);
+  assert.ok(terminal.includes(seat.reason));
+  const result = summarizeDuel([event], { id: 'duel-fixture', winner: 'tie', tally: { A: 0, B: 0 }, aborted: false });
+  assert.equal(result.routing[0].reason, seat.reason);
+});
+
+test('MCP auto start schemas and meeting, collaboration, ultraplan results expose routing', async t => {
+  fixtureAgents();
+  process.env.OPENAI_API_KEY = 'fixture';
+  stubFetch(t, () => reply('OK'));
+  for (const name of ['start_meeting', 'start_collaboration', 'start_duel', 'start_ultraplan']) {
+    assert.ok(tools.find(tool => tool.name === name).inputSchema.properties.provider.enum.includes('auto'));
+  }
+  for (const [name, args] of [
+    ['start_meeting', { agent: 'judgment-a', agenda: 'brief' }],
+    ['start_collaboration', { agents: ['judgment-a', 'judgment-b'], topic: 'brief', grounding: false }],
+    ['start_ultraplan', { agents: ['judgment-a'], task: 'brief' }],
+  ]) {
+    const result = await handleToolCall(name, { ...args, provider: 'auto' });
+    assert.ok(!result.isError, result.content[0].text);
+    const output = JSON.parse(result.content[0].text);
+    assert.ok(output.routing.length);
+    assert.ok(output.routing.every(seat => seat.provider === 'openai' && /healthy/.test(seat.reason)));
+  }
+});
+
+test('heads-down review and huddle provider is routed when unset; execute preflight falls back and checks it', async t => {
+  process.env.ANTHROPIC_API_KEY = 'fixture-a'; process.env.OPENAI_API_KEY = 'fixture-b';
+  const calls = stubFetch(t, url => url.includes('/messages') ? json(401, { error: { message: 'bad key' } }) : reply('OK'));
+  const chosen = await prepareExecutionProvider();
+  assert.equal(chosen.provider, 'openai');
+  assert.equal(executionLLM({ config: {}, history: [] }).provider, 'openai');
+  assert.equal(executionHuddleLLM().provider, 'openai');
+  delete process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT;
+  await preflightExecutionProvider();
+  assert.ok(calls.every(c => c.body.max_tokens === 64 || c.body.max_completion_tokens === 64));
+  process.env.ROUNDTABLE_EXECUTION_PROVIDER = 'together'; process.env.ROUNDTABLE_EXECUTION_MODEL = 'explicit-fixture';
+  assert.equal(executionLLM().provider, 'together'); assert.equal(executionLLM().model, 'explicit-fixture');
+});
+
+test('real outcome ledger captures failure and latency without usage double counting', async t => {
+  process.env.OPENAI_API_KEY = 'fixture';
+  stubFetch(t, () => json(429, { error: { message: 'rate limited' } }));
+  await assert.rejects(callLLM('brief', [{ role: 'user', content: 'brief' }], { provider: 'openai', model: 'judgment-ledger-fixture' }));
+  const history = recentRoutingHistory(NOW, ROUNDTABLE_HOME).filter(line => line.model === 'judgment-ledger-fixture');
+  assert.equal(history.length, 1);
+  assert.equal(history[0].outcome, 'rate_limit'); assert.equal(history[0].latency_ms, 0);
+  assert.equal(history[0].tokens, undefined); assert.equal(history[0].usd, undefined);
+});
+
+test('healthy pair preflight is cached until TTL expiry and retried after a key rotation', async t => {
+  let now = NOW;
+  t.mock.method(Date, 'now', () => now);
+  process.env.OPENAI_API_KEY = 'fixture';
+  const calls = stubFetch(t, () => reply('OK'));
+  const options = { agents: ['a'], load: empty, routing: { config: {}, history: [] } };
+  await prepareSeats(options); await prepareSeats(options);
+  assert.equal(calls.length, 1);
+  now += HEALTH_TTL_MS;
+  await prepareSeats(options);
+  assert.equal(calls.length, 2);
+  process.env.OPENAI_API_KEY = 'rotated-fixture';
+  await prepareSeats(options);
+  assert.equal(calls.length, 3);
+});
+
+test('persona missing-model fallback survives automatic preflight, while explicit model errors never fall back', async t => {
+  process.env.OPENAI_API_KEY = 'fixture';
+  const calls = stubFetch(t, (_url, init) => JSON.parse(init.body).model === 'missing-fixture' ? json(404, { error: { message: 'unknown model' } }) : reply('OK'));
+  const seats = await prepareSeats({ agents: ['a'], load: async () => ({ frontmatter: { provider: 'openai', model: 'missing-fixture' } }), routing: { config: {}, history: [] } });
+  assert.equal(seats.get('a').model, DEFAULT_MODELS.openai);
+  assert.equal(calls.length, 2);
+  await assert.rejects(prepareSeats({ agents: ['a'], provider: 'openai', model: 'missing-fixture', load: empty }, { preflight: true }), /model missing-fixture not available/);
+});
+
+test('configured output cap reaches automatic calls and explicit starts preserve their model and token defaults', async t => {
+  fixtureAgents();
+  process.env.OPENAI_API_KEY = 'fixture';
+  const home = mkdtempSync(join(tmpdir(), 'judgment-call-cap-')); t.after(() => rmSync(home, { recursive: true, force: true }));
+  const originalHome = process.env.ROUNDTABLE_HOME;
+  process.env.ROUNDTABLE_HOME = home;
+  t.after(() => { process.env.ROUNDTABLE_HOME = originalHome; });
+  writeFileSync(join(home, 'config.json'), JSON.stringify({ routing: { openai: { balanced: { model: DEFAULT_MODELS.openai, maxOutputTokens: 250 } } } }), { mode: 0o600 });
+  const calls = stubFetch(t, () => reply('OK'));
+  const auto = await handleToolCall('start_meeting', { agent: 'judgment-a', agenda: 'brief' });
+  assert.ok(!auto.isError, auto.content[0].text);
+  assert.equal(calls.at(-1).body.max_completion_tokens, 250);
+  for (const [name, args] of [
+    ['start_meeting', { agent: 'judgment-a', agenda: 'brief' }],
+    ['start_ultraplan', { agents: ['judgment-a'], task: 'brief' }],
+  ]) {
+    const result = await handleToolCall(name, { ...args, provider: 'openai', model: 'explicit-fixture' });
+    assert.ok(!result.isError, result.content[0].text);
+    assert.equal(JSON.parse(result.content[0].text).routing, undefined);
+    assert.equal(calls.at(-1).body.model, 'explicit-fixture');
+    assert.notEqual(calls.at(-1).body.max_completion_tokens, 250);
+  }
+});
+
+test('duel MCP auto result contains the selected reasons after a complete stubbed duel', async t => {
+  fixtureAgents();
+  process.env.OPENAI_API_KEY = 'fixture';
+  stubFetch(t, (_url, init) => {
+    const prompt = JSON.parse(init.body).messages.at(-1).content;
+    const content = prompt.startsWith('R1b BUILD') ? '<prototype kind="text" title="Draft"><file path="draft.md">A short draft.</file></prototype>'
+      : prompt.startsWith('R2 JUDGE') ? 'VERDICT A: APPROVE — fits\nVERDICT B: APPROVE — fits\nPREFER: A' : 'OK';
+    return reply(content);
+  });
+  const result = await handleToolCall('start_duel', { topic: 'A short draft', kind: 'text', team_a: ['judgment-a'], team_b: ['judgment-b'], judges: ['judgment-judge'], provider: 'auto' });
+  assert.ok(!result.isError, result.content[0].text);
+  const output = JSON.parse(result.content[0].text);
+  assert.equal(output.routing.length, 3);
+  assert.ok(output.routing.every(seat => seat.provider === 'openai' && /chosen: healthy/.test(seat.reason)));
+});
+
+test('explicit compatible URLs dispatch without environment endpoints, probes, health fallback or duplicate ledger rows', async t => {
+  fixtureAgents();
+  const { withUsageSink } = await import('../../dist/providers/usage.js');
+  const { readTableLines, day } = await import('../../dist/usage/table.js');
+  const { startCollaboration, advanceCollaboration, collaborations, endCollaboration } = await import('../../dist/sessions/collaborations.js');
+  const baseUrl = 'http://localhost:4141/v1';
+  assert.equal(process.env.OPENAI_COMPATIBLE_BASE_URL, undefined);
+  providerHealth.recordCall('openai_compatible', false, 'auth failed');
+  const calls = stubFetch(t, (url, init) => {
+    assert.equal(url, `${baseUrl}/chat/completions`);
+    assert.notEqual(JSON.parse(init.body).max_tokens, 64, 'explicit seats must never preflight');
+    return reply('OK');
+  });
+  const seen = [], before = readTableLines([day(NOW)], ROUNDTABLE_HOME).length;
+  await withUsageSink(report => seen.push(report), async () => {
+    const { collaborationId } = await startCollaboration(['judgment-a', 'judgment-b'], 'brief', {
+      provider: 'openai_compatible', model: 'explicit-fixture', baseUrl, maxRounds: 1,
+    });
+    await advanceCollaboration(collaborations.get(collaborationId));
+    await endCollaboration(collaborationId, true);
+  });
+  assert.equal(calls.length, 3);
+  assert.equal(seen.length, 3);
+  assert.equal(readTableLines([day(NOW)], ROUNDTABLE_HOME).length, before, 'execution-owned calls cannot create table outcome rows');
+  assert.ok(calls.every(call => call.body.model === 'explicit-fixture'));
+  assert.ok(seen.every(report => !Object.hasOwn(report, 'outcome') && !Object.hasOwn(report, 'latency_ms')));
+
+  const result = await handleToolCall('start_collaboration', { agents: ['judgment-a', 'judgment-b'], topic: 'brief', base_url: baseUrl,
+    seats: { 'judgment-a': { provider: 'openai_compatible', model: 'seat-a' }, 'judgment-b': { provider: 'openai_compatible', model: 'seat-b' } }, grounding: false });
+  assert.ok(!result.isError, result.content[0].text);
+  assert.equal(calls.length, 4);
+  assert.equal(calls.at(-1).body.model, 'seat-a');
+  await endCollaboration(JSON.parse(result.content[0].text).collaborationId);
+});
+
+test('pure duel seat resolution with explicit seats performs no credential or network preflight', async t => {
+  fixtureAgents();
+  const { resolveSeatsLocal } = await import('../../dist/table/duel.js');
+  const calls = stubFetch(t, () => { throw new Error('Pure seat resolution cannot dispatch'); });
+  const seats = await resolveSeatsLocal({ topic: 'brief', teamA: ['judgment-a'], teamB: ['judgment-b'], judges: ['judgment-judge'],
+    seats: Object.fromEntries(['judgment-a', 'judgment-b', 'judgment-judge'].map(agent => [agent, { provider: 'openai_compatible', model: 'explicit-fixture' }])) });
+  assert.equal(seats.length, 3);
+  assert.ok(seats.every(seat => seat.provider === 'openai_compatible' && seat.model === 'explicit-fixture'));
+  assert.equal(calls.length, 0);
+});
+
+test('the runner validates a missing execution before selecting or probing any provider', async t => {
+  const { runRunner } = await import('../../dist/execution/runner.js');
+  process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT = '1';
+  const calls = stubFetch(t, () => { throw new Error('A missing execution cannot probe'); });
+  const messages = [];
+  t.mock.method(console, 'error', message => messages.push(String(message)));
+  assert.equal(await runRunner('exe-01m5e6mgmc6np7f4'), 1);
+  assert.match(messages.join('\n'), /not found/);
+  assert.doesNotMatch(messages.join('\n'), /No healthy provider/);
+  assert.equal(calls.length, 0);
+});

@@ -267,9 +267,13 @@ test("verdict parser fails closed for missing, quoted, fenced, or ambiguous verd
   assert.equal(parseDuelVerdicts("VERDICT A: APPROVE — yes\nVERDICT A: REJECT — no").A.verdict, "UNCLEAR");
 });
 
-test("local seat resolver loads generic personas and applies explicit model overrides", async () => {
+test("local seat resolver loads generic personas and applies explicit model overrides", async t => {
   await mkdir(AGENTS_DIR, { recursive: true });
   for (const name of options.teamA.concat(options.teamB, options.judges)) await writeFile(join(AGENTS_DIR, `${name}.md`), `---\nname: ${name}\n---\nYou are the ${name}.\n`);
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "fixture-key";
+  t.after(() => { if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousKey; });
+  t.mock.method(globalThis, "fetch", () => { throw new Error("Seat resolution must not probe providers"); });
   const resolved = await resolveSeatsLocal({ ...options, agentsDir: AGENTS_DIR, seats: { designer: { agent: "designer", provider: "openai_compatible", model: "custom-model" } } });
   assert.equal(resolved[0].model, "custom-model");
   assert.equal(resolved[0].provider, "openai_compatible");

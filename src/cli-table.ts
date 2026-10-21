@@ -241,7 +241,9 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
   const resetTurn = () => { clearTimeout(turnTimer); turnTimer = setTimeout(() => abort(`timed out after ${parsed.options.turnTimeoutMs! / 1000} s without a turn; raise --turn-timeout`), parsed.options.turnTimeoutMs); };
   sessions.setCollaborationRecordHook((c, message) => {
     if (c.origin !== origin) return;
+    const starting = !id;
     id = c.id;
+    if (starting) pending = pending.then(async () => { await observer.onEvent({ type: "start", id: c.id, topic: parsed.topic, mode: command as "meeting" | "debate" | "waffle", seats: [...seats.values()], startedAt: c.startedAt.toISOString() }); });
     const seat = seats.get(message.agent);
     if (!seat) return;
     const event = { type: "turn" as const, round: String(c.currentRound + 1), seat, text: message.content, ts: message.timestamp.toISOString() };

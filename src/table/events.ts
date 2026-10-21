@@ -10,6 +10,9 @@ export interface Seat {
   id: string;
   name: string;
   role?: string;
+  /** Provider judgment, carried into start events and seat cards. */
+  reason?: string;
+  maxOutputTokens?: number;
   team?: "A" | "B" | "judge";
   /** API provider or explicit runtime registry name. */
   provider: string;
@@ -24,7 +27,7 @@ export type TableEvent =
       type: "start";
       id: string;
       topic: string;
-      mode: "duel";
+      mode: "duel" | "meeting" | "debate" | "waffle";
       seats: Seat[];
       startedAt: string;
       /** Added in the general duel: absent in older archives, which were all web. */

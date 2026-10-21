@@ -211,6 +211,7 @@ function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string
   const stopped = new Map<string, TableLine>();
   const byKey = new Map<string, { id: string; session: string; kind: string; tokens: Tokens; money: Money; models: Map<string, number>; provider?: string; last: string; priced: boolean }>();
   for (const l of lines) {
+    if (l.outcome !== undefined && l.tokens === undefined && l.usd === undefined) continue;
     if (l.event === "stopped") {
       stopped.set(l.session, l);
       continue;

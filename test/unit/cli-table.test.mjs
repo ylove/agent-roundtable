@@ -1,10 +1,15 @@
-import { test, before, after } from 'node:test';
+import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { parseTableArgs, runTableCli } from '../../dist/cli-table.js';
+import { providerHealth } from '../../dist/providers/health.js';
+beforeEach(() => {
+  providerHealth.clear();
+  rmSync(join(process.env.ROUNDTABLE_HOME, 'usage'), { recursive: true, force: true });
+});
 import { stubFetch, json } from './helpers.mjs';
 const agentsDir = process.env.ROUNDTABLE_AGENTS_DIR;
 const originalKeys = Object.fromEntries(['OPENAI_API_KEY', 'TOGETHER_API_KEY', 'OPENAI_COMPATIBLE_BASE_URL', 'ROUNDTABLE_ENV_FILE', 'REPLICATE_API_TOKEN', 'ANTHROPIC_API_KEY', 'OLLAMA_URL'].map(k => [k, process.env[k]]));
@@ -115,7 +120,10 @@ test('debate, waffle and meeting stream their first turn and complete with per-s
     const code = await runTableCli(command, ['A budget', '--agents', 'designer,skeptic', '--seat', 'designer=openai:fixture-model,skeptic=together:fixture-other', '--rounds', '1', '--json'], streams);
     assert.equal(code, 0, streams.error.read());
     const events = streams.output.read().trim().split('\n').map(JSON.parse);
-    assert.equal(events[0].type, 'turn'); assert.equal(events[0].seat.id, 'designer');
+    assert.equal(events[0].type, 'start');
+    assert.equal(events[0].seats[0].id, 'designer');
+    assert.equal(events[0].seats[0].reason, 'explicit provider/model');
+    assert.equal(events[1].type, 'turn'); assert.equal(events[1].seat.id, 'designer');
     assert.equal(events.filter(e => e.type === 'turn').length, command === 'waffle' ? 3 : 2);
     assert.equal(events.at(-1).type, 'end'); assert.equal(events.at(-2).type, 'usage');
     assert.equal(calls[offset].body.model, 'fixture-model'); assert.equal(calls[offset + 1].body.model, 'fixture-other');
@@ -187,8 +195,8 @@ test('CLI mixes automatically preflight and exclude a 401 provider before callin
   assert.equal(await runTableCli('duel', [...automaticRoster(), '--json', '--no-room'], streams), 0, streams.error.read());
   assert.ok(Object.values(state.options.seats).every(s => s.provider !== 'anthropic'));
   assert.notEqual(state.options.seats.designer.provider, state.options.seats.marketer.provider);
-  assert.equal(calls.length, 4);
-  assert.match(streams.error.read(), /anthropic: auth failed, excluded from mix/);
+  assert.equal(calls.length, 5);
+  assert.match(streams.error.read(), /anthropic: auth failed, excluded from routing/);
   assert.match(streams.error.read(), /openai\/.*: pass/);
   assert.deepEqual(streams.output.read().trim().split('\n').map(JSON.parse).map(e => e.type), ['start', 'end']);
   assert.doesNotMatch(streams.error.read() + streams.output.read(), /invalid-fixture-key|never-print-provider-body/);

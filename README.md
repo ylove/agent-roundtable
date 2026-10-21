@@ -131,7 +131,7 @@ No arguments starts the orchestrator MCP server. The binary has **12 subcommands
 - [Duel](docs/modes/duel.md) and the [demo recording script](docs/demo.md)
 - [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)
 - [CLI runtimes at the table](docs/runtimes.md): installed agents alongside API providers
-- [Configuration](docs/configuration.md) and [providers](docs/providers.md)
+- [Configuration](docs/configuration.md), [providers](docs/providers.md) and [provider judgment](docs/providers.md#provider-judgment)
 - [Agent personas and skills](docs/agents.md) and [session archives](docs/sessions.md)
 - [Changelog](CHANGELOG.md), [threat model](docs/THREAT_MODEL.md), [security controls](docs/SECURITY_CONTROLS.md)
 

@@ -1,9 +1,12 @@
+import { prepareSeats } from "../table/seats.js";
+import { callSeat } from "../table/dispatch.js";
+import type { Seat } from "../table/events.js";
 // ============================================================================
 // Meeting Functions (API-based, one agent per meeting)
 // ============================================================================
 
 import type { LLMProvider } from "../config.js";
-import { DEFAULT_MODELS } from "../config.js";
+import { DEFAULT_MODELS, MAX_TOKENS } from "../config.js";
 import { agentKey, loadAgentPrompt } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
@@ -98,7 +101,7 @@ export async function startMeeting(
   agent: string,
   agenda: string,
   context?: string,
-  provider: LLMProvider = "anthropic",
+  provider?: LLMProvider | "auto",
   model?: string,
   baseUrl?: string,
   mode: MeetingMode = "standard",
@@ -108,11 +111,18 @@ export async function startMeeting(
 ): Promise<{
   meetingId: string;
   response: string;
+  routing?: Seat[];
   public?: { url: string | null; topic: string };
   /** Prototype meetings only. */
   prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
+  if ((provider === undefined || provider === "auto") && baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
   assertMeetingMode(mode);
+  const routed = provider === undefined || provider === "auto";
+  const seats = routed ? await prepareSeats({ agents: [agent], model }) : undefined;
+  const chosen = seats?.get(agent);
+  provider = chosen?.provider as LLMProvider | undefined ?? provider as LLMProvider;
+  model = chosen?.model ?? model;
   let systemPrompt = await loadAgentPrompt(agent);
   if (mode === "debate") {
     systemPrompt += buildChallengerDirective(debateFocus);
@@ -135,7 +145,7 @@ export async function startMeeting(
       : undefined,
     () => (isPublic ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda }) : undefined)
   );
-  const resolvedModel = model || DEFAULT_MODELS[provider];
+  let resolvedModel = model || DEFAULT_MODELS[provider];
 
   let userMessage = agenda;
   if (context) {
@@ -147,11 +157,12 @@ export async function startMeeting(
 
   let assistantMessage: string;
   try {
-    assistantMessage = await metered({ session: meetingId, kind: "meeting", agent }, () => callLLM(
-      systemPrompt,
-      [{ role: "user", content: userMessage }],
-      { provider, model: resolvedModel, baseUrl }
-    ));
+    assistantMessage = await metered({ session: meetingId, kind: "meeting", agent }, () => {
+      const messages = [{ role: "user" as const, content: userMessage }];
+      const options = { provider: provider as LLMProvider, model: resolvedModel, baseUrl, ...(chosen?.maxOutputTokens !== undefined && { maxTokens: Math.min(MAX_TOKENS, chosen.maxOutputTokens) }) };
+      return routed ? callSeat(systemPrompt, messages, options, { agent, onModelFallback: replacement => { resolvedModel = replacement; if (chosen) chosen.model = replacement; } })
+        : callLLM(systemPrompt, messages, options);
+    });
   } catch (e) {
     // The meeting never started; close the channel (and the prototype blackboard) so nothing dangles.
     if (publicChannel) void publicChannel.finalize();
@@ -189,6 +200,7 @@ export async function startMeeting(
   return {
     meetingId,
     response: assistantMessage,
+    ...(seats && { routing: [...seats.values()] }),
     ...(publicChannel && { public: { url: publicChannel.url, topic: publicChannel.topic } }),
     ...(prototype && { prototypes: prototype.takeCallSummary() }),
   };

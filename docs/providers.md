@@ -12,3 +12,66 @@
 Every provider call is bounded by `ROUNDTABLE_LLM_TIMEOUT_MS` (default 600000 = 10 min). Empty replies are errors, never blank messages. Unknown provider ids are rejected. Missing keys fail per call with a message naming the variable — the server itself always starts.
 
 See [provider configuration](configuration.md) and [direct completion examples](tools.md#tool-call-examples).
+
+## Provider judgment
+
+When you omit a provider, a deterministic router chooses each seat's provider and model without an LLM call. It applies to `duel`, `debate`, `waffle` and `meeting` in the terminal, and to `start_meeting`, `start_collaboration`, `start_duel` and `start_ultraplan`. Those MCP tools also accept `"provider": "auto"`. Local meetings through the `claude` CLI are unchanged. Runtime seats always require an explicit assignment.
+
+Precedence is:
+
+1. Explicit `--seat`, `seats`, or tool provider/model arguments; per-seat arguments win over session arguments.
+2. Persona frontmatter provider/model, while that provider is configured and passes health checks. An unknown persona model retains the existing one-time fallback to that provider's default.
+3. `--mix auto` and `--mix cheap`: aliases for the router with a cost bias.
+4. Automatic role, health, performance and spread judgment.
+
+The built-in role defaults are below. Environment model defaults still apply, except that the judge tier uses the smaller model shown for `anthropic`. Routing overrides take priority over these defaults.
+
+| Role | anthropic | openai | together | replicate | ollama | openai_compatible |
+| --- | --- | --- | --- | --- | --- | --- |
+| Builder / long output | claude-sonnet-5-5 | gpt-5.6-luna | zai-org/GLM-5.3¹ | qwen/qwen3-235b-a22b-instruct-2507 | qwen3:14b | configured model |
+| Judge / critique / short turn | claude-haiku-5-5 | gpt-5.6-luna | zai-org/GLM-5.3 | qwen/qwen3-235b-a22b-instruct-2507 | qwen3:14b | configured model |
+| Balanced / designer / persona chat | claude-sonnet-5-5 | gpt-5.6-luna | zai-org/GLM-5.3 | qwen/qwen3-235b-a22b-instruct-2507 | qwen3:14b | configured model |
+
+¹ Reasoning models are excluded for automatic builds when an eligible non-reasoning candidate remains. A duel team's last member uses the builder tier; judges and critique roles use the judge tier. Other seats use balanced. Output limits share the duel's provider ceilings; an operator override can lower a ceiling but cannot raise it. Explicit assignments retain their chosen model.
+
+Automatic choices preflight each selected provider/model pair and try another provider after a failure. Successful pairs and provider health are cached in the process for ten minutes, keyed by provider, endpoint identity and credential identity. Only actual call and preflight outcomes update health; tool arguments and ledger data cannot assert health. Changing a key or endpoint invalidates its cached health. `--no-preflight` skips probes but still respects known failures. If nothing remains, startup fails with every provider tried and its local reason, including the unavailable legacy `anthropic` fallback; it does not start a doomed session.
+
+Recent call outcomes and latency are retained in the usage ledger without prompts or response bodies. The last 50 outcome-bearing calls per provider/model, from the last seven days, determine failure rate and median latency. Failures rank below successful alternatives; role capability, cost bias and spreading seats across providers guide the remaining choices. Final ties use provider identifier order. The two duel teams use different eligible providers where possible.
+
+With a remaining budget, a candidate must have a known per-call price within that allowance. Unknown prices are excluded conservatively and explained in the reason. The estimate uses the requested input/output bounds, or a default input allowance and the role's output limit. Explicit and persona pins also pass this budget gate. Heads-down calls retain their existing per-call reservations and token bounds against the blackboard budget. Price overrides use the existing `ROUNDTABLE_PRICING_FILE`; routing configuration cannot change prices or health. Most remote defaults other than `anthropic` currently have unknown built-in prices, so supply a pricing file to make them eligible for a bounded execution.
+
+When `ROUNDTABLE_EXECUTION_PROVIDER` is unset, heads-down goal review, lead and huddle calls use the judge tier. The `execute` preflight checks the routed choice. Setting that variable keeps the explicit provider path. Worker CLI drivers remain explicit runtime choices.
+
+For automatic `openai_compatible` selection, configure `OPENAI_COMPATIBLE_BASE_URL` as an operator setting. Automatic routing accepts HTTPS or loopback HTTP and rejects URLs containing credentials, query strings or fragments. A caller's `base_url` requires explicit `provider: "openai_compatible"`; it cannot steer an automatic choice. The existing explicit-call origin checks and key binding still apply.
+
+Override models by provider and tier in `~/.agent-roundtable/config.json` (or under `ROUNDTABLE_HOME`):
+
+```json
+{
+  "routing": {
+    "replicate": {
+      "builder": {
+        "model": "qwen/qwen3-235b-a22b-instruct-2507",
+        "reasoning": false,
+        "maxOutputTokens": 12000
+      }
+    },
+    "anthropic": {
+      "judge": { "model": "claude-haiku-5-5" }
+    }
+  }
+}
+```
+
+Only provider identifiers, the tiers `builder`, `judge`, `balanced`, and model entries containing `model`, optional boolean `reasoning`, and optional positive integer `maxOutputTokens` are accepted. Unknown routing fields are errors. No endpoint, health or budget override is accepted there.
+
+```sh
+roundtable duel "A short policy" --kind text --team-a editor --team-b reviewer --judges critic
+roundtable debate "A spending limit" --agents designer,skeptic --mix cheap
+```
+
+```json
+{"agent":"reviewer","agenda":"Review the draft","provider":"auto"}
+```
+
+Every selected seat carries a short `reason`. It appears in the terminal seat line, NDJSON `start` event, room seat cards and MCP start results' `routing` array. For example: `replicate/... chosen: healthy, non-reasoning, 0 recent failures`. Exclusions for reasoning models, failed health or budget limits appear alongside the choice.

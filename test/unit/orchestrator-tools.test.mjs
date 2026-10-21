@@ -470,7 +470,7 @@ test("execute: a 401 from the execution provider refuses before anything starts,
   const saved = Object.fromEntries(["ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT", "ROUNDTABLE_EXECUTION_PROVIDER", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY"].map((k) => [k, process.env[k]]));
   t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
   delete process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT;
-  delete process.env.ROUNDTABLE_EXECUTION_PROVIDER;
+  process.env.ROUNDTABLE_EXECUTION_PROVIDER = "anthropic";
   process.env.ANTHROPIC_API_KEY = "sk-dead-key-value";
   process.env.TOGETHER_API_KEY = "together-key-value";
   let alive = false;

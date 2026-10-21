@@ -1,8 +1,8 @@
 # MCP tool reference
 
-Generated from the registered definitions in `src/tools/*.ts` after building: **42 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
+Generated from the registered definitions in `src/tools/*.ts` after building: **43 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
 
-Use these through your MCP client; Claude Code names them `mcp__agent-roundtable__<tool>`. Omitted optional fields use the behavior described below. A nested field marked required is required only when its enclosing object/item is supplied. Null optional values are treated as absent. New contract, run and worker tools reject unknown arguments.
+Use these through your MCP client; Claude Code names them `mcp__<server name>__<tool>`, for example `mcp__roundtable__start_meeting`. Omitted optional fields use the behavior described below. A nested field marked required is required only when its enclosing object/item is supplied. Null optional values are treated as absent. New contract, run and worker tools reject unknown arguments.
 
 Worker examples below use the **worker server** schema, bound to its startup identity. On the orchestrator server each of the 7 execution worker tools additionally requires `execution_id` and `agent_token` from `join_execution`; keep that token private. The eighth worker tool is `file_dissent`, which also accepts orchestrator authority on the orchestrator server; see the [dissent guide](dissents.md). `join_execution` itself exists only on the orchestrator server. Every execution worker response carries new inbox decisions/directives, including errors; acknowledge directives with `post_update(kind: "ack", directive_id, text)`.
 
@@ -24,7 +24,7 @@ Start a meeting with an agent. Returns a meeting ID for follow-up messages. Use 
 | `duel` | string | no | Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call. See [a duel as a meeting's focus](modes/duel.md#a-duel-as-a-meetings-focus). |
 | `duel_source` | boolean | no | Default true; only with duel. The duel brief is resent on every turn to every participant (a full brief can be about 20k tokens per turn). Set false to leave out artifact file contents and keep titles, file names and sizes, verdicts, tally and dissents. |
 | `provider` | string | no | LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `start_meeting`
@@ -169,6 +169,7 @@ Start a collaboration where agents take turns responding; returns a collaboratio
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
 | `agents` | array of string | yes | Array of agent identifiers. Examples: ["cfo", "fpa"], ["product", "engineering", "design"] minItems: `2`. |
+| `seats` | object | no | Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider and model. |
 | `topic` | string | no | Required except in conversation mode, where it is an optional loose theme, not an agenda. |
 | `context` | string | no | Optional background for all agents. In conversation mode, share what you know about their current situation: what was just built, what each agent last did, and current problems. |
 | `grounding` | boolean | no | Conversation only, default true: send workspace, agent-memory and local activity excerpts to the session's provider as background. Set false to disable. Always disabled in public conversations. |
@@ -181,7 +182,7 @@ Start a collaboration where agents take turns responding; returns a collaboratio
 | `duel` | string | no | Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call. See [a duel as a meeting's focus](modes/duel.md#a-duel-as-a-meetings-focus). |
 | `duel_source` | boolean | no | Default true; only with duel. The duel brief is resent on every turn to every participant (a full brief can be about 20k tokens per turn). Set false to leave out artifact file contents and keep titles, file names and sizes, verdicts, tally and dissents. |
 | `provider` | string | no | LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `start_collaboration`
@@ -209,7 +210,7 @@ Run a duel and return its result: two teams each build an artifact for the same 
 | `team_b` | array of string | yes | Team B personas, 1 to 4. Same roles as team_a. No persona may appear twice across both teams and the judges. |
 | `judges` | array of string | yes | Judge personas, 1 to 5. |
 | `kind` | string | no | What the teams build: web (a self-contained index.html, inline CSS, optional inline JS; default), code (source files, shown as read-only text and never executed), diagram (Mermaid source) or text (markdown or plain text). Values: `web`, `code`, `diagram`, `text`. |
-| `criteria` | array of string | no | Judging rubric, up to 8 items. Default: fit to the brief, quality, usability and accessibility, and risk or safety within the judge's own remit. |
+| `criteria` | array of string | no | Judging rubric. Default: fit to the brief, quality, usability and accessibility, and risk or safety within the judge's own remit. maxItems: `8`; each item up to 120 characters. |
 | `rounds` | number | no | 1 (default) judges once; 2 lets a team the judges did not approve revise once and keeps the original tally. minimum: `1`, maximum: `2`. |
 | `seats` | object | no | Optional assignments keyed by exact persona identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider and model. |
 | `turn_timeout_s` | number | no | Seconds allowed for each turn. Default 90 (builds get at least 240). maximum: `3600`. |
@@ -346,7 +347,7 @@ Plan with specialist agents: you (the orchestrator) own and write the plan; agen
 | `execution_ready` | boolean | no | Default false. True when the plan will be executed heads-down: planner drafts and revisions (and your next steps) must end with a fenced roundtable-tasks JSON block of tasks, commands and interfaces, and sign-offs check it. |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `start_ultraplan`
@@ -417,7 +418,7 @@ Have specialists design a new Claude Code subagent in one call: sequential contr
 | `perform_task` | boolean | no | Create + write only: start a private meeting with the new agent on its task. Default false. |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `create_agent`
@@ -449,7 +450,7 @@ Refine an existing Claude Code agent in one call, preserving its identity and us
 | `write` | boolean | no | Default true: back up and update the target. False: preview files and write nothing. |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `improve_agent`
@@ -480,7 +481,7 @@ Turn an agreed plan into a heads-down contract: a draft v1 in a new execution, w
 | `artifacts` | array of string | no | Repository paths or URLs the goal refers to. |
 | `from_session` | string | no | Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from, or of an archived duel (duel-<id>): its winning artifact title becomes a decision and its dissents become draft concerns (a tie or no winner imports no decision). A duel with no contract tasks or plan gets a deterministic task plan drafted from its winning artifact (see draft_plan; no model call); a tie, no winner or no artifact drafts none. |
 | `plan` | string | no | Plan text: its last roundtable-tasks block is used, else a structuring call turns it into tasks. |
-| `draft_plan` | boolean | no | Duel from_session only, default true. With no contract tasks and no plan, draft a task plan from the winning artifact, the judges' REVISE/REJECT reasons and the dissents. False imports only the decision and dissents, and then contract or plan is required. |
+| `draft_plan` | boolean | no | Duel from_session only, default true: when neither contract (with tasks) nor plan is given, draft a task plan from the winning artifact, the judges' reasons and the dissents (deterministic, no model call). False imports only the decision and dissents, and then contract or plan is required. A tie, no winner or no artifact drafts no plan. |
 | `contract` | object | no | An explicit contract (roundtable.contract/1 fields: title, scope.paths, participants, teams, tasks, interfaces, decisions, validation {commands, final}, budget, authority, sandbox, workers). id, version, status and consent are set for you. |
 | `parent_contract` | string | no | For a child contract: the parent contract id (with parent_task, a subcontract task of it). |
 | `parent_task` | string | no | For a child contract: the parent's subcontract task this contract carries out. |
@@ -489,7 +490,7 @@ Turn an agreed plan into a heads-down contract: a draft v1 in a new execution, w
 | `base_ref` | string | no | The commit or ref the run starts from; default HEAD. Stored as the resolved sha. |
 | `consent` | boolean | no | Default false. True: ask every participant for consent right away. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `propose_contract`
@@ -517,7 +518,7 @@ Amend a contract with an RFC 7396 merge patch (objects merge, arrays replace, nu
 | `consent` | boolean | no | Default false. True: ask participants about the new version: everyone for a draft or a run-wide change, the personas of affected tasks otherwise. |
 | `override_consent` | boolean | no | Frozen contracts only, default false: apply a run-wide change (budget, scope, sandbox, authority, validation, workers, goal) without everyone's consent. Audited. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `amend_contract`
@@ -555,6 +556,73 @@ Example: `freeze_contract`
 {
   "contract_id": "ctr-abc123-1",
   "orchestrator": "main"
+}
+```
+
+### file_dissent
+
+File or update a structured dissent on a draft contract, creating a new version. Tripwires are data only. An agent files as its authenticated identity; an orchestrator may file for any participant. A dissent needs a tripwire before freeze or explicit excusal with a reason. Frozen contracts require `amend_contract` and consent. Available on both servers: the orchestrator server accepts `orchestrator`, or `execution_id` and `agent_token`; the worker server is already bound to its agent and accepts neither credential argument (only `contract_id`, `dissent`, `resolve_objection` and `excuse_reason`). Full behavior, tripwire kinds and freeze rules: the [dissent guide](dissents.md#file-or-update-a-concern).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `contract_id` | string | yes | The contract id (ctr-<6 characters>-<n>) from propose_contract. |
+| `dissent` | object | yes | Structured concern. Omit tripwire only for a draft. With excuse_reason, pass just {id}. by is bound to an authenticated agent; orchestrators specify a participant. |
+| `dissent.id` | string | yes | Stable id; filing an existing id replaces that concern. pattern: `^[a-z0-9][a-z0-9._-]{0,63}$`. |
+| `dissent.by` | string | no | The dissenting participant. Filled from the identity of an authenticated agent. |
+| `dissent.source` | object | no | Provenance of the concern. |
+| `dissent.source.kind` | string | yes | Values: `ultraplan`, `consent`, `debate`, `waffle_house`, `duel`, `manual`. |
+| `dissent.source.ref` | string | no | The session or duel id the concern came from. |
+| `dissent.claim` | string | no | The concern. maxLength: `500`. |
+| `dissent.predicted_failure` | string | no | What the dissenter predicts will fail. maxLength: `500`. |
+| `dissent.tripwire` | object | no | The evidence that should wake the dissenter. |
+| `dissent.tripwire.kind` | string | yes | Values: `check_failed`, `path_touched`, `task_state`. |
+| `dissent.tripwire.check` | string | no | `check_failed`: a validation command id. |
+| `dissent.tripwire.task` | string | no | A task id; limits `check_failed` and `path_touched`, and names the task for `task_state`. |
+| `dissent.tripwire.paths` | array of string | no | `path_touched`: nonempty relative globs. maxItems: `64`. |
+| `dissent.tripwire.state` | string | no | `task_state`: Values: `rejected`, `blocked`. |
+| `dissent.on_fire` | string | no | Default huddle. Values: `notify`, `huddle`, `pause_and_huddle`. |
+| `resolve_objection` | boolean | no | The objector explicitly consents to the new version with how: dissented, retaining this dissent. Other participants must re-consent. |
+| `excuse_reason` | string | no | Orchestrator only: explicitly excuse this dissent by id. Its concern and this reason remain in version history and the audit log. Creates a new draft requiring re-consent. |
+| `orchestrator` | string | no | Your name as this contract's orchestrator (e.g. main). Only the orchestrator that proposed a contract can amend or freeze it. Orchestrator server only. |
+| `execution_id` | string | no | With agent_token: the agent's execution. Orchestrator server only. |
+| `agent_token` | string | no | Authenticate as an agent instead of an orchestrator. Orchestrator server only. pattern: `^[0-9a-f]{64}$`. |
+
+Example: `file_dissent`
+
+```json
+{
+  "contract_id": "ctr-abc123-1",
+  "orchestrator": "main",
+  "dissent": {
+    "id": "retry-risk",
+    "by": "skeptic",
+    "source": { "kind": "manual" },
+    "claim": "Retries may duplicate writes.",
+    "predicted_failure": "The repeated request check fails.",
+    "tripwire": { "kind": "check_failed", "check": "unit", "task": "storage" }
+  }
+}
+```
+
+### score_dissent
+
+Record or revise an advisory dissent outcome on a frozen contract. Only its orchestrator may score. Scores are display-only and never weight votes or consent. Orchestrator server only. See [advisory scores](dissents.md#advisory-scores).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `contract_id` | string | yes | The contract id (ctr-<6 characters>-<n>) from propose_contract. |
+| `orchestrator` | string | yes | Your name as this contract's orchestrator (e.g. main). Only the orchestrator that proposed a contract can amend or freeze it. |
+| `dissent_id` | string | yes | The dissent to score. pattern: `^[a-z0-9][a-z0-9._-]{0,63}$`. |
+| `outcome` | string | yes | `vindicated` (evidence supports the prediction), `refuted` (evidence contradicts it) or `untested` (the run did not establish an outcome). Values: `vindicated`, `refuted`, `untested`. |
+
+Example: `score_dissent`
+
+```json
+{
+  "contract_id": "ctr-abc123-1",
+  "orchestrator": "main",
+  "dissent_id": "retry-risk",
+  "outcome": "vindicated"
 }
 ```
 
@@ -674,7 +742,7 @@ Answer an escalation the watcher woke you for (execution_status(view: "escalatio
 | `amendment` | object | no | amend: an RFC 7396 merge patch of the contract (as for amend_contract). |
 | `resolved_by` | string | no | Who resolves: the contract's orchestrator (default) or its lead. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `resolve_escalation`
@@ -800,7 +868,7 @@ Hold the postmortem meeting for a draft, then conclude it. Refused while any fin
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
 | `action` | string | no | hold (default) or conclude. Values: `hold`, `conclude`. |
-| `project` | string | no | The project: a directory inside its repository (resolved with git rev-parse --show-toplevel; refused outside a git work tree or with submodules), or a project key returned earlier. maxLength: `1000`. |
+| `project` | string | no | The project: a directory inside its git repository (resolved with git rev-parse --show-toplevel; refused outside a git work tree or with submodules), or a project key returned earlier. |
 | `execution_id` | string | no | The heads-down run (exe-…) the draft belongs to. Give this or work. pattern: `^exe-[0-9a-hjkmnp-tv-z]{16}$`. |
 | `work` | string | no | A short label for at-the-table work (for example "checkout redesign") when there is no run. Give this or execution_id. maxLength: `200`. |
 | `opening` | string | no | hold: your account of what happened, including your own part. Do not paste the human's words. maxLength: `8000`. |
@@ -816,7 +884,7 @@ Hold the postmortem meeting for a draft, then conclude it. Refused while any fin
 | `reject[].id` | string | yes | The artifact id. maxLength: `16`. |
 | `reject[].why` | string | yes | Why not. maxLength: `400`. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `hold_postmortem`
@@ -1025,7 +1093,7 @@ Example: `escalate`
 
 ### chat_completion
 
-Call an LLM for text completion. Providers: anthropic (claude-opus-5 / claude-sonnet-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).
+Call an LLM for text completion. Providers: anthropic (claude-opus-5-5 / claude-sonnet-5-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
@@ -1033,7 +1101,7 @@ Call an LLM for text completion. Providers: anthropic (claude-opus-5 / claude-so
 | `messages[].role` | string | yes |  Values: `system`, `user`, `assistant`. |
 | `messages[].content` | string | yes |  |
 | `provider` | string | no | LLM provider to use. Default: openai. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `max_tokens` | number | no | Maximum tokens in the response. Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this. |
 | `temperature` | number | no | Sampling temperature (0-2). Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too. Replicate: sent only when the model's schema declares it. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
@@ -1103,6 +1171,7 @@ A contract is what a heads-down run builds: the goal and the human's request ver
 - `propose_contract` takes the structure from an explicit `contract` object with tasks, then from the last `roundtable-tasks` block in `plan` or in the archived `from_session`, then from a structuring call on the plan (one retry quoting the errors). It resolves `repo_dir` to its git top level and `base_ref` (default `HEAD`) to a commit. `consent: true` asks every participant right away; an unclear answer is re-asked once, then counts as an objection. When the repository's project has [postmortem](modes/postmortem.md) lessons, the result gains a `postmortem_lessons` section, every active contract rule becomes a `decisions` entry (`by: "postmortem:<pm>"`) and every flag a warning; with the mode on, the draft contract carries `postmortem: {enabled: true}`.
 - `amend_contract` applies an RFC 7396 merge patch and makes v(N+1). Amending a draft makes a new proposal that everyone must consent to again (`consent: true` asks them all). Amending a frozen contract cancels the tasks it removes and tells the agents of affected tasks to re-read the contract; a change to its budget, scope, sandbox, authority, validation, workers or goal needs `consent: true` (everyone is asked first, and it applies only if all agree) or `override_consent: true` (audited). `patch: {}` with `consent: true` asks everyone who has not agreed to the current version.
 - `freeze_contract` lists every reason it refuses: an unresolved objection or unclear answer, a participant who has not answered about the current version, a consent round in flight, a busy source session, or, for a child contract, a parent that is not frozen. `excuse` sets these aside with a reason, and `abandon_round` ends a consent round whose process died. Excusals, abandoned rounds and the frozen sha256 are written to the audit log. Freezing starts nothing.
+- `file_dissent` files, completes or excuses a draft concern; `score_dissent` records an advisory outcome after freeze. Neither changes consent weight. See the [dissent guide](dissents.md).
 
 ### Heads-down runs
 

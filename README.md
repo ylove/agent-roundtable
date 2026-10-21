@@ -135,7 +135,7 @@ No arguments starts the orchestrator MCP server. The binary has **11 subcommands
 
 ## Security
 
-Read the [security policy and private reporting instructions](SECURITY.md).
+Read the [security policy and private reporting instructions](SECURITY.md), and the [October 2026 audit](docs/security/audit-2026-10.md).
 
 ## Contributing
 

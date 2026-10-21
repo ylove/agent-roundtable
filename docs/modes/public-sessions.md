@@ -13,7 +13,7 @@ Pass `public: true` to `start_meeting`, `start_local_meeting`, `start_collaborat
 - Publishing never fails or blocks a session. If posting fails, the session continues and the failure shows up in the end-of-session block; the local transcript marks undelivered entries.
 - If a server exits before a public session is ended, the transcript is not saved; the public channel just expires.
 
-**Prototype sessions.** With `prototype: true`, public channels get a Markdown reference per prototype and, when Chrome is available, screenshots of web prototypes as attachments; the localhost board is never posted. See [Prototype mode](prototype-mode.md).
+**Prototype sessions.** With `prototype: true`, public channels get a Markdown reference per prototype and, when Chrome is available, screenshots of web prototypes as attachments; the localhost blackboard is never posted. See [Prototype mode](prototype-mode.md).
 
 **ntfy (default).** Messages go to `ROUNDTABLE_NTFY_URL` (default `https://ntfy.sh`) as JSON with `Firebase: no`, so they are not forwarded to Google. Open `<server>/<topic>` in a browser to watch; the page renders Markdown. Limits on the anonymous `ntfy.sh` server: 250 messages per day, a burst of 60 requests then one every 5 seconds, and messages are cached for 12 hours. Replies longer than about 3.8 KB are split into ordered parts. The server retries on 429 (honoring `Retry-After`) and stops posting for the session if the daily limit is reached or auth is rejected, then marks the channel degraded. Self-host ntfy or set a token to lift the limits.
 

@@ -23,8 +23,9 @@ export function parseTitle(title: string): ParsedTitle | null {
   if (!m) return null;
   const part = m[3] ? parseInt(m[3], 10) : 1;
   const parts = m[4] ? parseInt(m[4], 10) : 1;
-  if (part < 1 || parts < 1 || part > parts) return null;
-  return { turn: parseInt(m[1], 10), speaker: m[2], part, parts };
+  const turn = Number(m[1]);
+  if (![turn, part, parts].every(Number.isSafeInteger) || turn < 0 || part < 1 || parts < 1 || part > parts || parts > 1000) return null;
+  return { turn, speaker: m[2], part, parts };
 }
 
 export interface RemoteEntry {
@@ -67,8 +68,7 @@ export function reassemble(messages: HistoryMessage[]): RemoteEntry[] {
     .sort((a, b) => a.turn - b.turn || a.firstIdx - b.firstIdx)
     .map((g) => {
       const nums = [...g.byPart.keys()].sort((a, b) => a - b);
-      let complete = true;
-      for (let i = 1; i <= g.parts; i++) if (!g.byPart.has(i)) complete = false;
+      const complete = nums.length === g.parts && nums.every((n, i) => n === i + 1);
       return {
         turn: g.turn,
         speaker: g.speaker,

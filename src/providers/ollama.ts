@@ -1,8 +1,9 @@
 // --- Ollama (native /api/chat; optional, only when reachable) ---
 import type { ProviderCall } from "./shared.js";
-import { assertNonEmpty, readProviderJson, stripThinkTags } from "./shared.js";
+import { assertNonEmpty, assertNotRedirect, readProviderJson, stripThinkTags } from "./shared.js";
 import { providerHttpError, withRetry } from "./retry.js";
 import { OLLAMA_URL } from "../config.js";
+import { describeUrl } from "../security/url-guard.js";
 import { scrubAndCap } from "../security/secrets.js";
 
 /**
@@ -14,8 +15,11 @@ export async function isOllamaAvailable(timeoutMs: number = 1000): Promise<boole
   try {
     const response = await fetch(`${OLLAMA_URL}/api/tags`, {
       method: "GET",
+      redirect: "manual",
       signal: controller.signal,
     });
+    assertNotRedirect("Ollama", response, OLLAMA_URL);
+    await response.body?.cancel().catch(() => {});
     return response.ok;
   } catch {
     return false;
@@ -27,7 +31,7 @@ export async function isOllamaAvailable(timeoutMs: number = 1000): Promise<boole
 export const callOllama: ProviderCall = async (messages, o) => {
   if (!(await isOllamaAvailable())) {
     throw new Error(
-      `Ollama is not reachable at ${OLLAMA_URL} (GET /api/tags did not answer within 1s). ` +
+      `Ollama is not reachable at ${describeUrl(OLLAMA_URL)} (GET /api/tags did not answer within 1s). ` +
         `Set OLLAMA_URL in the MCP server .env or choose another provider.`
     );
   }
@@ -40,10 +44,12 @@ export const callOllama: ProviderCall = async (messages, o) => {
   const result = await withRetry(async () => {
     const response = await fetch(`${OLLAMA_URL}/api/chat`, {
       method: "POST",
+      redirect: "manual",
       headers: { "Content-Type": "application/json" },
       body,
       signal: o.signal,
     });
+    assertNotRedirect("Ollama", response, OLLAMA_URL);
     const parsed = (await readProviderJson(response)) as {
       error?: string;
       message?: { content?: string };

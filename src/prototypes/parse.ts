@@ -8,6 +8,7 @@ export type Decision = "REVISE" | "SCRAP" | "SHORTLIST";
 
 export const PROTOTYPE_KINDS: readonly PrototypeKind[] = ["web", "code", "diagram", "text"];
 export const MAX_FILES = 10;
+export const MAX_PARSE_BYTES = 1024 * 1024;
 export const MAX_TOTAL_BYTES = 100 * 1024;
 export const MAX_PATH_LENGTH = 120;
 export const MAX_TITLE_LENGTH = 120;
@@ -47,7 +48,8 @@ const ATTRS = String.raw`((?:\s+[^\s=>"'/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>"']
 const BLOCK_SOURCE = String.raw`(?<!\x60)<prototype${ATTRS}>((?:(?!<prototype[\s>])[\s\S])*?)<\/prototype\s*>`;
 const blockRe = () => new RegExp(BLOCK_SOURCE, "gi");
 const UNCLOSED_RE = /(?:^|\n)[ \t>]*<prototype[\s>]/i;
-const FILE_RE = new RegExp(String.raw`<file${ATTRS}(?:>([\s\S]*?)<\/file\s*>|\/>)`, "gi");
+const FILE_OPEN_RE = /<file(?=[\s>/])/gi;
+const FILE_CLOSE_RE = /<\/file\s*>/gi;
 const DEMO_RE = /<demo(?:\s[^>]*)?>([\s\S]*?)<\/demo\s*>/i;
 const ATTR_RE = /([^\s=>"'/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/g;
 
@@ -226,6 +228,9 @@ export function validatePrototype(p: ParsedPrototype): string | null {
 export function parsePrototypeBlock(text: string): ParseResult {
   const warnings: string[] = [];
   const src = String(text ?? "");
+  if (Buffer.byteLength(src, "utf8") > MAX_PARSE_BYTES) {
+    return { found: true, ok: false, error: "prototype input exceeds size limit", warnings };
+  }
   const matches = [...src.matchAll(blockRe())];
   if (matches.length === 0) {
     if (UNCLOSED_RE.test(src)) {
@@ -261,12 +266,38 @@ export function parsePrototypeBlock(text: string): ParseResult {
   }
 
   const files: PrototypeFile[] = [];
-  for (const m of body.matchAll(FILE_RE)) {
-    const fa = parseAttributes(m[1] ?? "");
+  const remaining: string[] = [];
+  let copied = 0;
+  FILE_OPEN_RE.lastIndex = 0;
+  for (let m; (m = FILE_OPEN_RE.exec(body));) {
+    let end = FILE_OPEN_RE.lastIndex;
+    let quote = "";
+    for (; end < body.length; end++) {
+      const char = body[end];
+      if (quote) {
+        if (char === quote) quote = "";
+      } else if (char === '"' || char === "'") quote = char;
+      else if (char === ">" || char === "<") break;
+    }
+    if (body[end] !== ">") {
+      return { found: true, ok: false, error: "a <file> element is not closed: end each file with </file>", warnings };
+    }
+    const rawAttrs = body.slice(FILE_OPEN_RE.lastIndex, end).trimEnd();
+    const selfClosing = rawAttrs.endsWith("/");
+    const bodyStart = end + 1;
+    FILE_CLOSE_RE.lastIndex = bodyStart;
+    const close = selfClosing ? null : FILE_CLOSE_RE.exec(body);
+    if (!selfClosing && !close) {
+      return { found: true, ok: false, error: "a <file> element is not closed: end each file with </file>", warnings };
+    }
+    const fa = parseAttributes(selfClosing ? rawAttrs.slice(0, -1) : rawAttrs);
     const path = (fa.path ?? fa.name ?? fa.filename ?? "").trim();
-    files.push({ path, content: cleanFileContent(m[2] ?? "") });
+    files.push({ path, content: cleanFileContent(close ? body.slice(bodyStart, close.index) : "") });
+    remaining.push(body.slice(copied, m.index));
+    copied = FILE_OPEN_RE.lastIndex = close ? FILE_CLOSE_RE.lastIndex : bodyStart;
   }
-  const rest = body.replace(FILE_RE, "");
+  remaining.push(body.slice(copied));
+  const rest = remaining.join("");
   if (/<file[\s>]/i.test(rest)) {
     return { found: true, ok: false, error: "a <file> element is not closed: end each file with </file>", warnings };
   }
@@ -297,10 +328,14 @@ export function parsePrototypeBlock(text: string): ParseResult {
 const OPEN_TAG_RE = /(?<!\x60)<prototype(?=[\s>/]|$)/gi;
 
 function unclosedStart(segment: string): number {
+  let lastFile = -1;
+  for (const m of segment.matchAll(/<file[\s>/]/gi)) lastFile = m.index;
+  let end = segment.indexOf(">");
+  let equals = segment.indexOf("=");
   for (const m of segment.matchAll(OPEN_TAG_RE)) {
-    const rest = segment.slice(m.index);
-    const end = rest.indexOf(">");
-    if (end < 0 || rest.slice(0, end).includes("=") || /<file[\s>/]/i.test(rest)) return m.index;
+    if (end < m.index) end = segment.indexOf(">", m.index);
+    if (equals >= 0 && equals < m.index) equals = segment.indexOf("=", m.index);
+    if (end < 0 || (equals >= 0 && equals < end) || lastFile >= m.index) return m.index;
   }
   return -1;
 }
@@ -316,6 +351,7 @@ export function scrubPrototypeBlocks(
   opts: { first: string | null; extra: string; unclosed: string; unclosedOnly?: string }
 ): string {
   const src = String(text ?? "");
+  if (Buffer.byteLength(src, "utf8") > MAX_PARSE_BYTES) return opts.unclosedOnly ?? opts.unclosed;
   const blocks = [...src.matchAll(blockRe())];
   const tail = blocks.length ? opts.unclosed : opts.unclosedOnly ?? opts.unclosed;
   let out = "";
@@ -340,7 +376,9 @@ export function scrubPrototypeBlocks(
  */
 export function replacePrototypeBlock(text: string, replacement: string, extraReplacement?: string): string {
   let n = 0;
-  return String(text ?? "").replace(blockRe(), (whole) => {
+  const src = String(text ?? "");
+  if (Buffer.byteLength(src, "utf8") > MAX_PARSE_BYTES) return replacement;
+  return src.replace(blockRe(), (whole) => {
     n++;
     if (n === 1) return replacement;
     return extraReplacement ?? whole;

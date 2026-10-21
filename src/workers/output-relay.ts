@@ -17,7 +17,7 @@ const STOP_WINDOW_MS = 5 * 60_000;
 const PEM_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 const PEM_END = /-----END [A-Z ]*PRIVATE KEY-----/;
 /** A line of a PEM body: base64, or an RFC 1421 header such as Proc-Type or DEK-Info. */
-const PEM_BODY = /^\s*(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info|Comment):.*)?\s*$/;
+const PEM_BODY = /^(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info|Comment):.*)?$/;
 
 /** A stream-json line, or undefined for anything else. */
 function parseJSONLine(line: string): unknown {
@@ -36,10 +36,18 @@ function parseJSONLine(line: string): unknown {
  * under secret-shaped keys, the same vocabulary as the text rule, are redacted outright, including
  * inside arrays held by such a key. Anything else is scrubbed as text.
  */
-function scrubJSON(v: unknown, key?: string): unknown {
+function scrubJSON(v: unknown, key?: string, depth = 0, budget = { remaining: 10_000 }): unknown {
+  if (depth >= 64 || budget.remaining-- <= 0) return "[redacted:limit]";
   if (typeof v === "string") return key !== undefined && v && SECRET_KEY_RE.test(key) ? "[redacted:secret]" : scrubSecrets(v).text;
-  if (Array.isArray(v)) return v.map((x) => scrubJSON(x, key));
-  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrubJSON(x, k)]));
+  if (Array.isArray(v)) {
+    if (v.length > budget.remaining) return "[redacted:limit]";
+    return v.map((x) => scrubJSON(x, key, depth + 1, budget));
+  }
+  if (v && typeof v === "object") {
+    const entries = Object.entries(v);
+    if (entries.length > budget.remaining) return "[redacted:limit]";
+    return Object.fromEntries(entries.map(([k, x]) => [k, scrubJSON(x, k, depth + 1, budget)]));
+  }
   return v;
 }
 
@@ -117,24 +125,30 @@ async function run(o: SpawnWorkerOptions): Promise<void> {
       // that cannot be part of a PEM body, so a lone header never silences the rest of the run.
       const flush = (newline: boolean) => {
         const nl = newline ? "\n" : "";
-        if (dropping) {
-          append("[worker output line omitted: size limit]\n");
-          privateKey = false;
-        } else {
-          const json = parseJSONLine(line);
-          if (json !== undefined) {
+        try {
+          if (dropping) {
+            append("[worker output line omitted: size limit]\n");
             privateKey = false;
-            append(JSON.stringify(scrubJSON(json)) + nl);
-          } else if (privateKey && (PEM_END.test(line) || PEM_BODY.test(line))) {
-            append("[redacted:private_key]" + nl);
-            if (PEM_END.test(line)) privateKey = false;
           } else {
-            privateKey = PEM_BEGIN.test(line) && !PEM_END.test(line.slice(line.search(PEM_BEGIN)));
-            append(privateKey ? "[redacted:private_key]" + nl : scrubSecrets(line).text + nl);
+            const json = parseJSONLine(line);
+            if (json !== undefined) {
+              privateKey = false;
+              append(JSON.stringify(scrubJSON(json)) + nl);
+            } else if (privateKey && (PEM_END.test(line) || PEM_BODY.test(line.trim()))) {
+              append("[redacted:private_key]" + nl);
+              if (PEM_END.test(line)) privateKey = false;
+            } else {
+              privateKey = PEM_BEGIN.test(line) && !PEM_END.test(line.slice(line.search(PEM_BEGIN)));
+              append(privateKey ? "[redacted:private_key]" + nl : scrubSecrets(line).text + nl);
+            }
           }
+        } catch {
+          privateKey = false;
+          try { append("[redacted:processing_error]" + nl); } catch { /* output unavailable */ }
+        } finally {
+          line = "";
+          dropping = false;
         }
-        line = "";
-        dropping = false;
       };
       stream.setEncoding("utf8");
       stream.on("data", (chunk: string) => {

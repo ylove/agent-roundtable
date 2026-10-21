@@ -206,6 +206,7 @@ export function localMeetingCwd(): string {
 }
 
 const posix = process.platform !== "win32";
+const STDOUT_LIMIT = 8 * 1024 * 1024;
 /** Enough output for a useful error; the message shows at most 500 characters of it. */
 const OUTPUT_KEEP = 64 * 1024;
 const KILL_GRACE_MS = 2000;
@@ -339,12 +340,22 @@ export async function executeClaudeCLI(
     stop?.addEventListener("abort", onStop, { once: true });
 
     let stdout = "";
+    let stdoutBytes = 0;
     let stderr = "";
 
     // Decoded as a stream, so a multi-byte character split across chunks stays intact.
     proc.stdout!.setEncoding("utf8");
     proc.stderr!.setEncoding("utf8");
     proc.stdout!.on("data", (data: string) => {
+      if (settled) return;
+      stdoutBytes += Buffer.byteLength(data, "utf8");
+      if (stdoutBytes > STDOUT_LIMIT) {
+        stdout = "";
+        signalTree(proc.pid, "SIGTERM");
+        setTimeout(() => signalTree(proc.pid, "SIGKILL"), KILL_GRACE_MS).unref();
+        settle(() => reject(new Error(`CLI stdout exceeds ${STDOUT_LIMIT} byte limit`)));
+        return;
+      }
       stdout += data;
     });
     proc.stderr!.on("data", (data: string) => {

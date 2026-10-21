@@ -2,8 +2,8 @@
 // Executable lookup on PATH (no shell, no `which`)
 // ============================================================================
 
-import { accessSync, constants, statSync } from "node:fs";
-import { delimiter, join, isAbsolute, resolve } from "node:path";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import { delimiter, isAbsolute, join } from "node:path";
 
 /** A regular file this process may execute. */
 export function isExecutableFile(p: string): boolean {
@@ -27,8 +27,12 @@ export function findExecutable(names: string | readonly string[], searchPath: st
     if (!name || /[\\/]/.test(name)) continue;
     for (const d of dirs) {
       for (const e of exts) {
-        const p = resolve(d, name + e);
-        if (isExecutableFile(p)) return p;
+        try {
+          const p = realpathSync.native(join(d, name + e));
+          if (isExecutableFile(p)) return p;
+        } catch {
+          // Missing or unresolvable candidates are absent from PATH.
+        }
       }
     }
   }

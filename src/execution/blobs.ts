@@ -8,7 +8,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fsyncDir, mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
-import { scrub } from "../security/secrets.js";
+import { redactSecretTokens } from "../security/redaction-rules.js";
+import { scrub, scrubConfiguredSecrets } from "../security/secrets.js";
 import { canonicalJSON, sha256Hex } from "./chain.js";
 import { preview } from "./events.js";
 
@@ -87,13 +88,22 @@ export function getBlob(blobsDir: string, ref: string): Buffer {
   return buf;
 }
 
-/** Scrub every string inside plain objects and arrays (keys and other values are left alone). */
-export function scrubDeep<T>(value: T): T {
+function credentialField(key: string): boolean {
+  const normalized = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  return /(?:^|_)(?:password|passwd|secret|token|api_?key|access_key|private_key|authorization|credentials?|client_secret|bearer)(?:_|$)/.test(normalized);
+}
+
+/** Scrub token-shaped keys and credential leaves, preserving identifier maps and structure. */
+export function scrubDeep<T>(value: T, key?: string): T {
+  if ((typeof value === "string" || typeof value === "number") && key !== undefined && credentialField(key)) return "[redacted:secret]" as T;
   if (typeof value === "string") return scrub(value) as T;
-  if (Array.isArray(value)) return value.map((v) => scrubDeep(v)) as T;
+  if (Array.isArray(value)) return value.map((v) => scrubDeep(v, key)) as T;
   if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = scrubDeep(v);
+    const out = Object.fromEntries(Object.entries(value).map(([k, v]) => [
+      // Postmortem refs map seat identifiers to persona paths. An identifier such as secret-scanner
+      // is not a credential field; its value still gets string scrubbing and nested field checks.
+      redactSecretTokens(scrubConfiguredSecrets(k).text).text, scrubDeep(v, key === "refs" ? undefined : k),
+    ]));
     return out as T;
   }
   return value;

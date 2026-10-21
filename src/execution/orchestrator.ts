@@ -24,7 +24,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_MODELS, defaultBudgetUsd, defaultVisibility, type LLMProvider } from "../config.js";
+import { DEFAULT_MODELS, defaultBudgetUsd, executionLLM, defaultVisibility, type LLMProvider } from "../config.js";
 import { checkGhReady, isRepoName, type GhReadiness } from "../github/gh.js";
 import { executionTag, newId } from "../ids.js";
 import { pidAlive } from "../prototypes/sandbox.js";
@@ -32,6 +32,7 @@ import { DockerBackend, LocalBackend, SANDBOX_ENV, SandboxUnavailableError, sele
 import { localSandboxAllowed } from "../sandbox/common.js";
 import { appendAudit } from "../security/audit.js";
 import { scrub } from "../security/secrets.js";
+import { availableProviders, PROVIDER_KEYS, preflightSeats } from "../table/seats.js";
 import { ClaudeCodeDriver } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
 import { stopGroup } from "../workers/process.js";
@@ -437,6 +438,25 @@ async function startedInfo(store: FileExecutionStore, state: BlackboardState, wa
   };
 }
 
+/**
+ * One cheap call with the provider the runner's goal review and lead calls use. A dead key there leaves a run
+ * stuck at 100% accepted, so a 401/403 refuses before anything starts. Other failures (no network, no key
+ * configured yet) do not block; ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT=1 skips the call (offline tests).
+ */
+export async function preflightExecutionProvider(): Promise<void> {
+  if (process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT === "1") return;
+  const { provider, model, unknown } = executionLLM();
+  if (unknown) return;
+  const [result] = await preflightSeats([{ id: "execution", name: "execution", provider, model }]);
+  if (result?.reason !== "auth failed") return;
+  const key = PROVIDER_KEYS[provider];
+  const other = availableProviders().find((p) => p !== provider) ?? "together";
+  throw new Error(
+    `execute: the execution provider (${provider}${key ? `, ${key}` : ""}) rejected its credentials, and the runner's goal review and lead calls use it, so the run would stall at the end. ` +
+      `Nothing has started. Fix the key, or switch providers with ROUNDTABLE_EXECUTION_PROVIDER=${other} (and ROUNDTABLE_EXECUTION_MODEL if needed), then call execute again.`,
+  );
+}
+
 /** execute: preflight, then start the run (heads-down.md §13). */
 export async function execute(a: ExecuteInput): Promise<Json> {
   const contractId = a.contract_id.trim();
@@ -487,6 +507,8 @@ export async function execute(a: ExecuteInput): Promise<Json> {
       next: "Nothing has started. Ask the human these questions in plain words, then call execute again with their answers (and their confirmation).",
     };
   }
+
+  await preflightExecutionProvider();
 
   // The human's settings become part of the frozen contract the runner reads.
   const { patch, changes } = settingsPatch(c, a, usd, driver);

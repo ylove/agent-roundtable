@@ -4,7 +4,7 @@
 
 import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
-import { resolveSeats, validateSeatSpecs } from "../table/seats.js";
+import { callWithFrontmatterFallback, resolveSeats, validateSeatSpecs } from "../table/seats.js";
 import type { SeatSpec } from "../table/events.js";
 import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
@@ -118,7 +118,9 @@ export const MAX_COLLABORATION_ROUNDS = 20;
 
 function callAgent(collaboration: Collaboration, agent: CollaborationAgent, messages: Parameters<typeof callLLM>[1]): Promise<string> {
   return metered({ session: collaboration.id, kind: "collaboration", agent: agent.name }, () => {
-    const call = () => callLLM(agent.systemPrompt, messages, agentCallOptions(collaboration, agent));
+    const options = agentCallOptions(collaboration, agent);
+    const call = () => callWithFrontmatterFallback(options, agent.name, () => callLLM(agent.systemPrompt, messages, options))
+      .finally(() => { agent.model = options.model; });
     if (!collaboration.signal) return call();
     const sessionStop = activeAbortSignal();
     const signal = sessionStop ? AbortSignal.any([sessionStop, collaboration.signal]) : collaboration.signal;

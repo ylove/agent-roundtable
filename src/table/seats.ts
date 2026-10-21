@@ -1,3 +1,6 @@
+import { getRuntime } from "../runtimes/registry.js";
+import { RUNTIME_MODEL } from "../runtimes/spec.js";
+import { detectRuntime } from "../runtimes/runner.js";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { agentKey, loadAgent, parseAgentFrontmatter } from "../agents.js";
@@ -7,7 +10,7 @@ import { ProviderHttpError } from "../providers/retry.js";
 import { parseSeat, type Seat, type SeatSpec } from "./events.js";
 
 export class SeatUsageError extends Error { readonly exitCode = 2; }
-export const PROVIDER_KEYS: Partial<Record<LLMProvider, string>> = {
+export const PROVIDER_KEYS: Partial<Record<string, string>> = {
   anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", together: "TOGETHER_API_KEY", replicate: "REPLICATE_API_TOKEN",
 };
 export function availableProviders(env: NodeJS.ProcessEnv = process.env): LLMProvider[] {
@@ -18,7 +21,7 @@ export function availableProviders(env: NodeJS.ProcessEnv = process.env): LLMPro
 }
 export function assertSeatCredentials(seats: Iterable<Seat>, env: NodeJS.ProcessEnv = process.env): void {
   for (const seat of seats) {
-    const key = PROVIDER_KEYS[seat.provider];
+    const key = Object.hasOwn(PROVIDER_KEYS, seat.provider) ? PROVIDER_KEYS[seat.provider] : undefined;
     if (key && !env[key]?.trim()) throw new SeatUsageError(`Missing ${key} for seat ${seat.id}.`);
     if (seat.provider === "openai_compatible" && !env.OPENAI_COMPATIBLE_BASE_URL?.trim()) throw new SeatUsageError("Missing OPENAI_COMPATIBLE_BASE_URL.");
   }
@@ -39,7 +42,7 @@ export function validateSeatSpecs(raw: Record<string, SeatSpec>): void {
     if (!spec || typeof spec !== "object" || Array.isArray(spec) ||
         Object.keys(spec).some(key => !["agent", "provider", "model"].includes(key)) ||
         (spec.agent !== undefined && spec.agent !== id) ||
-        (spec.provider !== undefined && !PROVIDER_IDS.includes(spec.provider)) ||
+        (spec.provider !== undefined && !(PROVIDER_IDS as readonly string[]).includes(spec.provider) && !getRuntime(spec.provider)) ||
         (spec.model !== undefined && (typeof spec.model !== "string" || !spec.model.trim()))) {
       throw new SeatUsageError("Invalid seat assignment.");
     }
@@ -79,32 +82,13 @@ const frontmatterPins = new Set<string>();
 const pinKey = (agent: string, provider: string, model: string): string => JSON.stringify([agentKey(agent), provider, model]);
 export const isFrontmatterModel = (agent: string, provider: string, model: string): boolean => frontmatterPins.has(pinKey(agent, provider, model));
 export const clearFrontmatterModels = (): void => frontmatterPins.clear();
-const defaultModelFor = (provider: LLMProvider): string => provider === "anthropic" ? resolveAnthropicModel(DEFAULT_MODELS[provider]) : DEFAULT_MODELS[provider];
+export const forgetFrontmatterModel = (agent: string, provider: string, model: string): void => { frontmatterPins.delete(pinKey(agent, provider, model)); };
+export const defaultModelFor = (provider: LLMProvider): string => provider === "anthropic" ? resolveAnthropicModel(DEFAULT_MODELS[provider]) : DEFAULT_MODELS[provider];
 
 /** The provider says the model itself is unknown: HTTP 404, or a 400 whose text says the model does not exist. */
 export function isUnknownModelError(error: unknown): boolean {
   if (!(error instanceof ProviderHttpError)) return false;
   return error.status === 404 || (error.status === 400 && /model/i.test(error.message) && /(not[ _-]?found|does not exist|unknown model|no such model|not available)/i.test(error.message));
-}
-
-/**
- * Run a provider call for a seat. When the seat's model came from persona frontmatter and the provider
- * rejects it as unknown, switch the seat (in place) to the provider's default model with a one-line
- * warning and retry once. Any other failure, and any explicitly assigned model, throws as before.
- */
-export async function callWithFrontmatterFallback<T>(
-  target: { provider: LLMProvider; model: string }, agent: string, call: () => Promise<T>,
-  warn: (line: string) => void = line => { process.stderr.write(`${line}\n`); },
-): Promise<T> {
-  try { return await call(); }
-  catch (error) {
-    const fallback = defaultModelFor(target.provider);
-    if (!isUnknownModelError(error) || !isFrontmatterModel(agent, target.provider, target.model) || fallback === target.model) throw error;
-    frontmatterPins.delete(pinKey(agent, target.provider, target.model));
-    warn(`persona ${agentKey(agent)}: model ${target.model} not available; using ${fallback}`);
-    target.model = fallback;
-    return call();
-  }
 }
 
 /** Resolve the complete roster before any provider call. Higher precedence replaces a whole assignment. */
@@ -121,8 +105,8 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
   if (typeof raw === "string") {
     for (const value of raw.split(",")) {
       let spec: SeatSpec;
-      try { spec = parseSeat(value); } catch { throw new SeatUsageError("Invalid --seat assignment; use agent=provider:model."); }
-      if (!spec.provider) throw new SeatUsageError("--seat requires agent=provider:model or agent=provider.");
+      try { spec = parseSeat(value); } catch { throw new SeatUsageError("Invalid --seat assignment; use agent=provider[:model] or agent=runtime[:model]."); }
+      if (!spec.provider) throw new SeatUsageError("--seat requires agent=provider[:model] or agent=runtime[:model].");
       if (overrides.has(spec.agent)) throw new SeatUsageError("Repeated seat assignment.");
       overrides.set(spec.agent, spec);
     }
@@ -139,6 +123,13 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
     const override = overrides.get(id);
     const mixed = opts.mix ? available[(index + (team === "B" ? 1 : team === "judge" ? 2 : 0)) % available.length] : undefined;
     const provider = override?.provider ?? mixed ?? (Object.hasOwn(frontmatter, "provider") ? frontmatter.provider : opts.provider ?? "anthropic");
+    const runtime = override?.provider ? getRuntime(override.provider) : undefined;
+    if (runtime) {
+      const model = override?.model ?? "";
+      if (model && (!RUNTIME_MODEL.test(model) || !runtime.modelFlag)) throw new SeatUsageError("Invalid runtime model override.");
+      out.set(id, { id, name: agentKey(id), ...(team && { team }), provider: override!.provider!, model });
+      continue;
+    }
     if (!PROVIDER_IDS.includes(provider as LLMProvider)) throw new SeatUsageError("Invalid seat provider.");
     const p = provider as LLMProvider;
     const fromFrontmatter = override?.model === undefined && !override?.provider && !mixed ? frontmatterModel(frontmatter, p) : undefined;
@@ -153,10 +144,10 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
 }
 
 export interface SeatPreflightResult {
-  provider: LLMProvider;
+  provider: string;
   model: string;
   ok: boolean;
-  reason?: "auth failed" | "model not found" | "missing credentials" | "request timed out" | "request failed";
+  reason?: "auth failed" | "model not found" | "missing credentials" | "request timed out" | "request failed" | "runtime unavailable";
 }
 
 /** Check every pair even after failures; return only local, credential-free diagnostics. */
@@ -174,8 +165,14 @@ export async function preflightSeats(
     const stop = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const result: SeatPreflightResult = { provider: seat.provider, model: seat.model, ok: true };
     try {
-      assertSeatCredentials([seat]);
-      await withAbortSignal(stop, () => callLLM("Reply briefly.", [{ role: "user", content: "Reply OK." }], { provider: seat.provider, model: seat.model, maxTokens: 64 }));
+      const runtime = getRuntime(seat.provider);
+      if (runtime) {
+        const detected = await detectRuntime(runtime, { signal: stop });
+        if (!detected.ok) { result.ok = false; result.reason = "runtime unavailable"; }
+      } else {
+        assertSeatCredentials([seat]);
+        await withAbortSignal(stop, () => callLLM("Reply briefly.", [{ role: "user", content: "Reply OK." }], { provider: seat.provider as LLMProvider, model: seat.model, maxTokens: 64 }));
+      }
     } catch (error) {
       signal?.throwIfAborted();
       result.ok = false;
@@ -207,28 +204,33 @@ export async function prepareSeats(opts: ResolveSeatsOptions, options: {
     }
   }
   const results = await preflightSeats(probes, options.signal, result => {
-    options.report?.(`${result.provider}/${result.model}: ${result.ok ? "pass" : `fail (${result.reason})`}`);
+    options.report?.(`${result.provider}/${result.model || "default"}: ${result.ok ? "pass" : `fail (${result.reason})`}`);
   });
   // A frontmatter model the provider does not know falls back once to the provider's default; an assigned one fails.
   if (results.some(r => r.reason === "model not found")) {
     const replaced = new Map(seats);
     for (const [id, seat] of seats) {
       if (!results.some(r => r.reason === "model not found" && r.provider === seat.provider && r.model === seat.model)) continue;
-      if (!isFrontmatterModel(id, seat.provider, seat.model) || defaultModelFor(seat.provider) === seat.model) {
+      if (!(PROVIDER_IDS as readonly string[]).includes(seat.provider) || !isFrontmatterModel(id, seat.provider, seat.model) || defaultModelFor(seat.provider as LLMProvider) === seat.model) {
         throw new SeatUsageError(`Seat ${seat.name} (${seat.provider}): model ${seat.model} not available.`);
       }
-      const model = defaultModelFor(seat.provider);
+      const model = defaultModelFor(seat.provider as LLMProvider);
       options.report?.(`persona ${seat.name}: model ${seat.model} not available; using ${model}`);
-      frontmatterPins.delete(pinKey(id, seat.provider, seat.model));
+      forgetFrontmatterModel(id, seat.provider, seat.model);
       replaced.set(id, { ...seat, model });
     }
     seats = replaced;
     const rerun = await preflightSeats(seats.values(), options.signal, result => {
       if (!results.some(r => r.provider === result.provider && r.model === result.model)) options.report?.(`${result.provider}/${result.model}: ${result.ok ? "pass" : `fail (${result.reason})`}`);
     });
+    for (const seat of seats.values()) {
+      if (rerun.some(r => r.reason === "model not found" && r.provider === seat.provider && r.model === seat.model)) {
+        throw new SeatUsageError(`Seat ${seat.name} (${seat.provider}): model ${seat.model} not available.`);
+      }
+    }
     results.push(...rerun.filter(r => !results.some(o => o.provider === r.provider && o.model === r.model)));
   }
-  const failed = new Map<LLMProvider, SeatPreflightResult>();
+  const failed = new Map<string, SeatPreflightResult>();
   for (const result of results) {
     if (!result.ok && result.reason !== "model not found" && (!failed.has(result.provider) || result.reason === "auth failed")) failed.set(result.provider, result);
   }
@@ -245,7 +247,7 @@ export async function prepareSeats(opts: ResolveSeatsOptions, options: {
     if (!availableProviders(opts.env).some(provider => !failed.has(provider) && !opts.excludeProviders?.includes(provider))) {
       throw new SeatUsageError("No providers passed preflight for --mix.");
     }
-    seats = await resolveSeats({ ...opts, excludeProviders: [...(opts.excludeProviders ?? []), ...failed.keys()] });
+    seats = await resolveSeats({ ...opts, excludeProviders: [...(opts.excludeProviders ?? []), ...[...failed.keys()].filter((p): p is LLMProvider => (PROVIDER_IDS as readonly string[]).includes(p))] });
   }
   assertSeatCredentials(seats.values(), opts.env);
   return seats;

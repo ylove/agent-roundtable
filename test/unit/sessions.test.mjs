@@ -2,6 +2,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { DEFAULT_MODELS } from "../../dist/config.js";
 import { json, stubFetch } from "./helpers.mjs";
 
 delete process.env.OPENAI_COMPATIBLE_BASE_URL;
@@ -18,6 +20,32 @@ const plain = resolve(here, "../fixtures/agents/plain.md");
 const BASE = "http://localhost:1234/v1";
 const ENDPOINT = `${BASE}/chat/completions`;
 const reply = (i) => json(200, { choices: [{ message: { content: `reply ${i}` } }] });
+
+test("collaboration dispatch persists a frontmatter model fallback across turns and the summary", async t => {
+  const oldKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "fixture-key";
+  t.after(() => { if (oldKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = oldKey; });
+  const dir = process.env.ROUNDTABLE_AGENTS_DIR;
+  mkdirSync(dir, { recursive: true });
+  for (const [id, model] of [["legacy-collaboration", "missing-collaboration-model"], ["fresh-collaboration", "fixture-model"]]) {
+    writeFileSync(resolve(dir, `${id}.md`), `---\nprovider: openai\nmodel: ${model}\n---\nYou are ${id}.\n`);
+  }
+  const warnings = [];
+  t.mock.method(process.stderr, "write", line => { warnings.push(line); return true; });
+  const calls = stubFetch(t, (_url, init, i) => JSON.parse(init.body).model === "missing-collaboration-model"
+    ? json(404, { error: { message: "model not found" } }) : reply(i));
+  const { collaborationId, messages } = await startCollaboration(["legacy-collaboration", "fresh-collaboration"], "topic", {
+    autoRun: true, runRounds: 1,
+  });
+  t.after(() => {
+    if (listCollaborations().some(c => c.id === collaborationId)) return endCollaboration(collaborationId);
+  });
+  assert.equal(messages.length, 3);
+  await endCollaboration(collaborationId, true);
+  assert.deepEqual(calls.map(c => c.body.model), ["missing-collaboration-model", DEFAULT_MODELS.openai,
+    "fixture-model", DEFAULT_MODELS.openai, DEFAULT_MODELS.openai]);
+  assert.equal(warnings.length, 1);
+});
 
 describe("meetings carry base_url for their whole life", () => {
   test("start, say, list, end(summary) all hit the configured base", async (t) => {

@@ -3,7 +3,6 @@
 // ============================================================================
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { PROVIDER_IDS } from "../config.js";
 import { runDuel, validateDuelOptions, withChosenSeats } from "../table/duel.js";
 import type { DuelKind, DuelOptions, SeatSpec, TableEvent } from "../table/events.js";
 import { DUEL_KINDS, MAX_CRITERIA } from "../table/prompts.js";
@@ -29,9 +28,9 @@ export const START_DUEL_SCHEMA: JsonSchema & { type: "object" } = {
     rounds: { type: "number", minimum: 1, maximum: 2, description: "1 (default) judges once; 2 lets a team the judges did not approve revise once and keeps the original tally." },
     seats: {
       type: "object",
-      description: 'Optional assignments keyed by exact persona identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider and model.',
+      description: 'Optional assignments keyed by exact persona identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (a provider or explicit runtime name) and model.',
       additionalProperties: true,
-      patternProperties: { "^.+$": { type: "object", properties: { agent: { type: "string" }, provider: { type: "string", enum: PROVIDER_IDS }, model: { type: "string", minLength: 1 } }, additionalProperties: false } },
+      patternProperties: { "^.+$": { type: "object", properties: { agent: { type: "string" }, provider: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,31}$", description: "Provider or explicit configured runtime name." }, model: { type: "string", minLength: 1 } }, additionalProperties: false } },
     },
     turn_timeout_s: { type: "number", minimum: 1, maximum: 3600, description: "Seconds allowed for each turn. Default 90 (builds get at least 240)." },
     max_seconds: { type: "number", minimum: 1, maximum: 3600, description: "Time limit for the whole duel before it moves to closings. Default 600, plus 120 per member beyond two on the larger team. Hosts need a request timeout longer than this, or one that resets on progress notifications." },

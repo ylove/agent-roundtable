@@ -1,7 +1,8 @@
 // ============================================================================
-// Configuration (reads process.env only; imports no local modules)
+// Configuration (reads process.env; imports only inert provider identifiers)
 // ============================================================================
 
+import { PROVIDER_IDS, type LLMProvider } from "./provider-ids.js";
 import { mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -54,21 +55,7 @@ export const LLM_TIMEOUT_MS = parseInt(process.env.ROUNDTABLE_LLM_TIMEOUT_MS || 
 export const OLLAMA_URL = (process.env.OLLAMA_URL || "http://localhost:11434").replace(/\/+$/, "");
 
 // Text LLM providers
-export type LLMProvider =
-  | "anthropic"
-  | "openai"
-  | "together"
-  | "replicate"
-  | "ollama"
-  | "openai_compatible";
-export const PROVIDER_IDS: LLMProvider[] = [
-  "anthropic",
-  "openai",
-  "together",
-  "replicate",
-  "ollama",
-  "openai_compatible",
-];
+export { PROVIDER_IDS, type LLMProvider } from "./provider-ids.js";
 
 // Short model aliases are accepted wherever a model is given
 export const ANTHROPIC_MODEL_ALIASES: Record<string, string> = {

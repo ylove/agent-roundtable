@@ -156,25 +156,61 @@ test('preflight: an explicit seat model that the provider does not know fails ha
   stubFetch(t, notFound);
   await assert.rejects(prepareSeats({ agents: ['old'], load: legacy, seat: 'old=openai:explicit-missing' }, { preflight: true }), e => e.exitCode === 2 && /model explicit-missing not available/.test(e.message));
 });
-test('call time: a frontmatter model falls back once per seat; an explicit one rethrows', async () => {
-  const { callWithFrontmatterFallback, isUnknownModelError } = await import('../../dist/table/seats.js');
-  const { ProviderHttpError } = await import('../../dist/providers/retry.js');
+test('call time: dispatch falls back once for frontmatter models and persists the replacement', async t => {
+  providerEnvironment(t);
+  const { callSeat } = await import('../../dist/table/dispatch.js');
   const seats = await resolveSeats({ agents: ['old'], load: legacy });
   const target = { ...seats.get('old') };
-  const warnings = [], used = [];
-  const call = async () => { used.push(target.model); if (target.model !== DEFAULT_MODELS.openai) throw new ProviderHttpError('nope', 404); return 'ok'; };
-  assert.equal(await callWithFrontmatterFallback(target, 'old', call, w => warnings.push(w)), 'ok');
-  assert.deepEqual(used, ['legacy-model-1', DEFAULT_MODELS.openai]);
+  const warnings = [];
+  t.mock.method(process.stderr, 'write', line => { warnings.push(line); return true; });
+  const calls = stubFetch(t, (_url, init) => JSON.parse(init.body).model === 'legacy-model-1'
+    ? notFound() : json(200, { choices: [{ message: { content: 'ok' } }] }));
+  const context = { agent: 'old', onModelFallback: model => { target.model = model; } };
+  const call = () => callSeat('Persona', [{ role: 'user', content: 'Reply.' }], { ...target }, context);
+  assert.equal(await call(), 'ok');
+  assert.equal(await call(), 'ok');
+  assert.deepEqual(modelOf(calls), ['legacy-model-1', DEFAULT_MODELS.openai, DEFAULT_MODELS.openai]);
+  assert.equal(target.model, DEFAULT_MODELS.openai);
   assert.equal(warnings.length, 1);
-  // Once is enough: a later 404 on the fallback model is a real failure.
-  const failing = async () => { throw new ProviderHttpError('nope', 404); };
-  await assert.rejects(callWithFrontmatterFallback(target, 'old', failing, w => warnings.push(w)), ProviderHttpError);
+  assert.match(warnings[0], /persona old: model legacy-model-1 not available; using/);
+});
+
+test('call time: explicit models, other errors and a failing fallback rethrow without extra retries', async t => {
+  providerEnvironment(t);
+  const { callSeat } = await import('../../dist/table/dispatch.js');
+  const { ProviderHttpError } = await import('../../dist/providers/retry.js');
+  const { isUnknownModelError } = await import('../../dist/table/seats.js');
+  const warnings = [];
+  t.mock.method(process.stderr, 'write', line => { warnings.push(line); return true; });
+  let status = 404;
+  const calls = stubFetch(t, () => json(status, { error: { message: 'model not found' } }));
+  const explicit = (await resolveSeats({ agents: ['old'], load: legacy, seat: 'old=openai:assigned-missing' })).get('old');
+  const call = seat => callSeat('Persona', [{ role: 'user', content: 'Reply.' }], seat, { agent: 'old' });
+  await assert.rejects(call(explicit), ProviderHttpError);
+  assert.equal(calls.length, 1);
+  assert.equal(explicit.model, 'assigned-missing');
+  assert.equal(warnings.length, 0);
+  const frontmatter = (await resolveSeats({ agents: ['old'], load: legacy })).get('old');
+  status = 401;
+  await assert.rejects(call(frontmatter), ProviderHttpError);
+  assert.equal(calls.length, 2);
+  assert.equal(frontmatter.model, 'legacy-model-1');
+  assert.equal(warnings.length, 0);
+  status = 404;
+  await assert.rejects(call(frontmatter), ProviderHttpError);
+  assert.deepEqual(modelOf(calls).slice(2), ['legacy-model-1', DEFAULT_MODELS.openai]);
+  await assert.rejects(call(frontmatter), ProviderHttpError);
+  assert.equal(calls.length, 5);
   assert.equal(warnings.length, 1);
-  const assigned = { provider: 'openai', model: 'assigned-missing' };
-  await resolveSeats({ agents: ['old'], load: legacy, seat: 'old=openai:assigned-missing' });
-  await assert.rejects(callWithFrontmatterFallback(assigned, 'old', failing, w => warnings.push(w)), ProviderHttpError);
-  assert.equal(assigned.model, 'assigned-missing');
   assert.equal(isUnknownModelError(new ProviderHttpError('The model `x` does not exist', 400)), true);
   assert.equal(isUnknownModelError(new ProviderHttpError('bad request', 400)), false);
   assert.equal(isUnknownModelError(new ProviderHttpError('x', 401)), false);
+});
+
+test('preflight fails clearly when the default fallback model is also missing', async t => {
+  providerEnvironment(t);
+  const calls = stubFetch(t, notFound);
+  await assert.rejects(prepareSeats({ agents: ['old'], load: legacy }, { preflight: true }),
+    e => e.exitCode === 2 && e.message.includes(`model ${DEFAULT_MODELS.openai} not available`));
+  assert.deepEqual(modelOf(calls), ['legacy-model-1', DEFAULT_MODELS.openai]);
 });

@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 
 /** A regular file this process may execute. */
 export function isExecutableFile(p: string): boolean {
@@ -37,4 +37,9 @@ export function findExecutable(names: string | readonly string[], searchPath: st
     }
   }
   return null;
+}
+
+/** Resolve configured runtime binaries without invoking a shell. */
+export function resolveExecutable(command: string, searchPath = process.env.PATH || ""): string | null {
+  return isAbsolute(command) ? (isExecutableFile(command) ? command : null) : findExecutable(command, searchPath);
 }

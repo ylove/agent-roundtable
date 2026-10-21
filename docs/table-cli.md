@@ -21,7 +21,7 @@ Duel gives each team 1 to 4 members (the first writes the concept, the last buil
 
 ## Seats and models
 
-Choose a provider and model for individual seats with one comma-separated flag:
+Choose a provider or [CLI runtime](runtimes.md) and model for individual seats with one comma-separated flag:
 
 ```sh
 roundtable debate "A spending limit" --agents designer,skeptic \
@@ -44,6 +44,8 @@ Both mixes use the configured provider defaults. The default for `anthropic` is 
 Both `--mix auto` and `--mix cheap` run preflight automatically. Each configured candidate provider is checked, including candidates not used by the initial roster. Any provider with a failed check is excluded, with one warning such as `anthropic: auth failed, excluded from mix`. Seats are then reassigned across the remaining providers; the teams start on different providers when at least two remain. If no provider passes, the command exits 2.
 
 Explicit `--seat` assignments are preserved: if their provider fails preflight, the command exits 2 and names the seat and provider. Use `--no-preflight` to skip automatic mix checks and exclusions. It cannot be combined with `--preflight`. Replay and dry-run never make preflight requests.
+
+Runtime seats are explicit: `--seat designer=hermes,skeptic=codex:example-model`. `--mix` selects only configured API providers. `roundtable runtimes [--json]` lists runtime detection and versions. See [CLI runtimes](runtimes.md) for profiles, configuration and prompt exposure.
 
 For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exact agent identifiers. Explicit session-wide `provider`/`model` arguments preserve their existing behavior, with per-seat overrides taking priority:
 

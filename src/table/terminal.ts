@@ -37,7 +37,7 @@ export function createTerminalObserver(options: TerminalOptions = {}): TableObse
   const width = Math.max(20, Math.min(options.width ?? output.columns ?? 88, 120));
   const paint = (code: number, text: string) => color ? `\x1b[${code}m${text}\x1b[0m` : text;
   const seatColor = (seat: Seat) => 31 + ([...seat.id].reduce((n, ch) => (n * 31 + ch.charCodeAt(0)) >>> 0, 0) % 6);
-  const label = (seat: Seat) => paint(seatColor(seat), oneLine(`${seat.name} · ${seat.role ?? seat.team ?? "at the table"} · [${seat.provider}/${seat.model}]`));
+  const label = (seat: Seat) => paint(seatColor(seat), oneLine(`${seat.name} · ${seat.role ?? seat.team ?? "at the table"} · [${seat.provider}/${seat.model || "default"}]`));
   let spend = 0, unpriced = 0;
   let perSeat: Extract<TableEvent, { type: "usage" }>["perSeat"] = [];
   return { onEvent(event) {

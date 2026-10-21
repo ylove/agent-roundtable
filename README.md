@@ -34,7 +34,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [Collaboration: conversation](docs/modes/collaborations.md#conversation-mode) | Informal colleague chat with an optional theme and private grounding. | “Let cfo and product-lead chat about the launch in conversation mode.” |
 | [Ultraplan](docs/modes/ultraplan.md) | Collect input, review revisions and record sign-offs on a plan. | “Ultraplan the launch with product-lead, cfo and skeptic; show the final document verbatim.” |
 | [Agent workshops](docs/modes/agent-workshops.md) | Specialists create or improve an agent and reusable skills. | “Have cfo and skeptic create a budget agent, then improve product-lead's escalation rules; preview both.” |
-| [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local blackboard for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
+| [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local prototype board for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
 | [Duel](docs/modes/duel.md) | Two teams build competing artifacts (a page, code, a diagram or a document); judges assess them; dissents are recorded. | “Run a duel on a rate limiter module with architect and engineer against pragmatist and reviewer, judged by security-lead.” |
 | [Public sessions](docs/modes/public-sessions.md) | Mirror an explicitly public session to ntfy or a webhook. | “Make that pricing debate public and give me the viewing link.” |
 
@@ -102,7 +102,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 ## CLI
 
-No arguments starts the orchestrator MCP server. The binary has **11 subcommands**, plus **5 table commands** that run at the table from a terminal (`duel`, `debate`, `waffle`, `meeting`, `config`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
+No arguments starts the orchestrator MCP server. The binary has **12 subcommands**, plus **5 table commands** that run at the table from a terminal (`duel`, `debate`, `waffle`, `meeting`, `config`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
 
 | Subcommand | Purpose |
 | --- | --- |
@@ -116,6 +116,7 @@ No arguments starts the orchestrator MCP server. The binary has **11 subcommands
 | `statusline [--agents N] [--plain] [--no-host]` | A Claude Code status line with the host and the roundtable's spend. |
 | `usage [--json] [--watch]` | Who is using what, on which platform, measured or estimated. |
 | `stop <agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent, heads-down or at the table. |
+| `runtimes [--json]` | Detect installed [CLI runtimes](docs/runtimes.md). |
 | `help` | Print usage. |
 | `duel`, `debate`, `waffle`, `meeting`, `config` | Table commands: see [at the table from the terminal](docs/table-cli.md). |
 
@@ -129,6 +130,7 @@ No arguments starts the orchestrator MCP server. The binary has **11 subcommands
 - [At the table from the terminal](docs/table-cli.md): `duel`, `debate`, `waffle`, `meeting`, per-seat models and replay
 - [Duel](docs/modes/duel.md) and the [demo recording script](docs/demo.md)
 - [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)
+- [CLI runtimes at the table](docs/runtimes.md): installed agents alongside API providers
 - [Configuration](docs/configuration.md) and [providers](docs/providers.md)
 - [Agent personas and skills](docs/agents.md) and [session archives](docs/sessions.md)
 - [Changelog](CHANGELOG.md), [threat model](docs/THREAT_MODEL.md), [security controls](docs/SECURITY_CONTROLS.md)

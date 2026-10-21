@@ -4,7 +4,7 @@
 
 import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
-import { callWithFrontmatterFallback, resolveSeats, validateSeatSpecs } from "../table/seats.js";
+import { resolveSeats, validateSeatSpecs } from "../table/seats.js";
 import type { SeatSpec } from "../table/events.js";
 import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
@@ -12,7 +12,8 @@ import { newId } from "../ids.js";
 import { sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveCollaboration } from "./archive.js";
 import { isPostmortemOrigin } from "../postmortem/sessions.js";
-import { callLLM, activeAbortSignal, withAbortSignal } from "../providers/index.js";
+import { callSeat } from "../table/dispatch.js";
+import { activeAbortSignal, withAbortSignal } from "../providers/index.js";
 import { metered, stoppedOutcome, type StoppedInfo } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
@@ -51,7 +52,7 @@ import {
 
 export interface CollaborationAgent {
   name: string;
-  provider?: LLMProvider;
+  provider?: string;
   model?: string;
   systemPrompt: string;
   /** Set in debate (proponent/challenger) and waffle-house (defender/attacker) modes. */
@@ -107,7 +108,7 @@ function agentCallOptions(collaboration: Collaboration, agent: CollaborationAgen
   const provider = agent.provider ?? collaboration.provider;
   return {
     provider,
-    model: agent.model ?? (provider === collaboration.provider ? collaboration.model : DEFAULT_MODELS[provider]),
+    model: agent.model ?? (provider === collaboration.provider ? collaboration.model : (Object.hasOwn(DEFAULT_MODELS, provider) ? DEFAULT_MODELS[provider as LLMProvider] : "")),
     baseUrl: provider === "openai_compatible" ? collaboration.baseUrl : undefined,
     estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin),
   };
@@ -116,11 +117,11 @@ function agentCallOptions(collaboration: Collaboration, agent: CollaborationAgen
 /** Hard cap on max_rounds and on rounds per continue (the tool schemas declare the same maximum). */
 export const MAX_COLLABORATION_ROUNDS = 20;
 
-function callAgent(collaboration: Collaboration, agent: CollaborationAgent, messages: Parameters<typeof callLLM>[1]): Promise<string> {
+function callAgent(collaboration: Collaboration, agent: CollaborationAgent, messages: Parameters<typeof callSeat>[1]): Promise<string> {
   return metered({ session: collaboration.id, kind: "collaboration", agent: agent.name }, () => {
-    const options = agentCallOptions(collaboration, agent);
-    const call = () => callWithFrontmatterFallback(options, agent.name, () => callLLM(agent.systemPrompt, messages, options))
-      .finally(() => { agent.model = options.model; });
+    const call = () => callSeat(agent.systemPrompt, messages, agentCallOptions(collaboration, agent), {
+      agent: agent.name, onModelFallback: model => { agent.model = model; },
+    });
     if (!collaboration.signal) return call();
     const sessionStop = activeAbortSignal();
     const signal = sessionStop ? AbortSignal.any([sessionStop, collaboration.signal]) : collaboration.signal;
@@ -340,7 +341,7 @@ async function openCollaboration(
   }
 
   const provider = options.provider || "anthropic";
-  const resolvedModel = options.model || DEFAULT_MODELS[provider];
+  const resolvedModel = options.model || (Object.hasOwn(DEFAULT_MODELS, provider) ? DEFAULT_MODELS[provider as LLMProvider] : "");
   const baseUrl = options.baseUrl;
   const mode: CollaborationMode = options.mode ?? "collaborate";
   assertCollaborationMode(mode);
@@ -361,8 +362,8 @@ async function openCollaboration(
   const assigned: Record<string, SeatSpec> | undefined = options.provider !== undefined || options.model !== undefined
     ? Object.fromEntries(agentNames.map(agent => {
         const override = options.seats?.[agent];
-        const model = override?.model ?? (override?.provider ? DEFAULT_MODELS[override.provider] : resolvedModel);
-        return [agent, { agent, provider, ...override, model }];
+        const model = override?.model ?? (override?.provider ? (Object.hasOwn(DEFAULT_MODELS, override.provider) ? DEFAULT_MODELS[override.provider as LLMProvider] : "") : resolvedModel);
+        return [agent, { agent, provider, ...override, ...(model && { model }) }];
       }))
     : options.seats;
   if (options.seats && Object.keys(options.seats).some(agent => !agentNames.includes(agent))) {

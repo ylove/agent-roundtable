@@ -40,6 +40,7 @@ export const USAGE = [
   "                                                  stop one agent (a heads-down worker or an at-the-table session)",
   "  roundtable duel <brief> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--kind web|code|diagram|text] [--criteria a,b] [--open]",
   "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2]",
+  "  roundtable runtimes [--json]",
   "  roundtable config set env-file|agents-dir <absolute-path> | config show",
   "  agent-roundtable help                           this text",
 ].join("\n");
@@ -250,6 +251,15 @@ export async function runCli(argv: string[]): Promise<void> {
       return usageReport(rest);
     case "stop":
       return stopAgentCommand(rest);
+    case "runtimes": {
+      if (rest.some(v => v !== "--json") || rest.length > 1) return usage("runtimes accepts only --json");
+      const { runtimeRegistry } = await import("./runtimes/registry.js");
+      const { detectRuntime } = await import("./runtimes/runner.js");
+      const profiles = [];
+      for (const [name, spec] of Object.entries(runtimeRegistry())) profiles.push({ name, ...await detectRuntime(spec) });
+      process.stdout.write(rest.includes("--json") ? JSON.stringify(profiles) + "\n" : profiles.map(p => `${p.name}: ${p.found ? "found" : "not found"}${p.path ? ` ${p.path}` : ""}${p.version ? ` (${p.version.replace(/[\r\n\x1b]/g, " ")})` : ""}${p.error ? `; ${p.error}` : ""}`).join("\n") + "\n");
+      return;
+    }
     case "duel":
     case "debate":
     case "waffle":

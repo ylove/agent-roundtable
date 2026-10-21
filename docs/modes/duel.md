@@ -22,6 +22,10 @@ roundtable duel "One-page remote-work expenses policy" --kind text \
 
 Use personas available in your agents directory. Each persona holds one seat across both teams and the judges.
 
+## Seats
+
+Choose API providers or installed CLI runtimes per seat with `--seat designer=hermes,builder=codex:example-model`. In `start_duel`, use the runtime name in the seat's `provider` field, for example `"seats": {"designer": {"provider": "hermes"}}`. Runtime selection is explicit; `--mix` only chooses configured providers. See [CLI runtimes](../runtimes.md) for built-in profiles, preflight, usage accounting and process-list prompt exposure.
+
 ## Kinds
 
 `--kind` (or `kind` in the `start_duel` tool) picks what both teams build, reusing [prototype mode](prototype-mode.md)'s block format and parser. Every kind is small by design: at most 40 KB in total, and builders are told to aim much lower.

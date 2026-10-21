@@ -23,6 +23,8 @@ export interface UsageReport {
   usage?: LLMCompletionResult["usage"];
   /** A driver may report a measured cost along with provider token usage. */
   usd?: number;
+  /** External runtimes report their own counts; API response counts are measured by default. */
+  tokensProvenance?: "measured" | "reported";
   /** Lengths (not text) of the request and the reply, so a call without usage can still be estimated. */
   chars?: { input: number; output: number };
 }

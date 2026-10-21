@@ -132,7 +132,7 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
       cache_read: r.usage.cacheReadTokens ?? 0,
       cache_write: r.usage.cacheWriteTokens ?? 0,
     };
-    prov = "measured";
+    prov = r.tokensProvenance ?? "measured";
   } else {
     tokens = {
       input: Math.ceil((r.chars?.input ?? 0) / CHARS_PER_TOKEN),
@@ -166,6 +166,10 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
       line.usd = est.usd;
       line.usd_prov = "estimated";
     }
+  }
+  if (r.tokensProvenance === "reported" && r.usd !== undefined && Number.isFinite(r.usd) && r.usd >= 0) {
+    line.usd = r.usd;
+    line.usd_prov = "reported";
   }
   return line;
 }

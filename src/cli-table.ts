@@ -13,7 +13,7 @@ const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges
   teams have 1 to 4 members (first writes the concept, last builds, any between critique); 1 to 5 judges
   --open --no-room --no-hold   open the live room, skip it, or exit when the duel ends
   --json                       NDJSON events instead of the terminal view
-  --seat <agent=provider:model,...>  --mix auto|cheap  --preflight | --no-preflight
+  --seat <agent=provider-or-runtime:model,...>  --mix auto|cheap  --preflight | --no-preflight
   --kind web|code|diagram|text   what the teams build (default web)
   --criteria "a,b,c"           judging rubric (default: fit to the brief, quality, usability and accessibility, risk or safety)
   --rounds 1|2  --turn-timeout <s>  --max-seconds <s>  --agents-dir <abs-path>
@@ -191,7 +191,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
         { ...(command === "duel" ? parsed.options : { agents: parsed.agents, agentsDir: parsed.options.agentsDir }), seat: parsed.flags.seat as string | undefined, mix: parsed.options.mix },
         { preflight: !parsed.flags["no-preflight"], signal: controller.signal, report: message => { error.write(`${clean(message)}\n`); } },
       );
-      parsed.options.seats = Object.fromEntries([...seats].map(([id, seat]) => [id, { agent: id, provider: seat.provider, model: seat.model }]));
+      parsed.options.seats = Object.fromEntries([...seats].map(([id, seat]) => [id, { agent: id, provider: seat.provider, ...(seat.model && { model: seat.model }) }]));
     }
     if (command !== "duel") return await runDiscussion(command, parsed, seats, terminal, controller.signal);
     const runner = replay ? await modules.replay() : await modules.duel();

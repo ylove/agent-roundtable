@@ -14,9 +14,10 @@ The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts th
 | `statusline` | `[--agents N] [--plain] [--no-host]` | A Claude Code `statusLine` command: the host's line, the roundtable's spend, the busiest agents. Always exits 0. |
 | `usage` | `[--json] [--watch]` | Who is using what, on which platform, with measured / reported / estimated labels. `--watch` refreshes every 2 s. |
 | `stop` | `<agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent: a heads-down worker or an at-the-table session. |
+| `runtimes` | `[--json]` | List installed CLI runtimes, paths and versions. See [CLI runtimes](runtimes.md). |
 | `help` | none | Print usage. |
 
-These are the **11 named subcommands** of the heads-down and usage side of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches five table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
+These are the **12 named subcommands** for heads-down runs, usage and runtime detection of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches five table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
 
 ```sh
 agent-roundtable help

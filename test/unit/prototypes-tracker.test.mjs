@@ -51,6 +51,14 @@ const codeBlock = (title = "Coupons table", extra = "") =>
 const status = async (url) => (await fetch(url)).status;
 const protoDirs = (tr) => (existsSync(tr.sessionDir) ? readdirSync(tr.sessionDir).filter((n) => /^P\d+v\d+$/.test(n)) : []);
 
+async function waitFor(condition, description) {
+  const deadline = performance.now() + 10_000;
+  while (!condition()) {
+    assert.ok(performance.now() < deadline, `Timed out waiting for ${description}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 test("tracker: 2-agent flow — propose, assess (destroyed from disk), SHORTLIST", async (t) => {
   const tr = await mk(t);
   assert.match(tr.boardUrl, /^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{20,}\/$/);
@@ -200,7 +208,8 @@ test("tracker: TTL expiry destroys an unassessed prototype", async (t) => {
   const tr = await mk(t, { ttlMs: 40 });
   await tr.onTurn(0, webBlock(), 1);
   assert.deepEqual(protoDirs(tr), ["P1v1"]);
-  await new Promise((r) => setTimeout(r, 150));
+  // Expiry updates state before awaiting asynchronous directory removal.
+  await waitFor(() => !tr.hasLiveUnderAssessment() && protoDirs(tr).length === 0, "TTL expiry and artifact removal");
   assert.deepEqual(protoDirs(tr), []);
   assert.equal(tr.hasLiveUnderAssessment(), false);
   assert.equal(await status(`${tr.boardUrl}p/P1v1/`), 410);
@@ -381,7 +390,7 @@ test("close during materialize: the prototype is never registered as live and no
     assert.equal(tr.hasLiveUnderAssessment(), false, `yields ${yields}`);
     assert.deepEqual(tr.takeCallSummary().live, [], `yields ${yields}`);
     if (r.created) assert.match(tr.outcomesMarkdown(), /status: closed at session end/);
-    for (let i = 0; i < 50 && existsSync(tr.sessionDir); i++) await new Promise((res) => setTimeout(res, 10));
+    await waitFor(() => !existsSync(tr.sessionDir), `yields ${yields}: session dir removal`);
     assert.equal(existsSync(tr.sessionDir), false, `yields ${yields}: session dir removed`);
   }
 });

@@ -157,7 +157,14 @@ function tryCreate(lockDir: string, token: string): boolean {
   const owner: LockOwner = { pid: process.pid, host: hostname(), token, at: new Date().toISOString(), ...(started ? { started } : {}) };
   const tmp = join(lockDir, `.owner.${token}.tmp`);
   try {
-    writeFileSync(tmp, JSON.stringify(owner), { mode: 0o600, flag: "wx" });
+    try {
+      writeFileSync(tmp, JSON.stringify(owner), { mode: 0o600, flag: "wx" });
+    } catch (e) {
+      // A contender clearing a stale lock can rename or remove our fresh directory under us; macOS
+      // reports that as EINVAL from open(2) inside it. Same meaning as ENOENT: the directory is not ours.
+      if (errCode(e) === "EINVAL") return false;
+      throw e;
+    }
     linkSync(tmp, join(lockDir, OWNER_FILE));
     return true;
   } catch (e) {

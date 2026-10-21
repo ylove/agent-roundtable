@@ -22,6 +22,19 @@ export function trustedRoutingEndpoint(provider: LLMProvider, env: NodeJS.Proces
   } catch { return false; }
 }
 
+/**
+ * Short stable identity of the endpoint behind a provider call: a hash of origin and path only, so neither
+ * URL credentials, query strings nor keys are ever stored. Only operator-pointable providers have one.
+ */
+export function endpointFingerprint(provider: string, env: NodeJS.ProcessEnv = process.env, baseUrl?: string): string | undefined {
+  if (provider !== "openai_compatible" && provider !== "ollama") return undefined;
+  const raw = provider === "openai_compatible" ? baseUrl ?? env.OPENAI_COMPATIBLE_BASE_URL : env.OLLAMA_URL;
+  try {
+    const u = new URL(raw ?? "");
+    return createHash("sha256").update(`${u.origin}${u.pathname.replace(/\/+$/, "")}`).digest("hex").slice(0, 16);
+  } catch { return "invalid"; }
+}
+
 export interface ProviderHealth { ok: boolean; at: number; reason?: string }
 /** No persistence: tool arguments and ledger rows can never create a trusted health entry. */
 export class ProviderHealthCache {

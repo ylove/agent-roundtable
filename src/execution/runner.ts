@@ -139,6 +139,7 @@ const SNAPSHOT_MS = 60_000;
 const TERMINAL_RUN: ReadonlySet<string> = new Set(["completed", "failed", "aborted"]);
 /** As control_execution abort: the CLI's time to stop before its group is killed. */
 const ABORT_STOP_GRACE_MS = 5_000;
+const ROUTE_RETRY_MS = 30_000;
 const OPEN_ESCALATION: ReadonlySet<string> = new Set(["open", "routed", "in_huddle", "awaiting_human"]);
 const ACTIVE_TASK: ReadonlySet<string> = new Set(["claimed", "in_progress", "submitted", "checking"]);
 const SESSION_GONE_RE = /no conversation found|session(?: id)?[^\n]{0,80}\bnot found|could not (?:find|resume) (?:the )?session/i;
@@ -330,6 +331,8 @@ export class Runner {
   /** Stop requests (agent.stop_requested event ids) this process has applied. */
   private readonly stopApplied = new Set<string>();
   private readonly routed = new Set<string>();
+  /** A failed route (for example no healthy provider) is offered again after a pause, not on every tick. */
+  private readonly routeRetryAt = new Map<string, number>();
   private readonly leadInFlight = new Set<string>();
   /** The hooks' escalation pass: one at a time, when the log moved or every PASS_MS. */
   private passInFlight = false;
@@ -1216,13 +1219,13 @@ export class Runner {
   /** New open escalations go to the router once per process (a restarted runner offers them again). */
   private routeEscalations(state: Readonly<BlackboardState>): void {
     for (const esc of Object.values(state.escalations)) {
-      if (esc.status !== "open" || this.routed.has(esc.id)) continue;
+      if (esc.status !== "open" || this.routed.has(esc.id) || (this.routeRetryAt.get(esc.id) ?? 0) > Date.now()) continue;
       this.routed.add(esc.id);
       this.track(
         this.hooks
           .escalationRouter(this.ctx, structuredClone(esc))
           .then((ops) => this.applyResolutionOps(ops ?? [], `escalation ${esc.id}`))
-          .catch((e) => this.say(`escalation router on ${esc.id}: ${errText(e)}`))
+          .catch((e) => { this.routed.delete(esc.id); this.routeRetryAt.set(esc.id, Date.now() + ROUTE_RETRY_MS); this.say(`escalation router on ${esc.id}: ${errText(e)}`); })
       );
     }
   }

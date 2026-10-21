@@ -155,7 +155,7 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
     tokens_prov: prov,
   };
   const outcome = activeProviderOutcome();
-  if (outcome?.provider === r.provider) { line.outcome = outcome.outcome; line.latency_ms = outcome.latency_ms; }
+  if (outcome?.provider === r.provider) { line.outcome = outcome.outcome; line.latency_ms = outcome.latency_ms; if (outcome.endpoint !== undefined) line.endpoint = outcome.endpoint; }
   const count = tokens.input + tokens.output + tokens.cache_read + tokens.cache_write;
   if (count > 0) {
     const est = estimateUsd(

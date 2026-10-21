@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { endpointFingerprint } from '../../dist/providers/health.js';
+import { runnerHookContext, resolveHuddleLLM } from '../../dist/execution/escalation.js';
+import { makeState } from '../fixtures/execution-state.mjs';
 import { routeProvider, routingModels, recentPerformance, recentRoutingHistory } from '../../dist/providers/router.js';
 import { ProviderHealthCache, providerHealth, HEALTH_TTL_MS } from '../../dist/providers/health.js';
 import { PROVIDER_MAX_TOKENS } from '../../dist/providers/limits.js';
@@ -85,20 +88,90 @@ test('recent 429 and timeout history demotes providers; only the last 50 calls c
   assert.deepEqual(routeProvider(inputs()), routeProvider(inputs()));
 });
 
-test('budget is a hard cap; unknown prices are excluded and explained, including all explicit or persona pins', async () => {
+test('budget is a hard cap on known and estimated costs; unpriced providers stay eligible on an estimate', async () => {
   const pricing = { [DEFAULT_MODELS.anthropic]: rates(100, 100), [DEFAULT_MODELS.openai]: rates(1, 1) };
   const choice = routeProvider(inputs({ remainingBudgetUsd: 0.02, pricing }));
   assert.equal(choice.provider, 'openai');
   assert.match(choice.reason, /exceeds remaining budget/);
-  assert.match(choice.reason, /unknown price excluded with budget/);
   assert.throws(() => routeProvider(inputs({ remainingBudgetUsd: 0, pricing })), /No healthy provider/);
   assert.throws(() => routeProvider(inputs({ remainingBudgetUsd: NaN, pricing })), /No healthy provider/);
   for (const bounds of [{ inputTokens: -1 }, { outputTokens: 0 }, { outputTokens: NaN }]) assert.throws(() => routeProvider(inputs({ ...bounds, remainingBudgetUsd: 1, pricing })), /token bounds/);
-  assert.throws(() => routeProvider(inputs({ env: { TOGETHER_API_KEY: 'fixture' }, remainingBudgetUsd: 100 })), /unknown price excluded with budget/);
+  // Together has no built-in price: eligible on a conservative estimate, labelled as such, until the estimate exceeds the budget.
+  const together = { TOGETHER_API_KEY: 'fixture' };
+  const eligible = routeProvider(inputs({ env: together, remainingBudgetUsd: 100 }));
+  assert.equal(eligible.provider, 'together');
+  assert.match(eligible.reason, /price estimated/);
+  assert.throws(() => routeProvider(inputs({ env: together, remainingBudgetUsd: 0.0001 })), /exceeds remaining budget \(estimated cost\)/);
+  // A price from the table overrides the estimate: a cheap known price fits where the estimate does not.
+  const priced = routeProvider(inputs({ env: together, remainingBudgetUsd: 0.01, pricing: { [DEFAULT_MODELS.together]: rates(0.1, 0.1) } }));
+  assert.equal(priced.provider, 'together');
+  assert.doesNotMatch(priced.reason, /price estimated/);
   const base = { agents: ['a'], env, load: empty, routing: { config: {}, history: [], remainingBudgetUsd: 0.02, pricing } };
   await assert.rejects(resolveSeats({ ...base, seats: { a: { provider: 'anthropic', model: DEFAULT_MODELS.anthropic } } }), /exceeds remaining budget/);
   await assert.rejects(resolveSeats({ ...base, provider: 'anthropic' }), /exceeds remaining budget/);
-  await assert.rejects(resolveSeats({ ...base, load: async () => ({ frontmatter: { provider: 'together' } }) }), /unknown price excluded with budget/);
+  await assert.rejects(resolveSeats({ ...base, load: async () => ({ frontmatter: { provider: 'together' } }) }), /exceeds remaining budget \(estimated/);
+});
+
+test('persona model fallback checks affordability, counting estimated cost, before probing or accepting the default', async t => {
+  process.env.TOGETHER_API_KEY = 'fixture';
+  const calls = stubFetch(t, (_url, init) => JSON.parse(init.body).model === 'missing-fixture' ? json(404, { error: { message: 'unknown model' } }) : reply('OK'));
+  const load = async () => ({ frontmatter: { provider: 'together', model: 'missing-fixture' } });
+  const pricing = { 'missing-fixture': rates(0.001, 0.001) };
+  // The pinned model is cheap; the provider default has no price, so its estimate exceeds the allowance.
+  await assert.rejects(prepareSeats({ agents: ['a'], load, routing: { config: {}, history: [], remainingBudgetUsd: 0.01, pricing } }), /exceeds remaining budget \(estimated/);
+  assert.ok(calls.every(call => call.body.model === 'missing-fixture'), 'the unaffordable default is never probed');
+  calls.length = 0;
+  const seats = await prepareSeats({ agents: ['a'], load, routing: { config: {}, history: [], remainingBudgetUsd: 100, pricing } });
+  assert.equal(seats.get('a').model, DEFAULT_MODELS.together);
+});
+
+test('endpoint-scoped history: an unrelated openai_compatible URL cannot sway routing for the configured endpoint', async t => {
+  Object.assign(process.env, { OPENAI_COMPATIBLE_BASE_URL: 'https://configured.example/v1', OPENAI_COMPATIBLE_API_KEY: 'sk-secret-key', ANTHROPIC_API_KEY: 'fixture-a' });
+  stubFetch(t, () => json(401, { error: { message: 'no' } }));
+  for (let i = 0; i < 3; i++) {
+    await assert.rejects(callLLM('brief', [{ role: 'user', content: 'brief' }], { provider: 'openai_compatible', model: 'judgment-endpoint-fixture', baseUrl: 'https://foreign.example/v1' }));
+  }
+  const history = recentRoutingHistory(NOW, ROUNDTABLE_HOME).filter(line => line.model === 'judgment-endpoint-fixture');
+  assert.equal(history.length, 3);
+  assert.ok(history.every(line => /^[0-9a-f]{16}$/.test(line.endpoint) && !JSON.stringify(line).includes('foreign.example') && !JSON.stringify(line).includes('sk-secret-key')));
+  assert.equal(endpointFingerprint('openai_compatible', process.env, 'https://user:pw@foreign.example/v1/?k=1'), endpointFingerprint('openai_compatible', process.env, 'https://foreign.example/v1'));
+  assert.notEqual(endpointFingerprint('openai_compatible', process.env, 'https://foreign.example/v1'), endpointFingerprint('openai_compatible', process.env));
+  const configured = { ...process.env };
+  const model = routingModels('openai_compatible', 'judge').model;
+  const poisoned = history.map(line => ({ ...line, model }));
+  assert.equal(recentPerformance(poisoned, 'openai_compatible', model, endpointFingerprint('openai_compatible', configured)).failures, 0);
+  assert.equal(recentPerformance(poisoned, 'openai_compatible', model, endpointFingerprint('openai_compatible', configured, 'https://foreign.example/v1')).failures, 3);
+  const choice = routeProvider(inputs({ env: configured, tier: 'judge', history: poisoned, health: new ProviderHealthCache(() => NOW) }));
+  assert.equal(choice.provider, 'anthropic', 'tie-break order is unchanged by foreign failures (anthropic precedes openai_compatible)');
+  assert.equal(routeProvider(inputs({ env: { OPENAI_COMPATIBLE_BASE_URL: 'https://configured.example/v1' }, tier: 'judge', history: poisoned })).provider, 'openai_compatible');
+});
+
+test('hook context resolves its provider lazily, so recovery needs neither budget nor a healthy provider', async () => {
+  process.env.ANTHROPIC_API_KEY = 'fixture';
+  const store = { state: async () => makeState({ contract: null }) };
+  const ctx = await runnerHookContext({ store, header: {}, driver: () => ({}), worker: () => undefined });
+  assert.equal(typeof ctx.llm, 'function');
+  assert.throws(() => resolveHuddleLLM(ctx.llm), /exceeds remaining budget|No healthy provider/);
+  const explicit = await runnerHookContext({ store, header: {}, driver: () => ({}), worker: () => undefined }, { llm: { provider: 'openai', model: 'x' } });
+  assert.deepEqual(resolveHuddleLLM(explicit.llm), { provider: 'openai', model: 'x' });
+});
+
+test('the routed output ceiling applies to every meeting call: opening, turns and summaries', async t => {
+  mkdirSync(ROUNDTABLE_HOME, { recursive: true, mode: 0o700 });
+  writeFileSync(join(ROUNDTABLE_HOME, 'config.json'), JSON.stringify({ routing: { openai: { balanced: { model: DEFAULT_MODELS.openai, maxOutputTokens: 250 }, judge: { model: DEFAULT_MODELS.openai, maxOutputTokens: 250 } } } }), { mode: 0o600 });
+  t.after(() => rmSync(join(ROUNDTABLE_HOME, 'config.json'), { force: true }));
+  fixtureAgents();
+  process.env.OPENAI_API_KEY = 'fixture';
+  const calls = stubFetch(t, () => reply('OK'));
+  const started = await handleToolCall('start_meeting', { agent: 'judgment-a', agenda: 'brief', provider: 'auto' });
+  assert.ok(!started.isError, started.content[0].text);
+  const id = JSON.parse(started.content[0].text).meetingId;
+  const said = await handleToolCall('say', { meeting_id: id, message: 'go on' });
+  assert.ok(!said.isError, said.content[0].text + started.content[0].text);
+  assert.ok((await handleToolCall('end_meeting', { meeting_id: id, request_summary: true })).isError !== true);
+  const limits = calls.filter(call => call.body.messages).map(call => call.body.max_tokens ?? call.body.max_completion_tokens).filter(n => n !== 64);
+  assert.ok(limits.length >= 3, `expected opening, turn and summary calls, saw ${limits.length}`);
+  assert.ok(limits.every(n => n <= 250), `uncapped call: ${limits}`);
 });
 
 test('judge and mix cost bias use known prices and stable provider order', () => {

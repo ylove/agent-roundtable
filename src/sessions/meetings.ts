@@ -45,6 +45,8 @@ export interface Meeting {
   startedAt: Date;
   provider: LLMProvider;
   model: string;
+  /** Output ceiling pinned by automatic provider judgment for every call in this meeting. */
+  maxOutputTokens?: number;
   /** Only with provider "openai_compatible": base URL pinned for the life of the meeting. */
   baseUrl?: string;
   mode: MeetingMode;
@@ -55,6 +57,11 @@ export interface Meeting {
   prototype?: PrototypeTracker;
   /** Set when a person stopped the meeting (usage visibility): it then ends without a summary. */
   stopped?: StoppedInfo;
+}
+
+function meetingCallOptions(meeting: Pick<Meeting, "provider" | "model" | "baseUrl" | "maxOutputTokens">) {
+  return { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl,
+    ...(meeting.maxOutputTokens !== undefined && { maxTokens: Math.min(MAX_TOKENS, meeting.maxOutputTokens) }) };
 }
 
 export const meetings = new Map<string, Meeting>();
@@ -159,7 +166,7 @@ export async function startMeeting(
   try {
     assistantMessage = await metered({ session: meetingId, kind: "meeting", agent }, () => {
       const messages = [{ role: "user" as const, content: userMessage }];
-      const options = { provider: provider as LLMProvider, model: resolvedModel, baseUrl, ...(chosen?.maxOutputTokens !== undefined && { maxTokens: Math.min(MAX_TOKENS, chosen.maxOutputTokens) }) };
+      const options = meetingCallOptions({ provider: provider as LLMProvider, model: resolvedModel, baseUrl, maxOutputTokens: chosen?.maxOutputTokens });
       return routed ? callSeat(systemPrompt, messages, options, { agent, onModelFallback: replacement => { resolvedModel = replacement; if (chosen) chosen.model = replacement; } })
         : callLLM(systemPrompt, messages, options);
     });
@@ -179,6 +186,7 @@ export async function startMeeting(
     startedAt: new Date(),
     provider,
     model: resolvedModel,
+    ...(chosen?.maxOutputTokens !== undefined && { maxOutputTokens: chosen.maxOutputTokens }),
     ...(baseUrl !== undefined && { baseUrl }),
     mode,
     ...(debateFocus !== undefined && { debateFocus }),
@@ -247,7 +255,7 @@ async function runMeetingTurn(meetingId: string, message: string): Promise<strin
   const assistantMessage = await metered({ session: meeting.id, kind: "meeting", agent: meeting.agent }, () => callLLM(
     meeting.systemPrompt,
     request,
-    { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
+    meetingCallOptions(meeting)
   ));
 
   await recordMeetingAgentReply(meeting, assistantMessage, record);
@@ -290,11 +298,11 @@ async function closeMeeting(meetingId: string, requestSummary: boolean): Promise
     summary = withoutDissentBlocks(await metered({ session: meeting.id, kind: "meeting", agent: meeting.agent }, () => callLLM(
       meeting.systemPrompt,
       summaryMessages,
-      { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }
+      meetingCallOptions(meeting)
     )));
     if (meeting.mode === "debate") {
       const messages = [...summaryMessages.slice(0, -1), { role: "user" as const, content: buildDissentSummaryPrompt("challenger", meeting.agenda ?? "") }];
-      const content = await metered({ session: meeting.id, kind: "meeting", agent: meeting.agent }, () => callLLM(meeting.systemPrompt, messages, { provider: meeting.provider, model: meeting.model, baseUrl: meeting.baseUrl }));
+      const content = await metered({ session: meeting.id, kind: "meeting", agent: meeting.agent }, () => callLLM(meeting.systemPrompt, messages, meetingCallOptions(meeting)));
       dissentSummaries.push({ agent: meeting.agent, content });
     }
   }

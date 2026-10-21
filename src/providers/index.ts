@@ -1,10 +1,11 @@
-import { providerHealth } from "./health.js";
+import { providerHealth, endpointFingerprint } from "./health.js";
 import { ProviderHttpError } from "./retry.js";
 import { appendTableLine, newServerId } from "../usage/table.js";
 
 let outcomeServer: string | undefined;
-function recordOutcome(provider: LLMProvider, model: string, started: number, outcome: ProviderOutcome["outcome"], reportsUsage: boolean): ProviderOutcome {
-  const result: ProviderOutcome = { provider, model, outcome, latency_ms: Math.max(0, Date.now() - started) };
+function recordOutcome(provider: LLMProvider, model: string, started: number, outcome: ProviderOutcome["outcome"], reportsUsage: boolean, baseUrl?: string): ProviderOutcome {
+  const endpoint = endpointFingerprint(provider, process.env, baseUrl);
+  const result: ProviderOutcome = { provider, model, outcome, latency_ms: Math.max(0, Date.now() - started), ...(endpoint !== undefined && { endpoint }) };
   // A session or execution sink already owns this call. Never create a second table row for it.
   if (activeUsageSink()) {
     if (!reportsUsage) reportProviderFailure(result);
@@ -105,7 +106,7 @@ export async function chatCompletion(
       ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
     });
     providerHealth.recordCall(provider, true, undefined, process.env, options.baseUrl, model);
-    const outcome = recordOutcome(provider, model, started, "ok", true);
+    const outcome = recordOutcome(provider, model, started, "ok", true, options.baseUrl);
     // Every completion (engines via callLLM, and the chat_completion tool) reaches the active usage sink.
     withProviderOutcome(outcome, () => reportUsage({
       provider: result.provider,
@@ -120,7 +121,7 @@ export async function chatCompletion(
       const outcome = status === 401 || status === 403 ? "auth" : status === 429 ? "rate_limit" : error instanceof Error && /timeout|timed out|abort/i.test(error.name + error.message) ? "timeout" : "error";
       // Unknown persona models are handled by the existing model fallback, not provider exclusion.
       if (outcome === "auth" || outcome === "timeout" || outcome === "rate_limit") providerHealth.recordCall(provider, false, outcome === "auth" ? "auth failed" : outcome === "timeout" ? "request timed out" : "rate limited", process.env, options.baseUrl);
-      failedOutcome = recordOutcome(provider, model, started, outcome, options.estimateUsageOnFailure === true);
+      failedOutcome = recordOutcome(provider, model, started, outcome, options.estimateUsageOnFailure === true, options.baseUrl);
     }
     if (dispatched && options.estimateUsageOnFailure) {
       const report = () => reportUsage({ provider, model, chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });

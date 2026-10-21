@@ -35,6 +35,8 @@ export interface ProviderOutcome {
   model: string;
   outcome: "ok" | "auth" | "rate_limit" | "timeout" | "error";
   latency_ms: number;
+  /** Endpoint hash for operator-pointable providers (see endpointFingerprint). */
+  endpoint?: string;
 }
 type OutcomeSink = (outcome: ProviderOutcome) => void;
 const outcomeContext = new AsyncLocalStorage<ProviderOutcome>();

@@ -64,6 +64,8 @@ export interface TableLine {
   /** Provider-call outcome; separate from token accounting rows. */
   outcome?: "ok" | "auth" | "rate_limit" | "timeout" | "error";
   latency_ms?: number;
+  /** Hash of the endpoint a provider-call row went to (openai_compatible, ollama); never a URL. */
+  endpoint?: string;
   provider?: string;
   model?: string;
   tokens?: { input: number; output: number; cache_read: number; cache_write: number };
@@ -94,6 +96,7 @@ export function parseLine(raw: unknown): TableLine | null {
   if (typeof o.provider === "string") line.provider = clean(o.provider, 64);
   if (typeof o.model === "string") line.model = clean(o.model, 200);
   if (["ok", "auth", "rate_limit", "timeout", "error"].includes(String(o.outcome))) line.outcome = o.outcome as TableLine["outcome"];
+  if (typeof o.endpoint === "string" && /^[0-9a-f]{16}$|^invalid$/.test(o.endpoint)) line.endpoint = o.endpoint;
   if (typeof o.latency_ms === "number" && Number.isFinite(o.latency_ms) && o.latency_ms >= 0) line.latency_ms = o.latency_ms;
   const t = o.tokens as Record<string, unknown> | undefined;
   if (t && typeof t === "object") {
@@ -113,6 +116,7 @@ export function appendTableLine(line: TableLine, home = ROUNDTABLE_HOME): void {
   const safe: TableLine = { at: line.at, server: line.server, session: line.session, kind: clean(line.kind, 40), agent: clean(line.agent, 64) };
   if (line.outcome !== undefined) safe.outcome = line.outcome;
   if (line.latency_ms !== undefined) safe.latency_ms = num(line.latency_ms);
+  if (line.endpoint !== undefined && /^[0-9a-f]{16}$|^invalid$/.test(line.endpoint)) safe.endpoint = line.endpoint;
   if (line.provider !== undefined) safe.provider = clean(line.provider, 64);
   if (line.model !== undefined) safe.model = clean(line.model, 200);
   if (line.tokens !== undefined) safe.tokens = { input: num(line.tokens.input), output: num(line.tokens.output), cache_read: num(line.tokens.cache_read), cache_write: num(line.tokens.cache_write) };

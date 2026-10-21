@@ -1,7 +1,8 @@
+import { PROVIDER_MAX_TOKENS } from "../providers/limits.js";
 import { PROVIDER_KEYS, availableProviders, providerHealth, trustedRoutingEndpoint } from "../providers/health.js";
 import { routeProvider, assertRoutingBudget, recentRoutingHistory, type RoutingInputs } from "../providers/router.js";
 import { readUserConfig } from "../user-config.js";
-import { ROUNDTABLE_HOME } from "../config.js";
+import { ROUNDTABLE_HOME, MAX_TOKENS } from "../config.js";
 import { getRuntime } from "../runtimes/registry.js";
 import { RUNTIME_MODEL } from "../runtimes/spec.js";
 import { detectRuntime } from "../runtimes/runner.js";
@@ -89,6 +90,12 @@ export function isUnknownModelError(error: unknown): boolean {
   return error.status === 404 || (error.status === 400 && /model/i.test(error.message) && /(not[ _-]?found|does not exist|unknown model|no such model|not available)/i.test(error.message));
 }
 
+function routingTier(opts: ResolveSeatsOptions, seat: Pick<Seat, "id" | "team" | "role">): NonNullable<RoutingInputs["tier"]> {
+  return opts.tier ?? (seat.team === "judge" ? "judge" :
+    (seat.team === "A" || seat.team === "B") && (seat.team === "A" ? opts.teamA : opts.teamB)?.at(-1) === seat.id ? "builder" :
+    /judge|critic|review/i.test(seat.role ?? "") ? "judge" : "balanced");
+}
+
 /** Resolve the roster deterministically; explicit assignments and healthy persona pins precede judgment. */
 export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<string, Seat>> {
   if (opts.mix !== undefined && opts.mix !== "auto" && opts.mix !== "cheap") throw new SeatUsageError("--mix must be auto or cheap.");
@@ -131,7 +138,7 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
     if (!explicit && persona !== undefined && !(PROVIDER_IDS as readonly unknown[]).includes(persona)) throw new SeatUsageError("Invalid seat provider.");
     const healthyPersona = typeof persona === "string" && available.includes(persona as LLMProvider) &&
       trustedRoutingEndpoint(persona as LLMProvider, env) && (opts.routing?.health ?? providerHealth).get(persona as LLMProvider, env)?.ok !== false;
-    const tier = opts.tier ?? (team === "judge" ? "judge" : team && index === (team === "A" ? opts.teamA : opts.teamB)!.length - 1 ? "builder" : /judge|critic|review/i.test(String(frontmatter.role ?? "")) ? "judge" : "balanced");
+    const tier = routingTier(opts, { id, team, role: typeof frontmatter.role === "string" ? frontmatter.role : undefined });
     const choose = () => {
       try { return routeProvider({ ...opts.routing, tier, env, config, history, model: override?.model ?? opts.model,
         excludeProviders: opts.excludeProviders, costBias: !!opts.mix, used: [...out.values()].map(s => s.provider) }); }
@@ -240,6 +247,9 @@ export async function prepareSeats(opts: ResolveSeatsOptions, options: {
         const explicit = seat.reason?.startsWith("explicit");
         if (result.reason === "model not found" && !explicit && isFrontmatterModel(id, seat.provider, seat.model) && defaultModelFor(seat.provider as LLMProvider) !== seat.model) {
           const model = defaultModelFor(seat.provider as LLMProvider);
+          const tier = routingTier(opts, seat);
+          const outputTokens = Math.min(opts.routing?.outputTokens ?? (tier === "builder" ? PROVIDER_MAX_TOKENS[seat.provider] : MAX_TOKENS), seat.maxOutputTokens ?? Infinity);
+          assertRoutingBudget(seat.provider, model, { ...opts.routing, tier, outputTokens });
           const message = `persona ${seat.name}: model ${seat.model} not available; using ${model}`;
           if (options.report) options.report(message); else process.stderr.write(`${message}\n`);
           forgetFrontmatterModel(id, seat.provider, seat.model);

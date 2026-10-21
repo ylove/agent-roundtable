@@ -79,6 +79,9 @@ export interface HuddleLLM {
   baseUrl?: string;
 }
 
+export type HuddleLLMSource = HuddleLLM | (() => HuddleLLM);
+export const resolveHuddleLLM = (source: HuddleLLMSource): HuddleLLM => typeof source === "function" ? source() : source;
+
 export interface HookCtx {
   store: ExecutionStore;
   /** The runner's latest state. Every hook reads the store again before it acts. */
@@ -89,7 +92,7 @@ export interface HookCtx {
   worker?: RunnerContext["worker"];
   integrationSha?: string;
   /** Provider and model for persona calls (huddles, the lead, goal review). */
-  llm: HuddleLLM;
+  llm: HuddleLLMSource;
 }
 
 interface OpBase {
@@ -330,10 +333,11 @@ export function callOptions(llm: HuddleLLM): { provider: LLMProvider; model: str
 }
 
 /** One stateless persona call: the persona (body and skills) plus `directive` as the system prompt. */
-export async function askPersona(meter: UsageMeter, llm: HuddleLLM, persona: string, directive: string, prompt: string, allowance?: number): Promise<string> {
+export async function askPersona(meter: UsageMeter, source: HuddleLLMSource, persona: string, directive: string, prompt: string, allowance?: number): Promise<string> {
   if (meter.bounded && allowance === undefined) throw new Error("A bounded persona call requires a budget allowance");
   const a = await loadAgent(persona);
   const system = a.body + renderSkillsSection(a.skills) + directive;
+  const llm = resolveHuddleLLM(source);
   let maxTokens: number | undefined;
   if (allowance !== undefined) {
     const { input: inputRate, output: outputRate } = microRates(llm.model, llm.provider);
@@ -1231,7 +1235,7 @@ export async function runnerHookContext(ctx: RunnerContext, opts: RunnerHookOpti
     store: ctx.store, state, header: ctx.header,
     // The run's driver: a live claude-code worker answers a micro-huddle through driver.answer().
     driver: ctx.driver(), worker: (agent) => ctx.worker(agent),
-    llm: opts.llm ?? executionHuddleLLM(remainingUsd(state)),
+    llm: opts.llm ?? (() => executionHuddleLLM(remainingUsd(state))),
   };
 }
 

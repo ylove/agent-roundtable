@@ -73,31 +73,41 @@ function redactVendorTokens(rep: Replace): void {
   rep(/(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36}/g, "api_key");
 }
 
-/** Credentials only: keys, tokens, private keys, URL and HTTP credentials, key=value secrets. */
+/** Secret-shaped rules only: private keys, URL and HTTP credentials, JWTs and vendor key formats. */
+function shapedSecretRules(rep: Replace): void {
+  redactPrivateKeys(rep);
+
+  // credentials embedded in a URL: scheme://user:pass@host
+  rep(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s:@/]*:[^\s@/]+@/gi, "url_credentials", (_m, scheme) => scheme + mark("url_credentials") + "@");
+
+  // Explicit authorization fields accept credential tokens of any length or alphabet.
+  rep(/\b((?:Proxy-)?Authorization\s*:\s*Basic\s+)[A-Za-z0-9+/]+={0,2}/gi, "basic_auth", (_m, p) => p + mark("basic_auth"));
+  rep(/\b((?:Proxy-)?Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "bearer", (_m, p) => p + mark("bearer"));
+
+  // JWTs, then bearer credentials, then vendor tokens
+  redactJWTs(rep);
+  rep(/\b(Bearer\s+)(?=[A-Za-z0-9._~+/=-]*[\d._~+/=-]|[A-Za-z]{16})[A-Za-z0-9._~+/=-]{8,}/gi, "bearer", (_m, p) => p + mark("bearer"));
+  redactVendorTokens(rep);
+  // HTTP Basic credentials, including alphabet-only base64.
+  rep(
+    /\b(Basic\s+)[A-Za-z0-9+/]{8,}={0,2}/g,
+    "basic_auth",
+    (_m, p) => p + mark("basic_auth")
+  );
+}
+
+/** Credentials only: shaped secrets plus the generic key=value assignment rule. */
 export function redactSecrets(input: string): RedactionResult {
-  const result = redactWith(input, (rep) => {
-    redactPrivateKeys(rep);
+  return redactAssignments(redactWith(input, shapedSecretRules));
+}
 
-    // credentials embedded in a URL: scheme://user:pass@host
-    rep(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s:@/]*:[^\s@/]+@/gi, "url_credentials", (_m, scheme) => scheme + mark("url_credentials") + "@");
-
-    // Explicit authorization fields accept credential tokens of any length or alphabet.
-    rep(/\b((?:Proxy-)?Authorization\s*:\s*Basic\s+)[A-Za-z0-9+/]+={0,2}/gi, "basic_auth", (_m, p) => p + mark("basic_auth"));
-    rep(/\b((?:Proxy-)?Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "bearer", (_m, p) => p + mark("bearer"));
-
-    // JWTs, then bearer credentials, then vendor tokens
-    redactJWTs(rep);
-    rep(/\b(Bearer\s+)(?=[A-Za-z0-9._~+/=-]*[\d._~+/=-]|[A-Za-z]{16})[A-Za-z0-9._~+/=-]{8,}/gi, "bearer", (_m, p) => p + mark("bearer"));
-    redactVendorTokens(rep);
-    // HTTP Basic credentials, including alphabet-only base64.
-    rep(
-      /\b(Basic\s+)[A-Za-z0-9+/]{8,}={0,2}/g,
-      "basic_auth",
-      (_m, p) => p + mark("basic_auth")
-    );
-
-  });
-  return redactAssignments(result);
+/**
+ * Artifact content (model-written code and documents): only the secret-shaped rules. The name-based
+ * key=value rule is left out because identifiers such as `tokens`, `secretKey` or `password: string`
+ * are ordinary source, not credentials. Exact configured values are handled by scrubArtifactSecrets.
+ */
+export function redactArtifactSecrets(input: string): RedactionResult {
+  return redactWith(input, shapedSecretRules);
 }
 
 /** Consume each identifier once before deciding whether to read an assignment value. */
@@ -111,11 +121,19 @@ function redactAssignments(result: RedactionResult): RedactionResult {
   let copied = 0;
   for (let m; (m = keys.exec(input));) {
     const key = m[1];
-    if (!SECRET_KEY_RE.test(key.slice(key.lastIndexOf(".") + 1))) continue;
+    const field = key.slice(key.lastIndexOf(".") + 1);
+    if (!SECRET_KEY_RE.test(field)) continue;
     value.lastIndex = keys.lastIndex;
     const v = value.exec(input);
     if (!v) continue;
     const quote = v[0][0] === '"' || v[0][0] === "'" ? v[0][0] : "";
+    // Provider validation errors echo numeric output-token limits; these are not credentials.
+    // Check the already-consumed field and value independently, without rescanning the assignment.
+    const raw = quote ? v[0].slice(1, -1) : v[0];
+    if (/^max_(?:new_|completion_)?tokens$/i.test(field) && /^\d+$/.test(raw)) {
+      keys.lastIndex = value.lastIndex;
+      continue;
+    }
     chunks.push(input.slice(copied, keys.lastIndex), quote + mark("secret") + quote);
     copied = keys.lastIndex = value.lastIndex;
     result.counts.secret = (result.counts.secret ?? 0) + 1;

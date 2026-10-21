@@ -1,6 +1,6 @@
 # Agent workshops
 
-> Have cfo and product-lead create a marketing-budget agent via agent-roundtable, bringing their expertise and useful skills. Then delegate the budget task to the new agent.
+> Have cfo and product-lead create a marketing-budget agent via roundtable, bringing their expertise and useful skills. Then delegate the budget task to the new agent.
 
 > Turn our current roundtable discussion into a new agent that owns the launch checklist. Preview the files before writing them.
 

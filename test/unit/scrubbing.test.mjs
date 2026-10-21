@@ -95,3 +95,108 @@ test("replicate: echoed error bodies and prediction errors are scrubbed", async 
   const failed = await createReplicateCall({ pollIntervalMs: 1 })(messages, opts({ model: "meta/llama" })).then(() => null, (e) => e);
   assert.match(failed.message, /prediction failed .*crashed with \[redacted:env:REPLICATE_API_TOKEN\]/);
 });
+
+test("a numeric max_tokens in a validation error survives while real secrets are still redacted", async () => {
+  const { scrubSecrets } = await import("../../dist/security/secrets.js");
+  assert.equal(scrubSecrets("422 input.max_tokens: 32768 is too large").text, "422 input.max_tokens: 32768 is too large");
+  assert.match(scrubSecrets("api_key: sk-abcdefghijklmnopqrstuvwxyz0123").text, /redacted/);
+  assert.match(scrubSecrets("max_tokens: hunter2hunter2").text, /redacted/);
+  assert.match(scrubSecrets("access_token: 123456789012").text, /redacted/);
+});
+
+test("artifact scrubbing keeps ordinary identifiers byte for byte and still redacts credential shapes", async () => {
+  const { scrubArtifact, scrub } = await import("../../dist/security/secrets.js");
+  const code = [
+    "private readonly state: Map<string, { tokens: number; lastRefill: number }>;",
+    "let tokens = 5;",
+    "const secretKey = options.secretKey;",
+    "password: string;",
+    'const apiKeyHeader = "X-Api-Key";',
+    'apiKeyHeader = "X-Api-Key"',
+    "const token = getToken();",
+    "const tokensToAdd = (elapsed / 1000) * this.refillRate;",
+  ].join("\n");
+  assert.equal(scrubArtifact(code), code);
+  assert.notEqual(scrub('let tokens = 5; apiKeyHeader = "X-Api-Key"'), 'let tokens = 5; apiKeyHeader = "X-Api-Key"', "turn text keeps the full scrubber");
+
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.abcDEF123_-";
+  const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----";
+  const doc = [
+    "key = sk-ant-api03-ABCDEFGHIJKLMNOP", "gh ghp_abcdefghijklmnopqrstuvwxyz0123", pem, jwt,
+    "Authorization: Bearer abcdef1234567890xyz", "postgres://admin:hunter2pw@db.example.com/x", `const k = "${PATTERN_ONLY}"; // ${ANTHROPIC}`,
+  ].join("\n");
+  const out = scrubArtifact(doc);
+  for (const leaked of ["sk-ant-api03-ABCDEFGHIJKLMNOP", "ghp_abcdefghijklmnopqrstuvwxyz0123", "MIIEowIBAAKCAQEA", jwt, "abcdef1234567890xyz", "hunter2pw", ANTHROPIC]) {
+    assert.ok(!out.includes(leaked), `${leaked} leaked: ${out}`);
+  }
+  assert.ok(out.includes("[redacted:env:ANTHROPIC_API_KEY]"));
+});
+
+test("numeric token-limit exemptions cover quoted and dotted fields without exempting credentials", async () => {
+  const { redactSecrets } = await import("../../dist/security/redaction-rules.js");
+  const { scrubSecrets } = await import("../../dist/security/secrets.js");
+  for (const field of ["max_tokens", "max_new_tokens", "max_completion_tokens", "MAX_TOKENS"]) {
+    for (const prefix of ["", "input."]) {
+      for (const quote of ["", '"', "'"]) {
+        for (const separator of [": ", " = "]) {
+          const input = `${quote}${prefix}${field}${quote}${separator}${quote}32768${quote}`;
+          assert.deepEqual(redactSecrets(input), { text: input, counts: {} });
+          assert.deepEqual(scrubSecrets(input, {}), { text: input, redactions: 0 });
+        }
+      }
+    }
+    const input = `${field}: 32768; access_token: 123456789012; ${field}="opaque-value"`;
+    assert.deepEqual(redactSecrets(input), {
+      text: `${field}: 32768; access_token: [redacted:secret]; ${field}="[redacted:secret]"`,
+      counts: { secret: 2 },
+    });
+  }
+  for (const input of ["prefix_max_tokens: 32768", "max_tokens_extra: 32768", "max_tokens: 32768x"]) {
+    assert.equal(redactSecrets(input).counts.secret, 1, input);
+  }
+});
+
+test("normal and artifact modes scrub private literals inherited by a runner, including numeric values", async (t) => {
+  const { childEnv } = await import("../../dist/security/child-env.js");
+  const { SCRUB_LITERALS_ENV, scrubSecrets, scrubArtifactSecrets, scrubArtifact } = await import("../../dist/security/secrets.js");
+  const literal = "opaque.literal+[123456]";
+  const longer = `${literal}-longer`;
+  const numeric = "12345678";
+  const env = childEnv("runner", {}, {
+    DATABASE_PASSWORD: literal,
+    [SCRUB_LITERALS_ENV]: JSON.stringify([longer, numeric]),
+  });
+  assert.equal(env.DATABASE_PASSWORD, undefined);
+  const input = `plain ${longer} ${literal} ${literal}; max_tokens: ${numeric}; max_new_tokens: 32768; password: string;`;
+  const artifact = "plain [redacted:env:ROUNDTABLE_SCRUB_LITERALS] [redacted:env:ROUNDTABLE_SCRUB_LITERALS] [redacted:env:ROUNDTABLE_SCRUB_LITERALS]; max_tokens: [redacted:env:ROUNDTABLE_SCRUB_LITERALS]; max_new_tokens: 32768; password: string;";
+  assert.deepEqual(scrubArtifactSecrets(input, env), { text: artifact, redactions: 4 });
+  assert.deepEqual(scrubSecrets(input, env), {
+    text: artifact.replace("password: string", "password: [redacted:secret]"), redactions: 5,
+  });
+  const previous = process.env[SCRUB_LITERALS_ENV];
+  process.env[SCRUB_LITERALS_ENV] = env[SCRUB_LITERALS_ENV];
+  t.after(() => {
+    if (previous === undefined) delete process.env[SCRUB_LITERALS_ENV];
+    else process.env[SCRUB_LITERALS_ENV] = previous;
+  });
+  assert.equal(scrubArtifact(input), artifact, "the artifact convenience function also uses private literals");
+});
+
+test("artifact and normal modes share the hardened Basic, Bearer and sk rules", async () => {
+  const { redactSecrets, redactArtifactSecrets } = await import("../../dist/security/redaction-rules.js");
+  for (const redact of [redactSecrets, redactArtifactSecrets]) {
+    for (const scheme of ["Basic", "Bearer"]) {
+      for (const token of ["YWJjOmRlZmdo", "abc", "a1+/"]) {
+        const kind = scheme === "Basic" ? "basic_auth" : "bearer";
+        const out = redact(`Authorization: ${scheme} ${token}`);
+        assert.ok(!out.text.includes(token));
+        assert.ok(out.text.includes(`[redacted:${kind}]`));
+        assert.equal(out.counts[kind], 1);
+        if (redact === redactArtifactSecrets) {
+          assert.equal(out.text, `Authorization: ${scheme} [redacted:${kind}]`);
+        }
+      }
+    }
+    assert.deepEqual(redact("sk-" + "z".repeat(32)), { text: "[redacted:api_key]", counts: { api_key: 1 } });
+  }
+});

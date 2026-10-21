@@ -15,7 +15,9 @@ const pkg = mkdtempSync(join(tmpdir(), "rt-dotenv-"));
 after(() => rmSync(pkg, { recursive: true, force: true }));
 mkdirSync(join(pkg, "dist"));
 copyFileSync(join(repo, "dist", "env.js"), join(pkg, "dist", "env.js"));
+copyFileSync(join(repo, "dist", "user-config.js"), join(pkg, "dist", "user-config.js"));
 symlinkSync(join(repo, "node_modules"), join(pkg, "node_modules"), "dir");
+writeFileSync(join(pkg, "package.json"), '{"type":"module"}');
 writeFileSync(join(pkg, ".env"), "RT_DOTENV_PROBE=from-dotenv\nANTHROPIC_API_KEY=sk-ant-from-dotenv-file\n");
 
 /** Import env.js in a fresh process and report what it left in process.env. */
@@ -24,7 +26,7 @@ function load(extraEnv) {
     `await import(${JSON.stringify(pathToFileURL(join(pkg, "dist", "env.js")).href)});\n` +
     `process.stdout.write(JSON.stringify({ probe: process.env.RT_DOTENV_PROBE ?? null, key: process.env.ANTHROPIC_API_KEY ?? null }));`;
   const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
-    env: { PATH: process.env.PATH, HOME: process.env.HOME, ...extraEnv },
+    env: { PATH: process.env.PATH, HOME: join(pkg, "home"), ROUNDTABLE_HOME: join(pkg, "state"), ...extraEnv },
     encoding: "utf8",
   });
   assert.equal(r.status, 0, r.stderr);

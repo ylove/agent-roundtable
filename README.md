@@ -8,10 +8,13 @@ Runs locally over stdio with Claude Code or any MCP client. Requires Node 22+.
 
 ```sh
 npm install -g agent-roundtable
-claude mcp add agent-roundtable \
+claude mcp add --scope user roundtable \
   -e ROUNDTABLE_AGENTS_DIR="$HOME/my-project/.claude/agents" \
-  -- agent-roundtable
+  -- roundtable mcp
+claude mcp list        # roundtable should show as connected
 ```
+
+`roundtable mcp` starts the orchestrator server, the same as running the binary with no arguments. Without the global install, use `-- npx -y agent-roundtable` or `-- node /absolute/path/to/dist/index.js` (a source checkout). `--scope user` makes it available in every project; leave it out (or use `--scope project`) to register it for one project only. Then ask Claude Code to "list the roundtable tools": you should see the 43 [tools](#tools), named `mcp__roundtable__<tool>`.
 
 Create personas in that directory or copy the [examples](examples/). Set keys for the [providers](docs/providers.md) you use; local meetings use your Claude CLI login. For source installs, `.env`, `add-json` and project `.mcp.json` registration, see [getting started](docs/getting-started.md) and [configuration](docs/configuration.md). After a rebuild, reconnect with `/mcp`.
 
@@ -23,7 +26,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 | Format | What it does | Example prompt |
 | --- | --- | --- |
-| [Meeting](docs/modes/meetings.md) | Talk with one persona on a chosen provider/model. | “Start a meeting via agent-roundtable with cfo about our Q3 budget.” |
+| [Meeting](docs/modes/meetings.md) | Talk with one persona on a chosen provider/model. | “Start a meeting via roundtable with cfo about our Q3 budget.” |
 | [Local meeting](docs/modes/meetings.md#local-meetings) | Talk with a persona through your installed Claude CLI and login. | “Start a local meeting with product-lead about onboarding.” |
 | [Collaboration: collaborate](docs/modes/collaborations.md) | Personas take turns building a shared idea. | “Have cfo and product-lead collaborate on launch priorities for three rounds.” |
 | [Collaboration: debate](docs/modes/collaborations.md#formats) | One proponent faces challengers. | “Have cfo defend our pricing plan against skeptic in a roundtable debate.” |
@@ -32,7 +35,14 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [Ultraplan](docs/modes/ultraplan.md) | Collect input, review revisions and record sign-offs on a plan. | “Ultraplan the launch with product-lead, cfo and skeptic; show the final document verbatim.” |
 | [Agent workshops](docs/modes/agent-workshops.md) | Specialists create or improve an agent and reusable skills. | “Have cfo and skeptic create a budget agent, then improve product-lead's escalation rules; preview both.” |
 | [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local blackboard for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
+| [Duel](docs/modes/duel.md) | Two teams build competing artifacts (a page, code, a diagram or a document); judges assess them; dissents are recorded. | “Run a duel on a rate limiter module with architect and engineer against pragmatist and reviewer, judged by security-lead.” |
 | [Public sessions](docs/modes/public-sessions.md) | Mirror an explicitly public session to ntfy or a webhook. | “Make that pricing debate public and give me the viewing link.” |
+
+| Terminal command | Purpose |
+| --- | --- |
+| [`roundtable duel`](docs/modes/duel.md) | Two teams build competing artifacts; judges assess them; dissents are recorded. |
+| [`roundtable debate`, `waffle`, `meeting`](docs/table-cli.md) | Stream a discussion with per-seat models and spend. |
+| [`roundtable config`](docs/configuration.md#saved-cli-settings-and-env-files) | Save env-file and persona-directory settings; show set/unset status. |
 
 ### Heads-down
 
@@ -42,7 +52,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 ## Tools
 
-**42 tools on the orchestrator server; 8 on worker servers.** The seven execution worker tools appear in both; the orchestrator's copies also require `execution_id` and `agent_token`. Dissent filing is also available on both servers. The table follows the registered definitions in `src/tools/*.ts`; [full arguments and examples](docs/tools.md).
+**43 tools on the orchestrator server; 8 on worker servers.** The seven execution worker tools appear in both; the orchestrator's copies also require `execution_id` and `agent_token`. Dissent filing is also available on both servers. The table follows the registered definitions in `src/tools/*.ts`; [full arguments and examples](docs/tools.md).
 
 | Group | Tool | Purpose |
 | --- | --- | --- |
@@ -61,6 +71,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | Collaborations | [`end_collaboration`](docs/tools.md#end_collaboration) | End a discussion and return its transcript and optional summary. |
 | Collaborations | [`get_collaboration_transcript`](docs/tools.md#get_collaboration_transcript) | Read a discussion without ending it. |
 | Collaborations | [`list_collaborations`](docs/tools.md#list_collaborations) | List active collaborations. |
+| Duel | [`start_duel`](docs/tools.md#start_duel) | Run a duel: two teams build competing artifacts, judges assess them, dissents are recorded. |
 | Ultraplan | [`start_ultraplan`](docs/tools.md#start_ultraplan) | Collect input and begin a reviewed plan. |
 | Ultraplan | [`submit_plan`](docs/tools.md#submit_plan) | Review a full plan version or collect final sign-offs. |
 | Ultraplan | [`end_ultraplan`](docs/tools.md#end_ultraplan) | Close a plan without sign-offs. |
@@ -69,8 +80,8 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | Contracts | [`propose_contract`](docs/tools.md#propose_contract) | Turn a plan into a draft execution contract. |
 | Contracts | [`amend_contract`](docs/tools.md#amend_contract) | Apply a versioned contract merge patch. |
 | Contracts | [`freeze_contract`](docs/tools.md#freeze_contract) | Freeze the current contract after consent. |
-| Contracts (both servers) | [`file_dissent`](docs/dissents.md#file-or-update-a-concern) | File, complete or explicitly excuse a draft dissent. |
-| Contracts | [`score_dissent`](docs/dissents.md#advisory-scores) | Record an advisory assessment of a dissent's prediction. |
+| Contracts (both servers) | [`file_dissent`](docs/tools.md#file_dissent) | File, complete or explicitly excuse a draft dissent. |
+| Contracts | [`score_dissent`](docs/tools.md#score_dissent) | Record an advisory assessment of a dissent's prediction. |
 | Runs | [`execute`](docs/tools.md#execute) | Preflight and start an authorized frozen contract. |
 | Runs | [`execution_status`](docs/tools.md#execution_status) | Report progress, blockers, budget and context. |
 | Runs | [`control_execution`](docs/tools.md#control_execution) | Pause, resume, steer, abort or purge a run; stop an agent; write a handoff. |
@@ -91,21 +102,22 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 ## CLI
 
-No arguments starts the orchestrator MCP server. The **11 subcommands** are documented in the [CLI reference](docs/cli.md).
+No arguments starts the orchestrator MCP server. The binary has **11 subcommands**, plus **5 table commands** that run at the table from a terminal (`duel`, `debate`, `waffle`, `meeting`, `config`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
 
 | Subcommand | Purpose |
 | --- | --- |
 | `mcp` | Start an orchestrator or token-bound worker stdio server. |
 | `hook pre-tool-use` | Check worker file access and leases using stdin hook JSON. |
 | `run <exe>` | Run or recover a heads-down runner. |
-| `watch <exe> --as <name>` | Wait for one orchestrator wake, printing JSON. |
+| `watch <exe> --as <name> [--timeout-min N]` | Wait for one orchestrator wake, printing JSON. |
 | `status <exe> [--json]` | Inspect a run's tasks, budget and health. |
 | `verify <exe> [--json]` | Verify execution and audit chains. |
 | `purge <exe> --confirm` | Delete a finished run's worktrees, branches and log. |
 | `statusline [--agents N] [--plain] [--no-host]` | A Claude Code status line with the host and the roundtable's spend. |
 | `usage [--json] [--watch]` | Who is using what, on which platform, measured or estimated. |
-| `stop <agent> [--execution <exe> \| --session <id>]` | Stop one agent, heads-down or at the table. |
+| `stop <agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent, heads-down or at the table. |
 | `help` | Print usage. |
+| `duel`, `debate`, `waffle`, `meeting`, `config` | Table commands: see [at the table from the terminal](docs/table-cli.md). |
 
 ## Docs
 
@@ -114,6 +126,8 @@ No arguments starts the orchestrator MCP server. The **11 subcommands** are docu
 - [Heads-down user guide](docs/heads-down.md) and [design specification](docs/design/heads-down.md); [postmortem design specification](docs/design/postmortem.md)
 - [Usage visibility](docs/usage.md): the status line, the usage report, the dashboard Usage page and stopping an agent
 - [Dissents and tripwires](docs/dissents.md)
+- [At the table from the terminal](docs/table-cli.md): `duel`, `debate`, `waffle`, `meeting`, per-seat models and replay
+- [Duel](docs/modes/duel.md) and the [demo recording script](docs/demo.md)
 - [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)
 - [Configuration](docs/configuration.md) and [providers](docs/providers.md)
 - [Agent personas and skills](docs/agents.md) and [session archives](docs/sessions.md)

@@ -3,8 +3,10 @@
 // ultraplan, agent workshops and diagnostics
 // ============================================================================
 
+import { withDuelFocus } from "../sessions/duel-focus.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { LLMProvider } from "../config.js";
+import type { SeatSpec } from "../table/events.js";
 import {
   VERSION,
   DEFAULT_MODELS,
@@ -85,6 +87,7 @@ import {
   END_COLLABORATION,
   GET_COLLABORATION_TRANSCRIPT,
   LIST_COLLABORATIONS,
+  START_DUEL,
   START_ULTRAPLAN,
   SUBMIT_PLAN,
   END_ULTRAPLAN,
@@ -92,6 +95,7 @@ import {
   IMPROVE_AGENT,
   DEBUG_ENV,
 } from "./names.js";
+import { START_DUEL_DESCRIPTION, START_DUEL_SCHEMA, startDuelTool } from "./duel.js";
 import {
   ORCHESTRATOR_ONLY,
   READ_ONLY_LOCAL,
@@ -101,10 +105,13 @@ import {
   MEETING_MODE_PROPS,
   PUBLIC_PROP,
   PROTOTYPE_PROP,
+  DUEL_PROP,
+  DUEL_SOURCE_PROP,
   validateProviderOptions,
   formatUltraplanResult,
   formatAgentWorkshopResult,
   type ToolArgs,
+  type ToolCallContext,
   type ToolDefinition,
 } from "./shared.js";
 
@@ -153,6 +160,8 @@ export const deliberationTools: ToolDefinition[] = [
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        duel: DUEL_PROP,
+        duel_source: DUEL_SOURCE_PROP,
         provider: {
           type: "string",
           enum: PROVIDER_IDS,
@@ -254,6 +263,8 @@ export const deliberationTools: ToolDefinition[] = [
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        duel: DUEL_PROP,
+        duel_source: DUEL_SOURCE_PROP,
       },
       required: ["agent", "agenda"],
     },
@@ -317,7 +328,7 @@ export const deliberationTools: ToolDefinition[] = [
     modes: ORCHESTRATOR_ONLY,
     annotations: { title: "Chat completion", readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     description:
-      "Call an LLM for text completion. Providers: anthropic (claude-opus-5 / claude-sonnet-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).",
+      "Call an LLM for text completion. Providers: anthropic (claude-opus-5-5 / claude-sonnet-5-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).",
     inputSchema: {
       type: "object",
       properties: {
@@ -382,6 +393,22 @@ export const deliberationTools: ToolDefinition[] = [
           description:
             'Array of agent identifiers. Examples: ["cfo", "fpa"], ["product", "engineering", "design"]',
         },
+        seats: {
+          type: "object",
+          description: 'Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider and model.',
+          additionalProperties: true,
+          patternProperties: {
+            "^.+$": {
+              type: "object",
+              properties: {
+                agent: { type: "string" },
+                provider: { type: "string", enum: PROVIDER_IDS },
+                model: { type: "string", minLength: 1 },
+              },
+              additionalProperties: false,
+            },
+          },
+        },
         topic: {
           type: "string",
           description: "Required except in conversation mode, where it is an optional loose theme, not an agenda.",
@@ -422,6 +449,8 @@ export const deliberationTools: ToolDefinition[] = [
         },
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        duel: DUEL_PROP,
+        duel_source: DUEL_SOURCE_PROP,
         provider: {
           type: "string",
           enum: PROVIDER_IDS,
@@ -441,6 +470,13 @@ export const deliberationTools: ToolDefinition[] = [
       },
       required: ["agents"],
     },
+  },
+  {
+    name: START_DUEL,
+    modes: ORCHESTRATOR_ONLY,
+    annotations: { title: "Start duel", ...SESSION_TURN },
+    description: START_DUEL_DESCRIPTION,
+    inputSchema: START_DUEL_SCHEMA,
   },
   {
     name: CONTINUE_COLLABORATION,
@@ -563,6 +599,8 @@ export const deliberationTools: ToolDefinition[] = [
         agents: { type: "array", items: { type: "string" }, minItems: 1, description: "Specialists contributing input, independent reviews and sign-offs. A planner may also be a participant." },
         task: { type: "string", description: "What the plan must accomplish; required and non-empty.", "x-nonblank": true, "x-hint": "describe what the plan is for" },
         context: { type: "string", description: "Optional background shared with the agents; never posted publicly." },
+        duel: DUEL_PROP,
+        duel_source: DUEL_SOURCE_PROP,
         draft_plan: { type: "string", description: "Optional full draft: becomes v1 by orchestrator and skips the input phase. Whitespace-only counts as absent." },
         planner: { type: "string", description: "Optional persona that owns drafting and revision server-side; runs the whole loop in one call." },
         revision_rounds: { type: "number", description: "Planner only: review/revise cycles before sign-off, default 1, clamped to 1..3." },
@@ -678,14 +716,19 @@ export const deliberationTools: ToolDefinition[] = [
 ];
 
 /** Dispatch one deliberation tool. Errors are thrown to handleToolCall, which formats them. */
-export async function handleDeliberationTool(name: string, args: ToolArgs): Promise<CallToolResult> {
+export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?: ToolCallContext): Promise<CallToolResult> {
   switch (name) {
+    case START_DUEL:
+      return startDuelTool(args ?? {}, ctx);
+
     // === Meeting Tools ===
     case START_MEETING: {
-      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype } = args as {
+      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype, duel, duel_source } = args as {
         agent: string;
         agenda: string;
         context?: string;
+        duel?: string;
+        duel_source?: boolean;
         provider?: LLMProvider;
         model?: string;
         base_url?: string;
@@ -694,7 +737,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
         public?: boolean;
         prototype?: boolean;
       };
-      const result = await startMeeting(agent, agenda, context, provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true);
+      const result = await startMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -741,16 +784,18 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Local Meeting Tools (CLI-based) ===
     case START_LOCAL_MEETING: {
-      const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype } = args as {
+      const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype, duel, duel_source } = args as {
         agent: string;
         agenda: string;
         context?: string;
+        duel?: string;
+        duel_source?: boolean;
         mode?: MeetingMode;
         debate_focus?: string;
         public?: boolean;
         prototype?: boolean;
       };
-      const result = await startLocalMeeting(agent, agenda, context, mode, debate_focus, isPublic === true, prototype === true);
+      const result = await startLocalMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), mode, debate_focus, isPublic === true, prototype === true);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -821,14 +866,17 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Collaboration Tools ===
     case START_COLLABORATION: {
-      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, base_url, mode, debate_focus, grounding, public: isPublic, prototype } = args as {
+      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, duel, duel_source } = args as {
         agents: string[];
         topic?: string;
         context?: string;
+        duel?: string;
+        duel_source?: boolean;
         max_rounds?: number;
         auto_run_rounds?: number;
         provider?: LLMProvider;
         model?: string;
+        seats?: Record<string, SeatSpec>;
         base_url?: string;
         mode?: CollaborationMode;
         debate_focus?: string;
@@ -839,11 +887,14 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
       const result = await startCollaboration(agents, topic, {
         context,
+        duel,
+        duelSource: duel_source,
         maxRounds: max_rounds,
         autoRun: auto_run_rounds !== undefined,
         runRounds: auto_run_rounds,
         provider,
         model,
+        seats,
         baseUrl: base_url,
         mode,
         debateFocus: debate_focus,
@@ -959,10 +1010,12 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Ultraplan Tools ===
     case START_ULTRAPLAN: {
-      const { agents, task, context: given, draft_plan, planner, revision_rounds, execution_ready, repo_dir, public: isPublic, provider, model, base_url } = (args ?? {}) as {
+      const { agents, task, context: given, draft_plan, planner, revision_rounds, execution_ready, repo_dir, duel, duel_source, public: isPublic, provider, model, base_url } = (args ?? {}) as {
         agents: string[];
         task: string;
         context?: string;
+        duel?: string;
+        duel_source?: boolean;
         repo_dir?: string;
         draft_plan?: string;
         planner?: string;
@@ -975,7 +1028,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
       };
       // What earlier postmortems of the project taught is read whether or not postmortem mode is on now.
       const lessons = repo_dir ? ultraplanSection((await resolveRepo(repo_dir)).root) : "";
-      const context = [given, lessons].filter((x) => x?.trim()).join("\n\n") || undefined;
+      const context = withDuelFocus([given, lessons].filter((x) => x?.trim()).join("\n\n") || undefined, duel, duel_source !== false) || undefined;
       const result = await startUltraplan(agents, task, {
         context,
         draftPlan: draft_plan,

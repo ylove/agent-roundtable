@@ -37,7 +37,7 @@ const DISSENT_PROPS = {
       id: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" },
       by: { type: "string" },
       source: { type: "object", additionalProperties: false, required: ["kind"], properties: {
-        kind: { type: "string", enum: ["ultraplan", "consent", "debate", "waffle_house", "manual"] }, ref: { type: "string" },
+        kind: { type: "string", enum: ["ultraplan", "consent", "debate", "waffle_house", "duel", "manual"] }, ref: { type: "string" },
       } },
       claim: { type: "string", maxLength: 500 },
       predicted_failure: { type: "string", maxLength: 500 },
@@ -112,7 +112,8 @@ export const contractTools: ToolDefinition[] = [
         title: { type: "string", description: "Short title; default the goal's first line." },
         original_prompt: { type: "string", description: "The human's request, verbatim (default: from_session's task or topic). Workers see it on every task card." },
         artifacts: { type: "array", items: { type: "string" }, description: "Repository paths or URLs the goal refers to." },
-        from_session: { type: "string", description: "Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from." },
+        from_session: { type: "string", description: "Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from, or of an archived duel (duel-<id>): its winning artifact title becomes a decision and its dissents become draft concerns (a tie or no winner imports no decision). A duel has no task list, so by default a deterministic task plan is drafted from the winning artifact (see draft_plan); an explicit contract (with tasks) or plan replaces it." },
+        draft_plan: { type: "boolean", description: "Duel from_session only, default true: when neither contract (with tasks) nor plan is given, draft a task plan from the winning artifact, the judges' reasons and the dissents (deterministic, no model call). False imports only the decision and dissents, and then contract or plan is required. A tie, no winner or no artifact drafts no plan." },
         plan: { type: "string", description: "Plan text: its last roundtable-tasks block is used, else a structuring call turns it into tasks." },
         contract: { type: "object", description: "An explicit contract (roundtable.contract/1 fields: title, scope.paths, participants, teams, tasks, interfaces, decisions, dissents, validation {commands, final}, budget, authority, sandbox, workers). id, version, status and consent are set for you." },
         parent_contract: { type: "string", description: "For a child contract: the parent contract id (with parent_task, a subcontract task of it)." },
@@ -148,7 +149,7 @@ export const contractTools: ToolDefinition[] = [
         patch: { type: "object", description: "RFC 7396 merge patch over the latest version, e.g. {\"budget\": {\"usd\": 40}} or {\"tasks\": [...the full new task list...]}." },
         reason: { type: "string", description: "Why the contract changes; recorded and sent to affected agents.", "x-nonblank": true, "x-hint": "say why the contract changes" },
         orchestrator: ORCHESTRATOR,
-        from_session: { type: "string", description: "Id of an archived replan or ultraplan whose roundtable-tasks block replaces the tasks, commands and interfaces." },
+        from_session: { type: "string", description: "Id of an archived replan or ultraplan whose roundtable-tasks block replaces the tasks, commands and interfaces, or of an archived duel (duel-<id>): its winning decision and dissents are added to the contract (tasks untouched, repeats skipped; dissents are run-wide on a frozen contract)." },
         consent: { type: "boolean", description: "Default false. True: ask participants about the new version: everyone for a draft or a run-wide change, the personas of affected tasks otherwise." },
         override_consent: { type: "boolean", description: "Frozen contracts only, default false: apply a run-wide change (budget, scope, sandbox, authority, validation, workers, goal) without everyone's consent. Audited." },
         ...PROVIDER_PROPS,
@@ -254,6 +255,7 @@ export async function handleContractTool(name: string, args: ToolArgs, ctx: Tool
         parentContract: a.parent_contract as string | undefined, parentTask: a.parent_task as string | undefined,
         participants: a.participants as string[] | undefined, repoDir: a.repo_dir as string | undefined,
         baseRef: a.base_ref as string | undefined, consent: a.consent === true, llm: llmOf(a),
+        draftPlan: a.draft_plan === false ? false : undefined,
       });
       break;
     case AMEND_CONTRACT: {

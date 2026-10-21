@@ -38,6 +38,9 @@ export const USAGE = [
   "  agent-roundtable usage [--json] [--watch]       who is using what, on which platform, measured or estimated",
   "  agent-roundtable stop <agent> [--execution <exe> | --session <id>] [--reason <text>]",
   "                                                  stop one agent (a heads-down worker or an at-the-table session)",
+  "  roundtable duel <brief> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--kind web|code|diagram|text] [--criteria a,b] [--open]",
+  "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2]",
+  "  roundtable config set env-file|agents-dir <absolute-path> | config show",
   "  agent-roundtable help                           this text",
 ].join("\n");
 
@@ -49,7 +52,7 @@ function usage(problem: string): void {
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** --name value pairs and bare flags, or the problem with them (an unknown, repeated or valueless argument). */
-function parseFlags(args: string[], known: { values: string[]; flags: string[] }): Record<string, string | true> | string {
+export function parseFlags(args: string[], known: { values: string[]; flags: string[] }): Record<string, string | true> | string {
   const out: Record<string, string | true> = {};
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -247,6 +250,15 @@ export async function runCli(argv: string[]): Promise<void> {
       return usageReport(rest);
     case "stop":
       return stopAgentCommand(rest);
+    case "duel":
+    case "debate":
+    case "waffle":
+    case "meeting":
+    case "config": {
+      const { runTableCli } = await import("./cli-table.js");
+      process.exitCode = await runTableCli(command, rest);
+      return;
+    }
     case "help":
       if (rest.length) return usage("help takes no arguments");
       process.stdout.write(USAGE + "\n");

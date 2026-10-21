@@ -70,10 +70,11 @@ export const PROVIDER_IDS: LLMProvider[] = [
   "openai_compatible",
 ];
 
-// Anthropic: both current models are first-class; short aliases are accepted wherever a model is given
+// Short model aliases are accepted wherever a model is given
 export const ANTHROPIC_MODEL_ALIASES: Record<string, string> = {
-  opus: "claude-opus-5",
-  sonnet: "claude-sonnet-5",
+  opus: "claude-opus-5-5",
+  sonnet: "claude-sonnet-5-5",
+  haiku: "claude-haiku-5-5",
 };
 export function resolveAnthropicModel(model: string): string {
   return ANTHROPIC_MODEL_ALIASES[model.trim().toLowerCase()] ?? model;
@@ -81,7 +82,7 @@ export function resolveAnthropicModel(model: string): string {
 
 // Default models per provider (each overridable from the environment)
 export const DEFAULT_MODELS: Record<LLMProvider, string> = {
-  anthropic: resolveAnthropicModel(process.env.ROUNDTABLE_ANTHROPIC_MODEL || "claude-opus-5"),
+  anthropic: resolveAnthropicModel(process.env.ROUNDTABLE_ANTHROPIC_MODEL || "claude-sonnet-5-5"),
   openai: process.env.ROUNDTABLE_OPENAI_MODEL || "gpt-5.6-luna",
   together: process.env.ROUNDTABLE_TOGETHER_MODEL || "zai-org/GLM-5.3",
   replicate: process.env.ROUNDTABLE_REPLICATE_MODEL || "qwen/qwen3-235b-a22b-instruct-2507",
@@ -102,7 +103,7 @@ export function requireEnv(name: string, purpose: string): string {
 // Shared description for every tool's optional `model` parameter
 export const MODEL_PARAM_DESCRIPTION =
   `Model id. Defaults: ${PROVIDER_IDS.map((p) => `${DEFAULT_MODELS[p]} (${p})`).join(", ")}. ` +
-  `Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). ` +
+  `Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). ` +
   `Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL.`;
 
 // Public sessions: publishing a session's turns to a world-readable channel (see src/publishers/)

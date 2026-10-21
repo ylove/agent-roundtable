@@ -1,0 +1,356 @@
+{
+  "version": 1,
+  "events": [
+    {
+      "type": "start",
+      "id": "synthetic-budget-duel",
+      "topic": "60-second browser game that teaches kids to budget",
+      "mode": "duel",
+      "seats": [
+        {
+          "id": "designer",
+          "name": "designer",
+          "team": "A",
+          "role": "designer",
+          "provider": "anthropic",
+          "model": "claude-sonnet-5-5"
+        },
+        {
+          "id": "builder",
+          "name": "builder",
+          "team": "A",
+          "role": "builder",
+          "provider": "openai",
+          "model": "gpt-5.6-luna"
+        },
+        {
+          "id": "marketer",
+          "name": "marketer",
+          "team": "B",
+          "role": "designer",
+          "provider": "together",
+          "model": "zai-org/GLM-5.3"
+        },
+        {
+          "id": "skeptic",
+          "name": "skeptic",
+          "team": "B",
+          "role": "builder",
+          "provider": "anthropic",
+          "model": "claude-sonnet-5-5"
+        },
+        {
+          "id": "cfo",
+          "name": "cfo",
+          "team": "judge",
+          "role": "judge",
+          "provider": "openai",
+          "model": "gpt-5.6-luna"
+        },
+        {
+          "id": "safety-reviewer",
+          "name": "safety-reviewer",
+          "team": "judge",
+          "role": "judge",
+          "provider": "anthropic",
+          "model": "claude-sonnet-5-5"
+        }
+      ],
+      "startedAt": "2026-01-01T12:00:00.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1",
+      "seat": {
+        "id": "designer",
+        "name": "designer",
+        "team": "A",
+        "role": "designer",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "text": "Choose needs and wants with ten coins. Keep enough for the bus and lunch.",
+      "ts": "2026-01-01T12:00:01.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1",
+      "seat": {
+        "id": "marketer",
+        "name": "marketer",
+        "team": "B",
+        "role": "designer",
+        "provider": "together",
+        "model": "zai-org/GLM-5.3"
+      },
+      "text": "Save toward a goal while paying for daily needs. Finish after five choices.",
+      "ts": "2026-01-01T12:00:01.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1b",
+      "seat": {
+        "id": "builder",
+        "name": "builder",
+        "team": "A",
+        "role": "builder",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "text": "One self-contained playable game is ready.",
+      "ts": "2026-01-01T12:00:02.000Z"
+    },
+    {
+      "type": "prototype",
+      "team": "A",
+      "seat": {
+        "id": "builder",
+        "name": "builder",
+        "team": "A",
+        "role": "builder",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "title": "Ten Coins",
+      "files": [
+        {
+          "path": "index.html",
+          "bytes": 1434
+        }
+      ],
+      "ok": true
+    },
+    {
+      "type": "turn",
+      "round": "R1b",
+      "seat": {
+        "id": "skeptic",
+        "name": "skeptic",
+        "team": "B",
+        "role": "builder",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "text": "One self-contained playable game is ready.",
+      "ts": "2026-01-01T12:00:02.000Z"
+    },
+    {
+      "type": "prototype",
+      "team": "B",
+      "seat": {
+        "id": "skeptic",
+        "name": "skeptic",
+        "team": "B",
+        "role": "builder",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "title": "Goal Jar",
+      "files": [
+        {
+          "path": "index.html",
+          "bytes": 1201
+        }
+      ],
+      "ok": true
+    },
+    {
+      "type": "turn",
+      "round": "R2",
+      "seat": {
+        "id": "cfo",
+        "name": "cfo",
+        "team": "judge",
+        "role": "judge",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "text": "VERDICT A: APPROVE \u2014 Covers needs and tradeoffs\nVERDICT B: REVISE \u2014 Add unavoidable expenses",
+      "ts": "2026-01-01T12:00:03.000Z"
+    },
+    {
+      "type": "assessment",
+      "judge": {
+        "id": "cfo",
+        "name": "cfo",
+        "team": "judge",
+        "role": "judge",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "team": "A",
+      "verdict": "APPROVE",
+      "reason": "Covers needs and tradeoffs."
+    },
+    {
+      "type": "assessment",
+      "judge": {
+        "id": "cfo",
+        "name": "cfo",
+        "team": "judge",
+        "role": "judge",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "team": "B",
+      "verdict": "REVISE",
+      "reason": "Add unavoidable expenses so saving is not always best."
+    },
+    {
+      "type": "turn",
+      "round": "R2",
+      "seat": {
+        "id": "safety-reviewer",
+        "name": "safety-reviewer",
+        "team": "judge",
+        "role": "judge",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "text": "VERDICT A: APPROVE \u2014 Covers needs and tradeoffs\nVERDICT B: REVISE \u2014 Add unavoidable expenses",
+      "ts": "2026-01-01T12:00:03.000Z"
+    },
+    {
+      "type": "assessment",
+      "judge": {
+        "id": "safety-reviewer",
+        "name": "safety-reviewer",
+        "team": "judge",
+        "role": "judge",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "team": "A",
+      "verdict": "APPROVE",
+      "reason": "Covers needs and tradeoffs."
+    },
+    {
+      "type": "assessment",
+      "judge": {
+        "id": "safety-reviewer",
+        "name": "safety-reviewer",
+        "team": "judge",
+        "role": "judge",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "team": "B",
+      "verdict": "REVISE",
+      "reason": "Add unavoidable expenses so saving is not always best."
+    },
+    {
+      "type": "turn",
+      "round": "R4",
+      "seat": {
+        "id": "designer",
+        "name": "designer",
+        "team": "A",
+        "role": "designer",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "text": "Players learn to cover needs before optional spending.",
+      "ts": "2026-01-01T12:00:04.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R4",
+      "seat": {
+        "id": "marketer",
+        "name": "marketer",
+        "team": "B",
+        "role": "designer",
+        "provider": "together",
+        "model": "zai-org/GLM-5.3"
+      },
+      "text": "The goal jar is approachable, but daily needs need a stronger role.",
+      "ts": "2026-01-01T12:00:04.000Z"
+    },
+    {
+      "type": "dissent",
+      "seat": {
+        "id": "marketer",
+        "name": "marketer",
+        "team": "B",
+        "role": "designer",
+        "provider": "together",
+        "model": "zai-org/GLM-5.3"
+      },
+      "team": "B",
+      "text": "A single winning strategy may hide different family budgets.\nPredicted failure: Players may assume every household has coins left to save."
+    },
+    {
+      "type": "usage",
+      "perSeat": [
+        {
+          "seatId": "designer",
+          "inputTokens": 1000,
+          "outputTokens": 300,
+          "costUsd": 0.01
+        },
+        {
+          "seatId": "builder",
+          "inputTokens": 1000,
+          "outputTokens": 300,
+          "costUsd": 0.01
+        },
+        {
+          "seatId": "marketer",
+          "inputTokens": 1000,
+          "outputTokens": 300,
+          "costUsd": 0.01
+        },
+        {
+          "seatId": "skeptic",
+          "inputTokens": 1000,
+          "outputTokens": 300,
+          "costUsd": 0.01
+        },
+        {
+          "seatId": "cfo",
+          "inputTokens": 1000,
+          "outputTokens": 300,
+          "costUsd": 0.01
+        },
+        {
+          "seatId": "safety-reviewer",
+          "inputTokens": 1000,
+          "outputTokens": 300,
+          "costUsd": 0.01
+        }
+      ],
+      "totalCostUsd": 0.06
+    },
+    {
+      "type": "end",
+      "winner": "A",
+      "tally": {
+        "A": 2,
+        "B": 0
+      },
+      "aborted": false
+    }
+  ],
+  "prototypes": [
+    {
+      "eventIndex": 4,
+      "team": "A",
+      "files": [
+        {
+          "path": "index.html",
+          "content": "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Ten Coins</title><style>body{font:20px system-ui;padding:20px;background:#f1fff7;color:#153b29}button{font:inherit;margin:8px;padding:12px}output{display:block}</style><h1>Ten Coins</h1><p>You have 10 coins. Buy lunch (3) and a bus ride (2). Decide whether a toy (6) fits. Finish in 60 seconds.</p><output id=\"status\" aria-live=\"polite\"></output><button id=\"lunch\">Lunch: 3</button><button id=\"bus\">Bus: 2</button><button id=\"toy\">Toy: 6</button><button id=\"restart\">Restart</button><script>let coins,needs,over,timer;const status=document.getElementById('status');function show(message=''){status.textContent=message+' Coins left: '+coins;}function reset(){clearTimeout(timer);coins=10;needs=new Set();over=false;show('Choose your needs first.');timer=setTimeout(()=>{over=true;show('Time! Try again.');},60000);}for(const [id,cost] of [['lunch',3],['bus',2],['toy',6]])document.getElementById(id).onclick=()=>{if(over)return;if(needs.has(id))return show('Already bought.');if(cost>coins)return show('Too expensive. Save for needs.');coins-=cost;needs.add(id);if(needs.has('lunch')&&needs.has('bus')){over=true;clearTimeout(timer);show('You covered your needs and saved '+coins+'!');}else show('Good choice? Remember both needs.');};document.getElementById('restart').onclick=reset;reset();</script></html>"
+        }
+      ]
+    },
+    {
+      "eventIndex": 6,
+      "team": "B",
+      "files": [
+        {
+          "path": "index.html",
+          "content": "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Goal Jar</title><style>body{font:20px system-ui;padding:20px;background:#fff7e7;color:#423015}button{font:inherit;margin:8px;padding:12px}output{display:block}</style><h1>Goal Jar</h1><p>Five days, two coins a day. Save 5 for a book. Will you save or buy a snack? Finish in 60 seconds.</p><output id=\"status\" aria-live=\"polite\"></output><button id=\"save\">Save 2</button><button id=\"snack\">Snack: save 1</button><button id=\"restart\">Restart</button><script>let day,coins,over,timer;const status=document.getElementById('status');function show(){status.textContent='Day '+day+'/5. Jar: '+coins+' coins.'+(over?(coins>=5?' Book goal reached!':' Try saving more.'):'');}function choose(amount){if(over)return;coins+=amount;day++;over=day===5;if(over)clearTimeout(timer);show();}function reset(){clearTimeout(timer);day=0;coins=0;over=false;show();timer=setTimeout(()=>{over=true;show();},60000);}document.getElementById('save').onclick=()=>choose(2);document.getElementById('snack').onclick=()=>choose(1);document.getElementById('restart').onclick=reset;reset();</script></html>"
+        }
+      ]
+    }
+  ]
+}

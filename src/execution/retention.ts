@@ -14,6 +14,7 @@
 
 import { statSync } from "node:fs";
 import { join } from "node:path";
+import { pruneDuelArchives } from "../table/retention.js";
 import { auditRetentionDays, executionRetentionDays, sessionRetentionDays } from "../config.js";
 import { pruneAudit } from "../security/audit.js";
 import { pruneArchivedSessions } from "../sessions/archive.js";
@@ -89,7 +90,7 @@ export async function sweepRetention(opts: RetentionOptions = {}): Promise<Reten
   }
   if (sessionDays !== null) {
     try {
-      report.sessions = pruneArchivedSessions(sessionDays, now);
+      report.sessions = [...pruneArchivedSessions(sessionDays, now), ...pruneDuelArchives(sessionDays, now)];
     } catch (e) {
       report.errors.push(`sessions: ${errText(e)}`);
     }

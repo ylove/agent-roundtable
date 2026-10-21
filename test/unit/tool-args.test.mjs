@@ -5,8 +5,8 @@ const { checkArgs, handleToolCall, formatAgentWorkshopResult, tools } = await im
 // Keep these lists independent of the schemas so omitted fields cannot pass silently.
 const fields = {
   start_ultraplan: {
-    string: ["task", "context", "draft_plan", "planner", "repo_dir", "provider", "model", "base_url"],
-    array: ["agents"], number: ["revision_rounds"], boolean: ["public", "execution_ready"],
+    string: ["task", "context", "duel", "draft_plan", "planner", "repo_dir", "provider", "model", "base_url"],
+    array: ["agents"], number: ["revision_rounds"], boolean: ["public", "execution_ready", "duel_source"],
   },
   submit_plan: { string: ["ultraplan_id", "plan"], boolean: ["final"] },
   end_ultraplan: { string: ["ultraplan_id"] },
@@ -20,7 +20,7 @@ const fields = {
   },
   propose_contract: {
     string: ["goal", "orchestrator", "title", "original_prompt", "from_session", "plan", "parent_contract", "parent_task", "repo_dir", "base_ref", "provider", "model", "base_url"],
-    array: ["artifacts", "participants"], boolean: ["consent"], object: ["contract"],
+    array: ["artifacts", "participants"], boolean: ["consent", "draft_plan"], object: ["contract"],
   },
   amend_contract: {
     string: ["contract_id", "reason", "orchestrator", "from_session", "provider", "model", "base_url"],

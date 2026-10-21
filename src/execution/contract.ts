@@ -701,7 +701,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     if (by && !agents.has(by)) ck.err(`${p}.by`, `${q(by)} is not a participant`);
     const src = ck.obj(o.source, `${p}.source`, true) ?? {};
     ck.known(src, ["kind", "ref"], `${p}.source`);
-    const kind = ck.oneOf(src.kind, `${p}.source.kind`, ["ultraplan", "consent", "debate", "waffle_house", "manual"] as const);
+    const kind = ck.oneOf(src.kind, `${p}.source.kind`, ["ultraplan", "consent", "debate", "waffle_house", "duel", "manual"] as const);
     if (!kind) ck.err(`${p}.source.kind`, "is required");
     const ref = ck.str(src.ref, `${p}.source.ref`);
     const claim = ck.str(o.claim, `${p}.claim`, { required: true, max: CONTRACT_LIMITS.dissent_claim });

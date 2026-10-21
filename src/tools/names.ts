@@ -40,6 +40,9 @@ export const END_COLLABORATION = "end_collaboration";
 export const GET_COLLABORATION_TRANSCRIPT = "get_collaboration_transcript";
 export const LIST_COLLABORATIONS = "list_collaborations";
 
+// Duel
+export const START_DUEL = "start_duel";
+
 // Ultraplan
 export const START_ULTRAPLAN = "start_ultraplan";
 export const SUBMIT_PLAN = "submit_plan";

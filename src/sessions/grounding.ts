@@ -10,6 +10,7 @@ import type { LoadedAgent } from "../agents.js";
 import { recentActivityForKey } from "../activity.js";
 import { WORKSPACE_DIR } from "../config.js";
 import { childEnv } from "../security/child-env.js";
+import { isContained } from "../security/fs-safe.js";
 import { truncate } from "./workshop.js";
 
 export interface Grounding {
@@ -34,7 +35,9 @@ function capped(text: string, max: number): string {
 export function readHead(path: string, maxBytes = 64 * 1024): { text: string; truncated: boolean } | undefined {
   let fd: number | undefined;
   try {
+    if (!fs.statSync(path).isFile()) return undefined;
     fd = fs.openSync(path, "r");
+    if (!fs.fstatSync(fd).isFile()) return undefined;
     const buffer = Buffer.alloc(maxBytes + 1);
     let count = 0;
     while (count < buffer.length) {
@@ -50,8 +53,21 @@ export function readHead(path: string, maxBytes = 64 * 1024): { text: string; tr
   }
 }
 
-function readText(path: string): string | undefined {
-  const text = readHead(path)?.text;
+function containedFile(path: string, scope: string, parent = scope): string | undefined {
+  try {
+    const realParent = fs.realpathSync.native(parent);
+    const realScope = fs.realpathSync.native(scope);
+    const real = fs.realpathSync.native(path);
+    if (!isContained(realParent, realScope) || !isContained(realScope, real) || !fs.statSync(real).isFile()) return undefined;
+    return real;
+  } catch {
+    return undefined;
+  }
+}
+
+function readText(path: string, scope: string): string | undefined {
+  const file = containedFile(path, scope);
+  const text = file ? readHead(file)?.text : undefined;
   return text?.trim() ? text : undefined;
 }
 
@@ -65,7 +81,8 @@ export function workspaceSnapshot(dir: string = WORKSPACE_DIR): string | undefin
   if (cached && Date.now() - cached.at < 60_000) return cached.text;
   const parts: string[] = [];
   try {
-    const head = readHead(join(root, "package.json"));
+    const file = containedFile(join(root, "package.json"), root);
+    const head = file ? readHead(file) : undefined;
     const pkg = head && !head.truncated ? JSON.parse(head.text) : undefined;
     const fields = ["name", "description"].flatMap((key) =>
       typeof pkg?.[key] === "string" && pkg[key].trim() ? [`${key}: ${pkg[key]}`] : []);
@@ -73,9 +90,9 @@ export function workspaceSnapshot(dir: string = WORKSPACE_DIR): string | undefin
   } catch {
     // Missing or malformed package metadata does not hide the other project context.
   }
-  const instructions = readText(join(root, "CLAUDE.md")) ?? readText(join(root, "AGENTS.md"));
+  const instructions = readText(join(root, "CLAUDE.md"), root) ?? readText(join(root, "AGENTS.md"), root);
   if (instructions) parts.push("Project instructions:\n" + capped(instructions, 2500));
-  const readme = readText(join(root, "README.md"));
+  const readme = readText(join(root, "README.md"), root);
   if (readme) parts.push("README:\n" + capped(readme, 2500));
   for (const [label, args] of [
     ["Git branch", ["branch", "--show-current"]],
@@ -109,23 +126,19 @@ export function agentMemory(
     !!name && name !== "." && name !== ".." && !/[\\/]/.test(name));
   const workspace = opts.workspaceDir ?? WORKSPACE_DIR;
   const scopes = [
-    join(workspace, ".claude", "agent-memory"),
-    join(workspace, ".claude", "agent-memory-local"),
-    join(opts.homeDir ?? homedir(), ".claude", "agent-memory"),
+    [join(workspace, ".claude", "agent-memory"), workspace],
+    [join(workspace, ".claude", "agent-memory-local"), workspace],
+    [join(opts.homeDir ?? homedir(), ".claude", "agent-memory"), opts.homeDir ?? homedir()],
   ];
   const excerpts: string[] = [];
   const paths = new Set<string>();
-  for (const scope of [...new Set(scopes)]) {
+  for (const [scope, parent] of scopes) {
     for (const name of names) {
-      let path: string;
-      try {
-        path = fs.realpathSync.native(join(scope, name, "MEMORY.md"));
-      } catch {
-        continue;
-      }
+      const path = containedFile(join(scope, name, "MEMORY.md"), scope, parent);
+      if (!path) continue;
       if (paths.has(path)) continue;
       paths.add(path);
-      const text = readText(path);
+      const text = readText(path, scope);
       const excerpt = text?.split(/\r?\n/).slice(0, 200).join("\n");
       if (excerpt?.trim()) {
         const bounded = capped(excerpt, 3000);

@@ -50,14 +50,47 @@ export function assertNonEmpty(label: string, content: string, finishReason?: st
   );
 }
 
+export const PROVIDER_BODY_LIMIT = 8 * 1024 * 1024;
+class ResponseBodyLimitError extends Error {}
+
+/** Read response bytes incrementally and cancel the stream when the limit is exceeded. */
+export async function readBoundedText(response: Response, limit = PROVIDER_BODY_LIMIT): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > limit) {
+        void reader.cancel().catch(() => {});
+        throw new ResponseBodyLimitError(`Response body exceeds ${limit} byte limit`);
+      }
+      chunks.push(value);
+    }
+    return new TextDecoder().decode(Buffer.concat(chunks, bytes));
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /**
  * Success bodies are parsed strictly (a truncated or non-JSON 200 must reject). Error bodies are
  * best effort: a 502 HTML page is still an HTTP error, reported by its status rather than a parse error.
  */
 export async function readProviderJson(response: Response): Promise<Record<string, unknown>> {
-  if (response.ok) return (await response.json()) as Record<string, unknown>;
+  let text: string;
   try {
-    const parsed = (await response.json()) as unknown;
+    text = await readBoundedText(response);
+  } catch (error) {
+    if (response.ok || error instanceof ResponseBodyLimitError) throw error;
+    return {};
+  }
+  if (response.ok) return JSON.parse(text) as Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(text) as unknown;
     return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {};
@@ -85,5 +118,17 @@ export function assertNotRedirect(label: string, response: Response, requestUrl:
 
 /** Some open-weight reasoning models emit their reasoning inline as <think>...</think>. */
 export function stripThinkTags(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
+  const chunks: string[] = [];
+  let pos = 0;
+  for (;;) {
+    const start = text.indexOf("<think>", pos);
+    if (start < 0) break;
+    const end = text.indexOf("</think>", start + 7);
+    if (end < 0) break;
+    chunks.push(text.slice(pos, start));
+    pos = end + 8;
+    while (pos < text.length && /\s/.test(text[pos])) pos++;
+  }
+  chunks.push(text.slice(pos));
+  return chunks.join("");
 }

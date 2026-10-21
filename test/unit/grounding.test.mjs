@@ -84,3 +84,67 @@ test("truncated package metadata is skipped while small metadata is used", () =>
   put(join(small, "package.json"), JSON.stringify({ name: "KEEP-SMALL", description: "Small metadata" }));
   assert.ok(grounding.workspaceSnapshot(small).includes("KEEP-SMALL"));
 });
+
+test("workspace context skips escaping links and non-files", { skip: process.platform === "win32" }, () => {
+  const outside = put(join(root, "outside-context.md"), "OUTSIDE-CONTEXT");
+  for (const name of ["CLAUDE.md", "AGENTS.md", "README.md", "package.json"]) {
+    const ws = fs.mkdtempSync(join(root, "context-"));
+    const target = name === "package.json"
+      ? put(join(root, "outside-package.json"), JSON.stringify({ name: "OUTSIDE-CONTEXT" })) : outside;
+    fs.symlinkSync(target, join(ws, name));
+    if (name === "CLAUDE.md") put(join(ws, "AGENTS.md"), "LOCAL-INSTRUCTIONS");
+    const text = grounding.workspaceSnapshot(ws) ?? "";
+    assert.ok(!text.includes("OUTSIDE-CONTEXT"), name);
+    if (name === "CLAUDE.md") assert.ok(text.includes("LOCAL-INSTRUCTIONS"));
+  }
+  const ws = fs.mkdtempSync(join(root, "context-"));
+  const local = put(join(ws, "notes.md"), "LOCAL-CONTEXT");
+  fs.symlinkSync(local, join(ws, "CLAUDE.md"));
+  fs.mkdirSync(join(ws, "README.md"));
+  assert.ok(grounding.workspaceSnapshot(ws).includes("LOCAL-CONTEXT"));
+  assert.equal(grounding.readHead(join(ws, "README.md")), undefined);
+});
+
+test("memory skips escaping file and directory links in each scope", { skip: process.platform === "win32" }, () => {
+  const outside = join(root, "outside-memory");
+  const target = put(join(outside, "alpha", "MEMORY.md"), "OUTSIDE-MEMORY");
+  for (const kind of ["file", "agent", "scope", "parent", "directory"]) {
+    for (const scope of ["workspace", "local", "home"]) {
+      const base = fs.mkdtempSync(join(root, "memory-links-"));
+      const ws = join(base, "workspace");
+      const home = join(base, "home");
+      const parent = scope === "home" ? home : ws;
+      const memoryDir = scope === "local" ? "agent-memory-local" : "agent-memory";
+      const dir = join(parent, ".claude", memoryDir);
+      fs.mkdirSync(parent, { recursive: true });
+      if (kind === "parent") {
+        const externalParent = join(base, "external-parent");
+        put(join(externalParent, memoryDir, "alpha", "MEMORY.md"), "OUTSIDE-MEMORY");
+        fs.symlinkSync(externalParent, join(parent, ".claude"));
+      } else if (kind === "scope") {
+        fs.mkdirSync(join(parent, ".claude"));
+        fs.symlinkSync(outside, dir);
+      } else {
+        fs.mkdirSync(dir, { recursive: true });
+        if (kind === "agent") fs.symlinkSync(join(outside, "alpha"), join(dir, "alpha"));
+        else {
+          fs.mkdirSync(join(dir, "alpha"));
+          if (kind === "file") fs.symlinkSync(target, join(dir, "alpha", "MEMORY.md"));
+          else fs.mkdirSync(join(dir, "alpha", "MEMORY.md"));
+        }
+      }
+      assert.equal(grounding.agentMemory("alpha", undefined, { workspaceDir: ws, homeDir: home }), undefined, `${scope}: ${kind}`);
+    }
+  }
+});
+
+test("memory preserves contained links", { skip: process.platform === "win32" }, () => {
+  const ws = join(root, "contained-memory");
+  const scope = join(ws, ".claude", "agent-memory");
+  put(join(scope, "alpha", "MEMORY.md"), "LOCAL-MEMORY");
+  fs.symlinkSync("alpha", join(scope, "alias"));
+  assert.equal(grounding.agentMemory("alias", undefined, { workspaceDir: ws, homeDir: join(root, "empty") }), "LOCAL-MEMORY");
+  const other = put(join(ws, "notes", "MEMORY.md"), "OTHER-SCOPE");
+  fs.symlinkSync(dirname(other), join(scope, "other"));
+  assert.equal(grounding.agentMemory("other", undefined, { workspaceDir: ws, homeDir: join(root, "empty") }), undefined);
+});

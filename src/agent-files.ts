@@ -3,11 +3,12 @@
 // ============================================================================
 
 import fs from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { inspect, isDeepStrictEqual } from "node:util";
 import { stringify } from "yaml";
-import { agentKey, assertReadableFrontmatter, listAgents, parseAgentFrontmatter, projectSkillsDir, readFrontmatter, skillSearchDirs } from "./agents.js";
-import { SKILLS_DIR } from "./config.js";
+import { agentKey, allowedAgentRoots, assertReadableFrontmatter, listAgents, parseAgentFrontmatter, projectSkillsDir, readFrontmatter, skillSearchDirs } from "./agents.js";
+import { AGENTS_DIR, SKILLS_DIR, WORKSPACE_DIR } from "./config.js";
 
 export const MODEL_CHOICES = ["opus", "sonnet", "haiku", "inherit"] as const;
 export const TOOL_ALLOWLIST = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"] as const;
@@ -513,6 +514,11 @@ export function planAgentFiles(spec: AgentSpec, opts: AgentFilePlanOptions): Age
   let content: string;
   if (opts.mode === "create") {
     const dir = path.resolve(opts.agentsDir);
+    const automatic = [AGENTS_DIR, path.join(WORKSPACE_DIR, ".claude", "agents"), path.join(homedir(), ".claude", "agents")]
+      .some(root => path.resolve(root) === dir);
+    if (automatic && !allowedAgentRoots().includes(dir)) {
+      throw new Error("Unapproved agent write root");
+    }
     const prefix = detectAgentFilePrefix(dir);
     const taken = new Set<string>();
     for (const e of entries(dir)) {

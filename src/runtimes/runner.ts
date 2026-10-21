@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { resolveExecutable } from "../executables.js";
 import { childEnv } from "../security/child-env.js";
 import { scrubSecrets } from "../security/secrets.js";
@@ -13,7 +13,28 @@ export interface RuntimeResult {
   usage?: { inputTokens: number; outputTokens: number };
   costUsd?: number;
 }
-export interface RuntimeRunOptions { model?: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv }
+export interface RuntimeRunOptions { model?: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv; runtimeName?: string }
+
+// Leave room for the environment and platform overhead (notably macOS ARG_MAX).
+const MAX_ARG_BYTES = 100 * 1024;
+const MAX_ARGV_BYTES = 128 * 1024;
+const ERROR_SUMMARY_CHARS = 2000;
+
+/** Decode only error events; malformed JSONL lines must not hide a later error. */
+function stdoutError(stdout: string, mode: RuntimeSpec["output"]["mode"]): string | undefined {
+  const lines = mode === "json" ? [stdout] : stdout.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let event: unknown;
+    try { event = JSON.parse(lines[i]); } catch { continue; }
+    if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+    const type = runtimePath(event, "type");
+    if (type !== "turn.failed" && type !== "error" && !(mode === "json" && type === undefined)) continue;
+    const error = runtimePath(event, "error");
+    const message = typeof error === "string" ? error : runtimePath(error, "message") ?? (type === "error" ? runtimePath(event, "message") : undefined);
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  return undefined;
+}
 
 /** Runtime env adds only names explicitly authorized by the profile. */
 export function runtimeEnv(spec: RuntimeSpec, source: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -29,14 +50,19 @@ async function execute(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOption
   const clean = (s: string) => scrubSecrets(s, source).text;
   const binary = resolveExecutable(spec.argv[0], source.PATH);
   if (!binary) throw new Error(`Runtime binary not found: ${clean(spec.argv[0])}`);
+  const args = probe ? [...(spec.versionArgv ?? [])] : spec.argv.slice(1).map(v => v === "{prompt}" ? prompt : v);
+  if (!probe && opts.model && spec.modelFlag) {
+    // Keep option/value pairs intact; stdin's positional marker stays last.
+    args.splice(args.at(-1) === "-" && !spec.argv.includes("{prompt}") ? args.length - 1 : args.length, 0, spec.modelFlag, opts.model);
+  }
+  const argBytes = [binary, ...args].map(arg => Buffer.byteLength(arg));
+  const oversizedArg = argBytes.some(bytes => bytes > MAX_ARG_BYTES);
+  if (oversizedArg || argBytes.reduce((sum, bytes) => sum + bytes + 1, 0) > MAX_ARGV_BYTES) {
+    throw new Error(`Runtime ${clean(opts.runtimeName ?? basename(spec.argv[0]))}: ${oversizedArg ? "an argument exceeds the 100 KiB limit" : "total arguments exceed the 128 KiB limit"}; use a stdin-capable runtime profile or override argv in config.json to send the prompt on stdin.`);
+  }
   const temporary = spec.cwd ? undefined : await mkdtemp(join(tmpdir(), "roundtable-runtime-"));
   try {
     opts.signal?.throwIfAborted();
-    const args = probe ? spec.versionArgv ?? [] : spec.argv.slice(1).map(v => v === "{prompt}" ? prompt : v);
-    if (!probe && opts.model && spec.modelFlag) {
-      // Keep option/value pairs intact; stdin's positional marker stays last.
-      args.splice(args.at(-1) === "-" && !spec.argv.includes("{prompt}") ? args.length - 1 : args.length, 0, spec.modelFlag, opts.model);
-    }
     const timeoutMs = probe ? Math.min(spec.timeoutMs ?? 5000, 5000) : spec.timeoutMs ?? 120_000;
     const stdoutCap = spec.stdoutMaxBytes ?? 1_048_576;
     const stderrCap = spec.stderrMaxBytes ?? 65_536;
@@ -62,8 +88,13 @@ async function execute(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOption
         child.stdout.removeAllListeners(); child.stderr.removeAllListeners(); child.stdin.removeAllListeners();
         // A CLI that exited successfully may still have started descendants holding no pipes.
         if (child.pid) { signalGroup(child.pid, "SIGTERM"); signalGroup(child.pid, "SIGKILL"); }
-        const tail = clean(stderr.toString("utf8")).slice(-2000);
-        if (failure || code !== 0) reject(new Error(`Runtime ${failure ?? `exited with ${exitSignal ?? code}`}${tail ? `; stderr tail: ${errBytes > stderrCap ? "[truncated] " : ""}${tail}` : ""}`));
+        const tail = clean(stderr.toString("utf8")).slice(-ERROR_SUMMARY_CHARS);
+        if (failure || code !== 0) {
+          const raw = stdout.toString("utf8");
+          const summary = spec.output.mode === "text" ? clean(raw).trim().slice(-ERROR_SUMMARY_CHARS)
+            : clean(stdoutError(raw, spec.output.mode) ?? "").slice(0, ERROR_SUMMARY_CHARS);
+          reject(new Error(`Runtime ${failure ?? `exited with ${exitSignal ?? code}`}${summary ? `; stdout ${spec.output.mode === "text" ? "tail" : "error"}: ${summary}` : ""}${tail ? `; stderr tail: ${errBytes > stderrCap ? "[truncated] " : ""}${tail}` : ""}`));
+        }
         // Structured stdout must remain raw until parsing and numeric usage extraction finish.
         else resolve(stdout.toString("utf8"));
       };
@@ -90,7 +121,8 @@ async function execute(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOption
       if (opts.signal?.aborted) abort();
       child.stdout.on("data", (chunk: Buffer) => {
         outBytes += chunk.length;
-        if (stdout.length < stdoutCap) stdout = Buffer.concat([stdout, chunk.subarray(0, stdoutCap - stdout.length)]);
+        if (spec.output.mode === "text") stdout = Buffer.concat([stdout, chunk]).subarray(-stdoutCap);
+        else if (stdout.length < stdoutCap) stdout = Buffer.concat([stdout, chunk.subarray(0, stdoutCap - stdout.length)]);
         if (outBytes > stdoutCap) stop("stdout exceeded byte cap [truncated]");
       });
       child.stderr.on("data", (chunk: Buffer) => {

@@ -4,6 +4,16 @@ import { createTerminalObserver, createNdjsonObserver } from '../../dist/table/t
 const seat = { id: 'designer', name: 'designer', role: 'designer', team: 'A', provider: 'anthropic', model: 'claude-sonnet-5-5' };
 const turn = text => ({ type: 'turn', seat, text, round: '1', ts: '2026-01-01T00:00:00.000Z' });
 function sink(isTTY = false) { let text = ''; return { isTTY, columns: 45, write(s) { text += s; }, read() { return text; } }; }
+test('runtime seats without a model display the default badge on turns and dissents', () => {
+  const output = sink(), obs = createTerminalObserver({ output });
+  const runtime = { ...seat, provider: 'codex', model: '' };
+  obs.onEvent({ ...turn('A contribution.'), seat: runtime });
+  obs.onEvent({ type: 'dissent', seat: runtime, text: 'A concern.' });
+  assert.equal(output.read().match(/\[codex\/default\]/g)?.length, 2);
+  assert.doesNotMatch(output.read(), /\[codex\/\]/);
+  obs.onEvent({ ...turn('Explicit model.'), seat: { ...runtime, model: 'fixture-model' } });
+  assert.match(output.read(), /\[codex\/fixture-model\]/);
+});
 test('non-TTY and NO_COLOR output have no ANSI; turns wrap to at most six text lines', () => {
   for (const [isTTY, env] of [[false, {}], [true, { NO_COLOR: '' }]]) {
     const output = sink(isTTY), obs = createTerminalObserver({ output, env });

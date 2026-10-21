@@ -47,6 +47,15 @@ switch (name) {
     break;
   }
   case 'fail': console.error(`Failed with ${process.env.FIXTURE_SECRET || ''}`); process.exitCode = 23; break;
+  case 'stdout-fail': {
+    const content = await input();
+    console.log(content || JSON.stringify({ type: 'turn.failed', error: {
+      message: "The 'not-a-model' model is not supported when using Codex with a ChatGPT account",
+    } }));
+    if (args.includes('--stderr')) console.error(`Extra diagnostic: ${process.env.FIXTURE_SECRET || 'fixture detail'}`);
+    process.exitCode = 1;
+    break;
+  }
   case 'hang': {
     process.on('SIGTERM', () => {});
     const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'], { stdio: 'ignore' });

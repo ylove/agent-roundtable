@@ -35,6 +35,8 @@ An omitted model uses the CLI's own default. A model override is a separate flag
 
 All profiles support an explicit model via `--model`, or `-m` for `codex`. They use the CLI's installed configuration and login where supported. The codex profile ignores user configuration and rules, uses a read-only sandbox, sets approval policy to `never` and inherits only the core shell environment, following the heads-down driver's safety flags. It gets `CODEX_HOME` when set. The runtime seat does not use the heads-down worker protocol.
 
+Only the codex profile runs sandboxed (read-only); hermes, openclaw and gemini run their own agent loops with the allowlisted environment and an empty temporary cwd but can read the user's filesystem; runtimes are opt-in by explicit name only.
+
 **Process-list exposure:** hermes, openclaw and gemini pass the full prompt as one argv element because these profiles use their prompt flags. Other local processes may see it in process listings. Codex receives the prompt on stdin. Prefer stdin for custom CLIs that support it.
 
 The hermes heuristic removes ANSI color sequences, lines containing only box/border characters, and leading lines beginning with `Hermes`, `Hermes Agent`, `loading` or `connected`. It can remove legitimate prose resembling a banner; override `output` with `{ "mode": "text" }` to preserve it. `hermes acp` is a possible future upgrade; this adapter uses `chat`.
@@ -70,6 +72,8 @@ Names match `^[a-z][a-z0-9_-]{0,31}$`, cannot shadow a provider, and are limited
 
 `argv` is an array of at most 64 nonempty strings, each at most 4096 characters without control characters. The first is an absolute executable path or bare command name, resolved without a shell through PATH. Relative paths and shell command strings are rejected. Shell interpreters cannot be configured as the executable. Arguments are literal; no interpolation, expansion or shell quoting occurs. A single whole argument `{prompt}` is replaced by the full prompt. Without it, the prompt is written to stdin and stdin is closed. `modelFlag` names one option; its value is always a separate argument. `versionArgv` contains only probe arguments, excluding the binary.
 
+After prompt substitution, each argument is limited to 100 KiB and the full argument list to 128 KiB. Larger requests fail before spawning; use a stdin-capable profile or override `argv` to send the prompt on stdin.
+
 Output modes:
 
 - `{ "mode": "text" }`: trimmed stdout; optional `stripDecoration: true` uses the hermes heuristic.
@@ -84,7 +88,7 @@ Runtime children always use `shell: false` and a detached process group. Each in
 
 The runtime environment passes PATH, HOME, locale/timezone, TMPDIR, proxy and certificate variables, plus `TERM=dumb` and `NO_COLOR=1`. Only names explicitly listed in a spec's `env` pass beyond that allowlist. Provider API keys, including `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TOGETHER_API_KEY` and `REPLICATE_API_TOKEN`, are excluded unless individually named there. Passing HOME permits the CLI to find its saved login.
 
-Defaults are 120 seconds, 1 MiB stdout and 64 KiB stderr. Configurable limits are capped at one hour, 16 MiB stdout and 1 MiB stderr. A timeout, cancellation or either output overflow terminates the entire process group with SIGTERM, then SIGKILL after a short grace period, and waits for the CLI to close. Overflow is marked as truncated and fails the turn. Output and error diagnostics are scrubbed using the shared secret rules; errors include a bounded stderr tail. Nonzero exit and spawn failures fail the turn clearly.
+Defaults are 120 seconds, 1 MiB stdout and 64 KiB stderr. Configurable limits are capped at one hour, 16 MiB stdout and 1 MiB stderr. A timeout, cancellation or either output overflow terminates the entire process group with SIGTERM, then SIGKILL after a short grace period, and waits for the CLI to close. Overflow is marked as truncated and fails the turn. Output and error diagnostics are scrubbed using the shared secret rules; failures include a bounded stdout error message (JSON/JSONL) or tail (text), plus a stderr tail when present. Nonzero exit and spawn failures fail the turn clearly.
 
 CLI seat preflight checks binary availability and the optional version probe, without sending a prompt or charging a provider call. Existing `--preflight` and `--no-preflight` switches apply. Preflight does not verify saved login or gateway availability.
 

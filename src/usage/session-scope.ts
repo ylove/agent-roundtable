@@ -167,7 +167,7 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
       line.usd_prov = "estimated";
     }
   }
-  if (r.usd !== undefined && Number.isFinite(r.usd) && r.usd >= 0) {
+  if (r.tokensProvenance === "reported" && r.usd !== undefined && Number.isFinite(r.usd) && r.usd >= 0) {
     line.usd = r.usd;
     line.usd_prov = "reported";
   }

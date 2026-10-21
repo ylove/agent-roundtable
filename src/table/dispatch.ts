@@ -33,7 +33,7 @@ export async function callSeat(system: string, messages: Parameters<typeof callL
   if (!spec) throw new Error("Unknown seat runtime.");
   const prompt = `${system}\n\n${messages.map(m => `${m.role}:\n${m.content}`).join("\n\n")}`;
   try {
-    const result = await runRuntime(spec, prompt, { ...(options.model && { model: options.model }), signal: activeAbortSignal() });
+    const result = await runRuntime(spec, prompt, { ...(options.model && { model: options.model }), signal: activeAbortSignal(), runtimeName: options.provider });
     reportUsage({ provider: options.provider, model: options.model || "default", usage: result.usage, tokensProvenance: "reported", usd: result.costUsd, chars: { input: prompt.length, output: result.text.length } });
     return result.text;
   } catch (error) {

@@ -68,6 +68,86 @@ test('nonzero, spawn failure, missing binaries and byte caps give bounded scrubb
   for (const name of ['oversize', 'oversize-stderr']) await assert.rejects(runRuntime({ ...text(name), stdoutMaxBytes: 1024, stderrMaxBytes: 1024 }, '', { env }), e => /byte cap.*truncated/.test(e.message) && e.message.length < 3000);
 });
 
+test('Codex nonzero JSONL stdout reports an unsupported model with empty stderr', async () => {
+  const spec = { ...BUILTIN_RUNTIMES.codex, argv: ['stdout-fail', ...BUILTIN_RUNTIMES.codex.argv.slice(1)] };
+  await assert.rejects(runRuntime(spec, '', { env, model: 'not-a-model' }), error => {
+    assert.match(error.message, /Runtime exited with 1; stdout error: The 'not-a-model' model is not supported when using Codex with a ChatGPT account/);
+    assert.doesNotMatch(error.message, /stderr tail/);
+    return true;
+  });
+});
+
+test('stdout error summaries handle JSON/JSONL error shapes and ignore malformed events', async () => {
+  const jsonl = BUILTIN_RUNTIMES.codex.output;
+  for (const [output, content, expected] of [
+    [jsonl, 'not json\nnull\n[]\n42\n' + JSON.stringify({ type: 'turn.failed', error: 'unknown model' }) + '\n' + JSON.stringify({ type: 'turn.failed', error: { message: 42 } }), 'unknown model'],
+    [jsonl, JSON.stringify({ type: 'error', error: { message: 'authentication failed' } }), 'authentication failed'],
+    [jsonl, JSON.stringify({ type: 'error', message: 'connection refused' }), 'connection refused'],
+    [{ mode: 'json', path: 'response' }, JSON.stringify({ error: { message: 'account unavailable' } }), 'account unavailable'],
+    [{ mode: 'json', path: 'response' }, JSON.stringify({ error: 'unsupported model' }), 'unsupported model'],
+  ]) {
+    await assert.rejects(runRuntime({ argv: ['stdout-fail'], output }, content, { env }), error => {
+      assert.ok(error.message.includes(`stdout error: ${expected}`), error.message);
+      assert.ok(error.message.length < 300);
+      return true;
+    });
+  }
+  for (const content of ['invalid JSON', 'null', '[]', JSON.stringify({ error: { message: { private: 'not a message' } } }),
+    JSON.stringify({ type: 'item.completed', error: 'not an error event' })]) {
+    await assert.rejects(runRuntime({ argv: ['stdout-fail'], output: jsonl }, content, { env }), { message: 'Runtime exited with 1' });
+  }
+});
+
+test('stdout diagnostics are scrubbed after JSON decoding, capped, and retain stderr', async () => {
+  const secret = 'fixture-"private"-value\nwith\\escapes';
+  const output = BUILTIN_RUNTIMES.codex.output;
+  const spec = { argv: ['stdout-fail', '--stderr'], output, env: ['FIXTURE_SECRET'] };
+  const content = JSON.stringify({ type: 'turn.failed', error: { message: `Unsupported model ${secret}: ${'x'.repeat(5000)}` } });
+  await assert.rejects(runRuntime(spec, content, { env: { ...env, FIXTURE_SECRET: secret } }), error => {
+    assert.doesNotMatch(error.message, /fixture-|private|escapes/);
+    assert.match(error.message, /stdout error: Unsupported model \[redacted:env:FIXTURE_SECRET\]/);
+    assert.match(error.message, /stderr tail: Extra diagnostic: \[redacted:env:FIXTURE_SECRET\]/);
+    assert.ok(error.message.length < 2200);
+    return true;
+  });
+});
+
+test('text failures use a capped scrubbed stdout tail and keep stderr', async () => {
+  const secret = 'fixture-private-stdout-value';
+  await assert.rejects(runRuntime({ ...text('stdout-fail'), argv: ['stdout-fail', '--stderr'], env: ['FIXTURE_SECRET'] },
+    `OUTSIDE-TAIL-${'x'.repeat(5000)}\nFailure detail: ${secret}`, { env: { ...env, FIXTURE_SECRET: secret } }), error => {
+    assert.match(error.message, /stdout tail: .*\nFailure detail: \[redacted:env:FIXTURE_SECRET\]/);
+    assert.match(error.message, /stderr tail: Extra diagnostic/);
+    assert.doesNotMatch(error.message, /OUTSIDE-TAIL|fixture-private-stdout-value/);
+    assert.ok(error.message.length < 2200);
+    return true;
+  });
+});
+
+test('argv prompt limits use bytes, name the runtime, and recommend stdin before spawning', async () => {
+  for (const runtimeName of ['hermes', 'openclaw', 'gemini']) {
+    for (const prompt of ['x'.repeat(100 * 1024 + 1), '界'.repeat(35_000)]) {
+      await assert.rejects(runRuntime(BUILTIN_RUNTIMES[runtimeName], prompt, { env, runtimeName }), error => {
+        assert.ok(error.message.startsWith(`Runtime ${runtimeName}: an argument exceeds the 100 KiB limit`));
+        assert.match(error.message, /stdin-capable runtime profile or override argv in config.json/);
+        assert.doesNotMatch(error.message, /E2BIG|spawn failed|界/);
+        return true;
+      });
+    }
+  }
+  const boundary = 'x'.repeat(100 * 1024);
+  const echoed = await runRuntime({ argv: ['argv-echo', '{prompt}'], output: { mode: 'text' } }, boundary, { env });
+  assert.deepEqual(JSON.parse(echoed.text).args, [boundary]);
+  assert.equal((await runRuntime(BUILTIN_RUNTIMES.codex, 'x'.repeat(200 * 1024), { env })).text, 'Final answer.');
+});
+
+test('total argv byte limit also rejects many individually small arguments', async () => {
+  const spec = { ...text('argv-echo'), argv: ['argv-echo', ...Array(40).fill('x'.repeat(3500))] };
+  await assert.rejects(runRuntime(spec, '', { env, runtimeName: 'custom-agent' }), {
+    message: 'Runtime custom-agent: total arguments exceed the 128 KiB limit; use a stdin-capable runtime profile or override argv in config.json to send the prompt on stdin.',
+  });
+});
+
 test('timeout and abort kill the detached group, reap the CLI and clean abort listeners', async () => {
   for (const abort of [false, true]) {
     const controller = new AbortController();

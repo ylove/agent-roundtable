@@ -18,3 +18,14 @@ export async function prepareExecutionProvider(inputs: RoutingInputs = {}): Prom
   const seat = seats.get("execution")!;
   return { provider: seat.provider as LLMProvider, model: seat.model, reason: seat.reason };
 }
+
+/**
+ * Probe the routed choice once so this process's health cache is warm. Automatic judgment only: an explicit
+ * provider is left to the execute preflight. Never throws; returns the failure text when nothing was healthy.
+ */
+export async function seedExecutionProvider(): Promise<string | undefined> {
+  const raw = process.env.ROUNDTABLE_EXECUTION_PROVIDER?.trim();
+  if (raw && raw !== "auto") return undefined;
+  try { await prepareExecutionProvider(); return undefined; }
+  catch (e) { return e instanceof Error ? e.message : "no healthy provider"; }
+}

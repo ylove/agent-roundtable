@@ -1,11 +1,11 @@
-import { providerHealth, endpointFingerprint } from "./health.js";
+import { providerHealth, endpointFingerprint, credentialFingerprint } from "./health.js";
 import { ProviderHttpError } from "./retry.js";
 import { appendTableLine, newServerId } from "../usage/table.js";
 
 let outcomeServer: string | undefined;
 function recordOutcome(provider: LLMProvider, model: string, started: number, outcome: ProviderOutcome["outcome"], reportsUsage: boolean, baseUrl?: string): ProviderOutcome {
-  const endpoint = endpointFingerprint(provider, process.env, baseUrl);
-  const result: ProviderOutcome = { provider, model, outcome, latency_ms: Math.max(0, Date.now() - started), ...(endpoint !== undefined && { endpoint }) };
+  const endpoint = endpointFingerprint(provider, process.env, baseUrl), cred = credentialFingerprint(provider, process.env);
+  const result: ProviderOutcome = { provider, model, outcome, latency_ms: Math.max(0, Date.now() - started), ...(endpoint !== undefined && { endpoint }), ...(cred !== undefined && { cred }) };
   // A session or execution sink already owns this call. Never create a second table row for it.
   if (activeUsageSink()) {
     if (!reportsUsage) reportProviderFailure(result);

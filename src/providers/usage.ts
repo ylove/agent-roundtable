@@ -37,6 +37,8 @@ export interface ProviderOutcome {
   latency_ms: number;
   /** Endpoint hash for operator-pointable providers (see endpointFingerprint). */
   endpoint?: string;
+  /** Credential hash (see credentialFingerprint); never the key. */
+  cred?: string;
 }
 type OutcomeSink = (outcome: ProviderOutcome) => void;
 const outcomeContext = new AsyncLocalStorage<ProviderOutcome>();

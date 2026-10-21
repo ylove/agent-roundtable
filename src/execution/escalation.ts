@@ -1231,11 +1231,13 @@ export function executionHuddleLLM(remainingBudgetUsd?: number): HuddleLLM {
 /** Adapt the WS08 controls to the context shared by WS10 and WS11. */
 export async function runnerHookContext(ctx: RunnerContext, opts: RunnerHookOptions = {}): Promise<HookCtx> {
   const state = await ctx.store.state();
+  // One routing decision per hook context (a huddle, a lead call, a goal review), not one per turn.
+  let routed: HuddleLLM | undefined;
   return {
     store: ctx.store, state, header: ctx.header,
     // The run's driver: a live claude-code worker answers a micro-huddle through driver.answer().
     driver: ctx.driver(), worker: (agent) => ctx.worker(agent),
-    llm: opts.llm ?? (() => executionHuddleLLM(remainingUsd(state))),
+    llm: opts.llm ?? (() => (routed ??= executionHuddleLLM(remainingUsd(state)))),
   };
 }
 
@@ -1250,6 +1252,9 @@ export function createRunnerHooks(opts: RunnerHookOptions = {}): RunnerHooks {
     },
     async leadFallback(ctx, id) {
       return leadFallback(await runnerHookContext(ctx, opts), id, opts);
+    },
+    async escalationGiveUp(ctx, id, message) {
+      await awaitHuman(await runnerHookContext(ctx, opts), id, { actor: { kind: "runner" }, message });
     },
     async escalationPass(ctx) {
       // No model call here: owed resumes, and concluded huddles applied from their records.

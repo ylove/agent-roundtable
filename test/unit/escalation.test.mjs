@@ -461,7 +461,7 @@ test("WS08 hooks: exact hook names, worker answer, and the resolution's resume r
   const resumes = [];
   let answers = 0;
   const hooks = createRunnerHooks({ llm });
-  assert.deepEqual(Object.keys(hooks).sort(), ["escalationPass", "escalationRouter", "goalReview", "leadFallback"]);
+  assert.deepEqual(Object.keys(hooks).sort(), ["escalationGiveUp", "escalationPass", "escalationRouter", "goalReview", "leadFallback"]);
   const ctx = {
     execution: f.store.id, store: f.store, header: f.header, source: runner,
     log() {}, resumeTask: async (...args) => { resumes.push(args); return true; },

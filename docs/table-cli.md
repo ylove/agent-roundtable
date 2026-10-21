@@ -35,11 +35,11 @@ Assignments resolve in this order:
 3. `--mix auto` or `--mix cheap`, aliases for provider judgment with a cost bias.
 4. Automatic [provider judgment](providers.md#provider-judgment), using role, health, budget, recent failures/latency and provider spread.
 
-Without flags, the router chooses each seat. Builders avoid reasoning models when an eligible alternative remains; judge and critique seats prefer known cheaper models; designer and persona chat seats use balanced defaults. Explicit providers retain their defaults and aliases. Runtime seats are never selected automatically.
+Without flags, the router chooses each seat; `--mix auto` and `--mix cheap` run the same router with a cost bias that still spreads seats across providers. Builders avoid reasoning models when an eligible alternative remains; judge and critique seats prefer known cheaper models; designer and persona chat seats use balanced defaults. Explicit providers retain their defaults and aliases. Runtime seats are never selected automatically.
 
 Preflight sends a brief request for each selected provider/model pair, caches successful pairs and provider health for ten minutes, and retries automatic seats on surviving providers. Diagnostics contain local reasons, never keys or remote error bodies. Probes can incur a small charge. If no candidate survives, startup exits 2 with every provider and its reason.
 
-Explicit assignments are preserved and fail by seat name when their requested preflight fails. `--no-preflight` skips probes while retaining cached health exclusions; it cannot be combined with `--preflight`. Replay and dry-run never probe providers. The terminal seat line and the NDJSON `start` event include each routing reason; duel room cards show it too.
+Explicit assignments are preserved and fail by seat name when their requested preflight fails. `--no-preflight` skips probes while retaining cached health exclusions; it cannot be combined with `--preflight`. Replay and dry-run never probe providers. The terminal prints the routing exclusions once as a `Routing:` line and each seat's choice on its seat line; the NDJSON `start` event carries every seat's full routing reason, and duel room cards show it too.
 
 Runtime seats are explicit: `--seat designer=hermes,skeptic=codex:example-model`. `--mix` selects only configured API providers. `roundtable runtimes [--json]` lists runtime detection and versions. See [CLI runtimes](runtimes.md) for profiles, configuration and prompt exposure.
 

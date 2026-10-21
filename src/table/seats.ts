@@ -141,7 +141,7 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
     const tier = routingTier(opts, { id, team, role: typeof frontmatter.role === "string" ? frontmatter.role : undefined });
     const choose = () => {
       try { return routeProvider({ ...opts.routing, tier, env, config, history, model: override?.model ?? opts.model,
-        excludeProviders: opts.excludeProviders, costBias: !!opts.mix, used: [...out.values()].map(s => s.provider) }); }
+        excludeProviders: opts.excludeProviders, costBias: !!opts.mix, teamSeat: team === "A" || team === "B", used: [...out.values()].map(s => s.provider) }); }
       catch (error) { throw new SeatUsageError(error instanceof Error ? error.message : "Unable to route providers."); }
     };
     const choice = !explicit && !healthyPersona ? choose() : undefined;

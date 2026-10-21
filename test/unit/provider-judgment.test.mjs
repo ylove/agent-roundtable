@@ -6,8 +6,12 @@ import { join } from 'node:path';
 import { endpointFingerprint } from '../../dist/providers/health.js';
 import { runnerHookContext, resolveHuddleLLM } from '../../dist/execution/escalation.js';
 import { makeState } from '../fixtures/execution-state.mjs';
-import { routeProvider, routingModels, recentPerformance, recentRoutingHistory } from '../../dist/providers/router.js';
-import { ProviderHealthCache, providerHealth, HEALTH_TTL_MS } from '../../dist/providers/health.js';
+import { Runner } from '../../dist/execution/runner.js';
+import { splitRoutingReason } from '../../dist/table/terminal.js';
+import { appendTableLine, newServerId } from '../../dist/usage/table.js';
+import { seedExecutionProvider } from '../../dist/execution/provider-routing.js';
+import { routeProvider, routingModels, FAILURE_WINDOW_MS, modelFitsProvider, recentPerformance, recentRoutingHistory } from '../../dist/providers/router.js';
+import { ProviderHealthCache, providerHealth, HEALTH_TTL_MS, TRANSIENT_HEALTH_TTL_MS, credentialFingerprint } from '../../dist/providers/health.js';
 import { PROVIDER_MAX_TOKENS } from '../../dist/providers/limits.js';
 import { resolveSeats, prepareSeats, preflightSeats } from '../../dist/table/seats.js';
 import { callLLM } from '../../dist/providers/index.js';
@@ -80,10 +84,10 @@ test('builds avoid reasoning models; shared output ceilings and strict overrides
 });
 
 test('recent 429 and timeout history demotes providers; only the last 50 calls count, with median latency', () => {
-  const history = Array.from({ length: 60 }, (_, i) => ({ provider: 'anthropic', model: DEFAULT_MODELS.anthropic, outcome: i < 11 ? 'rate_limit' : 'ok', latency_ms: i }));
+  const history = Array.from({ length: 60 }, (_, i) => ({ at: new Date(NOW - 1000).toISOString(), provider: 'anthropic', model: DEFAULT_MODELS.anthropic, outcome: i < 11 ? 'rate_limit' : 'ok', latency_ms: i }));
   assert.deepEqual(recentPerformance(history, 'anthropic', DEFAULT_MODELS.anthropic), { failures: 1, rate: 0.02, medianMs: 34.5 });
   assert.equal(routeProvider(inputs({ history })).provider, 'openai');
-  const timeout = [{ provider: 'anthropic', model: DEFAULT_MODELS.anthropic, outcome: 'timeout', latency_ms: 3000 }];
+  const timeout = [{ at: new Date(NOW - 1000).toISOString(), provider: 'anthropic', model: DEFAULT_MODELS.anthropic, outcome: 'timeout', latency_ms: 3000 }];
   assert.equal(routeProvider(inputs({ history: timeout })).provider, 'openai');
   assert.deepEqual(routeProvider(inputs()), routeProvider(inputs()));
 });
@@ -433,4 +437,141 @@ test('the runner validates a missing execution before selecting or probing any p
   assert.match(messages.join('\n'), /not found/);
   assert.doesNotMatch(messages.join('\n'), /No healthy provider/);
   assert.equal(calls.length, 0);
+});
+
+const four = { ANTHROPIC_API_KEY: 'fixture-a', OPENAI_API_KEY: 'fixture-b', REPLICATE_API_TOKEN: 'fixture-d', OLLAMA_URL: 'http://localhost:11434' };
+const roster = ['a', 'b', 'c', 'd'];
+
+test('--mix auto and --mix cheap spread four seats across four healthy providers', async () => {
+  for (const mix of ['auto', 'cheap']) {
+    const seats = await resolveSeats({ agents: roster, mix, env: four, load: empty, routing: { config: {}, history: [] } });
+    assert.deepEqual([...new Set([...seats.values()].map(seat => seat.provider))].sort(), ['anthropic', 'ollama', 'openai', 'replicate'], mix);
+  }
+});
+
+test('mix cost bias ranks known prices first; an unknown price is its own rank, never the budget estimate', () => {
+  const pricing = { [DEFAULT_MODELS.anthropic]: rates(100, 100), [DEFAULT_MODELS.openai]: rates(1, 1) };
+  const cheap = routeProvider(inputs({ costBias: true, pricing }));
+  assert.equal(cheap.provider, 'openai');
+  const premiumVsUnknown = routeProvider(inputs({ env: { ANTHROPIC_API_KEY: 'k', TOGETHER_API_KEY: 'k' }, costBias: true, pricing, tier: 'balanced' }));
+  assert.equal(premiumVsUnknown.provider, 'anthropic', 'a priced model is not displaced by an unpriced one valued at the estimate rate');
+});
+
+test('execute preflight with automatic judgment never refuses: no keys, or a small budget with unpriced providers', async t => {
+  for (const key of Object.keys(env)) delete process.env[key];
+  await preflightExecutionProvider(5);
+  process.env.TOGETHER_API_KEY = 'fixture';
+  stubFetch(t, () => reply('OK'));
+  await preflightExecutionProvider(0.0001);
+  assert.equal(await seedExecutionProvider(), undefined);
+  delete process.env.TOGETHER_API_KEY;
+  assert.match(await seedExecutionProvider(), /No healthy provider/);
+});
+
+test('the runner retries a failed escalation route with doubling pauses, gives up to the human after five, and clears on success', async t => {
+  const given = [], routes = [];
+  let fail = true, now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const runner = new Runner('exe-01m5e6grqmtp6rv8', { signals: false, routeRetryBaseMs: 100, hooks: {
+    escalationRouter: async (_ctx, esc) => { routes.push(now); if (fail) throw new Error('No healthy provider'); },
+    escalationGiveUp: async (_ctx, id, message) => { given.push([id, message]); },
+  } });
+  runner.say = () => {};
+  const state = { escalations: { 'esc-1': { id: 'esc-1', status: 'open' } } };
+  const tick = async ms => { now += ms; runner.routeEscalations(state); await Promise.all([...runner.pending]); };
+  await tick(0);
+  await tick(50); assert.equal(routes.length, 1, 'inside the first pause nothing is retried');
+  await tick(50); await tick(199); assert.equal(routes.length, 2);
+  await tick(1); assert.equal(routes.length, 3, 'second pause doubled');
+  await tick(400); assert.equal(routes.length, 4);
+  await tick(800); assert.equal(routes.length, 5);
+  assert.equal(given.length, 1); assert.equal(given[0][0], 'esc-1'); assert.match(given[0][1], /after 5 attempts/);
+  await tick(100000); assert.equal(routes.length, 5, 'after giving up it is not routed again');
+  // Success clears the bookkeeping.
+  const ok = new Runner('exe-01m5e6grqmtp6rv8', { signals: false, routeRetryBaseMs: 100, hooks: { escalationRouter: async () => { if (fail) throw new Error('x'); } } });
+  ok.say = () => {};
+  ok.routeEscalations({ escalations: { e: { id: 'e', status: 'open' } } }); await Promise.all([...ok.pending]);
+  assert.equal(ok.routeAttempts.get('e'), 1);
+  fail = false; now += 100; ok.routeEscalations({ escalations: { e: { id: 'e', status: 'open' } } }); await Promise.all([...ok.pending]);
+  assert.equal(ok.routeAttempts.has('e'), false); assert.equal(ok.routeRetryAt.has('e'), false);
+});
+
+test('failures decay after the window and stop counting once the credential or endpoint changes; transient failures expire sooner than auth', () => {
+  const line = (extra = {}) => ({ at: new Date(NOW - 1000).toISOString(), server: 's', session: 'x', kind: 'provider-call', agent: 'provider', provider: 'openai', model: 'm', outcome: 'rate_limit', latency_ms: 5, ...extra });
+  assert.equal(recentPerformance([line()], 'openai', 'm', undefined, undefined, NOW).failures, 1);
+  assert.equal(recentPerformance([line({ at: new Date(NOW - FAILURE_WINDOW_MS - 1).toISOString() })], 'openai', 'm', undefined, undefined, NOW).failures, 0);
+  const rotated = credentialFingerprint('openai', { OPENAI_API_KEY: 'old-key' }), current = credentialFingerprint('openai', { OPENAI_API_KEY: 'new-key' });
+  assert.match(rotated, /^[0-9a-f]{16}$/); assert.notEqual(rotated, current);
+  assert.equal(recentPerformance([line({ cred: rotated })], 'openai', 'm', undefined, current, NOW).failures, 0);
+  assert.equal(recentPerformance([line({ cred: current })], 'openai', 'm', undefined, current, NOW).failures, 1);
+  let at = NOW;
+  const cache = new ProviderHealthCache(() => at);
+  const e = { OPENAI_API_KEY: 'k', ANTHROPIC_API_KEY: 'k' };
+  cache.recordCall('openai', false, 'rate limited', e); cache.recordCall('anthropic', false, 'auth failed', e);
+  at = NOW + TRANSIENT_HEALTH_TTL_MS;
+  assert.equal(cache.get('openai', e), undefined, 'a 429 excludes briefly');
+  assert.equal(cache.get('anthropic', e)?.ok, false, 'a rejected key stays excluded for the full TTL');
+});
+
+test('the ledger stores a credential hash, never the key', async t => {
+  process.env.OPENAI_API_KEY = 'sk-never-store-this';
+  stubFetch(t, () => json(429, { error: { message: 'slow down' } }));
+  await assert.rejects(callLLM('brief', [{ role: 'user', content: 'brief' }], { provider: 'openai', model: 'judgment-cred-fixture' }));
+  const rows = recentRoutingHistory(NOW, ROUNDTABLE_HOME).filter(row => row.model === 'judgment-cred-fixture');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].cred, credentialFingerprint('openai', process.env));
+  assert.ok(!JSON.stringify(rows).includes('sk-never-store-this'));
+});
+
+test('reasons name request failures; the terminal prints shared exclusions once and the choice per seat', async () => {
+  const health = new ProviderHealthCache(() => NOW);
+  health.recordCall('anthropic', false, 'request failed', env);
+  const choice = routeProvider(inputs({ health, tier: 'judge' }));
+  assert.match(choice.reason, /anthropic\/.*: request failed/);
+  const seats = await resolveSeats({ agents: ['a', 'b'], env, load: empty, routing: { config: {}, history: [], health } });
+  const rendered = [];
+  const observer = createTerminalObserver({ output: { write: text => rendered.push(text), isTTY: false, columns: 200 }, env: {} });
+  observer.onEvent({ type: 'start', id: 'x', topic: 'topic', mode: 'duel', seats: [...seats.values()], startedAt: new Date(NOW).toISOString() });
+  const text = rendered.join('');
+  assert.equal(text.match(/request failed/g).length, 1, text);
+  assert.match(text, /Routing: /);
+  assert.equal(splitRoutingReason('x: request failed; a/b chosen: healthy').chosen, 'a/b chosen: healthy');
+  assert.ok([...seats.values()].every(seat => /request failed/.test(seat.reason)), 'per-seat reasons stay complete for NDJSON and MCP');
+});
+
+test('a model given without a provider only goes to providers that can serve it', () => {
+  assert.equal(modelFitsProvider('anthropic', 'claude-sonnet-5-5'), true);
+  assert.equal(modelFitsProvider('openai', 'claude-sonnet-5-5'), false);
+  assert.equal(routeProvider(inputs({ model: 'claude-sonnet-5-5' })).provider, 'anthropic');
+  const health = new ProviderHealthCache(() => NOW);
+  health.recordCall('anthropic', false, 'auth failed', env);
+  assert.throws(() => routeProvider(inputs({ model: 'claude-sonnet-5-5', health })), /No healthy provider/);
+  assert.equal(routeProvider(inputs({ model: 'zai-org/GLM-5.3' })).provider, 'together');
+});
+
+test('reasoning models are ranked last for live seats when a non-reasoning one is healthy, but still usable alone', () => {
+  const pair = { TOGETHER_API_KEY: 'k', REPLICATE_API_TOKEN: 'k' };
+  assert.equal(routeProvider(inputs({ env: pair, tier: 'balanced' })).provider, 'replicate');
+  assert.equal(routeProvider(inputs({ env: pair, tier: 'judge' })).provider, 'replicate');
+  assert.equal(routeProvider(inputs({ env: { TOGETHER_API_KEY: 'k' }, tier: 'balanced' })).provider, 'together');
+});
+
+test('routing history is re-read after a local ledger write and routing context is memoised per hook', async () => {
+  const both = { ANTHROPIC_API_KEY: 'k', OPENAI_API_KEY: 'k' };
+  const base = { env: both, config: {}, health: new ProviderHealthCache(() => NOW), now: NOW };
+  assert.equal(routeProvider(base).provider, 'anthropic');
+  const model = routingModels('anthropic', 'balanced').model;
+  for (let i = 0; i < 3; i++) appendTableLine({ at: new Date(NOW - 1000).toISOString(), server: newServerId(), session: 'provider-calls', kind: 'provider-call', agent: 'provider', provider: 'anthropic', model, outcome: 'timeout', latency_ms: 1, cred: credentialFingerprint('anthropic', both) });
+  assert.equal(routeProvider(base).provider, 'openai');
+  process.env.OPENAI_API_KEY = 'fixture';
+  const ctx = await runnerHookContext({ store: { state: async () => makeState({ contract: null }) }, header: {}, driver: () => ({}), worker: () => undefined }, {});
+  assert.equal(typeof ctx.llm, 'function');
+});
+
+test('non-team live seats all avoid a reasoning model while a non-reasoning one is healthy; duel teams still split', async () => {
+  const pair = { TOGETHER_API_KEY: 'k', REPLICATE_API_TOKEN: 'k' };
+  const seats = await resolveSeats({ agents: ['a', 'b', 'c'], env: pair, load: empty, routing: { config: {}, history: [] } });
+  assert.deepEqual([...seats.values()].map(seat => seat.provider), ['replicate', 'replicate', 'replicate']);
+  const teams = await resolveSeats({ teamA: ['a', 'x'], teamB: ['b', 'y'], env: pair, load: empty, routing: { config: {}, history: [] } });
+  assert.notEqual(teams.get('a').provider, teams.get('b').provider);
 });

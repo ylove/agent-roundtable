@@ -1,4 +1,4 @@
-import { prepareExecutionProvider } from "./provider-routing.js";
+import { prepareExecutionProvider, seedExecutionProvider } from "./provider-routing.js";
 // ============================================================================
 // The orchestrator's run controls (heads-down.md §13): execute, control_execution, resolve_escalation
 //
@@ -446,8 +446,14 @@ async function startedInfo(store: FileExecutionStore, state: BlackboardState, wa
  */
 export async function preflightExecutionProvider(remainingBudgetUsd?: number): Promise<void> {
   if (process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT === "1") return;
+  const raw = process.env.ROUNDTABLE_EXECUTION_PROVIDER?.trim();
+  if (!raw || raw === "auto") {
+    // Automatic judgment never refuses a run: claude-code workers need no API key, and the budget is not a reason to stall. Probing seeds the health cache.
+    await seedExecutionProvider(); // Never throws: routing is retried at each model call and fails clearly there.
+    return;
+  }
   const { provider, model, unknown } = await prepareExecutionProvider({ remainingBudgetUsd });
-  if (unknown || !process.env.ROUNDTABLE_EXECUTION_PROVIDER?.trim() || process.env.ROUNDTABLE_EXECUTION_PROVIDER?.trim() === "auto") return;
+  if (unknown) return;
   const [result] = await preflightSeats([{ id: "execution", name: "execution", provider, model }]);
   if (result?.reason !== "auth failed") return;
   const key = PROVIDER_KEYS[provider];

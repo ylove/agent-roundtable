@@ -37,9 +37,8 @@ test('mix gives the teams different first providers, even with two agents per te
     const seats = await resolveSeats({ teamA: ['designer', 'builder'], teamB: ['marketer', 'skeptic'], judges: ['cfo'], load, env, mix });
     assert.equal(seats.get('designer').team, 'A'); assert.equal(seats.get('marketer').team, 'B');
     assert.notEqual(seats.get('designer').provider, seats.get('marketer').provider);
-    assert.equal(seats.get('builder').provider, 'anthropic');
-    assert.equal(seats.get('cfo').provider, 'anthropic');
-    assert.equal(seats.get('cfo').model, 'claude-haiku-5-5');
+    // Mix spreads seats first and lets cost break ties: all three healthy providers sit at the table.
+    assert.equal(new Set([...seats.values()].map(seat => seat.provider)).size, 3, mix);
   }
   assert.deepEqual(availableProviders({}), []);
   assert.deepEqual(availableProviders({ OPENAI_COMPATIBLE_BASE_URL: 'http://127.0.0.1:1234/v1' }), ['openai_compatible']);
@@ -109,7 +108,7 @@ test('automatic mix preflight excludes a 401 provider and redistributes both tea
     const seats = await prepareSeats({ teamA: ['designer', 'builder'], teamB: ['marketer', 'skeptic'], judges: ['cfo'], load, mix }, { report: message => messages.push(message) });
     assert.ok([...seats.values()].every(s => s.provider !== 'anthropic'));
     assert.notEqual(seats.get('designer').provider, seats.get('marketer').provider);
-    assert.equal(calls.length - offset, 5);
+    assert.equal(calls.length - offset, 4);
     assert.ok(messages.includes('anthropic: auth failed, excluded from routing'));
     assert.ok(messages.some(m => /^openai\/.*: pass$/.test(m)));
     assert.doesNotMatch(messages.join('\n'), /do-not-print-this|fixture-key/);

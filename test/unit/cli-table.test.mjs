@@ -195,7 +195,7 @@ test('CLI mixes automatically preflight and exclude a 401 provider before callin
   assert.equal(await runTableCli('duel', [...automaticRoster(), '--json', '--no-room'], streams), 0, streams.error.read());
   assert.ok(Object.values(state.options.seats).every(s => s.provider !== 'anthropic'));
   assert.notEqual(state.options.seats.designer.provider, state.options.seats.marketer.provider);
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 4, 'the dead key plus each distinct surviving provider/model pair');
   assert.match(streams.error.read(), /anthropic: auth failed, excluded from routing/);
   assert.match(streams.error.read(), /openai\/.*: pass/);
   assert.deepEqual(streams.output.read().trim().split('\n').map(JSON.parse).map(e => e.type), ['start', 'end']);

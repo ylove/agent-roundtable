@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
 import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 const name = basename(process.argv[1]);
 const args = process.argv.slice(2);
 if (args.includes('--version')) { console.log(`${name} fixture 1.0`); process.exit(0); }
@@ -24,6 +25,27 @@ switch (name) {
       { type: 'turn.completed', usage: { input_tokens: 15, output_tokens: 9 } },
     ]) console.log(JSON.stringify(event));
     break;
+  case 'large-codex':
+    await input();
+    console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: process.env.FIXTURE_SECRET ? `Answer: ${process.env.FIXTURE_SECRET}` : 'Large usage answer.' } }));
+    console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 125678, output_tokens: 12345, cached_input_tokens: 24000 } }));
+    break;
+  case 'large-gemini':
+    console.log(JSON.stringify({ response: process.env.FIXTURE_SECRET ? `Answer: ${process.env.FIXTURE_SECRET}` : 'Large usage answer.', stats: { models: { 'fixture-model': { tokens: { input: 125678, prompt: 125678, candidates: 12345, total: 138023, cached: 24000, thoughts: 4321 } } }, cost: 0.1234 } }));
+    break;
+  case 'escaped-pipes': {
+    process.on('SIGTERM', () => {});
+    const helper = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
+    helper.once('spawn', () => {
+      const state = { helper: helper.pid, parent: process.pid, cwd: process.cwd() };
+      writeFileSync(args[0], JSON.stringify(state));
+      console.error(JSON.stringify(state));
+      if (args[1] === 'overflow') process.stdout.write('x'.repeat(200_000));
+    });
+    helper.unref();
+    setInterval(() => {}, 1000);
+    break;
+  }
   case 'fail': console.error(`Failed with ${process.env.FIXTURE_SECRET || ''}`); process.exitCode = 23; break;
   case 'hang': {
     process.on('SIGTERM', () => {});

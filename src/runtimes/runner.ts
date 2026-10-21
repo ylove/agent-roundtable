@@ -45,12 +45,18 @@ async function execute(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOption
       let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0);
       let outBytes = 0, errBytes = 0;
       let failure: string | undefined;
-      let closed = false, code: number | null = null, exitSignal: NodeJS.Signals | null = null;
+      let closed = false, exited = false, drainExpired = false, settled = false;
+      let code: number | null = null, exitSignal: NodeJS.Signals | null = null;
       let escalation: ReturnType<typeof setTimeout> | undefined;
+      let postKillDrain: ReturnType<typeof setTimeout> | undefined;
       let timer: ReturnType<typeof setTimeout>;
       const finish = () => {
-        if (!closed || escalation) return;
+        // A detached descendant can keep the pipes open after the direct child is reaped.
+        // Once draining expires, the exit event suffices; close is no longer required.
+        if (settled || escalation || (!closed && !(failure && drainExpired && (exited || child.pid === undefined)))) return;
+        settled = true;
         clearTimeout(timer);
+        clearTimeout(postKillDrain);
         opts.signal?.removeEventListener("abort", abort);
         child.removeAllListeners();
         child.stdout.removeAllListeners(); child.stderr.removeAllListeners(); child.stdin.removeAllListeners();
@@ -58,7 +64,8 @@ async function execute(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOption
         if (child.pid) { signalGroup(child.pid, "SIGTERM"); signalGroup(child.pid, "SIGKILL"); }
         const tail = clean(stderr.toString("utf8")).slice(-2000);
         if (failure || code !== 0) reject(new Error(`Runtime ${failure ?? `exited with ${exitSignal ?? code}`}${tail ? `; stderr tail: ${errBytes > stderrCap ? "[truncated] " : ""}${tail}` : ""}`));
-        else resolve(clean(stdout.toString("utf8")));
+        // Structured stdout must remain raw until parsing and numeric usage extraction finish.
+        else resolve(stdout.toString("utf8"));
       };
       const stop = (why: string) => {
         if (failure) return;
@@ -68,6 +75,11 @@ async function execute(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOption
           escalation = setTimeout(() => {
             signalGroup(child.pid!, "SIGKILL");
             escalation = undefined;
+            if (!closed) postKillDrain = setTimeout(() => {
+              drainExpired = true;
+              child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+              finish();
+            }, 500);
             finish();
           }, 250);
         }
@@ -87,6 +99,7 @@ async function execute(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOption
         if (errBytes > stderrCap) stop("stderr exceeded byte cap [truncated]");
       });
       child.once("error", error => { stop(`spawn failed: ${clean(error.message)}`); });
+      child.once("exit", (c, s) => { code = c; exitSignal = s; exited = true; finish(); });
       child.once("close", (c, s) => { code = c; exitSignal = s; closed = true; finish(); });
       child.stdin.on("error", () => { /* A CLI can exit before consuming its prompt; close reports the error. */ });
       child.stdin.end(probe || spec.argv.includes("{prompt}") ? undefined : prompt);
@@ -148,14 +161,14 @@ export async function runRuntime(spec: RuntimeSpec, prompt: string, opts: Runtim
     }
   }
   if (typeof text !== "string" || !text.trim()) throw new Error("Runtime returned no final text at the configured output path.");
-  return { text, ...(usage && { usage }), ...(costUsd !== undefined && { costUsd }) };
+  return { text: scrubSecrets(text, opts.env ?? process.env).text, ...(usage && { usage }), ...(costUsd !== undefined && { costUsd }) };
 }
 export async function detectRuntime(spec: RuntimeSpec, opts: RuntimeRunOptions = {}): Promise<{ found: boolean; path?: string; version?: string; ok: boolean; error?: string }> {
   validateRuntimeSpec(spec);
   const path = resolveExecutable(spec.argv[0], (opts.env ?? process.env).PATH);
   if (!path) return { found: false, ok: false };
   try {
-    const version = spec.versionArgv ? (await execute(spec, "", opts, true)).trim().slice(0, 200) : undefined;
+    const version = spec.versionArgv ? scrubSecrets(await execute(spec, "", opts, true), opts.env ?? process.env).text.trim().slice(0, 200) : undefined;
     return { found: true, path, ok: true, ...(version && { version }) };
   } catch (error) {
     opts.signal?.throwIfAborted();

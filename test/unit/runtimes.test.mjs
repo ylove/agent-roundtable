@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -222,4 +222,57 @@ test('absolute binaries work and successful runs remove abort listeners', async 
   const result = await runRuntime({ ...text('argv-echo'), argv: [join(fixtures, 'argv-echo')] }, 'Hello', { env, signal });
   assert.equal(JSON.parse(result.text).stdin, 'Hello');
   assert.equal(getEventListeners(signal, 'abort').length, 0);
+});
+
+
+test('codex and gemini preserve realistic large numeric usage before scrubbing decoded text', async () => {
+  for (const name of ['codex', 'gemini']) {
+    const builtin = BUILTIN_RUNTIMES[name];
+    const spec = { ...builtin, argv: [`large-${name}`, ...builtin.argv.slice(1)] };
+    const result = await runRuntime(spec, 'Reply.', { env });
+    assert.equal(result.text, 'Large usage answer.');
+    assert.deepEqual(result.usage, { inputTokens: 125678, outputTokens: 12345 });
+    if (name === 'gemini') assert.equal(result.costUsd, 0.1234);
+    // The exact secret contains JSON escapes, so scrubbing must happen after decoding it.
+    const secret = 'fixture-"private"-value\nwith\\escapes';
+    const scrubbed = await runRuntime({ ...spec, env: ['FIXTURE_SECRET'] }, 'Reply.', { env: { ...env, FIXTURE_SECRET: secret } });
+    assert.equal(scrubbed.text, 'Answer: [redacted:env:FIXTURE_SECRET]');
+    assert.deepEqual(scrubbed.usage, { inputTokens: 125678, outputTokens: 12345 });
+  }
+});
+
+test('timeout, abort and overflow bound draining when a detached helper holds output pipes', async () => {
+  for (const reason of ['timeout', 'abort', 'overflow']) {
+    const root = mkdtempSync(join(tmpdir(), 'runtime-escaped-pipes-'));
+    const statePath = join(root, 'state.json');
+    const controller = new AbortController();
+    const spec = { ...text('escaped-pipes'), argv: ['escaped-pipes', statePath, reason], timeoutMs: reason === 'timeout' ? 500 : 5000, stdoutMaxBytes: 1024 };
+    let state;
+    const cleanupHelper = () => {
+      if (!state && existsSync(statePath)) state = JSON.parse(readFileSync(statePath, 'utf8'));
+      if (state?.helper > 1) { try { process.kill(-state.helper, 'SIGKILL'); } catch {} }
+    };
+    let deadline, abort;
+    const started = Date.now();
+    const run = runRuntime(spec, '', { env, signal: controller.signal });
+    try {
+      if (reason === 'abort') abort = setTimeout(() => controller.abort(), 500);
+      const failure = await Promise.race([
+        run.then(() => { throw new Error('Runtime unexpectedly succeeded'); }, error => error),
+        new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('Runtime hung draining inherited pipes')), 3000); }),
+      ]);
+      assert.match(failure.message, reason === 'timeout' ? /timed out/ : reason === 'abort' ? /aborted/ : /byte cap.*truncated/);
+      assert.ok(Date.now() - started < 2500, 'failure must settle before helper cleanup releases its pipes');
+      state = JSON.parse(readFileSync(statePath, 'utf8'));
+      assert.doesNotThrow(() => process.kill(state.helper, 0), 'the helper still holds the inherited pipes');
+      assert.throws(() => process.kill(state.parent, 0), { code: 'ESRCH' }, 'the direct child was reaped');
+      assert.equal(existsSync(state.cwd), false, 'the runtime temporary directory was removed');
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+    } finally {
+      clearTimeout(deadline); clearTimeout(abort);
+      cleanupHelper();
+      await run.catch(() => {});
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 });

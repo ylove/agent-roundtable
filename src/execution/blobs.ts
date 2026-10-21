@@ -100,7 +100,9 @@ export function scrubDeep<T>(value: T, key?: string): T {
   if (Array.isArray(value)) return value.map((v) => scrubDeep(v, key)) as T;
   if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
     const out = Object.fromEntries(Object.entries(value).map(([k, v]) => [
-      redactSecretTokens(scrubConfiguredSecrets(k).text).text, scrubDeep(v, k),
+      // Postmortem refs map seat identifiers to persona paths. An identifier such as secret-scanner
+      // is not a credential field; its value still gets string scrubbing and nested field checks.
+      redactSecretTokens(scrubConfiguredSecrets(k).text).text, scrubDeep(v, key === "refs" ? undefined : k),
     ]));
     return out as T;
   }

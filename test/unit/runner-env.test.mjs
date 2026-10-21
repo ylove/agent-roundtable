@@ -16,7 +16,7 @@ test("runner retains provider and execution settings", () => {
   const names = [
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TMPDIR", "TERM",
     "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
-    "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "NODE_USE_ENV_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_USE_SYSTEM_CA",
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY", "REPLICATE_API_TOKEN",
     "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_MODEL", "OLLAMA_URL",
     "ROUNDTABLE_HOME", "ROUNDTABLE_AGENTS_DIR", "ROUNDTABLE_SKILLS_DIR", "ROUNDTABLE_WORKSPACE_DIR",
@@ -39,6 +39,35 @@ test("runner retains provider and execution settings", () => {
   ];
   const source = Object.fromEntries(names.map(name => [name, `setting-${name}`]));
   assert.deepEqual(runnerSettings({}, source), source);
+});
+
+test("a spawned runner retains Node proxy activation and CA settings", () => {
+  const network = {
+    NODE_USE_ENV_PROXY: "1", HTTP_PROXY: "http://127.0.0.1:8123", HTTPS_PROXY: "http://127.0.0.1:8123",
+    NO_PROXY: "localhost", NODE_USE_SYSTEM_CA: "1", SSL_CERT_FILE: "/tmp/runner-ca.pem", SSL_CERT_DIR: "/tmp/runner-certs",
+  };
+  const env = childEnv("runner", {}, { ...network, NODE_OPTIONS: "--throw-deprecation", DATABASE_PASSWORD: "host-only-password" });
+  assert.equal(env.NODE_OPTIONS, undefined);
+  assert.equal(env.DATABASE_PASSWORD, undefined);
+  const script = `
+    import assert from "node:assert/strict";
+    import http from "node:http";
+    import https from "node:https";
+    const expected = ${JSON.stringify(network)};
+    for (const [name, value] of Object.entries(expected)) assert.equal(process.env[name], value, name);
+    if (process.allowedNodeEnvironmentFlags.has("--use-env-proxy")) {
+      // The startup flag activates both built-in HTTP agents, without needing network access.
+      for (const agent of [http.globalAgent, https.globalAgent]) {
+        assert.equal(agent.options.proxyEnv?.HTTP_PROXY, expected.HTTP_PROXY);
+        assert.equal(agent.options.proxyEnv?.HTTPS_PROXY, expected.HTTPS_PROXY);
+      }
+    }
+    process.stdout.write("proxy activation retained");
+  `;
+  const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    env, encoding: "utf8", timeout: 15_000,
+  });
+  assert.equal(output, "proxy activation retained");
 });
 
 test("runner composes worker, git, docker and gh allowlists", () => {

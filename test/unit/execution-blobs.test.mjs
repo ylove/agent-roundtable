@@ -125,6 +125,31 @@ test("scrubbedJSON preserves persona refs and nested dissents with auth-prefixed
   assert.deepEqual(JSON.parse(scrubbedJSON(value)), value);
 });
 
+test("persona refs preserve credential-like identifiers while their values and nested fields are scrubbed", (t) => {
+  const previous = process.env.ROUNDTABLE_SCRUB_LITERALS;
+  const literal = "private-persona-ref-123456";
+  process.env.ROUNDTABLE_SCRUB_LITERALS = JSON.stringify([literal]);
+  t.after(() => {
+    if (previous === undefined) delete process.env.ROUNDTABLE_SCRUB_LITERALS;
+    else process.env.ROUNDTABLE_SCRUB_LITERALS = previous;
+  });
+  const refs = Object.fromEntries(["secret-scanner", "token-reviewer", "api-key-reviewer"].map(name => [name, `/agents/${name}.md`]));
+  const value = {
+    refs: { ...refs, configured: `/agents/${literal}.md`, shaped: `/agents/${FAKE_KEY}.md`,
+      nested: { password: "hunter22", token: ["short", 1234] } },
+    password: "hunter22", token: ["short", 1234], api_key: "opaque",
+    nested: { secret: "opaque", refs },
+  };
+  const expected = {
+    refs: { ...refs, configured: "/agents/[redacted:env:ROUNDTABLE_SCRUB_LITERALS].md", shaped: "/agents/[redacted:api_key].md",
+      nested: { password: "[redacted:secret]", token: ["[redacted:secret]", "[redacted:secret]"] } },
+    password: "[redacted:secret]", token: ["[redacted:secret]", "[redacted:secret]"], api_key: "[redacted:secret]",
+    nested: { secret: "[redacted:secret]", refs },
+  };
+  assert.deepEqual(scrubDeep(value), expected);
+  assert.deepEqual(JSON.parse(scrubbedJSON(value)), expected);
+});
+
 test("structured credential fields match normalized segments and redact only string or number leaves", () => {
   const fields = ["password", "PASSWD", "secret", "token", "Api_Key", "apikey", "access-key", "private.key",
     "authorization", "credential", "credentials", "client_secret", "bearer", "db-password", "service.token", "clientSecret", "accessKey"];

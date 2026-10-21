@@ -738,6 +738,32 @@ test("postmortem persistence preserves auth-prefixed persona refs and dissent id
   assert.deepEqual(after.dissents, before.dissents);
 });
 
+test("secret-scanner persona refs survive persistence and route an accepted addendum through conclusion", async (t) => {
+  const { WORKSPACE_DIR } = await import("../../dist/config.js");
+  const dir = join(WORKSPACE_DIR, ".claude", "agents");
+  mkdirSync(dir, { recursive: true });
+  const reviewer = join(dir, "secret-scanner.md");
+  writeFileSync(reviewer, PERSONA("Secret-scanner"));
+  t.after(() => rmSync(reviewer, { force: true }));
+  const { repo, ids, work } = await atTheTable(t, { responsible: [["secret-scanner"]] });
+  provider(t, { total: 3, block: `Artifact: persona_addendum | secret-scanner | ${ids[0]} | Review credential handling before submitting` });
+  const held = await ok("hold_postmortem", {
+    project: repo.root, work, opening: "Review credential handling",
+    participants: [reviewer, "tester"], rounds: 1, ...LLM,
+  });
+  const before = loadRecord(held.project, held.pm);
+  assert.equal(before.refs["secret-scanner"], reviewer);
+  const result = await ok("hold_postmortem", {
+    action: "conclude", pm: held.pm, closing: "Keep the credential checks", accept: ["a1"],
+  });
+  assert.deepEqual(result.warnings, []);
+  assert.equal(result.applied[0].path, reviewer);
+  assert.match(readFileSync(reviewer, "utf8"), /Review credential handling before submitting/);
+  const after = loadRecord(held.project, held.pm);
+  assert.equal(after.status, "concluded");
+  assert.deepEqual(after.refs, before.refs);
+});
+
 async function dissentMeeting(t, { outcomes = ["vindicated", "refuted", "untested"], malformed = false } = {}) {
   const specs = ["fired", "quiet", "unresolved", "unassessed"].map(dissentSpec);
   const run = await makeRun({ contract: { tasks: [task("api")], dissents: specs, postmortem: { enabled: true } } });

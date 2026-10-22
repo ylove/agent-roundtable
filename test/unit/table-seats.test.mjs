@@ -109,7 +109,7 @@ test('automatic mix preflight excludes a 401 provider and redistributes both tea
     assert.ok([...seats.values()].every(s => s.provider !== 'anthropic'));
     assert.notEqual(seats.get('designer').provider, seats.get('marketer').provider);
     assert.equal(calls.length - offset, 4);
-    assert.ok(messages.includes('anthropic: auth failed, excluded from routing'));
+    assert.equal(messages.filter(m => m === 'anthropic: auth failed, excluded from routing').length, 1);
     assert.ok(messages.some(m => /^openai\/.*: pass$/.test(m)));
     assert.doesNotMatch(messages.join('\n'), /do-not-print-this|fixture-key/);
   }

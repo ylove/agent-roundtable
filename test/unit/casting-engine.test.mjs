@@ -72,9 +72,10 @@ test("dry run makes zero fetch calls, needs no keys and preserves input order", 
   assert.deepEqual(report.recommended.seats, agents.slice(0, 2));
   assert.deepEqual(report.gaps, []);
   assert.equal(report.usage.totalCostUsd, 0);
-  assert.equal(report.note, undefined);
+  assert.match(report.note, /^Static checks only, no auditions/);
+  assert.match(renderRoster(report), /Gaps: not assessed/);
   assert.equal(report.usage.unpricedTokens, undefined);
-  assert.match(renderCastingMarkdown(report), /Gaps: none/);
+  assert.match(renderCastingMarkdown(report), /Gaps: not assessed/);
 });
 
 test("dry-run redundancy keeps only the first cluster member eligible", async t => {
@@ -173,6 +174,25 @@ test("abort mid-run cuts in-flight calls, stops scheduling and still archives", 
   assert.ok(report.agents.every(a => a.verdict === "unclear"));
   assert.equal((await archiveFor(report)).id, report.id);
   await assertNote(report, /Stopped before completion; roster is partial\./);
+});
+
+test("a running cast is a live session that stop reaches, and leaves the live list when done", async t => {
+  const { liveSessions, stopSession } = await import("../../dist/usage/table-service.js");
+  let id, reached;
+  const gotCall = new Promise(resolve => { reached = resolve; });
+  const running = run(t, { audition: async (_persona, init) => {
+    reached();
+    await new Promise((resolve, reject) => { if (init.signal.aborted) reject(init.signal.reason); else init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true }); });
+  } }, {}, noSignal(), event => { if (event.type === "start") id = event.id; });
+  await gotCall;
+  const live = liveSessions().find(s => s.id === id);
+  assert.equal(live.kind, "casting");
+  assert.ok(agents.every(key => live.agents.includes(key)));
+  assert.equal((await stopSession({ session: id, by: "test", surface: "cli" })).status, "stopped");
+  const { report, events } = await running;
+  assert.equal(events.at(-1).aborted, true);
+  await assertNote(report, /Stopped before completion; roster is partial\./);
+  assert.equal(liveSessions().some(s => s.id === id), false);
 });
 
 test("deadline settles a provider that ignores abort and archives available results", async t => {

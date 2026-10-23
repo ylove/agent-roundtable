@@ -11,6 +11,7 @@ import { callSeat } from "../table/dispatch.js";
 import { parseSeat, type Seat, type SeatSpec, type TableEvent, type TableObserver } from "../table/events.js";
 import { assertSeatCredentials, resolveSeats, SeatUsageError, validateSeatSpecs } from "../table/seats.js";
 import { turnTokens } from "../table/duel.js";
+import { registerDuel, unregisterDuel } from "../table/live-duels.js";
 import { lineFor, metered, sessionSignal } from "../usage/session-scope.js";
 import { listLibrary } from "../library/catalog.js";
 import { lintAgent } from "./lint.js";
@@ -160,7 +161,8 @@ function staticReport(agents: LoadedAgent[], opts: CastingOptions, id: string, c
   });
   const recommended = roster.filter(a => a.verdict === "cast").slice(0, opts.seats ?? Math.min(5, agents.length)).map(a => a.key);
   for (const agent of roster) if (agent.verdict === "cast" && !recommended.includes(agent.key)) agent.verdict = "bench";
-  return { id, createdAt, brief: scrub(opts.brief), ...(opts.dryRun && { dryRun: true }), agents: roster, redundancy, gaps: [], recommended: { seats: recommended } };
+  return { id, createdAt, brief: scrub(opts.brief), ...(opts.dryRun && { dryRun: true, note: "Static checks only, no auditions: the recommended cast is the first eligible personas in listed order, not a judgment of the brief." }),
+    agents: roster, redundancy, gaps: [], recommended: { seats: recommended } };
 }
 
 function cancellable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -188,6 +190,8 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
   const deadline = new AbortController();
   const ended = Date.now() + (opts.maxSeconds ?? 300) * 1000;
   const timer = setTimeout(() => deadline.abort(new Error("Casting deadline reached.")), (opts.maxSeconds ?? 300) * 1000);
+  // Listed with the live duels, so the usage view and stop_session reach it through sessionSignal(id).
+  registerDuel({ id, kind: "casting", agents: agents.map(a => a.key), started: createdAt });
   try {
     const stop = AbortSignal.any([signal, deadline.signal, sessionSignal(id)]);
     const stopped = () => stop.aborted || Date.now() >= ended;
@@ -293,5 +297,5 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
     writeFileAtomic(archivePath, archive);
     writeFileAtomic(join(ROUNDTABLE_HOME, "casting", "latest.json"), archive);
     return report;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); unregisterDuel(id); }
 }

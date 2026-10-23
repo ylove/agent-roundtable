@@ -22,7 +22,7 @@ export function renderRoster(report: CastingReport, agentsDir?: string): string 
   const lines = ["Casting Call" + (report.dryRun ? " (dry run)" : ""), ...(report.note ? [`Note: ${report.note}`, ""] : []), ...report.agents.map(agent =>
     `${agent.key} [${agent.verdict.toUpperCase()}]${agent.role ? ` · ${agent.role}` : ""}${agent.overlapsWith.length ? ` · overlaps: ${agent.overlapsWith.join(", ")}` : ""}`)];
   lines.push("", "Redundancy: " + (report.redundancy.map(cluster => `${cluster.keys.join(", ")} (${cluster.reason})`).join("; ") || "none"),
-    "Gaps: " + (report.note && !report.dryRun ? "not assessed" : report.gaps.join("; ") || "none"), "Recommended cast: " + (report.recommended.seats.join(", ") || "none"));
+    "Gaps: " + (report.gaps.join("; ") || (report.note ? "not assessed" : "none")), "Recommended cast: " + (report.recommended.seats.join(", ") || "none"));
   const command = duelLine(report, agentsDir);
   if (command) lines.push("", command);
   if (report.usage) lines.push("", usageLine(report));
@@ -39,7 +39,7 @@ export function renderCastingMarkdown(report: CastingReport, agentsDir?: string)
     if (notes.length) lines.push("", `**${md(agent.key)}**`, "", ...notes.map(note => `- ${md(note)}`));
   }
   lines.push("", `Redundancy: ${report.redundancy.map(r => `${r.keys.map(md).join(", ")} (${md(r.reason)})`).join("; ") || "none"}`,
-    "", `Gaps: ${report.note && !report.dryRun ? "not assessed" : report.gaps.map(md).join("; ") || "none"}`, "", `Recommended cast: ${report.recommended.seats.map(md).join(", ") || "none"}`);
+    "", `Gaps: ${report.gaps.map(md).join("; ") || (report.note ? "not assessed" : "none")}`, "", `Recommended cast: ${report.recommended.seats.map(md).join(", ") || "none"}`);
   const command = duelLine(report, agentsDir);
   if (command) {
     const fence = "`".repeat(Math.max(3, ...[...command.matchAll(/`+/g)].map(m => m[0].length + 1)));

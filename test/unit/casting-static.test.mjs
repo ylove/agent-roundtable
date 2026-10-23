@@ -58,13 +58,14 @@ test("recommended teams render a shell-safe duel command in terminal and markdow
   assert.match(renderCastingMarkdown(report), /roundtable duel/);
 });
 
-test("fallback notes render at the top, escape markdown and preserve dry-run gap wording", () => {
+test("fallback and dry-run notes render at the top, escape markdown and say gaps were not assessed", () => {
   const report = { ...base(), note: "Director [verdict] unavailable; *static* roster." };
   assert.match(renderRoster(report), /^Casting Call\nNote: Director \[verdict\] unavailable; \*static\* roster\./);
   assert.match(renderCastingMarkdown(report), /^## Casting Call\n\n\*\*Note: Director \\\[verdict\\\] unavailable; \\\*static\\\* roster\.\*\*/);
   for (const render of [renderRoster, renderCastingMarkdown]) {
     assert.match(render(report), /Gaps: not assessed/);
-    assert.match(render({ ...report, dryRun: true }), /Gaps: none/);
+    assert.match(render({ ...report, dryRun: true }), /Gaps: not assessed/);
+    assert.match(render({ ...report, gaps: ["no on-call owner"] }), /Gaps: no on-call owner/);
     assert.match(render(base()), /Gaps: none/);
   }
 });

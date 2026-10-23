@@ -47,7 +47,7 @@ const clean = (s: string, max: number): string => scrub(s).replace(/[\r\n\t]+/g,
 
 interface LiveInfo {
   id: string;
-  kind: "meeting" | "local-meeting" | "collaboration" | "ultraplan" | "duel";
+  kind: "meeting" | "local-meeting" | "collaboration" | "ultraplan" | "duel" | "casting";
   agents: string[];
   started: string;
   mark(stopped: StoppedInfo): void;
@@ -68,7 +68,7 @@ function sessions(): LiveInfo[] {
   }
   for (const d of liveDuels()) {
     // The duel unwinds itself once its calls are cut, so ending it needs nothing more.
-    out.push({ id: d.id, kind: "duel", agents: d.agents, started: d.started, mark: (s) => void (d.stopped = s), end: async () => undefined });
+    out.push({ id: d.id, kind: d.kind ?? "duel", agents: d.agents, started: d.started, mark: (s) => void (d.stopped = s), end: async () => undefined });
   }
   for (const u of ultraplans.values()) {
     out.push({

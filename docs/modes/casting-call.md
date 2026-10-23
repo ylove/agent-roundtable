@@ -29,9 +29,10 @@ The report fields are:
 | --- | --- |
 | `id`, `createdAt`, `brief` | `cast-<uuid>`, ISO timestamp and scrubbed brief |
 | `dryRun` | True on an explicitly requested dry run |
+| `note` | Present when the roster is static (a dry run or a director fallback) or partial (stopped early); shown above the roster |
 | `agents` | Each persona's `key`, optional `name` and `role`, `verdict`, `strengths`, `risks`, `overlapsWith` and `lint` |
 | `agents[].verdict` | `cast`, `bench`, `redundant` or `unclear` |
-| `agents[].lint` | `{level: "warn" | "info", code, message}` entries |
+| `agents[].lint` | `{level, code, message}` entries, where `level` is `warn` or `info` |
 | `redundancy` | `{keys, reason}` clusters |
 | `gaps` | Expertise or ownership the brief still needs |
 | `recommended` | `seats`, plus optional `teamA`, `teamB` and `judges` |
@@ -47,7 +48,7 @@ Reports and scrubbed transcript events are stored together in `ROUNDTABLE_HOME/c
 roundtable cast "Build a queue module" --agents-dir /absolute/path/to/agents --dry-run --json
 ```
 
-A dry run makes zero provider calls and needs no keys. In each overlap cluster, the first persona is eligible and the rest are redundant. Empty bodies are unclear. The first eligible personas in input order fill the requested seats; other eligible personas are benched. Static reports have no inferred gaps or duel teams. A fallback uses these same rules and leaves `dryRun` absent.
+A dry run makes zero provider calls and needs no keys. In each overlap cluster, the first persona is eligible and the rest are redundant. Empty bodies are unclear. The first eligible personas in input order fill the requested seats; other eligible personas are benched. Static reports have no inferred gaps or duel teams, so they carry a `note` and print "Gaps: not assessed". A fallback uses these same rules and leaves `dryRun` absent.
 
 A full examination normally makes `2 × personas + 2` calls: auditions, one director question call, answers and one verdict call. Without examination it makes `personas + 1`. JSON retries and model fallbacks can add calls. Every call goes through the table usage meter and ledger. The terminal retains unpriced token totals when no model price is known.
 

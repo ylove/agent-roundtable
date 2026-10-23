@@ -35,11 +35,13 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [Ultraplan](docs/modes/ultraplan.md) | Collect input, review revisions and record sign-offs on a plan. | “Ultraplan the launch with product-lead, cfo and skeptic; show the final document verbatim.” |
 | [Agent workshops](docs/modes/agent-workshops.md) | Specialists create or improve an agent and reusable skills. | “Have cfo and skeptic create a budget agent, then improve product-lead's escalation rules; preview both.” |
 | [Prototype mode](docs/modes/prototype-mode.md) | Show ephemeral proposals on a local prototype board for assessment. | “Run a prototype collaboration on checkout with product-lead and skeptic.” |
+| [Casting Call](docs/modes/casting-call.md) | Audition personas for a brief; find redundancy, gaps and a recommended cast. | “Cast our personas for a bounded-memory queue module.” |
 | [Duel](docs/modes/duel.md) | Two teams build competing artifacts (a page, code, a diagram or a document); judges assess them; dissents are recorded. | “Run a duel on a rate limiter module with architect and engineer against pragmatist and reviewer, judged by security-lead.” |
 | [Public sessions](docs/modes/public-sessions.md) | Mirror an explicitly public session to ntfy or a webhook. | “Make that pricing debate public and give me the viewing link.” |
 
 | Terminal command | Purpose |
 | --- | --- |
+| [`roundtable cast`](docs/modes/casting-call.md) | Audition personas and recommend a cast for a brief. |
 | [`roundtable duel`](docs/modes/duel.md) | Two teams build competing artifacts; judges assess them; dissents are recorded. |
 | [`roundtable debate`, `waffle`, `meeting`](docs/table-cli.md) | Stream a discussion with per-seat models and spend. |
 | [`roundtable config`](docs/configuration.md#saved-cli-settings-and-env-files) | Save env-file and persona-directory settings; show set/unset status. |
@@ -72,6 +74,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | Collaborations | [`end_collaboration`](docs/tools.md#end_collaboration) | End a discussion and return its transcript and optional summary. |
 | Collaborations | [`get_collaboration_transcript`](docs/tools.md#get_collaboration_transcript) | Read a discussion without ending it. |
 | Collaborations | [`list_collaborations`](docs/tools.md#list_collaborations) | List active collaborations. |
+| Casting Call | [`casting_call`](docs/tools.md#casting_call) | Audition personas and recommend a cast for any brief. |
 | Duel | [`start_duel`](docs/tools.md#start_duel) | Run a duel: two teams build competing artifacts, judges assess them, dissents are recorded. |
 | Ultraplan | [`start_ultraplan`](docs/tools.md#start_ultraplan) | Collect input and begin a reviewed plan. |
 | Ultraplan | [`submit_plan`](docs/tools.md#submit_plan) | Review a full plan version or collect final sign-offs. |
@@ -103,7 +106,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 ## CLI
 
-No arguments starts the orchestrator MCP server. The binary has **13 subcommands**, plus **5 table commands** that run at the table from a terminal (`duel`, `debate`, `waffle`, `meeting`, `config`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
+No arguments starts the orchestrator MCP server. The binary has **13 subcommands**, plus **6 table commands** that run at the table from a terminal (`cast`, `duel`, `debate`, `waffle`, `meeting`, `config`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
 
 | Subcommand | Purpose |
 | --- | --- |
@@ -120,7 +123,7 @@ No arguments starts the orchestrator MCP server. The binary has **13 subcommands
 | `runtimes [--json]` | Detect installed [CLI runtimes](docs/runtimes.md). |
 | [`agents [--json]`](docs/agents-library.md) | List or import personas, install the starter pack, open the library. |
 | `help` | Print usage. |
-| `duel`, `debate`, `waffle`, `meeting`, `config` | Table commands: see [at the table from the terminal](docs/table-cli.md). |
+| `cast`, `duel`, `debate`, `waffle`, `meeting`, `config` | Table commands: see [at the table from the terminal](docs/table-cli.md). |
 
 ## Docs
 

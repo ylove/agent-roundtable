@@ -1,10 +1,38 @@
 # MCP tool reference
 
-Generated from the registered definitions in `src/tools/*.ts` after building: **43 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
+Generated from the registered definitions in `src/tools/*.ts` after building: **44 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
 
 Use these through your MCP client; Claude Code names them `mcp__<server name>__<tool>`, for example `mcp__roundtable__start_meeting`. Omitted optional fields use the behavior described below. A nested field marked required is required only when its enclosing object/item is supplied. Null optional values are treated as absent. New contract, run and worker tools reject unknown arguments.
 
 Worker examples below use the **worker server** schema, bound to its startup identity. On the orchestrator server each of the 7 execution worker tools additionally requires `execution_id` and `agent_token` from `join_execution`; keep that token private. The eighth worker tool is `file_dissent`, which also accepts orchestrator authority on the orchestrator server; see the [dissent guide](dissents.md). `join_execution` itself exists only on the orchestrator server. Every execution worker response carries new inbox decisions/directives, including errors; acknowledge directives with `post_update(kind: "ack", directive_id, text)`.
+
+## Casting Call
+
+### casting_call
+
+Audition 2 to 24 personas for any brief, cross-examine them through a neutral casting director, and return redundancy, gaps and a recommended cast. Sends progress notifications on every visible step. No duel or heads-down run is started. See [Casting Call](modes/casting-call.md).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `brief` | string | yes | Brief of 1 to 4000 characters. |
+| `agents` | array of string | no | 2 to 24 persona identifiers; default every persona in the directory. |
+| `agents_dir` | string | no | Absolute persona directory. |
+| `seats` | number | no | Whole number from 1 to persona count, at most 24; default min(5, persona count). |
+| `examine` | boolean | no | Default true; ask and answer one probing question per persona. |
+| `dry_run` | boolean | no | Static lint and similarity only; zero provider calls, no keys needed. |
+| `provider` | string | no | `auto` (default), `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
+| `model` | string | no | Provider model override, as in `start_duel`. |
+| `seat` | object | no | Assignments keyed by persona, with `agent`, `provider` and `model` fields as in duel's `seats`. The director's key is `casting-director`. |
+| `mix` | string | no | `auto` or `cheap` for cost-aware routing. |
+| `turn_timeout_s` | number | no | 1 to 3600 seconds; default 90. |
+| `max_seconds` | number | no | 1 to 3600 seconds; default 300. |
+
+Returns report markdown, `archive_id`, `archive: "casting/<id>.json"`, the structured report, usage and per-seat routing reasons. The report contains `agents` (verdicts, roles, strengths, risks, overlaps and lint), `redundancy`, `gaps`, and `recommended.seats`. With at least four requested seats the director is asked for `recommended.teamA`, `teamB` and `judges`; these render a ready-to-run, shell-quoted duel command. Aborts and time limits archive available results. Invalid director JSON retries once then falls back to static checks; a failed persona is `unclear` and excluded from recommendations. The latest report and scrubbed transcript are copied to `ROUNDTABLE_HOME/casting/latest.json`.
+
+```json
+casting_call { "brief": "Build a queue module", "agents": ["architect", "engineer", "researcher", "reviewer"], "seats": 4 }
+casting_call { "brief": "Draft a policy", "agents_dir": "/absolute/path/to/agents", "dry_run": true }
+```
 
 ## Meetings
 

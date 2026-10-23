@@ -88,6 +88,7 @@ import {
   GET_COLLABORATION_TRANSCRIPT,
   LIST_COLLABORATIONS,
   START_DUEL,
+  CASTING_CALL,
   START_ULTRAPLAN,
   SUBMIT_PLAN,
   END_ULTRAPLAN,
@@ -95,6 +96,7 @@ import {
   IMPROVE_AGENT,
   DEBUG_ENV,
 } from "./names.js";
+import { CASTING_CALL_DESCRIPTION, CASTING_CALL_SCHEMA, castingCallTool } from "./casting.js";
 import { START_DUEL_DESCRIPTION, START_DUEL_SCHEMA, startDuelTool } from "./duel.js";
 import {
   ORCHESTRATOR_ONLY,
@@ -473,6 +475,13 @@ export const deliberationTools: ToolDefinition[] = [
     },
   },
   {
+    name: CASTING_CALL,
+    modes: ORCHESTRATOR_ONLY,
+    annotations: { title: "Casting Call", ...SESSION_TURN },
+    description: CASTING_CALL_DESCRIPTION,
+    inputSchema: CASTING_CALL_SCHEMA,
+  },
+  {
     name: START_DUEL,
     modes: ORCHESTRATOR_ONLY,
     annotations: { title: "Start duel", ...SESSION_TURN },
@@ -719,6 +728,8 @@ export const deliberationTools: ToolDefinition[] = [
 /** Dispatch one deliberation tool. Errors are thrown to handleToolCall, which formats them. */
 export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?: ToolCallContext): Promise<CallToolResult> {
   switch (name) {
+    case CASTING_CALL:
+      return castingCallTool(args ?? {}, ctx);
     case START_DUEL:
       return startDuelTool(args ?? {}, ctx);
 

@@ -5,7 +5,7 @@
 //               ROUNDTABLE_EXECUTION_RETENTION_DAYS ago (default 30): their worktrees, rt/<tag>/*
 //               branches and execution directory, through run-admin's purge (audited). A run whose
 //               repository is gone uses the same locked purge and worker checks, skipping only git cleanup.
-//   sessions    archived at-the-table sessions (pruneArchivedSessions, ROUNDTABLE_SESSION_RETENTION_DAYS, 30)
+//   sessions    archived at-the-table sessions, duels and casting calls (ROUNDTABLE_SESSION_RETENTION_DAYS, 30)
 //   audit       month files of the audit log (pruneAudit, ROUNDTABLE_AUDIT_RETENTION_DAYS, 365)
 //
 // 0 or off keeps everything of that kind. Live runs are never touched, and every failure is
@@ -15,6 +15,7 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { pruneDuelArchives } from "../table/retention.js";
+import { pruneCastingArchives } from "../casting/retention.js";
 import { auditRetentionDays, executionRetentionDays, sessionRetentionDays } from "../config.js";
 import { pruneAudit } from "../security/audit.js";
 import { pruneArchivedSessions } from "../sessions/archive.js";
@@ -90,7 +91,7 @@ export async function sweepRetention(opts: RetentionOptions = {}): Promise<Reten
   }
   if (sessionDays !== null) {
     try {
-      report.sessions = [...pruneArchivedSessions(sessionDays, now), ...pruneDuelArchives(sessionDays, now)];
+      report.sessions = [...pruneArchivedSessions(sessionDays, now), ...pruneDuelArchives(sessionDays, now), ...pruneCastingArchives(sessionDays, now)];
     } catch (e) {
       report.errors.push(`sessions: ${errText(e)}`);
     }

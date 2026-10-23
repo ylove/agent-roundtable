@@ -106,3 +106,27 @@ See [configuration](configuration.md#saved-cli-settings-and-env-files) for saved
 ## Persona frontmatter chooses where session content goes
 
 A persona's `provider` and `model` frontmatter decide which provider receives that seat's prompts and replies, for the CLI and for MCP collaborations alike. `model: inherit`, an empty model, or a Claude model name aimed at another provider falls back to that provider's default. Model ids must be printable ASCII without whitespace (up to 200 characters). Prototype file content keeps ordinary source identifiers (`tokens`, `secretKey`, `password: string`) intact; only credential-shaped values and the exact values of configured secrets are replaced there, while transcript text, reasons and titles get the full scrubber. Duel archives under `ROUNDTABLE_HOME/duels/` are scrubbed of configured secrets, written privately, and removed with the other session archives after `ROUNDTABLE_SESSION_RETENTION_DAYS`. The env file and `config.json` are ignored unless you own them and nobody else can write to them. `OPENAI_COMPATIBLE_BASE_URL` and `OPENAI_COMPATIBLE_API_KEY` are imported from the env file only as a pair, and only when the shell sets neither.
+
+## Casting Call
+
+`roundtable cast "<brief>"` auditions a persona set and recommends who to seat. Omit `--agents` to use every persona in the configured directory; use `--agents-dir <absolute-path>` for another set. The set must have 2 to 24 personas.
+
+```sh
+roundtable cast "Build a queue module" --agents architect,engineer,researcher,reviewer --seats 4
+roundtable cast "Draft an expenses policy" --agents-dir /absolute/path/to/agents --dry-run --json
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--agents a,b,...` | Personas, in audition and recommendation order |
+| `--agents-dir <abs>` | Persona discovery directory |
+| `--seats N` | Recommended cast size, default min(5, persona count) |
+| `--no-examine` | Skip director questions and persona answers |
+| `--dry-run` | Static lint and overlap report; no provider calls or keys |
+| `--json` | NDJSON events, then the report object |
+| `--seat …` | Shared table assignments; the neutral director's key is `casting-director` |
+| `--mix auto\|cheap` | Cost-aware provider judgment |
+| `--turn-timeout s` | Per-turn timeout, default 90 seconds |
+| `--max-seconds s` | Whole-run deadline, default 300 seconds |
+
+Turns stream using the table renderer. The final roster lists verdicts, roles, overlaps, redundancy, gaps and the recommended cast. When the director supplies teams, it also prints a shell-safe duel command. Archives live at `ROUNDTABLE_HOME/casting/<id>.json` and `casting/latest.json`; the terminal prints the archive path. Ctrl-C still prints and archives the available report. Exit codes: 0 completed, 1 aborted or failed, 2 usage error or missing key. See [Casting Call](modes/casting-call.md) for the report fields, costs and handoff to a contract or duel.

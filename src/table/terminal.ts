@@ -1,9 +1,11 @@
+import { clean } from "./text.js";
+export { clean } from "./text.js";
+import { renderRoster } from "../casting/report.js";
 import { NO_PRICE_LABEL } from "../usage/format.js";
 import type { Seat, TableEvent, TableObserver } from "./events.js";
 
 export interface TerminalOutput { write(text: string): unknown; isTTY?: boolean; columns?: number }
-export interface TerminalOptions { output?: TerminalOutput; env?: NodeJS.ProcessEnv; width?: number }
-export const clean = (text: string): string => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+export interface TerminalOptions { output?: TerminalOutput; env?: NodeJS.ProcessEnv; width?: number; agentsDir?: string }
 const oneLine = (text: string): string => clean(text).replace(/\s+/g, " ").trim();
 function wrapped(text: string, width: number): string[] {
   const lines: string[] = [];
@@ -63,7 +65,9 @@ export function createTerminalObserver(options: TerminalOptions = {}): TableObse
       case "assessment": output.write(`${oneLine(event.judge.name)} → ${event.team} ${paint(event.verdict === "APPROVE" ? 32 : event.verdict === "REJECT" ? 31 : 33, `[${event.verdict}]`)} ${(lines => (lines[0] ?? "") + (lines.length > 1 ? "…" : ""))(wrapped(event.reason, width))}\n`); break;
       case "dissent": output.write(`Dissent · ${label(event.seat)}\n${wrapped(event.text, width).join("\n")}\n`); break;
       case "usage": spend = event.totalCostUsd; unpriced = event.totalUnpricedTokens ?? 0; perSeat = event.perSeat; break;
+      case "roster": output.write("\n" + renderRoster(event.report, options.agentsDir)); break;
       case "end":
+        if (event.mode === "casting") { output.write(`\n${event.aborted ? "Aborted" : "Done"} · Spend: ${totalSpendText(spend, unpriced)}\n`); break; }
         output.write(`\n${event.aborted ? "Aborted" : event.winner === "tie" ? "Tie" : event.winner === "none" ? "No verdict" : `Winner: ${event.winner}`} · A ${event.tally.A} / B ${event.tally.B}\nSpend: ${totalSpendText(spend, unpriced)}${perSeat.length ? ` (${perSeat.map(s => `${clean(s.seatId)} ${seatSpendText(s.costUsd, s.unpricedTokens)}`).join(", ")})` : ""}\n`);
     }
   } };

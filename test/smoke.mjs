@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
-const AUTO_TOOLS = ["start_meeting", "start_collaboration", "start_ultraplan", "start_duel"];
+const AUTO_TOOLS = ["start_meeting", "start_collaboration", "start_ultraplan", "start_duel", "casting_call"];
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
 const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract", "resolve_escalation", "hold_postmortem"];
 const NEW_START_TOOLS = ["start_ultraplan", "create_agent", "improve_agent"];
@@ -340,7 +340,7 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 43 distinct tools", () => assert(tools.length === 43 && new Set(tools.map((t) => t.name)).size === 43, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 44 distinct tools", () => assert(tools.length === 44 && new Set(tools.map((t) => t.name)).size === 44, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
   check("contract and run tools are strict (additionalProperties: false)", () => {
     for (const name of ["propose_contract", "amend_contract", "freeze_contract", "file_dissent", "score_dissent", "postmortem", "hold_postmortem", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });
@@ -360,6 +360,11 @@ try {
     }
     assert(byName.debug_env.annotations.readOnlyHint === true && byName.improve_agent.annotations.readOnlyHint === false, "annotation values");
   });
+  for (const name of AUTO_TOOLS) {
+    check(`${name} supports automatic provider judgment`, () => {
+      assert(JSON.stringify(byName[name]?.inputSchema?.properties?.provider?.enum) === JSON.stringify(["auto", ...EXPECTED_PROVIDERS]), name);
+    });
+  }
   for (const name of PROVIDER_TOOLS) {
     check(`${name}.provider enum = ${EXPECTED_PROVIDERS.join("|")}`, () => {
       const e = byName[name]?.inputSchema?.properties?.provider?.enum;

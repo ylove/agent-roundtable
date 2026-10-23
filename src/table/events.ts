@@ -27,7 +27,7 @@ export type TableEvent =
       type: "start";
       id: string;
       topic: string;
-      mode: "duel" | "meeting" | "debate" | "waffle";
+      mode: "duel" | "meeting" | "debate" | "waffle" | "casting";
       seats: Seat[];
       startedAt: string;
       /** Added in the general duel: absent in older archives, which were all web. */
@@ -77,9 +77,11 @@ export type TableEvent =
       totalCostUsd: number;
       totalUnpricedTokens?: number;
     }
+  | { type: "roster"; report: import("../casting/report.js").CastingReport }
   /** The final outcome, including an optional archive location. */
   | {
       type: "end";
+      mode?: "casting";
       winner: "A" | "B" | "tie" | "none";
       tally: { A: number; B: number };
       aborted?: boolean;

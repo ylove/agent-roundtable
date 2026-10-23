@@ -52,3 +52,11 @@ test("a symlinked library is not a root or a source of named personas", async ()
   await assert.rejects(loadAgent(join(LIBRARY_DIR, "unapproved.md")), /outside the allowed/);
   assert.equal(listLibrary().some(entry => entry.source === "library"), false);
 });
+
+test("a library subagent- file loads by its listed key", async () => {
+  rmSync(LIBRARY_DIR, { recursive: true, force: true });
+  mkdirSync(LIBRARY_DIR, { recursive: true });
+  writeFileSync(join(LIBRARY_DIR, "subagent-prefixed.md"), "Prefixed body.");
+  assert.ok(listLibrary().some(entry => entry.key === "prefixed"));
+  assert.equal((await loadAgent("prefixed")).body.trim(), "Prefixed body.");
+});

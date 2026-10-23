@@ -126,3 +126,12 @@ test("folder import writes at most 200 personas", t => {
   assert.match(results.at(-1).error, /at most 200/);
   assert.equal(readdirSync(LIBRARY_DIR).filter(name => name.startsWith("bounded-")).length, 200);
 });
+
+test("a subagent- filename imports under its listed key and leaves no temp files", t => {
+  const dir = destination(t);
+  const result = importAgent({ filename: "subagent-auditor.md", content: "Audit carefully.\n" }, { dir });
+  assert.equal(result.key, "auditor");
+  assert.deepEqual(readdirSync(dir), ["auditor.md"]);
+  assert.equal(importAgent({ filename: "subagent-auditor.md", content: "Audit carefully.\n" }, { dir }).status, "exists");
+  assert.deepEqual(readdirSync(dir), ["auditor.md"]);
+});

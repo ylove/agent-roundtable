@@ -362,6 +362,7 @@ export async function loadAgent(ref: string): Promise<LoadedAgent> {
       join(AGENTS_DIR, ref, "AGENT.md"),
       ...(r.roots.includes(resolve(LIBRARY_DIR)) ? [
         join(LIBRARY_DIR, `${ref}.md`),
+        join(LIBRARY_DIR, `subagent-${ref}.md`),
         join(LIBRARY_DIR, ref, "AGENT.md"),
       ] : []),
     ];

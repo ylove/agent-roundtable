@@ -1,4 +1,5 @@
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { basename, extname, isAbsolute, join } from "node:path";
 import { stringify } from "yaml";
 import { assertReadableFrontmatter, readFrontmatter } from "../agents.js";
@@ -68,14 +69,19 @@ export function importAgent(
     if (Object.hasOwn(data, "name") && typeof data.name !== "string") return refused("Agent name must be a string.");
   } else return refused("Agent files must end in .md or .json.");
   if (!body.trim()) return refused("Agent prompt must not be empty.");
-  const key = slugify(typeof data.name === "string" ? data.name : filename.slice(0, -extension.length));
+  const key = slugify(typeof data.name === "string" ? data.name : filename.slice(0, -extension.length).replace(/^subagent-/i, ""));
   if (!key || reserved.test(key)) return refused("Agent name is empty or reserved.");
   if (Buffer.byteLength(content, "utf8") > MAX_AGENT_BYTES) return refused("Agent files must be at most 128 KiB.");
   const warnings = agentWarnings(data);
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     if (!lstatSync(dir).isDirectory()) return { key, ...refused("The library must be a directory, not a symlink.") };
-    writeFileSync(join(dir, `${key}.md`), content, { flag: "wx", mode: 0o600 });
+    // Write privately, then link into place: a failed write never leaves a truncated persona, and link never replaces.
+    const temp = join(dir, `.${key}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+    try {
+      writeFileSync(temp, content, { flag: "wx", mode: 0o600 });
+      linkSync(temp, join(dir, `${key}.md`));
+    } finally { try { unlinkSync(temp); } catch { /* Nothing to clean up. */ } }
     return { key, status: "imported", warnings };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return { key, status: "exists", warnings };

@@ -17,7 +17,7 @@ The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts th
 | `runtimes` | `[--json]` | List installed CLI runtimes, paths and versions. See [CLI runtimes](runtimes.md). |
 | `help` | none | Print usage. |
 
-These are the **12 named subcommands** for heads-down runs, usage and runtime detection of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches five table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
+These are the **12 named subcommands** for heads-down runs, usage and runtime detection of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches six table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
 
 ```sh
 agent-roundtable help
@@ -34,7 +34,7 @@ agent-roundtable verify <execution-id> --json
 
 `run` is detached when started by the tools and survives MCP shutdown. It recovers state before scheduling work and exits when finished or after six hours fully paused. `status` inspects the run; the MCP `execution_status` tool provides the richer focused views and ensures runner liveness.
 
-The generated worker configuration invokes `mcp --worker`; its token file is single-use and must be in the execution's expected agent directory. You normally never invoke it manually. The worker server has 8 tools and skips dotenv. The default and explicit orchestrator `mcp` forms have 43 tools and keep the host's umask. Heads-down processes (`run`, `watch`, `status`, `verify`, `purge`, worker MCP and hook) use umask 0077 and explicit private state modes.
+The generated worker configuration invokes `mcp --worker`; its token file is single-use and must be in the execution's expected agent directory. You normally never invoke it manually. The worker server has 8 tools and skips dotenv. The default and explicit orchestrator `mcp` forms have 44 tools and keep the host's umask. Heads-down processes (`run`, `watch`, `status`, `verify`, `purge`, worker MCP and hook) use umask 0077 and explicit private state modes.
 
 Exit status of the subcommands above is 0 for success, 1 for a refusal or failed verification, and 2 for usage errors or a denied hook. `statusline` always exits 0. The hook fails closed on errors. `verify` reports incomplete trailing writes separately from chain corruption. `purge` refuses running or paused runs; the confirmation flag authorizes deleting the terminal run and is audited. Abort or resume a live run through `control_execution` first.
 
@@ -44,6 +44,7 @@ Exit status of the subcommands above is 0 for success, 1 for a refusal or failed
 
 | Command | Arguments | Purpose |
 | --- | --- | --- |
+| `cast` | `"<brief>" [--agents a,b,...] [--agents-dir <abs>] [--seats N] [--dry-run] [--json]` | Audition personas and recommend a cast; see [Casting Call](modes/casting-call.md). |
 | `duel` | `<brief> --team-a <a,...> --team-b <c,...> --judges <j,...> [--kind web\|code\|diagram\|text] [--criteria "a,b"] [--rounds 1\|2] [--open] [--no-room] [--no-hold] [--json] [--seat ...] [--mix auto\|cheap] [--preflight\|--no-preflight] [--turn-timeout S] [--max-seconds S] [--agents-dir DIR]`; or `--dry-run`; or `--replay <archive> [--speed N]` | Two teams build competing artifacts, judges assess them, dissents are recorded. See [duel](modes/duel.md). |
 | `debate`, `waffle`, `meeting` | `<topic> --agents <a,b,...> [--rounds N] [--seat ...] [--mix ...] [--duel duel-<id> [--no-duel-source]] [--json]` | Stream a collaboration (debate, waffle-house, collaborate) with per-seat models and spend. With `--duel` the topic may be omitted. |
 | `config` | `show`, or `set env-file\|agents-dir <absolute-path>` | Save the env-file and persona-directory settings; `show` prints only set or unset. See [configuration](configuration.md#saved-cli-settings-and-env-files). |

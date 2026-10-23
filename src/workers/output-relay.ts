@@ -4,7 +4,7 @@
 // the launch lock and publishes its identity before the CLI starts, so recovery can adopt it or
 // cancel the intent, and a relay scheduled after cancellation never starts work.
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, constants, fchmodSync, openSync, writeSync } from "node:fs";
+import { closeSync, constants, fchmodSync, openSync, writeSync, rmSync } from "node:fs";
 import { acquireLock, processStart, type LockRelease } from "../execution/lock.js";
 import { writeFileAtomic } from "../security/fs-safe.js";
 import { SECRET_KEY_RE } from "../security/redaction-rules.js";
@@ -174,6 +174,7 @@ async function run(o: SpawnWorkerOptions): Promise<void> {
       notify({ started: true });
     });
     const { code, signal } = await closed;
+    for (const path of o.cleanupPaths ?? []) rmSync(path, { force: true });
     closeSync(logFd);
     fd = undefined;
     // Keep the verified group leader present until the controller's identity-checked SIGKILL,
@@ -190,6 +191,9 @@ async function run(o: SpawnWorkerOptions): Promise<void> {
       process.kill(process.pid, signal);
     } else process.exitCode = code ?? 1;
   } finally {
+    for (const path of o.cleanupPaths ?? []) {
+      try { rmSync(path, { force: true }); } catch { /* Reaping retries private-file cleanup. */ }
+    }
     if (fd !== undefined) closeSync(fd);
     release?.();
   }

@@ -1,7 +1,11 @@
 import type { DuelOptions, DuelResult, Seat, TableObserver } from "./table/events.js";
 import { parseFlags } from "./cli.js";
 import { clean, createNdjsonObserver, createTerminalObserver, type TerminalOutput } from "./table/terminal.js";
-import { readUserConfig, setUserConfig } from "./user-config.js";
+import { readUserConfig, setUserConfig, setSecretConfig, setConnectorConfig, unsetConfigEntry } from "./user-config.js";
+import { resolveSecret } from "./secrets/broker.js";
+import { secretReason } from "./secrets/backends.js";
+import { parseSecretRef } from "./secrets/ref.js";
+import { ENV_NAME } from "./connectors/config.js";
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scrubAndCap } from "./security/secrets.js";
@@ -22,6 +26,9 @@ const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges
 roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...] [--duel <duel-id>]
   --duel makes a saved duel the focus (its brief joins the context); the topic may then be omitted
 roundtable config show | config set env-file|agents-dir <absolute-path>
+roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>
+roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=secret://ref]
+roundtable config unset connector <name> | secrets check
 `;
 class UsageError extends Error { readonly exitCode = 2; }
 /** A turn or session deadline passed: reported as a timeout, never as a person stopping the session. */
@@ -130,6 +137,37 @@ function configCommand(args: string[], output: TerminalOutput): number {
   if (args.length === 1 && args[0] === "show") {
     const config = readUserConfig();
     output.write(`env-file: ${process.env.ROUNDTABLE_ENV_FILE !== undefined || config.envFile ? "set" : "unset"}\nagents-dir: ${process.env.ROUNDTABLE_AGENTS_DIR !== undefined || config.agentsDir ? "set" : "unset"}\n`);
+    for (const [name, ref] of Object.entries(config.secrets ?? {})) output.write(`${name}: ${parseSecretRef(ref).backend}\n`);
+    for (const [name, spec] of Object.entries(config.connectors ?? {})) output.write(`connector ${name}: ${Object.keys(spec.env).join(", ") || "(no env)"}\n`);
+    return 0;
+  }
+  if (args.length === 4 && args[0] === "set" && args[1] === "secret") {
+    setSecretConfig(args[2], args[3]);
+    output.write("secret: set\n");
+    return 0;
+  }
+  if (args.length === 3 && args[0] === "unset" && ["secret", "connector"].includes(args[1])) {
+    unsetConfigEntry(args[1] === "secret" ? "secrets" : "connectors", args[2]);
+    output.write(`${args[1]}: unset\n`);
+    return 0;
+  }
+  if (args[0] === "set" && args[1] === "connector" && args.length >= 5) {
+    let command: string | undefined;
+    const argv: string[] = [], env: Record<string, string> = {};
+    for (let i = 3; i < args.length; i += 2) {
+      const flag = args[i], value = args[i + 1];
+      if (value === undefined) throw new UsageError("Connector flags require a value.");
+      if (flag === "--command" && command === undefined) command = value;
+      else if (flag === "--arg") argv.push(value);
+      else if (flag === "--env") {
+        const at = value.indexOf("=");
+        if (at < 1 || !ENV_NAME.test(value.slice(0, at))) throw new UsageError("Connector env requires VAR=value.");
+        env[value.slice(0, at)] = value.slice(at + 1);
+      } else throw new UsageError("Use connector --command, --arg or --env.");
+    }
+    if (!command) throw new UsageError("Connector requires --command <absolute-path>.");
+    setConnectorConfig(args[2], { command, args: argv, env });
+    output.write("connector: set\n");
     return 0;
   }
   if (args.length === 3 && args[0] === "set" && ["env-file", "agents-dir"].includes(args[1])) {
@@ -148,6 +186,17 @@ export async function runTableCli(command: string, args: string[], io: CliIO = {
   try {
     if (args.includes("--help") || args.includes("-h")) { output.write(HELP); return 0; }
     if (command === "config") return configCommand(args, output);
+    if (command === "secrets") {
+      if (args.length !== 1 || args[0] !== "check") throw new UsageError("Use secrets check.");
+      const config = readUserConfig();
+      const refs = [...Object.entries(config.secrets ?? {}), ...Object.entries(config.connectors ?? {}).flatMap(([name, c]) => Object.entries(c.env).filter(([, v]) => v.startsWith("secret://")).map(([key, ref]) => [`${name}.${key}`, ref]))];
+      let failed = false;
+      for (const [name, ref] of refs) {
+        try { await resolveSecret(ref); output.write(`${name}: ok\n`); }
+        catch (e) { failed = true; output.write(`${name}: ${secretReason(e)}\n`); }
+      }
+      return failed ? 1 : 0;
+    }
     const parsed = parseTableArgs(command, args);
     if (parsed.options.agentsDir) process.env.ROUNDTABLE_AGENTS_DIR = parsed.options.agentsDir;
     const observer = parsed.flags.json ? createNdjsonObserver(output) : createTerminalObserver({ output });

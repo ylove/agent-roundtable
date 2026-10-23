@@ -53,3 +53,9 @@ Exit status of the subcommands above is 0 for success, 1 for a refusal or failed
 Every table command accepts `--help`. Exit codes are 0 for completion or tie, 1 for failure or interruption, and 2 for usage errors or missing credentials.
 
 See [configuration](configuration.md), [contracts and execution](heads-down.md), and [registration examples](getting-started.md#registering-with-claude-code).
+
+## Credential references and connectors
+
+`roundtable config set secret <ENV_NAME> <secret://ref>` and `config unset secret <ENV_NAME>` manage credential references. `roundtable secrets check` prints each reference name with `ok` or a safe reason and exits 1 on failure.
+
+`roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value]` configures a stdio MCP server; `--arg` and `--env` repeat. Credential-shaped env names require references. Remove it with `config unset connector <name>`. `config show` lists reference backends and connector/env names without values or locators. See [secrets](secrets.md) and [worker connectors](connectors.md).

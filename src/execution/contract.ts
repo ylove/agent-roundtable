@@ -10,6 +10,8 @@
 import { statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { AGENTS_DIR } from "../config.js";
+import { readUserConfig } from "../user-config.js";
+import { CONNECTOR_NAME } from "../connectors/config.js";
 import { isPathLikeRef, loadAgent } from "../agents.js";
 import { normalizeRelPath } from "../security/fs-safe.js";
 import { scrubSecrets } from "../security/secrets.js";
@@ -418,7 +420,7 @@ export function findCycle(tasks: ReadonlyArray<Pick<TaskSpec, "id" | "depends_on
 function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   const c = isObj(input) ? input : (ck.err("", "the contract must be a JSON object"), {} as Obj);
   ck.known(c, ["schema", "id", "version", "status", "title", "goal", "scope", "participants", "teams", "tasks", "interfaces",
-    "decisions", "dissents", "validation", "budget", "authority", "sandbox", "workers", "postmortem", "consent", "frozen"], "");
+    "decisions", "dissents", "validation", "budget", "authority", "sandbox", "workers", "connectors", "postmortem", "consent", "frozen"], "");
   if (c.schema !== undefined && c.schema !== CONTRACT_SCHEMA) ck.err("schema", `must be ${q(CONTRACT_SCHEMA)}`);
   let id = "";
   if (c.id === undefined || c.id === null) ck.err("id", "is required");
@@ -811,6 +813,15 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     schema: CONTRACT_SCHEMA, id, version, status, title, goal, scope, participants, teams, tasks, interfaces, decisions, dissents,
     validation: { commands, final }, budget, authority, sandbox, workers, consent,
   };
+  if (c.connectors !== undefined) {
+    out.connectors = [];
+    for (const name of ck.arr(c.connectors, "connectors", 8)) {
+      if (typeof name !== "string" || !CONNECTOR_NAME.test(name) || name === "roundtable") ck.err("connectors", "must contain connector names");
+      else if (out.connectors.includes(name)) ck.err("connectors", `names ${name} twice`);
+      else out.connectors.push(name);
+    }
+    if (out.connectors.length && workers.driver === "codex") ck.err("connectors", "are not supported by codex workers; use claude-code");
+  }
   if (postmortem) out.postmortem = postmortem;
   if (frozen) out.frozen = frozen;
   if (scope.parent) checkChild(ck, out, opts);
@@ -868,6 +879,11 @@ function agentsDirAvailable(): boolean {
 export async function validateContract(input: unknown, opts: ValidateOptions = {}): Promise<ContractValidation> {
   const ck = new Checker();
   const contract = normalize(input, ck, opts);
+  if (contract.connectors?.length) {
+    let connectors: Record<string, unknown> = {};
+    try { connectors = readUserConfig().connectors ?? {}; } catch { /* Missing local connectors are named below. */ }
+    for (const name of contract.connectors) if (!Object.hasOwn(connectors, name)) ck.err("connectors", `names unknown connector ${name}`);
+  }
   if (opts.personas !== false) {
     const dirOk = agentsDirAvailable();
     const refs = [...new Set([...contract.tasks.map((t) => t.persona), ...contract.participants.map((p) => p.agent)])];
@@ -986,6 +1002,7 @@ export interface RenderOptions {
 /** The contract as Markdown, for CONTRACT.md, tool results and consent prompts. */
 export function renderContractMarkdown(c: Contract, opts: RenderOptions = {}): string {
   const out: string[] = [`# Contract: ${c.title}`];
+  if (c.connectors?.length) out.push(`Connectors: ${c.connectors.join(", ")}`);
   out.push(`\`${c.id}\` v${c.version} · status: ${c.status} · orchestrator: ${c.scope.orchestrator} · lead: ${c.authority.lead}` +
     (c.frozen ? `\nFrozen by ${c.frozen.by} at ${c.frozen.at} · sha256 ${c.frozen.hash}` : ""));
   const goal = [`## Goal`, c.goal.ultimate, `**Original request:**\n${c.goal.original_prompt.split(/\r?\n/).map((l) => `> ${l}`).join("\n")}`];

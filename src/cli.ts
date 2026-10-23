@@ -44,6 +44,9 @@ export const USAGE = [
   "  roundtable runtimes [--json]",
   "  roundtable agents [--json] | agents import <absolute file|dir> | agents starter | agents --open",
   "  roundtable config set env-file|agents-dir <absolute-path> | config show",
+  "  roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>",
+  "  roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value]",
+  "  roundtable config unset connector <name> | secrets check",
   "  agent-roundtable help                           this text",
 ].join("\n");
 
@@ -276,6 +279,7 @@ export async function runCli(argv: string[]): Promise<void> {
     case "debate":
     case "waffle":
     case "meeting":
+    case "secrets":
     case "config": {
       const { runTableCli } = await import("./cli-table.js");
       process.exitCode = await runTableCli(command, rest);

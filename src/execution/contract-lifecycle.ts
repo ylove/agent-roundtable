@@ -778,7 +778,7 @@ export interface AmendOptions {
 const PROTECTED_TOP = ["schema", "id", "version", "status", "consent", "frozen"];
 const PROTECTED_SCOPE = ["orchestrator", "repo_root", "base_ref", "parent"];
 /** Changes to these touch every participant: on a frozen contract they need everyone's consent first. */
-export const RUN_WIDE_FIELDS = ["budget", "scope", "sandbox", "authority", "validation", "workers", "goal", "dissents"] as const;
+export const RUN_WIDE_FIELDS = ["budget", "scope", "sandbox", "authority", "validation", "workers", "connectors", "goal", "dissents"] as const;
 
 function protectedProblems(patch: Obj): string[] {
   const out = PROTECTED_TOP.filter((k) => Object.hasOwn(patch, k)).map((k) => `patch may not change ${k}`);
@@ -1065,6 +1065,13 @@ export async function amendContract(store: ExecutionStore, patch: Record<string,
     await store.transact(async ({ state }) => {
       const now = await contractRecord(store, contractId);
       if (now.version !== rec.version) throw new Error(`Contract ${contractId} changed meanwhile (now v${now.version}); amend the latest version`);
+      if (!same([...(c.connectors ?? [])].sort(), [...(final.connectors ?? [])].sort())) {
+        // Connector access is fixed at launch; every live worker must reload the amended set.
+        const tasks = Object.values(state.agents).filter((a) => !a.external && ["registered", "running"].includes(a.status))
+          .map((a) => Object.values(state.claims).find((claim) => claim.agent === a.id)?.task ?? a.task)
+          .filter((task): task is string => task !== undefined && Object.hasOwn(state.tasks, task));
+        affected.all = [...new Set([...affected.all, ...tasks])].sort();
+      }
       const m = mode(state.status);
       const events: AnyEventDraft[] = [{
         type: "contract.amended", source, mode: m, contract: contractId, contract_version: version,

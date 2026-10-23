@@ -84,6 +84,8 @@ The runner schedules ready tasks up to `budget.max_parallel` (default 3). Each t
 
 Claude workers have restricted file tools, no Bash and a PreToolUse lease hook. Commands go through sandboxed `run_command`. `submit_work(ready: false)` checkpoints; `ready: true` commits leased changes and runs checks in a separate checkout of that exact commit. The runner merges the checked commit serially into the integration branch, runs integration checks, and either accepts it or returns conflict/check context to the worker. Changes outside leases are refused. Submodules and escaping symlink chains are unsupported. Final validation and a lead goal review run before completion.
 
+Optional [worker connectors](connectors.md) add locally configured stdio MCP servers to Claude workers. A contract opts in with `connectors: ["issues"]`; those names are frozen and covered by consent. Credentials resolve through the [secrets broker](secrets.md) before spawn, are scrubbed from output and blackboard writes, and live only in the private temporary MCP config. Connector processes are trusted host programs with access to their external services. Codex workers refuse connector contracts; seat connectors at the table are not yet supported.
+
 External workers register with `join_execution` and receive an `agent_token` once. The orchestrator server's worker tools require it and `execution_id` on every call; their claims expire after 15 minutes without a tool call. External workers are trusted like the host chat and are unsandboxed. Every worker response also delivers inbox directives and decisions; directives need acknowledgement.
 
 ## Escalations and huddles

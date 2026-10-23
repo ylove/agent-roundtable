@@ -64,7 +64,7 @@ roundtable config set agents-dir /absolute/path/to/agents
 roundtable config show
 ```
 
-Settings are saved as `{ "envFile": "…", "agentsDir": "…" }` in `~/.agent-roundtable/config.json`, or `ROUNDTABLE_HOME/config.json` when a state root is configured. Writes use mode 0600. `config show` prints only `env-file: set|unset` and `agents-dir: set|unset`; it never displays paths or values.
+Settings are saved as `{ "envFile": "…", "agentsDir": "…" }` in `~/.agent-roundtable/config.json`, or `ROUNDTABLE_HOME/config.json` when a state root is configured. Writes use mode 0600. `config show` prints `env-file: set|unset`, `agents-dir: set|unset`, secret names with backend ids, and connector names with env variable names; it never displays paths, locators or values.
 
 `ROUNDTABLE_ENV_FILE` overrides the saved `envFile`. The target must be an absolute path to an accessible regular file. A file readable by group or world produces a warning without revealing its path. Restrict it to mode 0600. Invalid targets are skipped with a path-free warning.
 
@@ -171,3 +171,9 @@ Terminal output honors the standard `NO_COLOR` (any value turns colors off in th
 | `ROUNDTABLE_LIVE_OLLAMA` | `1` also checks Ollama | off |
 
 The standard unit-test preload isolates state, HOME, persona/skill directories and transcripts, disables retries and browser opening, and cleans up. The config fallback protects the state root when you invoke `node --test` without that preload; it does not isolate every explicitly configured path or clean up the fresh temp directory automatically.
+
+## Credential references and worker connectors
+
+Use `roundtable config set secret ANTHROPIC_API_KEY secret://keychain/roundtable/anthropic` to save a reference under `secrets` in the user config. Shell values win for referenced keys; otherwise references beat plaintext files. Startup resolves synchronously within 20 seconds; a failure warns by name and leaves the key unset. `ROUNDTABLE_SECRETS=off` disables startup resolution. Workers and hooks never run the startup broker. See [secrets](secrets.md) for backends, checks, caching and the resolver interface.
+
+The `connectors` config defines extra stdio MCP servers by absolute executable path, separate arguments and an env map. Credentials use references. Heads-down contracts opt in with `connectors: ["issues"]`; names are covered by consent. Claude workers support them; Codex workers refuse them. See [worker connectors](connectors.md) for configuration, limits and trust.

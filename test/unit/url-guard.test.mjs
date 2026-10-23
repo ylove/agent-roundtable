@@ -315,3 +315,34 @@ describe("webhook publisher URL", () => {
     assert.equal(r.retryable, false);
   });
 });
+
+test("guarded requests close their dispatcher after success, refusal and request failure", async t => {
+  const { Agent } = await import("undici");
+  const closed = [];
+  const close = Agent.prototype.close;
+  t.mock.method(Agent.prototype, "close", function (...args) {
+    if (!args.length) closed.push(this);
+    return close.apply(this, args);
+  });
+  stubDns(t);
+  let respond;
+  const calls = stubFetch(t, () => respond());
+  const baseUrl = "https://approved.example.test/v1";
+  respond = () => ok();
+  await callOpenAICompatible(messages, opts({ baseUrl }));
+  respond = () => json(400, { error: { message: "request refused" } });
+  await assert.rejects(callOpenAICompatible(messages, opts({ baseUrl })), /API error \(400\)/);
+  respond = () => new Response("", { status: 307, headers: { location: "http://169.254.169.254/" } });
+  await assert.rejects(callOpenAICompatible(messages, opts({ baseUrl })), /refusing to follow a redirect/);
+  respond = () => { throw new Error("request failed"); };
+  await assert.rejects(callOpenAICompatible(messages, opts({ baseUrl })), /request failed/);
+  const publisher = new WebhookPublisher({ url: baseUrl, topicPrefix: "rt" });
+  const channel = { id: "rt-fixture", sessionId: "fixture" };
+  assert.equal((await publisher.send(channel, { content: "hello" })).ok, false);
+  respond = () => new Response("", { status: 400 });
+  assert.equal((await publisher.send(channel, { content: "hello" })).ok, false);
+  respond = () => new Response("", { status: 200 });
+  assert.equal((await publisher.send(channel, { content: "hello" })).ok, true);
+  assert.equal(closed.length, calls.length);
+  assert.ok(calls.every((call, i) => call.init.dispatcher === closed[i]));
+});

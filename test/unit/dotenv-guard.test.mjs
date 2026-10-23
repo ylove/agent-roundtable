@@ -36,9 +36,10 @@ function load(extraEnv) {
   return JSON.parse(r.stdout);
 }
 
-test(".env is loaded by default (and wins over the host's values)", { skip: process.platform === "win32" }, () => {
+test(".env is loaded by default and preserves the host's values", { skip: process.platform === "win32" }, () => {
   assert.deepEqual(load({}), { probe: "from-dotenv", key: "sk-ant-from-dotenv-file" });
-  assert.equal(load({ ANTHROPIC_API_KEY: "from-host" }).key, "sk-ant-from-dotenv-file");
+  assert.equal(load({ ANTHROPIC_API_KEY: "from-host" }).key, "from-host");
+  assert.equal(load({ ANTHROPIC_API_KEY: "" }).key, "");
 });
 
 test("ROUNDTABLE_DOTENV=off skips .env entirely", { skip: process.platform === "win32" }, () => {

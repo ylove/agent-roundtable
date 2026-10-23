@@ -13,7 +13,7 @@ function fixture(t) {
   writeFileSync(file, '', { mode: 0o600 });
   return { home, file };
 }
-test('package > shell > pointed file; only allowed pointed keys are copied', t => {
+test('shell > package > pointed file; only allowed pointed keys are copied', t => {
   const { home, file } = fixture(t);
   const packageEnvFile = join(home, 'package.env');
   writeFileSync(packageEnvFile, 'OPENAI_API_KEY=package\nPACKAGE_SETTING=enabled\n');
@@ -22,7 +22,7 @@ test('package > shell > pointed file; only allowed pointed keys are copied', t =
   const warnings = [];
   loadUserEnvironment({ home, env, packageEnvFile, warn: m => warnings.push(m) });
   assert.equal(env.ANTHROPIC_API_KEY, 'shell');
-  assert.equal(env.OPENAI_API_KEY, 'package');
+  assert.equal(env.OPENAI_API_KEY, 'shell');
   assert.equal(env.TOGETHER_API_KEY, 'external');
   assert.equal(env.REPLICATE_API_TOKEN, 'external');
   assert.equal(env.OPENAI_COMPATIBLE_API_KEY, 'external');
@@ -57,7 +57,7 @@ test('off skips both env files; empty shell values are preserved', t => {
   loadUserEnvironment({ home, env, packageEnvFile: file });
   assert.equal(env.ANTHROPIC_API_KEY, undefined);
   const empty = { ROUNDTABLE_ENV_FILE: file, ANTHROPIC_API_KEY: '' };
-  loadUserEnvironment({ home, env: empty });
+  loadUserEnvironment({ home, env: empty, packageEnvFile: file });
   assert.equal(empty.ANTHROPIC_API_KEY, '');
 });
 test('paths and values never occur in warnings, including permission warnings', t => {
@@ -100,9 +100,9 @@ test('package loader and pointed loader compose in a fresh isolated package', t 
   writeFileSync(join(home, '.env'), 'OPENAI_API_KEY=package\n');
   writeFileSync(file, 'ANTHROPIC_API_KEY=external\nOPENAI_API_KEY=external\n');
   const script = `await import(${JSON.stringify(pathToFileURL(join(home, 'dist/env.js')).href)}); console.log(JSON.stringify([process.env.ANTHROPIC_API_KEY, process.env.OPENAI_API_KEY]));`;
-  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: home, ROUNDTABLE_HOME: home, ROUNDTABLE_ENV_FILE: file, ANTHROPIC_API_KEY: 'shell' } });
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: home, ROUNDTABLE_HOME: home, ROUNDTABLE_ENV_FILE: file, ANTHROPIC_API_KEY: 'shell', OPENAI_API_KEY: 'shell-openai' } });
   assert.equal(child.status, 0, child.stderr);
-  assert.deepEqual(JSON.parse(child.stdout), ['shell', 'package']);
+  assert.deepEqual(JSON.parse(child.stdout), ['shell', 'shell-openai']);
 });
 test('the OpenAI-compatible endpoint and key are imported together, only when the shell set neither', t => {
   const { home, file } = fixture(t);

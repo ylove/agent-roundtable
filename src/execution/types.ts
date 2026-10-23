@@ -205,6 +205,8 @@ export interface Contract {
   authority: { lead: string; may: AuthorityAction[]; budget_extension_pct: number };
   sandbox: { backend: SandboxBackendId; image: string; install?: { argv: string[]; egress: string[] } };
   workers: { driver: WorkerDriverId; model?: string; fallback_model?: string };
+  /** Local MCP connector names covered by consent. */
+  connectors?: string[];
   /** Postmortem mode (docs/design/postmortem.md §2): set by propose_contract when the project has it enabled. */
   postmortem?: { enabled: boolean };
   consent: Array<{ agent: string; verdict: ConsentVerdict; reason?: string }>;
@@ -849,6 +851,7 @@ export interface ExecutionStore {
 export type WorkerDriverId = "claude-code" | "codex" | "external";
 
 export interface WorkerLaunch {
+  connectors?: string[];
   execution: string;
   agent: string;
   task: string;

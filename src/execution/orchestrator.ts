@@ -34,6 +34,9 @@ import { localSandboxAllowed } from "../sandbox/common.js";
 import { appendAudit } from "../security/audit.js";
 import { scrub } from "../security/secrets.js";
 import { availableProviders, PROVIDER_KEYS, preflightSeats } from "../table/seats.js";
+import { readUserConfig } from "../user-config.js";
+import { isExecutableFile } from "../executables.js";
+import type { ConnectorSpec } from "../connectors/config.js";
 import { ClaudeCodeDriver } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
 import { stopGroup } from "../workers/process.js";
@@ -478,6 +481,12 @@ export async function execute(a: ExecuteInput): Promise<Json> {
   const c = state.contract;
   if (!c || c.id !== contractId) {
     throw new Error(`Contract ${contractId} is not frozen: freeze_contract it once every participant agrees (only a frozen contract can be executed)`);
+  }
+  if (c.connectors?.length) {
+    let connectors: Record<string, ConnectorSpec> = {};
+    try { connectors = readUserConfig().connectors ?? {}; } catch { /* Report the missing name only. */ }
+    for (const name of c.connectors) if (!Object.hasOwn(connectors, name) || !isExecutableFile(connectors[name].command)) throw new Error(`Connector ${name} is unavailable.`);
+    if ((a.worker_driver ?? c.workers.driver) === "codex") throw new Error("Connectors are not supported by codex workers; use claude-code.");
   }
   const orchestrator = c.scope.orchestrator;
 

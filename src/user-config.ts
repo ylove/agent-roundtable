@@ -5,6 +5,11 @@ import { parse } from "dotenv";
 import { PROVIDER_IDS, type LLMProvider } from "./provider-ids.js";
 
 import { validateRuntimeConfig, type RuntimeSpec } from "./runtimes/spec.js";
+import { validateConnectors, ENV_NAME, type ConnectorSpec } from "./connectors/config.js";
+import { isExecutableFile } from "./executables.js";
+import { parseSecretRef } from "./secrets/ref.js";
+import { resolveSecretSync } from "./secrets/broker.js";
+import { secretReason } from "./secrets/backends.js";
 
 export type RoutingTier = "builder" | "judge" | "balanced";
 export interface RoutingModel { model: string; reasoning?: boolean; maxOutputTokens?: number }
@@ -27,7 +32,10 @@ export function validateRoutingConfig(raw: unknown): RoutingConfig {
   return raw as RoutingConfig;
 }
 
-export interface UserConfig { routing?: RoutingConfig; envFile?: string; agentsDir?: string; runtimes?: Record<string, Partial<RuntimeSpec>> }
+export interface UserConfig {
+  routing?: RoutingConfig; envFile?: string; agentsDir?: string; runtimes?: Record<string, Partial<RuntimeSpec>>;
+  secrets?: Record<string, string>; connectors?: Record<string, ConnectorSpec>;
+}
 type Environment = Record<string, string | undefined>;
 const allowedKeys = new Set(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY", "REPLICATE_API_TOKEN"]);
 export function allowedEnvKey(key: string): boolean {
@@ -54,7 +62,11 @@ function readRegular(path: string, owned = false): { text: string; mode: number 
   } finally { if (fd !== undefined) closeSync(fd); }
 }
 
-export function readUserConfig(home = userConfigHome()): UserConfig {
+const warnedSecrets = new Set<string>();
+function secretNameAllowed(name: string, connectors: Record<string, ConnectorSpec>): boolean {
+  return ENV_NAME.test(name) && (allowedEnvKey(name) || Object.values(connectors).some(c => Object.hasOwn(c.env, name)));
+}
+export function readUserConfig(home = userConfigHome(), warn: (message: string) => void = console.error): UserConfig {
   try {
     const data: unknown = JSON.parse(readRegular(join(home, "config.json"), true).text);
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error();
@@ -64,7 +76,23 @@ export function readUserConfig(home = userConfigHome()): UserConfig {
     }
     const routing = config.routing === undefined ? undefined : validateRoutingConfig(config.routing);
     const runtimes = config.runtimes === undefined ? undefined : validateRuntimeConfig(config.runtimes);
-    return { ...(routing && { routing }), ...(runtimes && { runtimes }), ...(typeof config.envFile === "string" && { envFile: config.envFile }), ...(typeof config.agentsDir === "string" && { agentsDir: config.agentsDir }) };
+    const connectors = config.connectors === undefined ? undefined : validateConnectors(config.connectors);
+    const secrets: Record<string, string> = {};
+    if (config.secrets !== undefined) {
+      if (!config.secrets || typeof config.secrets !== "object" || Array.isArray(config.secrets)) throw new Error();
+      for (const [name, ref] of Object.entries(config.secrets)) {
+        try {
+          if (!secretNameAllowed(name, connectors ?? {})) throw new Error();
+          parseSecretRef(ref);
+          secrets[name] = ref as string;
+        } catch {
+          const safeName = ENV_NAME.test(name) ? name : "(invalid name)";
+          const key = `${home}:${name}`;
+          if (!warnedSecrets.has(key)) { warnedSecrets.add(key); warn(`${safeName}: invalid secret reference; ignored`); }
+        }
+      }
+    }
+    return { ...(routing && { routing }), ...(runtimes && { runtimes }), ...(connectors && { connectors }), ...(config.secrets !== undefined && { secrets }), ...(typeof config.envFile === "string" && { envFile: config.envFile }), ...(typeof config.agentsDir === "string" && { agentsDir: config.agentsDir }) };
   } catch {
     try { statSync(join(home, "config.json")); } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
@@ -81,6 +109,10 @@ export function setUserConfig(key: "envFile" | "agentsDir", path: string, home =
     catch { throw new Error("The agents directory must be an accessible directory."); }
   }
   const config = { ...readUserConfig(home), [key]: path };
+  saveUserConfig(config, home);
+}
+
+function saveUserConfig(config: UserConfig, home: string): void {
   const temp = join(home, `.config-${process.pid}-${crypto.randomUUID()}.tmp`);
   try {
     mkdirSync(home, { recursive: true, mode: 0o700 });
@@ -90,19 +122,41 @@ export function setUserConfig(key: "envFile" | "agentsDir", path: string, home =
   finally { try { rmSync(temp, { force: true }); } catch { /* Preserve the path-free diagnostic. */ } }
 }
 
+export function setSecretConfig(name: string, ref: string, home = userConfigHome()): void {
+  const config = readUserConfig(home);
+  if (!secretNameAllowed(name, config.connectors ?? {})) throw new Error("Secret name must be an allowed provider variable or a connector environment name.");
+  parseSecretRef(ref);
+  saveUserConfig({ ...config, secrets: { ...config.secrets, [name]: ref } }, home);
+}
+export function setConnectorConfig(name: string, spec: ConnectorSpec, home = userConfigHome()): void {
+  validateConnectors({ [name]: spec });
+  if (!isExecutableFile(spec.command)) throw new Error(`Connector ${name} is unavailable.`);
+  const config = readUserConfig(home);
+  saveUserConfig({ ...config, connectors: { ...config.connectors, [name]: spec } }, home);
+}
+export function unsetConfigEntry(kind: "secrets" | "connectors", name: string, home = userConfigHome()): void {
+  const config = readUserConfig(home);
+  const entries: Record<string, string | ConnectorSpec> = { ...config[kind] };
+  delete entries[name];
+  saveUserConfig({ ...config, [kind]: entries }, home);
+}
+
 /** Preserve shell values; the package file and allowed pointed keys fill gaps. */
 export function loadUserEnvironment(options: {
   env?: Environment; home?: string; packageEnvFile?: string; warn?: (message: string) => void;
 } = {}): void {
   const env = options.env ?? process.env;
+  const shell = { ...env };
+  const referenced = new Set<string>();
   const warn = options.warn ?? ((message: string) => console.error(message));
   const enabled = (env.ROUNDTABLE_DOTENV ?? "").trim().toLowerCase() !== "off";
   const apply = (data: Record<string, string>, filtered: boolean) => {
     // The endpoint and its key travel together, and only when the shell set neither.
     const pair = ["OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_API_KEY"];
-    const pairFree = pair.every(key => env[key] === undefined);
+    const pairFree = pair.every(key => shell[key] === undefined && (env[key] === undefined || referenced.has(key)));
     for (const [key, value] of Object.entries(data)) {
-      if (filtered && pair.includes(key)) { if (pairFree && allowedEnvKey(key)) env[key] = value; continue; }
+      if (filtered && referenced.has(key)) continue;
+      if (pair.includes(key)) { if (pairFree && (!filtered || allowedEnvKey(key))) env[key] = value; continue; }
       if ((!filtered || allowedEnvKey(key)) && env[key] === undefined) env[key] = value;
     }
   };
@@ -111,9 +165,20 @@ export function loadUserEnvironment(options: {
     catch { /* The package .env is optional. */ }
   }
   let config: UserConfig = {};
-  try { config = readUserConfig(options.home ?? userConfigHome(env)); }
+  try { config = readUserConfig(options.home ?? userConfigHome(env), warn); }
   catch { warn("Unable to read user configuration."); }
   if (env.ROUNDTABLE_AGENTS_DIR === undefined && config.agentsDir) env.ROUNDTABLE_AGENTS_DIR = config.agentsDir;
+  if ((env.ROUNDTABLE_SECRETS ?? "").trim().toLowerCase() !== "off") {
+    const deadline = Date.now() + 20_000;
+    for (const [name, ref] of Object.entries(config.secrets ?? {})) {
+      if (!allowedEnvKey(name)) continue;
+      referenced.add(name);
+      if (shell[name] !== undefined) { env[name] = shell[name]; continue; }
+      delete env[name];
+      try { env[name] = resolveSecretSync(ref, deadline - Date.now(), env); }
+      catch (e) { warn(`${name}: secret unavailable (${secretReason(e)})`); }
+    }
+  }
   if (!enabled) return;
   const envFile = env.ROUNDTABLE_ENV_FILE ?? config.envFile;
   if (envFile !== undefined) {

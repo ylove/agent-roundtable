@@ -37,7 +37,7 @@ import { writeFileAtomic } from "../security/fs-safe.js";
 import { scrub, scrubAndCap } from "../security/secrets.js";
 import { ClaudeCodeDriver, WORKER_ATTESTATION } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
-import { agentDir, writeAgentLeases, prepareWorkerFiles } from "../workers/files.js";
+import { agentDir, writeAgentLeases, prepareWorkerFiles, removeWorkerMcpConfig, registerWorkerSecrets } from "../workers/files.js";
 import { RunMonitor, type ExitReason, type MonitorCheckpoint } from "../workers/monitor.js";
 import { reconcileLaunch } from "../workers/launch-intent.js";
 import { stopGroup, workerExit, type WorkerExit } from "../workers/process.js";
@@ -430,6 +430,7 @@ export class Runner {
       await this.refreshLog();
       const state = await this.store.state();
       this.snapSeq = state.seq;
+      this.contractConnectors = state.contract?.connectors;
       this.driverId = state.contract?.workers.driver === "codex" ? "codex" : "claude-code";
       if (TERMINAL_RUN.has(state.status)) {
         if (state.status === "failed") this.exitCode = 1;
@@ -688,15 +689,22 @@ export class Runner {
     }
   }
 
-  /** Retry/reassignment drops a claim durably, so a lost handoff can never orphan its worker. */
+  /** Superseded claims and connector amendments stop workers even if a handoff was lost. */
   private async stopSuperseded(): Promise<void> {
     const state = await this.store.state();
     for (const t of this.workers.values()) {
+      const registered = this.lastSeq((e) => e.type === "agent.registered" && e.payload.agent === t.agent);
+      let connectorsChanged = false;
+      for (const e of this.log) {
+        if (e.type !== "contract.amended" || e.seq <= registered || !e.payload.affected_tasks.includes(t.task)) continue;
+        const patch = JSON.parse((await this.store.getBlob(e.payload.patch_blob)).toString("utf8"));
+        if (Object.hasOwn(patch, "connectors")) { connectorsChanged = true; break; }
+      }
       // An accepted task drops its claim; retireMerged stops its worker after the merge grace.
-      if (own(state.tasks, t.task)?.state === "accepted") continue;
+      if (own(state.tasks, t.task)?.state === "accepted" && !connectorsChanged) continue;
       const claim = own(state.claims, t.task);
-      if (!t.exit && (!claim || claim.agent !== t.agent || claim.attempt > t.attempt)) {
-        await this.killWorker(t.agent, "killed", "its task claim or attempt was superseded");
+      if (!t.exit && (connectorsChanged || !claim || claim.agent !== t.agent || claim.attempt > t.attempt)) {
+        await this.killWorker(t.agent, "killed", connectorsChanged ? "its connectors were amended" : "its task claim or attempt was superseded");
       }
     }
   }
@@ -842,6 +850,7 @@ export class Runner {
     if (p.attestation) t.attested = p.attestation.ok;
     if (t.exit && this.sessionGone(t)) return this.restartFresh(t);
     if (t.exit) {
+      removeWorkerMcpConfig(this.execution, t.agent);
       // An adopted worker is not our child: its exit code is unknown, so its stream says how it ended.
       const acc = t.monitor.acc;
       const reason = t.killReason ?? (t.adopted && t.exit.code === null && !t.exit.signal ? (acc.done && !acc.isError ? "completed" : "lost") : undefined);
@@ -1022,6 +1031,7 @@ export class Runner {
       if (!processMatches(t.pid, t.started)) t.exit = { code: null, signal: "SIGTERM" };
       else await sleep(25);
     }
+    if (t.exit) removeWorkerMcpConfig(this.execution, t.agent);
     return t.exit ?? { code: null, signal: "SIGKILL" };
   }
 
@@ -1034,6 +1044,7 @@ export class Runner {
       if (rec?.status === "running" && rec.pid && !rec.external) {
         if (processMatches(rec.pid, rec.started)) await stopGroup(rec.pid, 10_000, rec.started);
         else await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, code: null, reason: "lost" } }]);
+        if (!processMatches(rec.pid, rec.started)) removeWorkerMcpConfig(this.execution, agent);
       }
       return;
     }
@@ -1279,9 +1290,11 @@ export class Runner {
   }
 
   private driverId: WorkerDriverId = "claude-code";
+  private contractConnectors?: string[];
 
   /** The driver must pass detect() (its required flags) before the first spawn; a failure escalates once. */
   private async driverReady(state: Readonly<BlackboardState>): Promise<boolean> {
+    this.contractConnectors = state.contract?.connectors;
     this.driverId = state.contract?.workers.driver === "codex" ? "codex" : "claude-code";
     const d = this.driver();
     if (this.driverCheckedId !== d.id) this.driverChecked = undefined;
@@ -1417,7 +1430,7 @@ export class Runner {
       const rt = state.tasks[task];
       const spec = rt.spec;
       const wt = await ensureTaskWorktree(this.header, task, taskStartPoint(state, task));
-      const files = await prepareWorkerFiles({ store: this.store, agent, persona: await this.persona(spec.persona), task });
+      const files = await prepareWorkerFiles({ store: this.store, agent, persona: await this.persona(spec.persona), task, driver: driver.id });
       const rec = own(state.agents, agent);
       const run = readRunFile(this.execution, agent);
       const previous = run && run.task === task ? run.session_id : rec?.task === task ? rec.session_id : undefined;
@@ -1451,12 +1464,13 @@ export class Runner {
         return { events, result: null };
       });
       pre = [];
-      if (reg.result) return false;
+      if (reg.result) { removeWorkerMcpConfig(this.execution, agent); return false; }
       registered = true;
       await writeAgentLeases(this.store, agent, { task });
       const after = await this.store.state();
       const finalGate = canRespawn(after, Date.now(), this.observations(after), { task, agent, driver: driver.id });
       if (this.stopping || after.status !== "running" || after.paused_tasks.includes(task) || after.contract?.version !== state.contract?.version || !finalGate.ok || remainingUsd(after, { task, agent }) < 0.01) {
+        removeWorkerMcpConfig(this.execution, agent);
         await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, task, code: null, reason: "lost", result_subtype: "launch_interrupted" } }]);
         return false;
       }
@@ -1475,6 +1489,7 @@ export class Runner {
         prompt: card,
         appendPromptPath: files.promptPath,
         mcpConfigPath: files.mcpConfigPath,
+        connectors: state.contract?.connectors,
         settingsPath: files.settingsPath,
         ...(mode?.model && { model: mode.model }),
         ...(mode?.fallback_model && { fallbackModel: mode.fallback_model }),
@@ -1534,6 +1549,7 @@ export class Runner {
       await flush().catch((x) => this.say(`committing the previous run's exit: ${errText(x)}`));
       const pending = registered && !this.workers.has(agent)
         ? await reconcileLaunch(join(agentDir(this.execution, agent), "launch.json")).catch(() => undefined) : null;
+      if (!this.workers.has(agent) && pending === null) removeWorkerMcpConfig(this.execution, agent);
       if (registered && !this.workers.has(agent) && pending === null) {
         // Registered and claimed but nothing runs: an exit lets the watchdog retry it (and count it).
         await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, task, code: null, reason: "error", result_subtype: "spawn_failed" } }]).catch(() => undefined);
@@ -1553,7 +1569,7 @@ export class Runner {
       agent,
       task,
       source: this.source,
-      expected: driver.id === "claude-code" ? WORKER_ATTESTATION : null,
+      expected: driver.id === "claude-code" ? { ...WORKER_ATTESTATION, mcpServers: [...WORKER_ATTESTATION.mcpServers, ...(this.contractConnectors ?? [])] } : null,
       provider: driver.id,
       ...(model && { model }),
       offset,
@@ -1624,6 +1640,7 @@ export class Runner {
    */
   private async reconcile(): Promise<void> {
     const state = await this.store.state();
+    this.contractConnectors = state.contract?.connectors;
     for (const [agent, rec] of Object.entries(state.agents)) {
       if (this.workers.has(agent) || this.busy.has(agent) || rec.external || (rec.status !== "running" && rec.status !== "registered")) continue;
       let run = readRunFile(this.execution, agent);
@@ -1647,9 +1664,11 @@ export class Runner {
           };
         }
         if (alive && run && task !== undefined) {
+          registerWorkerSecrets(this.execution, agent);
           await this.adopt(agent, run, rec.status === "registered");
           continue;
         }
+        removeWorkerMcpConfig(this.execution, agent);
         if (!claim) {
           if (rec.status === "running") await this.commit(this.lostDrafts(agent, rec.task ?? run?.task, run));
           continue;

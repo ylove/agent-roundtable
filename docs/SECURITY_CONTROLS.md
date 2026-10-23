@@ -55,3 +55,14 @@ The page has no inline scripts or styles, limits connections to itself, and rend
 untrusted text through `textContent`. Imported instructions remain untrusted for
 later use. Evidence: `test/unit/library-import.test.mjs`, `library-lookup.test.mjs`,
 `library-server.test.mjs` and `library-cli.test.mjs`.
+
+## Credentials broker and worker connectors
+
+- User configuration stores strictly parsed `secret://` references. Owner and writable-mode checks apply before reading it. Invalid secret entries warn once by name and are ignored. No MCP tool resolves or returns credentials.
+- The broker caches only in memory and registers every resolved value with the call-time scrub literals, including short values and ordinary env names. Trusted runner, relay and roundtable worker-server processes carry the same redactions for logs, events, blackboard writes, artifacts, notifications and archives.
+- Keychain and 1Password backends use absolute executable lookup, `execFile`/`execFileSync` without a shell, a minimal `secret-cli` environment, capped output and fixed timeouts. Stderr never leaves the backend. Startup has a 20-second total budget; failures leave keys unset and do not fall back to plaintext for that key.
+- Connector names are frozen contract data. Propose/freeze validate local names; execute rejects missing connectors. Changes are run-wide for consent. Codex workers refuse connectors. Claude allowlists and attestation accept only the contract servers.
+- Each connector receives BASE plus configured variables through a trusted environment-filtering stdio launcher. Its resolved MCP config is 0600 in a private 0700 worker directory outside task worktrees and sandbox mounts. The relay removes it on exit; the runner removes it on reap/recovery or an interrupted launch. The trusted worker server receives scrub literals in this same private file. A hard crash can leave the file until recovery or purge.
+- Connectors and credential CLI binaries are trusted host processes. Connector tools may change external state; they are outside the command sandbox. Exact scrubbing cannot contain a malicious connector or guarantee redaction of transformed credentials.
+
+Implementation: `src/secrets/`, `src/connectors/config.ts`, `src/workers/connector-host.ts`, `src/workers/files.ts`. Tests: `test/unit/secrets-broker.test.mjs`, `test/unit/connectors-workers.test.mjs`. Usage and limits: [secrets](secrets.md), [connectors](connectors.md).

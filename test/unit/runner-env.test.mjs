@@ -123,14 +123,14 @@ test("runner receives configured literals without the individual host variables"
   const env = childEnv("runner", {}, source);
   assert.deepEqual(Object.keys(env), [PRIVATE]);
   assert.deepEqual(JSON.parse(env[PRIVATE]), [
-    source.SERVICE_TOKEN, "inherited-value-123456", source.DATABASE_PASSWORD,
+    source.SERVICE_TOKEN, "inherited-value-123456", source.DATABASE_PASSWORD, "tiny",
   ]);
   assert.deepEqual(childEnv("runner", {}, env), env);
 });
 
 test("only the runner profile receives the private literal variable, including extra overrides", () => {
   const runner = childEnv("runner", {}, { DATABASE_PASSWORD: "host-database-value-123456" });
-  for (const profile of ["claude-worker", "codex-worker", "local-meeting", "git", "gh", "docker", "browser", "open", "sandbox-local", "cloud-cli"]) {
+  for (const profile of ["claude-worker", "codex-worker", "local-meeting", "git", "gh", "docker", "browser", "open", "sandbox-local", "cloud-cli", "secret-cli", "connector"]) {
     for (const extra of [{}, { [PRIVATE]: runner[PRIVATE] }]) {
       const worker = childEnv(profile, extra, runner);
       assert.equal(worker[PRIVATE], undefined, profile);

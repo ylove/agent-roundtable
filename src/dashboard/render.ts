@@ -590,6 +590,7 @@ export function renderDagPage(c: PageContext): string {
 /** The contract as markdown, for when the contract tools left no CONTRACT.md. */
 export function contractMarkdown(k: Contract): string {
   const lines: string[] = [`# ${k.title}`, ""];
+  if (k.connectors?.length) lines.push(`Connectors: ${k.connectors.join(", ")}`, "");
   lines.push(`Contract ${k.id}, version ${k.version}. Status: ${k.status}.${k.frozen ? ` Frozen by ${k.frozen.by} at ${k.frozen.at}.` : ""}`, "");
   lines.push("## Goal", "", k.goal?.ultimate ?? "", "");
   if (k.goal?.original_prompt) lines.push("### Original prompt", "", ...k.goal.original_prompt.split("\n").map((l) => `> ${l}`), "");

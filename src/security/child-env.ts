@@ -20,6 +20,8 @@ export type ChildEnvProfile =
   | "open"
   | "sandbox-local"
   | "cloud-cli"
+  | "secret-cli"
+  | "connector"
   | "runner";
 
 const BASE = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TMPDIR", "TERM"];
@@ -90,6 +92,8 @@ function claudeCliNames(source: NodeJS.ProcessEnv): string[] {
 }
 
 const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: string[]; set: Record<string, string> }> = {
+  "secret-cli": (s) => ({ pass: [...BASE, ...Object.keys(s).filter(k => k.startsWith("OP_")), "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"], set: {} }),
+  connector: () => ({ pass: BASE, set: {} }),
   runtime: () => ({ pass: ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TMPDIR", ...PROXY, "ALL_PROXY", "all_proxy", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"], set: { TERM: "dumb", NO_COLOR: "1" } }),
   "claude-worker": (s) => ({
     pass: claudeCliNames(s),
@@ -121,9 +125,10 @@ const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: s
   "cloud-cli": () => ({ pass: [...BASE, ...PROXY, "CLOUDSDK_CONFIG", "FLY_CONFIG_DIR"], set: {} }),
   runner: (s) => ({
     pass: [
-      ...BASE, ...PROXY, ...RUNNER_PROVIDER, ...RUNNER_CONFIG,
+      ...BASE, ...PROXY, ...RUNNER_PROVIDER, ...RUNNER_CONFIG, "ROUNDTABLE_SECRETS",
       ...claudeCliNames(s), ...PROFILES["codex-worker"](s).pass,
       ...PROFILES.git(s).pass, ...PROFILES.docker(s).pass, ...PROFILES.gh(s).pass,
+      ...PROFILES["secret-cli"](s).pass,
     ],
     set: {},
   }),

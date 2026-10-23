@@ -2,7 +2,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -16,6 +16,8 @@ after(() => rmSync(pkg, { recursive: true, force: true }));
 mkdirSync(join(pkg, "dist"));
 copyFileSync(join(repo, "dist", "env.js"), join(pkg, "dist", "env.js"));
 copyFileSync(join(repo, "dist", "user-config.js"), join(pkg, "dist", "user-config.js"));
+for (const name of ["secrets", "security", "connectors"]) cpSync(join(repo, "dist", name), join(pkg, "dist", name), { recursive: true });
+copyFileSync(join(repo, "dist", "executables.js"), join(pkg, "dist", "executables.js"));
 mkdirSync(join(pkg, "dist", "runtimes"));
 copyFileSync(join(repo, "dist", "runtimes", "spec.js"), join(pkg, "dist", "runtimes", "spec.js"));
 copyFileSync(join(repo, "dist", "provider-ids.js"), join(pkg, "dist", "provider-ids.js"));

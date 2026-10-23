@@ -106,7 +106,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 ## CLI
 
-No arguments starts the orchestrator MCP server. The binary has **13 subcommands**, plus **6 table commands** that run at the table from a terminal (`cast`, `duel`, `debate`, `waffle`, `meeting`, `config`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
+No arguments starts the orchestrator MCP server. The binary has **13 subcommands**, plus **7 table commands** that run at the table from a terminal (`cast`, `duel`, `debate`, `waffle`, `meeting`, `config`, `secrets`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
 
 | Subcommand | Purpose |
 | --- | --- |
@@ -123,7 +123,7 @@ No arguments starts the orchestrator MCP server. The binary has **13 subcommands
 | `runtimes [--json]` | Detect installed [CLI runtimes](docs/runtimes.md). |
 | [`agents [--json]`](docs/agents-library.md) | List or import personas, install the starter pack, open the library. |
 | `help` | Print usage. |
-| `cast`, `duel`, `debate`, `waffle`, `meeting`, `config` | Table commands: see [at the table from the terminal](docs/table-cli.md). |
+| `cast`, `duel`, `debate`, `waffle`, `meeting`, `config`, `secrets` | Table commands: see [at the table from the terminal](docs/table-cli.md). |
 
 ## Docs
 
@@ -136,6 +136,7 @@ No arguments starts the orchestrator MCP server. The binary has **13 subcommands
 - [Duel](docs/modes/duel.md) and the [demo recording script](docs/demo.md)
 - [Tool reference](docs/tools.md) and [CLI reference](docs/cli.md)
 - [CLI runtimes at the table](docs/runtimes.md): installed agents alongside API providers
+- [Secrets broker](docs/secrets.md) and [worker connectors](docs/connectors.md)
 - [Configuration](docs/configuration.md), [providers](docs/providers.md) and [provider judgment](docs/providers.md#provider-judgment)
 - [Agent personas and skills](docs/agents.md) and [session archives](docs/sessions.md)
 - [Changelog](CHANGELOG.md), [threat model](docs/THREAT_MODEL.md), [security controls](docs/SECURITY_CONTROLS.md)

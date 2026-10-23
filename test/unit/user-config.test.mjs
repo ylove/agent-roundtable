@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, statSync, readFileSync, rmSync, copyFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, statSync, readFileSync, rmSync, copyFileSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -93,6 +93,8 @@ test('package loader and pointed loader compose in a fresh isolated package', t 
   const { home, file } = fixture(t);
   mkdirSync(join(home, 'dist'));
   for (const name of ['env.js', 'user-config.js', 'provider-ids.js']) copyFileSync(resolve('dist', name), join(home, 'dist', name));
+  for (const name of ['secrets', 'security', 'connectors']) cpSync(resolve('dist', name), join(home, 'dist', name), { recursive: true });
+  copyFileSync(resolve('dist/executables.js'), join(home, 'dist/executables.js'));
   mkdirSync(join(home, 'dist', 'runtimes'));
   copyFileSync(resolve('dist/runtimes/spec.js'), join(home, 'dist/runtimes/spec.js'));
   symlinkSync(resolve('node_modules'), join(home, 'node_modules'), 'dir');
@@ -128,4 +130,16 @@ test('an env file or config.json that others can modify is refused without namin
   writeFileSync(join(home, 'config.json'), JSON.stringify({ envFile: file }), { mode: 0o600 });
   chmodSync(join(home, 'config.json'), 0o666);
   assert.throws(() => readUserConfig(home), /Unable to read user configuration/);
+});
+test('the package .env cannot complete an endpoint and key pair the shell started', t => {
+  const { home } = fixture(t);
+  const packageEnvFile = join(home, 'package.env');
+  writeFileSync(packageEnvFile, 'OPENAI_COMPATIBLE_BASE_URL=https://package.example/v1\nOPENAI_COMPATIBLE_API_KEY=package-key\n');
+  const env = { OPENAI_COMPATIBLE_BASE_URL: 'https://shell.example/v1' };
+  loadUserEnvironment({ home, env, packageEnvFile, warn: () => {} });
+  assert.equal(env.OPENAI_COMPATIBLE_BASE_URL, 'https://shell.example/v1');
+  assert.equal(env.OPENAI_COMPATIBLE_API_KEY, undefined);
+  const fresh = {};
+  loadUserEnvironment({ home, env: fresh, packageEnvFile, warn: () => {} });
+  assert.deepEqual([fresh.OPENAI_COMPATIBLE_BASE_URL, fresh.OPENAI_COMPATIBLE_API_KEY], ['https://package.example/v1', 'package-key']);
 });

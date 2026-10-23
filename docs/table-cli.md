@@ -2,6 +2,14 @@
 
 `roundtable` and `agent-roundtable` invoke the same binary. Build a source checkout with `npm run build`; use `node dist/index.js` in place of `roundtable` until installed.
 
+Browse personas with `roundtable agents` (or `agents --json`), import an absolute
+file or directory with `agents import <absolute file|dir>`, and install the eight
+shipped personas with `agents starter`. `agents --open` opens the local library
+and file drop zone until Ctrl-C; `--no-hold` closes it immediately for tests.
+Imports skip existing files. Exit codes are 0 for success, 1 if any file is
+refused, and 2 for usage errors. See the [agents library](agents-library.md)
+for lookup order, limits, warnings and security.
+
 ```sh
 roundtable duel "Landing page for a bike-repair subscription" \
   --team-a designer,builder --team-b marketer,skeptic \

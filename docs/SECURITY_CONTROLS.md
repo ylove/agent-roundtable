@@ -37,3 +37,18 @@ File references are relative to the repository root. Tests demonstrate code beha
 The PI1.x rows cover defined objectives (PI1.1), inputs (PI1.2), processing (PI1.3), outputs (PI1.4) and storage (PI1.5). They do not establish that generated code satisfies a business objective; acceptance criteria, independent validation and human review remain necessary.
 
 Local meetings use restricted mode, explicit hook-disabled settings, disabled slash commands/Chrome and strict MCP config, with required-flag preflight cached per CLI path (`src/sessions/local-meetings.ts`; `sessions-modes.test.mjs`). Project `CLAUDE.md` context may be omitted; the trusted CLI must honor these flags, and cwd remains no OS read boundary.
+
+The agents library (`src/library/server.ts`) uses `SecureServer`'s loopback bind,
+Host validation, capability token and response headers. Its only mutating route,
+`POST /import`, checks `sameOriginProblem`, a per-start `X-Roundtable-Action`
+nonce delivered in a page meta tag, and `Content-Type: application/json` before
+reading content. It accepts at most 20 import requests per minute, 50 files per
+request and 2 MiB of JSON with a hard streaming cap. Each persona is limited to
+128 KiB. Imports refuse path filenames, empty/reserved slugs, ambiguous metadata
+and unknown JSON keys; files are created exclusively at mode 0600 in a library
+created at mode 0700. Folder imports skip symlinks and stop at 200 files. A symlinked
+library is not an approved loader root, and realpath containment still applies.
+The page has no inline scripts or styles, limits connections to itself, and renders
+untrusted text through `textContent`. Imported instructions remain untrusted for
+later use. Evidence: `test/unit/library-import.test.mjs`, `library-lookup.test.mjs`,
+`library-server.test.mjs` and `library-cli.test.mjs`.

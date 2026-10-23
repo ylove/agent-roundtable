@@ -42,6 +42,7 @@ export const LIST_COLLABORATIONS = "list_collaborations";
 
 // Duel
 export const START_DUEL = "start_duel";
+export const CASTING_CALL = "casting_call";
 
 // Ultraplan
 export const START_ULTRAPLAN = "start_ultraplan";

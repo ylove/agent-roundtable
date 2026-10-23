@@ -19,6 +19,13 @@ export const SCRUB_LITERALS_ENV = "ROUNDTABLE_SCRUB_LITERALS";
 
 const MIN_SECRET_LENGTH = 8;
 
+/** Broker values, including short credentials, must reach the detached output relay too. */
+export function registerSecretLiteral(value: string): void {
+  if (!value) return;
+  const literals = configuredSecretLiterals(process.env);
+  process.env[SCRUB_LITERALS_ENV] = JSON.stringify([...new Set([...literals, value])]);
+}
+
 interface EnvSecret {
   name: string;
   value: string;
@@ -35,7 +42,7 @@ function envSecrets(source: NodeJS.ProcessEnv): EnvSecret[] {
     const literals: unknown = JSON.parse(source[SCRUB_LITERALS_ENV] ?? "[]");
     if (Array.isArray(literals)) {
       for (const value of literals) {
-        if (typeof value === "string" && value.length >= MIN_SECRET_LENGTH) list.push({ name: SCRUB_LITERALS_ENV, value });
+        if (typeof value === "string" && value.length > 0) list.push({ name: SCRUB_LITERALS_ENV, value });
       }
     }
   } catch { /* ignore malformed private configuration */ }

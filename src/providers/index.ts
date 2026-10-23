@@ -1,4 +1,5 @@
 import { providerHealth, endpointFingerprint, credentialFingerprint } from "./health.js";
+import { MAX_REQUEST_TOKENS } from "./limits.js";
 import { ProviderHttpError } from "./retry.js";
 import { appendTableLine, newServerId } from "../usage/table.js";
 
@@ -71,6 +72,12 @@ export async function chatCompletion(
   messages: LLMMessage[],
   options: ChatCompletionOptions = {}
 ): Promise<LLMCompletionResult> {
+  if (options.maxTokens !== undefined && (!Number.isInteger(options.maxTokens) || options.maxTokens < 1 || options.maxTokens > MAX_REQUEST_TOKENS)) {
+    throw new Error(`max_tokens must be an integer from 1 to ${MAX_REQUEST_TOKENS}`);
+  }
+  if (options.temperature !== undefined && (typeof options.temperature !== "number" || !Number.isFinite(options.temperature) || options.temperature < 0 || options.temperature > 2)) {
+    throw new Error("temperature must be a number from 0 to 2");
+  }
   const provider = options.provider || "openai";
   // Own-property check: "constructor", "toString", "__proto__" must not resolve via Object.prototype.
   const call = Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider] : undefined;

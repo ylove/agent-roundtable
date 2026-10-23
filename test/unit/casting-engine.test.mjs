@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { runCastingCall } from "../../dist/casting/casting.js";
+import { renderRoster, renderCastingMarkdown } from "../../dist/casting/report.js";
 import { ROUNDTABLE_HOME, PARALLEL_TURNS } from "../../dist/config.js";
 import { readTableLines } from "../../dist/usage/table.js";
 import { tools, handleToolCall } from "../../dist/tools.js";
@@ -50,6 +51,15 @@ async function run(t, script = {}, overrides = {}, signal = noSignal(), observer
   return { ...fetch, events, report };
 }
 const archiveFor = async report => JSON.parse(await readFile(join(ROUNDTABLE_HOME, "casting", `${report.id}.json`), "utf8"));
+const assertNote = async (report, pattern) => {
+  assert.match(report.note, pattern);
+  assert.ok(renderRoster(report).indexOf(report.note) < renderRoster(report).indexOf("architect ["));
+  assert.ok(renderCastingMarkdown(report).indexOf(report.note) < renderCastingMarkdown(report).indexOf("| Persona |"));
+  assert.match(renderCastingMarkdown(report), /Gaps: not assessed/);
+  const archive = await archiveFor(report);
+  assert.equal(archive.note, report.note);
+  assert.equal(archive.events.find(e => e.type === "roster").report.note, report.note);
+};
 
 test("dry run makes zero fetch calls, needs no keys and preserves input order", async t => {
   const calls = stubFetch(t, () => { throw new Error("No provider calls allowed"); });
@@ -62,6 +72,9 @@ test("dry run makes zero fetch calls, needs no keys and preserves input order", 
   assert.deepEqual(report.recommended.seats, agents.slice(0, 2));
   assert.deepEqual(report.gaps, []);
   assert.equal(report.usage.totalCostUsd, 0);
+  assert.equal(report.note, undefined);
+  assert.equal(report.usage.unpricedTokens, undefined);
+  assert.match(renderCastingMarkdown(report), /Gaps: none/);
 });
 
 test("dry-run redundancy keeps only the first cluster member eligible", async t => {
@@ -90,6 +103,8 @@ test("happy path auditions, examines, meters and archives private report plus tr
   assert.deepEqual(report.recommended, verdict().recommended);
   assert.deepEqual(report.gaps, ["Operations"]);
   assert.ok(report.usage.totalCostUsd > 0);
+  assert.equal(report.usage.unpricedTokens, undefined);
+  assert.equal(report.note, undefined);
   const archive = await archiveFor(report);
   assert.deepEqual(archive.events, events);
   assert.deepEqual(archive.agents, report.agents);
@@ -111,6 +126,7 @@ test("malformed director verdict retries with validation feedback then falls bac
   assert.equal(report.dryRun, undefined);
   assert.deepEqual(report.recommended.seats, agents);
   assert.equal((await archiveFor(report)).id, report.id);
+  await assertNote(report, /Director verdict unavailable; static roster from lint and similarity only; gaps not assessed\./);
 });
 
 test("malformed questions retry once and fall back without answers or another director call", async t => {
@@ -118,6 +134,7 @@ test("malformed questions retry once and fall back without answers or another di
   assert.equal(questionCalls(), 2); assert.equal(verdictCalls(), 0);
   assert.equal(calls.length, 6);
   assert.deepEqual(report.gaps, []);
+  await assertNote(report, /Director questions unavailable; static roster from lint and similarity only; gaps not assessed\./);
 });
 
 test("unknown director keys are dropped everywhere in the final report", async t => {
@@ -155,6 +172,7 @@ test("abort mid-run cuts in-flight calls, stops scheduling and still archives", 
   assert.equal(events.at(-1).aborted, true);
   assert.ok(report.agents.every(a => a.verdict === "unclear"));
   assert.equal((await archiveFor(report)).id, report.id);
+  await assertNote(report, /Stopped before completion; roster is partial\./);
 });
 
 test("deadline settles a provider that ignores abort and archives available results", async t => {
@@ -162,6 +180,7 @@ test("deadline settles a provider that ignores abort and archives available resu
   assert.ok(calls.length <= PARALLEL_TURNS);
   assert.equal(events.at(-1).aborted, true);
   assert.equal((await archiveFor(report)).id, report.id);
+  await assertNote(report, /Stopped before completion; roster is partial\./);
 });
 
 test("no-examine skips questions and answers", async t => {
@@ -211,6 +230,7 @@ test("pre-aborted runs and a zero deadline need no credentials and still archive
     assert.equal(events.at(-1).aborted, true);
     assert.deepEqual(report.recommended.seats, []);
     assert.equal((await archiveFor(report)).id, report.id);
+    await assertNote(report, /Stopped before completion; roster is partial\./);
   }
   assert.equal(calls.length, 0);
 });
@@ -255,6 +275,42 @@ test("valid director JSON on retry completes the full report", async t => {
   assert.equal(questionCalls(), 2); assert.equal(verdictCalls(), 2);
   assert.deepEqual(report.gaps, ["Operations"]);
   assert.deepEqual(report.recommended, verdict().recommended);
+  assert.equal(report.note, undefined);
+});
+
+test("unpriced usage sums persona and director tokens and marks the total estimated", async t => {
+  const { report, events } = await run(t, {}, { model: "unpriced-casting-model" });
+  assert.deepEqual(report.usage, { totalCostUsd: 0, unpricedTokens: 1300, estimated: true });
+  const usage = events.filter(e => e.type === "usage").at(-1);
+  assert.equal(report.usage.unpricedTokens, usage.perSeat.reduce((n, seat) => n + seat.unpricedTokens, 0));
+  assert.equal(usage.perSeat.find(s => s.seatId === "casting-director").unpricedTokens, 260);
+  assert.deepEqual((await archiveFor(report)).usage, report.usage);
+  for (const render of [renderRoster, renderCastingMarkdown]) assert.match(render(report), /Usage: \$0\.0000 \(\+1300 tokens unpriced\) \(estimated\)/);
+});
+
+test("mixed priced and unpriced usage retains both known spend and unknown tokens", async t => {
+  const { report } = await run(t, {}, { seat: { architect: { model: "unpriced-casting-model" } } });
+  assert.ok(report.usage.totalCostUsd > 0);
+  assert.equal(report.usage.unpricedTokens, 260);
+  assert.equal(report.usage.estimated, true);
+});
+
+test("MCP returns unpriced usage in markdown and both structured usage fields", async t => {
+  setup(t);
+  const result = await handleToolCall("casting_call", { brief: options.brief, agents, agents_dir: dir, seats: 4, provider: options.provider, model: "unpriced-casting-model" });
+  assert.equal(result.isError, undefined);
+  assert.match(result.content[0].text, /Usage: \$0\.0000 \(\+1300 tokens unpriced\)/);
+  assert.deepEqual(result.structuredContent.usage, { totalCostUsd: 0, unpricedTokens: 1300, estimated: true });
+  assert.deepEqual(result.structuredContent.report.usage, result.structuredContent.usage);
+});
+
+test("MCP exposes director fallback prominently and leaves gaps unassessed", async t => {
+  setup(t, { badQuestions: true });
+  const result = await handleToolCall("casting_call", { brief: options.brief, agents, agents_dir: dir, seats: 4, provider: options.provider, model: options.model });
+  assert.equal(result.isError, undefined);
+  assert.match(result.content[0].text, /^## Casting Call\n\n\*\*Note: Director questions unavailable;/);
+  assert.match(result.content[0].text, /Gaps: not assessed/);
+  assert.match(result.structuredContent.report.note, /Director questions unavailable/);
 });
 
 test("auditions and answers are capped before display and reuse", async t => {

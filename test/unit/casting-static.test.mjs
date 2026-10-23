@@ -55,6 +55,26 @@ test("recommended teams render a shell-safe duel command in terminal and markdow
   assert.match(renderCastingMarkdown(report), /roundtable duel/);
 });
 
+test("fallback notes render at the top, escape markdown and preserve dry-run gap wording", () => {
+  const report = { ...base(), note: "Director [verdict] unavailable; *static* roster." };
+  assert.match(renderRoster(report), /^Casting Call\nNote: Director \[verdict\] unavailable; \*static\* roster\./);
+  assert.match(renderCastingMarkdown(report), /^## Casting Call\n\n\*\*Note: Director \\\[verdict\\\] unavailable; \\\*static\\\* roster\.\*\*/);
+  for (const render of [renderRoster, renderCastingMarkdown]) {
+    assert.match(render(report), /Gaps: not assessed/);
+    assert.match(render({ ...report, dryRun: true }), /Gaps: none/);
+    assert.match(render(base()), /Gaps: none/);
+  }
+});
+
+test("priced usage and estimates keep their wording without an unpriced suffix", () => {
+  for (const render of [renderRoster, renderCastingMarkdown]) {
+    assert.match(render({ ...base(), usage: { totalCostUsd: 0.1234 } }), /Usage: \$0\.1234(?:\n|$)/);
+    const text = render({ ...base(), usage: { totalCostUsd: 0.1234, estimated: true } });
+    assert.match(text, /Usage: \$0\.1234 \(estimated\)/);
+    assert.doesNotMatch(text, /unpriced/);
+  }
+});
+
 test("CLI parsing rejects bad values with usage exit codes and provides help", async () => {
   for (const args of [[], ["brief", "--agents", "a"], ["brief", "--seats", "1.5"], ["brief", "--max-seconds", "-1"], ["brief", "--mix", "bad"], ["brief", "--agents-dir", "relative"], ["brief", "--unknown"]]) {
     assert.throws(() => parseCastArgs(args), error => error.exitCode === 2);

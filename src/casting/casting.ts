@@ -268,6 +268,7 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
         if (failures.has(agent.key)) { agent.verdict = "unclear"; agent.risks.push(failures.get(agent.key)!); }
       }
       if (staticVerdict) {
+        report.note = `Director ${questionsFailed ? "questions" : "verdict"} unavailable; static roster from lint and similarity only; gaps not assessed.`;
         const eligible = report.agents.filter(a => a.verdict === "cast" || a.verdict === "bench");
         report.recommended = { seats: eligible.slice(0, count).map(a => a.key) };
         for (const agent of eligible) agent.verdict = report.recommended.seats.includes(agent.key) ? "cast" : "bench";
@@ -275,8 +276,11 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
         if (report.recommended[field]) report.recommended[field] = report.recommended[field]!.filter(key => !failures.has(key));
       }
     }
-    report.usage = { totalCostUsd: [...usage.values()].reduce((n, s) => n + s.costUsd, 0), ...([...usage.values()].some(s => s.estimated) && { estimated: true }) };
+    const unpricedTokens = [...usage.values()].reduce((n, s) => n + s.unpricedTokens, 0);
+    report.usage = { totalCostUsd: [...usage.values()].reduce((n, s) => n + s.costUsd, 0), ...(unpricedTokens > 0 && { unpricedTokens }),
+      ...((unpricedTokens > 0 || [...usage.values()].some(s => s.estimated)) && { estimated: true }) };
     await emitUsage();
+    if (!opts.dryRun && stopped()) report.note = "Stopped before completion; roster is partial.";
     await emit({ type: "roster", report });
     const archivePath = join(ROUNDTABLE_HOME, "casting", `${id}.json`);
     await emit({ type: "end", mode: "casting", winner: "none", tally: { A: 0, B: 0 }, aborted: !opts.dryRun && stopped(), archivePath: `casting/${id}.json` });

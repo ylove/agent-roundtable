@@ -16,7 +16,7 @@ claude mcp list        # roundtable should show as connected
 
 `roundtable mcp` starts the orchestrator server, the same as running the binary with no arguments. Without the global install, use `-- npx -y agent-roundtable` or `-- node /absolute/path/to/dist/index.js` (a source checkout). `--scope user` makes it available in every project; leave it out (or use `--scope project`) to register it for one project only. Then ask Claude Code to "list the roundtable tools": you should see the 43 [tools](#tools), named `mcp__roundtable__<tool>`.
 
-Create personas in that directory or copy the [examples](examples/). Set keys for the [providers](docs/providers.md) you use; local meetings use your Claude CLI login. For source installs, `.env`, `add-json` and project `.mcp.json` registration, see [getting started](docs/getting-started.md) and [configuration](docs/configuration.md). After a rebuild, reconnect with `/mcp`.
+Create personas in that directory or install the [starter pack](examples/starter-pack/) with `roundtable agents starter`. Set keys for the [providers](docs/providers.md) you use; local meetings use your Claude CLI login. For source installs, `.env`, `add-json` and project `.mcp.json` registration, see [getting started](docs/getting-started.md) and [configuration](docs/configuration.md). After a rebuild, reconnect with `/mcp`.
 
 ## Modes
 
@@ -43,6 +43,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [`roundtable duel`](docs/modes/duel.md) | Two teams build competing artifacts; judges assess them; dissents are recorded. |
 | [`roundtable debate`, `waffle`, `meeting`](docs/table-cli.md) | Stream a discussion with per-seat models and spend. |
 | [`roundtable config`](docs/configuration.md#saved-cli-settings-and-env-files) | Save env-file and persona-directory settings; show set/unset status. |
+| [`roundtable agents`](docs/agents-library.md) | Browse and import personas, install the starter pack, or open the library drop zone. |
 
 ### Heads-down
 
@@ -102,7 +103,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 ## CLI
 
-No arguments starts the orchestrator MCP server. The binary has **12 subcommands**, plus **5 table commands** that run at the table from a terminal (`duel`, `debate`, `waffle`, `meeting`, `config`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
+No arguments starts the orchestrator MCP server. The binary has **13 subcommands**, plus **5 table commands** that run at the table from a terminal (`duel`, `debate`, `waffle`, `meeting`, `config`). Both are documented in the [CLI reference](docs/cli.md); `roundtable` is a second name for the same binary.
 
 | Subcommand | Purpose |
 | --- | --- |
@@ -117,6 +118,7 @@ No arguments starts the orchestrator MCP server. The binary has **12 subcommands
 | `usage [--json] [--watch]` | Who is using what, on which platform, measured or estimated. |
 | `stop <agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent, heads-down or at the table. |
 | `runtimes [--json]` | Detect installed [CLI runtimes](docs/runtimes.md). |
+| [`agents [--json]`](docs/agents-library.md) | List or import personas, install the starter pack, open the library. |
 | `help` | Print usage. |
 | `duel`, `debate`, `waffle`, `meeting`, `config` | Table commands: see [at the table from the terminal](docs/table-cli.md). |
 

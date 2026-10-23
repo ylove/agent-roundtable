@@ -70,7 +70,7 @@ Any other MCP client: run `node dist/index.js` over stdio.
 
 ## Using it from a chat session
 
-Once the server is registered you do not call the tools yourself: you ask for what you want in plain language and the model calls them. Claude Code lists them as `mcp__<server name>__<tool>` (`mcp__roundtable__<tool>` with the commands above), so naming the server ("via roundtable", "using the roundtable") is enough to steer the model to it when several MCP servers are connected. Persona names are file names in `ROUNDTABLE_AGENTS_DIR` — the shipped `examples/` give you `cfo`, `product-lead` and `skeptic` — and a file path works too.
+Once the server is registered you do not call the tools yourself: you ask for what you want in plain language and the model calls them. Claude Code lists them as `mcp__<server name>__<tool>` (`mcp__roundtable__<tool>` with the commands above), so naming the server ("via roundtable", "using the roundtable") is enough to steer the model to it when several MCP servers are connected. Persona names are file names in `ROUNDTABLE_AGENTS_DIR` or the [library](agents-library.md) — `roundtable agents starter` installs eight personas from `examples/starter-pack/`, including `cfo`, `product-lead` and `skeptic` — and a file path works too.
 
 **Meetings** — one persona, back and forth. Each prompt is one message in the chat:
 

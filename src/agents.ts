@@ -7,7 +7,7 @@ import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, statS
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, relative, resolve, sep } from "node:path";
 import { parse } from "yaml";
-import { AGENTS_DIR, SKILLS_DIR, WORKSPACE_DIR, agentPaths } from "./config.js";
+import { AGENTS_DIR, LIBRARY_DIR, SKILLS_DIR, WORKSPACE_DIR, agentPaths } from "./config.js";
 import { isContained } from "./security/fs-safe.js";
 
 /** Canonical, path-free agent name, including directory-style AGENT.md personas. */
@@ -267,7 +267,7 @@ export function isPathLikeRef(ref: string): boolean {
 
 /**
  * Where a path-like ref may point: the agents directory, the workspace's and the user's
- * .claude/agents, and every directory in ROUNDTABLE_AGENT_PATHS.
+ * .claude/agents, the existing non-symlink library, and ROUNDTABLE_AGENT_PATHS.
  */
 export function allowedAgentRoots(): string[] {
   const discovered = (dir: string, parent: string): string[] => {
@@ -287,11 +287,15 @@ export function allowedAgentRoots(): string[] {
       return [dir];
     } catch { return []; }
   };
+  let library: string[] = [];
+  try { if (lstatSync(LIBRARY_DIR).isDirectory()) library = [LIBRARY_DIR]; }
+  catch { /* The library is created on first import. */ }
   return [...new Set([
     ...(process.env.ROUNDTABLE_AGENTS_DIR ? [AGENTS_DIR] : discovered(AGENTS_DIR, process.cwd())),
     ...discovered(join(WORKSPACE_DIR, ".claude", "agents"), WORKSPACE_DIR),
     ...discovered(join(homedir(), ".claude", "agents"), homedir()),
     ...agentPaths(),
+    ...library,
   ].map((dir) => resolve(dir)))];
 }
 
@@ -351,18 +355,23 @@ export async function loadAgent(ref: string): Promise<LoadedAgent> {
     const contained = containedAgentPath(ref, r);
     candidates = contained ? [contained] : [resolve(ref)];
   } else {
-    // Agent names are looked up only inside the agents directory.
+    // Configured personas always win over imported personas.
     candidates = ref === "." || ref === ".." ? [] : [
       join(AGENTS_DIR, `${ref}.md`),
       join(AGENTS_DIR, `subagent-${ref}.md`),
       join(AGENTS_DIR, ref, "AGENT.md"),
+      ...(r.roots.includes(resolve(LIBRARY_DIR)) ? [
+        join(LIBRARY_DIR, `${ref}.md`),
+        join(LIBRARY_DIR, `subagent-${ref}.md`),
+        join(LIBRARY_DIR, ref, "AGENT.md"),
+      ] : []),
     ];
   }
 
   for (const candidate of candidates) {
     const resolved = resolve(candidate);
     if (isFile(resolved)) {
-      // A name finds a file in the agents directory, but a symlink there may not lead out of the roots.
+      // A named persona's symlink must also stay inside the approved roots.
       assertRealpathContained(ref, resolved, r);
       const raw = await readFile(resolved, "utf-8");
       const { data: frontmatter, body } = readFrontmatter(raw);
@@ -407,7 +416,7 @@ export function listAgents(agentsDir: string = AGENTS_DIR): Array<{ key: string;
   const r = agentRoots();
   const root = resolve(agentsDir);
   // An explicit discovery directory is trusted; automatic locations use the shared root policy.
-  const automatic = [AGENTS_DIR, join(WORKSPACE_DIR, ".claude", "agents"), join(homedir(), ".claude", "agents")]
+  const automatic = [AGENTS_DIR, LIBRARY_DIR, join(WORKSPACE_DIR, ".claude", "agents"), join(homedir(), ".claude", "agents")]
     .some(dir => resolve(dir) === root);
   if (!r.roots.includes(root)) {
     if (automatic) return agents;

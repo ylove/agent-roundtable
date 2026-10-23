@@ -16,7 +16,7 @@ const root = mkdtempSync(join(tmpdir(), "roundtable-smoke-"));
 const agentsDir = join(root, "agents");
 mkdirSync(agentsDir);
 for (const name of ["cfo", "product-lead", "skeptic"]) {
-  writeFileSync(join(agentsDir, `${name}.md`), readFileSync(new URL(`../examples/${name}.md`, import.meta.url)));
+  writeFileSync(join(agentsDir, `${name}.md`), readFileSync(new URL(`../examples/starter-pack/${name}.md`, import.meta.url)));
 }
 writeFileSync(join(root, "README.md"), "Smoke project: ship the onboarding launch.");
 // Keys are deliberately absent/unset so no provider can be reached even by accident; a fake

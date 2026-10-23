@@ -38,6 +38,7 @@ function stateHome(): string {
   return join(homedir(), ".agent-roundtable");
 }
 export const ROUNDTABLE_HOME = stateHome();
+export const LIBRARY_DIR = join(ROUNDTABLE_HOME, "agents");
 export const SESSIONS_DIR = join(ROUNDTABLE_HOME, "sessions");
 export const EXECUTIONS_DIR = join(ROUNDTABLE_HOME, "executions");
 export const WORKTREES_DIR = join(ROUNDTABLE_HOME, "worktrees");

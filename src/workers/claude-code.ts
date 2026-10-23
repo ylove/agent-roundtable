@@ -2,7 +2,7 @@
 // The claude-code worker driver
 //
 // A worker is `claude -p` in its task worktree with exactly five file tools and the roundtable MCP
-// server: no shell, no web, no subagents, no other MCP servers, no user or project settings
+// server and consented connectors: no shell, no web, no subagents, no user or project settings
 // (--restricted), no permission prompts, a dollar cap, and the PreToolUse lease hook from its
 // settings.json. buildWorkerArgs is pure; there are no positional arguments (several flags are
 // variadic), and the task card goes in on stdin. --bare is never used: it skips hooks.
@@ -130,7 +130,7 @@ export function buildWorkerArgs(l: WorkerLaunch, caps: ClaudeCaps = FULL_CAPS, o
     "--settings", absolute("settingsPath", l.settingsPath),
     "--restricted",
     "--tools", WORKER_TOOLS.join(","),
-    "--allowedTools", WORKER_ALLOWED_TOOLS,
+    "--allowedTools", [WORKER_ALLOWED_TOOLS, ...(l.connectors ?? []).map(n => `mcp__${n}`)].join(" "),
     "--disallowedTools", WORKER_DISALLOWED_TOOLS,
     "--permission-mode", "dontAsk",
     "--permission-prompts", "none",
@@ -292,7 +292,7 @@ export interface AttestationResult {
 
 /**
  * Check what system/init reported against the expected set: every tool is one of the file tools
- * or mcp__roundtable__*, and the MCP servers are exactly [roundtable], connected. Anything else
+ * or tools of an expected MCP server, and every expected server is connected. Anything else
  * means the worker must be killed and an escalation raised.
  */
 export function attest(acc: RunAccumulator, expected: AttestationExpectation = WORKER_ATTESTATION): AttestationResult {
@@ -301,7 +301,7 @@ export function attest(acc: RunAccumulator, expected: AttestationExpectation = W
   const reasons: string[] = [];
   const unexpected: string[] = [];
   if (acc.tools === undefined) reasons.push("no system/init line reported the tools");
-  for (const t of tools) if (!expected.tools.includes(t) && !t.startsWith(expected.mcpToolPrefix)) unexpected.push(t);
+  for (const t of tools) if (!expected.tools.includes(t) && !t.startsWith(expected.mcpToolPrefix) && !expected.mcpServers.some(s => t.startsWith(`mcp__${s}__`))) unexpected.push(t);
   if (unexpected.length) reasons.push(`unexpected tools: ${unexpected.join(", ")}`);
   const extra = servers.filter((s) => !expected.mcpServers.includes(s));
   const missing = expected.mcpServers.filter((s) => !servers.includes(s));
@@ -435,7 +435,7 @@ export class ClaudeCodeDriver implements WorkerDriver {
     const args = buildWorkerArgs(l, d.caps, { resume });
     const env = childEnv("claude-worker", workerEnvExtras(l));
     const startedAt = new Date().toISOString();
-    const { pid, started } = await spawnWorker({ file: d.cli, args, cwd: l.cwd, env, prompt: l.prompt, outputPath: l.outputPath });
+    const { pid, started } = await spawnWorker({ file: d.cli, args, cwd: l.cwd, env, prompt: l.prompt, outputPath: l.outputPath, cleanupPaths: [l.mcpConfigPath] });
     console.error(`[Worker] ${l.agent} ${resume ? "resumed" : "started"} on ${l.task} (attempt ${l.attempt}, pid ${pid}, session ${l.sessionId})`);
     return { agent: l.agent, task: l.task, attempt: l.attempt, pid, pgid: pid, started, sessionId: l.sessionId, outputPath: l.outputPath, startedAt };
   }

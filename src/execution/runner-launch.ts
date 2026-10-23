@@ -21,6 +21,9 @@ import { fileURLToPath } from "node:url";
 import { VERSION } from "../config.js";
 import { pidAlive } from "../prototypes/sandbox.js";
 import { childEnv } from "../security/child-env.js";
+import { readUserConfig } from "../user-config.js";
+import { parseSecretRef } from "../secrets/ref.js";
+import { registerSecretLiteral } from "../security/secrets.js";
 import { writeFileAtomic } from "../security/fs-safe.js";
 import { processReused, readLockOwner } from "./lock.js";
 import { executionDir } from "./store.js";
@@ -118,6 +121,16 @@ export function launchRunner(exe: string, opts: LaunchRunnerOptions = {}): { pid
   }
   if (typeof repoRoot !== "string" || !existsSync(repoRoot)) throw new Error(`Execution ${exe}: its repository ${String(repoRoot)} is gone`);
   const log = runnerLogPath(exe);
+  const extra: Record<string, string> = {};
+  const config = readUserConfig();
+  const refs = [...Object.values(config.secrets ?? {}), ...Object.values(config.connectors ?? {}).flatMap(c => Object.values(c.env).filter(v => v.startsWith("secret://")))];
+  for (const ref of refs) {
+    const { backend, locator } = parseSecretRef(ref);
+    if (backend === "env" && process.env[locator] !== undefined) {
+      extra[locator] = process.env[locator]!;
+      registerSecretLiteral(extra[locator]);
+    }
+  }
   const fd = openSync(log, "a", 0o600);
   try {
     fchmodSync(fd, 0o600);
@@ -125,7 +138,7 @@ export function launchRunner(exe: string, opts: LaunchRunnerOptions = {}): { pid
       detached: true,
       stdio: ["ignore", fd, fd],
       cwd: repoRoot,
-      env: childEnv("runner", opts.env ?? {}),
+      env: childEnv("runner", { ...extra, ...opts.env }),
       shell: false,
       windowsHide: true,
     });

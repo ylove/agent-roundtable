@@ -778,7 +778,7 @@ export interface AmendOptions {
 const PROTECTED_TOP = ["schema", "id", "version", "status", "consent", "frozen"];
 const PROTECTED_SCOPE = ["orchestrator", "repo_root", "base_ref", "parent"];
 /** Changes to these touch every participant: on a frozen contract they need everyone's consent first. */
-export const RUN_WIDE_FIELDS = ["budget", "scope", "sandbox", "authority", "validation", "workers", "goal", "dissents"] as const;
+export const RUN_WIDE_FIELDS = ["budget", "scope", "sandbox", "authority", "validation", "workers", "connectors", "goal", "dissents"] as const;
 
 function protectedProblems(patch: Obj): string[] {
   const out = PROTECTED_TOP.filter((k) => Object.hasOwn(patch, k)).map((k) => `patch may not change ${k}`);

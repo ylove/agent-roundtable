@@ -115,7 +115,7 @@ export const contractTools: ToolDefinition[] = [
         from_session: { type: "string", description: "Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from, or of an archived duel (duel-<id>): its winning artifact title becomes a decision and its dissents become draft concerns (a tie or no winner imports no decision). A duel has no task list, so by default a deterministic task plan is drafted from the winning artifact (see draft_plan); an explicit contract (with tasks) or plan replaces it." },
         draft_plan: { type: "boolean", description: "Duel from_session only, default true: when neither contract (with tasks) nor plan is given, draft a task plan from the winning artifact, the judges' reasons and the dissents (deterministic, no model call). False imports only the decision and dissents, and then contract or plan is required. A tie, no winner or no artifact drafts no plan." },
         plan: { type: "string", description: "Plan text: its last roundtable-tasks block is used, else a structuring call turns it into tasks." },
-        contract: { type: "object", description: "An explicit contract (roundtable.contract/1 fields: title, scope.paths, participants, teams, tasks, interfaces, decisions, dissents, validation {commands, final}, budget, authority, sandbox, workers). id, version, status and consent are set for you." },
+        contract: { type: "object", description: "An explicit contract (roundtable.contract/1 fields: title, scope.paths, participants, teams, tasks, interfaces, decisions, dissents, validation {commands, final}, budget, authority, sandbox, workers, connectors). id, version, status and consent are set for you." },
         parent_contract: { type: "string", description: "For a child contract: the parent contract id (with parent_task, a subcontract task of it)." },
         parent_task: { type: "string", description: "For a child contract: the parent's subcontract task this contract carries out." },
         participants: { type: "array", items: { type: "string" }, description: "Agents who must consent (names or .md paths); task personas are always added." },
@@ -138,7 +138,7 @@ export const contractTools: ToolDefinition[] = [
       "from_session (an archived replan or ultraplan) first replaces the structure with that session's roundtable-tasks block (pass patch: {}). " +
       "id, version, status, consent, frozen, the scope's orchestrator, repository, base commit and parent, and the goal's original_prompt cannot change. " +
       "Consent counts only for the version it was given on. A draft amendment needs every participant's consent again before a freeze: consent: true asks them all, and an objector who now agrees has the objection resolved by the amendment. " +
-      "On a frozen contract, a run-wide change (budget, scope, sandbox, authority, validation, workers, goal, dissents) needs consent: true (everyone is asked about it first, and it applies only if all agree) or override_consent: true (audited); " +
+      "On a frozen contract, a run-wide change (budget, scope, sandbox, authority, validation, workers, connectors, goal, dissents) needs consent: true (everyone is asked about it first, and it applies only if all agree) or override_consent: true (audited); " +
       "other changes apply at once, and consent: true then asks the personas of affected tasks. patch: {} with consent: true just asks everyone without an agreement on the current version. " +
       "Returns the affected tasks, the consent outcome and the contract markdown.",
     inputSchema: {
@@ -151,7 +151,7 @@ export const contractTools: ToolDefinition[] = [
         orchestrator: ORCHESTRATOR,
         from_session: { type: "string", description: "Id of an archived replan or ultraplan whose roundtable-tasks block replaces the tasks, commands and interfaces, or of an archived duel (duel-<id>): its winning decision and dissents are added to the contract (tasks untouched, repeats skipped; dissents are run-wide on a frozen contract)." },
         consent: { type: "boolean", description: "Default false. True: ask participants about the new version: everyone for a draft or a run-wide change, the personas of affected tasks otherwise." },
-        override_consent: { type: "boolean", description: "Frozen contracts only, default false: apply a run-wide change (budget, scope, sandbox, authority, validation, workers, goal) without everyone's consent. Audited." },
+        override_consent: { type: "boolean", description: "Frozen contracts only, default false: apply a run-wide change (budget, scope, sandbox, authority, validation, workers, connectors, goal) without everyone's consent. Audited." },
         ...PROVIDER_PROPS,
       },
       required: ["contract_id", "patch", "reason", "orchestrator"],
@@ -205,6 +205,7 @@ export function formatContractResult(r: ContractResult): string {
   lines.push("", `Next: ${r.next}`);
   const summary = {
     contract_id: r.contractId, execution_id: r.executionId, version: r.version, status: r.status,
+    ...(r.contract.connectors?.length && { connectors: r.contract.connectors }),
     ...(r.source !== undefined && { source: r.source }), ...(r.hash !== undefined && { hash: r.hash }),
     warnings: r.warnings, consent: r.consent,
     ...(r.affected && { affected_tasks: r.affected }), ...(r.asked && { asked: r.asked }),

@@ -15,9 +15,10 @@ The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts th
 | `usage` | `[--json] [--watch]` | Who is using what, on which platform, with measured / reported / estimated labels. `--watch` refreshes every 2 s. |
 | `stop` | `<agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent: a heads-down worker or an at-the-table session. |
 | `runtimes` | `[--json]` | List installed CLI runtimes, paths and versions. See [CLI runtimes](runtimes.md). |
+| `agents` | `[--json]`, `import <absolute file\|dir>`, `starter`, or `--open [--no-hold]` | Browse and import personas or open the local drop zone. See [agents library](agents-library.md). |
 | `help` | none | Print usage. |
 
-These are the **12 named subcommands** for heads-down runs, usage and runtime detection of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches six table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
+These are the **13 named subcommands** for heads-down runs, usage, runtime detection and the agents library of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches six table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
 
 ```sh
 agent-roundtable help

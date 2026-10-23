@@ -42,6 +42,7 @@ export const USAGE = [
   "  roundtable duel <brief> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--kind web|code|diagram|text] [--criteria a,b] [--open]",
   "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2]",
   "  roundtable runtimes [--json]",
+  "  roundtable agents [--json] | agents import <absolute file|dir> | agents starter | agents --open",
   "  roundtable config set env-file|agents-dir <absolute-path> | config show",
   "  agent-roundtable help                           this text",
 ].join("\n");
@@ -252,6 +253,11 @@ export async function runCli(argv: string[]): Promise<void> {
       return usageReport(rest);
     case "stop":
       return stopAgentCommand(rest);
+    case "agents": {
+      const { runAgentsCli } = await import("./cli-agents.js");
+      process.exitCode = await runAgentsCli(rest);
+      return;
+    }
     case "runtimes": {
       if (rest.some(v => v !== "--json") || rest.length > 1) return usage("runtimes accepts only --json");
       const { runtimeRegistry } = await import("./runtimes/registry.js");

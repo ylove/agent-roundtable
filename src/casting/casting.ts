@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { agentKey, listAgents, loadAgent, readFrontmatter, type LoadedAgent } from "../agents.js";
-import { PARALLEL_TURNS, PROVIDER_IDS, ROUNDTABLE_HOME, type LLMProvider } from "../config.js";
+import { AGENTS_DIR, LIBRARY_DIR, PARALLEL_TURNS, PROVIDER_IDS, ROUNDTABLE_HOME, type LLMProvider } from "../config.js";
 import { activeUsageSink, withAbortSignal, withUsageSink } from "../providers/usage.js";
 import { isContained, mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { scrub, scrubAndCap } from "../security/secrets.js";
@@ -12,6 +12,7 @@ import { parseSeat, type Seat, type SeatSpec, type TableEvent, type TableObserve
 import { assertSeatCredentials, resolveSeats, SeatUsageError, validateSeatSpecs } from "../table/seats.js";
 import { turnTokens } from "../table/duel.js";
 import { lineFor, metered, sessionSignal } from "../usage/session-scope.js";
+import { listLibrary } from "../library/catalog.js";
 import { lintAgent } from "./lint.js";
 import { findSimilarity } from "./similarity.js";
 import { answerPrompt, auditionPrompt, DIRECTOR_SYSTEM, questionsPrompt, verdictPrompt } from "./prompts.js";
@@ -36,8 +37,10 @@ export function validateCastingOptions(opts: CastingOptions): void {
 }
 
 async function loadCast(opts: CastingOptions): Promise<LoadedAgent[]> {
-  const found = listAgents(opts.agentsDir);
-  const refs = opts.agents ?? found.map(agent => agent.key);
+  // With no explicit set, cast the agents directory plus the imported library (shadowed entries skipped).
+  const library = !opts.agents && !opts.agentsDir;
+  const found = library ? [...listAgents(AGENTS_DIR), ...listAgents(LIBRARY_DIR)] : listAgents(opts.agentsDir);
+  const refs = opts.agents ?? (library ? listLibrary().filter(agent => !agent.shadowed).map(agent => agent.key) : found.map(agent => agent.key));
   if (refs.length < 2 || refs.length > 24) throw new SeatUsageError("--agents requires 2 to 24 personas; narrow the set with --agents.");
   if (new Set(refs.map(agentKey)).size !== refs.length) throw new SeatUsageError("--agents requires distinct persona keys.");
   if (refs.some(ref => agentKey(ref) === "casting-director")) throw new SeatUsageError("--agents cannot include the reserved casting-director seat.");

@@ -258,8 +258,9 @@ export async function prepareSeats(opts: ResolveSeatsOptions, options: {
           throw new SeatUsageError(`Seat ${seat.name} (${seat.provider}): ${replacement.reason === "model not found" ? `model ${model} not available` : `preflight ${replacement.reason}`}.`);
         }
         if (explicit || result.reason === "model not found") throw new SeatUsageError(`Seat ${seat.name} (${seat.provider}): ${result.reason === "model not found" ? `model ${seat.model} not available` : `preflight ${result.reason}`}.`);
+        // Several seats can share the failed provider; say so once.
+        if (!failed.has(result.provider as LLMProvider)) options.report?.(`${result.provider}: ${result.reason}, excluded from routing`);
         failed.add(result.provider as LLMProvider);
-        options.report?.(`${result.provider}: ${result.reason}, excluded from routing`);
         reroute = true;
       }
     }

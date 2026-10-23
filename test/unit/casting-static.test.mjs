@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { lintAgent } from "../../dist/casting/lint.js";
 import { findSimilarity } from "../../dist/casting/similarity.js";
@@ -93,4 +96,19 @@ test("CLI cast --dry-run --json runs offline against casting fixtures", () => {
   assert.equal(lines.at(-2).type, "end");
   assert.equal(lines.at(-1).dryRun, true);
   assert.equal(lines.at(-1).agents.length, 4);
+});
+
+test("CLI cast with no --agents casts the agents dir plus the imported library and skips shadowed entries", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cast-lib-"));
+  const persona = (n) => `---\nname: ${n}\ndescription: ${n} persona\n---\n${n} owns a distinct area. `.concat("word ".repeat(45));
+  mkdirSync(join(dir, "agents"));
+  mkdirSync(join(dir, "home", "agents"), { recursive: true });
+  writeFileSync(join(dir, "agents", "alpha.md"), persona("alpha"));
+  writeFileSync(join(dir, "agents", "shared.md"), persona("shared"));
+  writeFileSync(join(dir, "home", "agents", "shared.md"), persona("shared").replace("word", "other"));
+  writeFileSync(join(dir, "home", "agents", "imported.md"), persona("imported"));
+  const text = execFileSync(process.execPath, ["dist/index.js", "cast", "Build a queue", "--dry-run", "--json"], { encoding: "utf8", env: { ...process.env, ROUNDTABLE_DOTENV: "off", ROUNDTABLE_HOME: join(dir, "home"), ROUNDTABLE_AGENTS_DIR: join(dir, "agents") } });
+  const report = JSON.parse(text.trim().split("\n").at(-1));
+  assert.deepEqual(report.agents.map(a => a.key).sort(), ["alpha", "imported", "shared"]);
+  rmSync(dir, { recursive: true, force: true });
 });

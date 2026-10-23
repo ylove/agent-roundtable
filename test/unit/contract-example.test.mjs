@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // Resolve names from the same personas users receive with the package.
-process.env.ROUNDTABLE_AGENTS_DIR = fileURLToPath(new URL("../../examples/", import.meta.url));
+process.env.ROUNDTABLE_AGENTS_DIR = fileURLToPath(new URL("../../examples/starter-pack/", import.meta.url));
 const { checkContract, validateContract } = await import("../../dist/execution/contract.js");
 
 test("the shipped three-task contract validates and every persona resolves", async () => {

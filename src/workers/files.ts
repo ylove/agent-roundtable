@@ -30,6 +30,7 @@ import { childEnv } from "../security/child-env.js";
 import { configuredSecretLiterals, registerSecretLiteral, SCRUB_LITERALS_ENV } from "../security/secrets.js";
 import { readUserConfig } from "../user-config.js";
 import { resolveSecrets } from "../secrets/broker.js";
+import { isExecutableFile } from "../executables.js";
 
 // ============================================================================
 // Names and locations
@@ -142,7 +143,7 @@ async function addConnectors(config: McpConfig, names: string[], home: string, e
   const specs = readUserConfig(home).connectors ?? {};
   for (const name of names) {
     const spec = Object.hasOwn(specs, name) ? specs[name] : undefined;
-    if (!spec) throw new Error(`Connector ${name} is unavailable.`);
+    if (!spec || !isExecutableFile(spec.command)) throw new Error(`Connector ${name} is unavailable.`);
     const env = childEnv("connector", await resolveSecrets(spec.env));
     config.mcpServers[name] = {
       type: "stdio", command: execPath,

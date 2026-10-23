@@ -6,6 +6,7 @@ import { PROVIDER_IDS, type LLMProvider } from "./provider-ids.js";
 
 import { validateRuntimeConfig, type RuntimeSpec } from "./runtimes/spec.js";
 import { validateConnectors, ENV_NAME, type ConnectorSpec } from "./connectors/config.js";
+import { isExecutableFile } from "./executables.js";
 import { parseSecretRef } from "./secrets/ref.js";
 import { resolveSecretSync } from "./secrets/broker.js";
 import { secretReason } from "./secrets/backends.js";
@@ -129,6 +130,7 @@ export function setSecretConfig(name: string, ref: string, home = userConfigHome
 }
 export function setConnectorConfig(name: string, spec: ConnectorSpec, home = userConfigHome()): void {
   validateConnectors({ [name]: spec });
+  if (!isExecutableFile(spec.command)) throw new Error(`Connector ${name} is unavailable.`);
   const config = readUserConfig(home);
   saveUserConfig({ ...config, connectors: { ...config.connectors, [name]: spec } }, home);
 }
@@ -151,7 +153,7 @@ export function loadUserEnvironment(options: {
   const apply = (data: Record<string, string>, filtered: boolean, override = false) => {
     // The endpoint and its key travel together, and only when the shell set neither.
     const pair = ["OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_API_KEY"];
-    const pairFree = pair.every(key => env[key] === undefined);
+    const pairFree = pair.every(key => shell[key] === undefined && (env[key] === undefined || referenced.has(key)));
     for (const [key, value] of Object.entries(data)) {
       if (filtered && referenced.has(key)) continue;
       if (filtered && pair.includes(key)) { if (pairFree && allowedEnvKey(key)) env[key] = value; continue; }

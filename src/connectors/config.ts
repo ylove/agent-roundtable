@@ -1,5 +1,4 @@
 import { isAbsolute, basename } from "node:path";
-import { isExecutableFile } from "../executables.js";
 import { SECRET_NAME_RE } from "../security/secrets.js";
 import { parseSecretRef } from "../secrets/ref.js";
 
@@ -13,7 +12,7 @@ export function validateConnectors(raw: unknown): Record<string, ConnectorSpec> 
   for (const [name, spec] of Object.entries(raw)) {
     if (!CONNECTOR_NAME.test(name) || name === "roundtable") throw new Error("Invalid connector name.");
     if (!record(spec) || Object.keys(spec).some(k => !["command", "args", "env"].includes(k))) throw new Error("Invalid connector fields.");
-    if (typeof spec.command !== "string" || !isAbsolute(spec.command) || /[\0-\x1f\x7f]/.test(spec.command) || !isExecutableFile(spec.command)
+    if (typeof spec.command !== "string" || !isAbsolute(spec.command) || /[\0-\x1f\x7f]/.test(spec.command)
       || /^(?:sh|bash|dash|ash|zsh|fish|ksh|csh|tcsh|cmd|powershell|pwsh)(?:\.exe)?$/i.test(basename(spec.command))) throw new Error("Connector command must be an absolute executable path.");
     if (!Array.isArray(spec.args) || spec.args.length > 16 || spec.args.some(v => typeof v !== "string" || Buffer.byteLength(v) > 4096 || /[\0-\x1f\x7f]/.test(v))) throw new Error("Invalid connector arguments.");
     if (!record(spec.env) || Object.keys(spec.env).length > 32) throw new Error("Invalid connector environment.");

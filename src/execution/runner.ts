@@ -689,15 +689,22 @@ export class Runner {
     }
   }
 
-  /** Retry/reassignment drops a claim durably, so a lost handoff can never orphan its worker. */
+  /** Superseded claims and connector amendments stop workers even if a handoff was lost. */
   private async stopSuperseded(): Promise<void> {
     const state = await this.store.state();
     for (const t of this.workers.values()) {
+      const registered = this.lastSeq((e) => e.type === "agent.registered" && e.payload.agent === t.agent);
+      let connectorsChanged = false;
+      for (const e of this.log) {
+        if (e.type !== "contract.amended" || e.seq <= registered || !e.payload.affected_tasks.includes(t.task)) continue;
+        const patch = JSON.parse((await this.store.getBlob(e.payload.patch_blob)).toString("utf8"));
+        if (Object.hasOwn(patch, "connectors")) { connectorsChanged = true; break; }
+      }
       // An accepted task drops its claim; retireMerged stops its worker after the merge grace.
-      if (own(state.tasks, t.task)?.state === "accepted") continue;
+      if (own(state.tasks, t.task)?.state === "accepted" && !connectorsChanged) continue;
       const claim = own(state.claims, t.task);
-      if (!t.exit && (!claim || claim.agent !== t.agent || claim.attempt > t.attempt)) {
-        await this.killWorker(t.agent, "killed", "its task claim or attempt was superseded");
+      if (!t.exit && (connectorsChanged || !claim || claim.agent !== t.agent || claim.attempt > t.attempt)) {
+        await this.killWorker(t.agent, "killed", connectorsChanged ? "its connectors were amended" : "its task claim or attempt was superseded");
       }
     }
   }

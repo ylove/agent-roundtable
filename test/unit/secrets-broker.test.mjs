@@ -118,6 +118,25 @@ test('startup precedence, unavailable references, off switch and invalid entries
   assert.ok(invalid.every(m => !m.includes('a-private-ref')));
 });
 
+test('broker-resolved compatible key pairs with an env-file endpoint while shell halves block the pair', t => {
+  const home = fixture(t), envFile = join(home, 'compatible.env');
+  restore(t, SCRUB_LITERALS_ENV);
+  writeFileSync(envFile, 'OPENAI_COMPATIBLE_BASE_URL=https://fixture.invalid/v1\nOPENAI_COMPATIBLE_API_KEY=file-fallback\n', { mode: 0o600 });
+  writeFileSync(join(home, 'config.json'), JSON.stringify({ envFile, secrets: { OPENAI_COMPATIBLE_API_KEY: 'secret://env/COMPATIBLE_BROKER_LOGIN' } }), { mode: 0o600 });
+  const env = { COMPATIBLE_BROKER_LOGIN: 'compatible-broker-fixture' };
+  loadUserEnvironment({ home, env });
+  assert.equal(env.OPENAI_COMPATIBLE_BASE_URL, 'https://fixture.invalid/v1');
+  assert.ok(env.OPENAI_COMPATIBLE_API_KEY === 'compatible-broker-fixture');
+  const shellKey = { OPENAI_COMPATIBLE_API_KEY: 'shell-fixture' };
+  loadUserEnvironment({ home, env: shellKey });
+  assert.equal(shellKey.OPENAI_COMPATIBLE_BASE_URL, undefined);
+  assert.ok(shellKey.OPENAI_COMPATIBLE_API_KEY === 'shell-fixture');
+  const shellUrl = { OPENAI_COMPATIBLE_BASE_URL: 'https://shell.invalid/v1', ROUNDTABLE_SECRETS: 'off' };
+  loadUserEnvironment({ home, env: shellUrl });
+  assert.equal(shellUrl.OPENAI_COMPATIBLE_BASE_URL, 'https://shell.invalid/v1');
+  assert.equal(shellUrl.OPENAI_COMPATIBLE_API_KEY, undefined);
+});
+
 test('config secret set/unset/show and secrets check never print a value or locator', async t => {
   const home = fixture(t);
   restore(t, 'ROUNDTABLE_HOME', home);

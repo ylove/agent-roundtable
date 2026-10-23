@@ -9,7 +9,7 @@ import { setConnectorConfig, setSecretConfig, readUserConfig, unsetConfigEntry }
 import { runTableCli } from '../../dist/cli-table.js';
 import { validateContract, checkContract, consentHash, renderContractMarkdown } from '../../dist/execution/contract.js';
 import { contractMarkdown } from '../../dist/dashboard/render.js';
-import { proposeContract, freezeContract, RUN_WIDE_FIELDS } from '../../dist/execution/contract-lifecycle.js';
+import { proposeContract, freezeContract, amendContract, RUN_WIDE_FIELDS } from '../../dist/execution/contract-lifecycle.js';
 import { openContractStore } from '../../dist/execution/contract-state.js';
 import { execute } from '../../dist/execution/orchestrator.js';
 import { buildMcpConfig, prepareWorkerFiles, registerWorkerSecrets, removeWorkerMcpConfig } from '../../dist/workers/files.js';
@@ -19,6 +19,9 @@ import { spawnWorker, workerExit } from '../../dist/workers/process.js';
 import { SCRUB_LITERALS_ENV, scrub, scrubArtifact } from '../../dist/security/secrets.js';
 import { makeRun, runner } from '../fixtures/workers/run.mjs';
 import { makeRepo } from '../fixtures/execution/git-fixture.mjs';
+import { Runner } from '../../dist/execution/runner.js';
+import { goodInit, sandbox, scriptedDriver } from '../fixtures/runner/driver.mjs';
+import { installProcessIdentity } from '../fixtures/execution/process-identity.mjs';
 
 function restore(t, key, value) {
   const old = process.env[key];
@@ -39,12 +42,13 @@ test('connector config validates executable paths, names, argument/env limits an
   assert.deepEqual(validateConnectors(good), good);
   for (const invalid of [
     { roundtable: spec() }, { 'Bad-name': spec() }, { 'a_b': spec() },
-    { issues: spec({ command: 'node' }) }, { issues: spec({ command: blocked }) }, { issues: spec({ command: '/bin/sh' }) },
+    { issues: spec({ command: 'node' }) }, { issues: spec({ command: '/bin/sh' }) },
     { issues: spec({ args: Array(17).fill('a') }) }, { issues: spec({ args: ['é'.repeat(2049)] }) },
     { issues: spec({ args: ['bad\0arg'] }) }, { issues: spec({ env: Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`V${i}`, 'x'])) }) },
     { issues: spec({ env: { ISSUE_TOKEN: 'plaintext-private' } }) }, { issues: spec({ env: { 'BAD-NAME': 'x' } }) },
     { issues: spec({ env: { ISSUE_TOKEN: 'secret://env/lower' } }) }, { issues: { ...spec(), shell: true } },
   ]) assert.throws(() => validateConnectors(invalid), e => !e.message.includes('plaintext-private'));
+  assert.throws(() => setConnectorConfig('issues', spec({ command: blocked }), dir), { message: 'Connector issues is unavailable.' });
 });
 
 test('connector CLI set/show/unset keeps commands, arguments and env values out of output', async t => {
@@ -62,6 +66,32 @@ test('connector CLI set/show/unset keeps commands, arguments and env values out 
   unsetConfigEntry('secrets', 'ISSUE_TOKEN', home);
   assert.equal(await runTableCli('config', ['unset', 'connector', 'issues'], io), 0);
   assert.deepEqual(readUserConfig(home).connectors, {});
+});
+
+test('missing connector binaries still allow config reads and unset without losing other connectors or secrets', async t => {
+  const home = process.env.ROUNDTABLE_HOME, dir = fixture(t), command = join(dir, 'moved-binary');
+  writeFileSync(command, '', { mode: 0o700 });
+  setConnectorConfig('issues', spec({ command, args: ['private-argument'] }), home);
+  setConnectorConfig('healthy', spec(), home);
+  setSecretConfig('OPENAI_API_KEY', 'secret://env/MISSING_BINARY_PROVIDER_LOGIN', home);
+  rmSync(command);
+  const before = readUserConfig(home);
+  assert.equal(before.connectors.issues.command, command);
+  assert.deepEqual(before.connectors.healthy, spec());
+  assert.throws(() => setConnectorConfig('missing', spec({ command }), home), { message: 'Connector missing is unavailable.' });
+  await assert.rejects(buildMcpConfig({ execPath: process.execPath, cli: join(dir, 'cli.js'), tokenFile: join(dir, 'token'), home, execution: 'exe-test', agent: 'builder', connectors: ['issues'] }), { message: 'Connector issues is unavailable.' });
+  const healthy = await buildMcpConfig({ execPath: process.execPath, cli: join(dir, 'cli.js'), tokenFile: join(dir, 'token'), home, execution: 'exe-test', agent: 'builder', connectors: ['healthy'] });
+  assert.deepEqual(Object.keys(healthy.mcpServers), ['roundtable', 'healthy']);
+  let output = '';
+  const io = { output: { write(s) { output += s; } }, error: { write(s) { output += s; } } };
+  assert.equal(await runTableCli('config', ['unset', 'connector', 'issues'], io), 0);
+  assert.ok(!output.includes(command) && !output.includes('private-argument'));
+  const after = readUserConfig(home);
+  assert.equal(after.connectors.issues, undefined);
+  assert.deepEqual(after.connectors.healthy, before.connectors.healthy);
+  assert.deepEqual(after.secrets, before.secrets);
+  unsetConfigEntry('connectors', 'healthy', home);
+  unsetConfigEntry('secrets', 'OPENAI_API_KEY', home);
 });
 
 test('contract connector names are consent-bound, validated on propose/freeze, and checked before execute', async t => {
@@ -91,8 +121,56 @@ test('contract connector names are consent-bound, validated on propose/freeze, a
   setConnectorConfig('issues', spec(), home);
   const frozen = await freezeContract(proposed.contractId, { orchestrator: 'main', excuse: [{ agent: persona, reason: 'fixture participant' }] });
   assert.deepEqual(frozen.contract.connectors, ['issues']);
+  const config = readUserConfig(home);
+  config.connectors.issues.command = join(fixture(t), 'missing-binary');
+  writeFileSync(join(home, 'config.json'), JSON.stringify(config), { mode: 0o600 });
+  await assert.rejects(execute({ contract_id: proposed.contractId, confirmation: 'go' }), { message: 'Connector issues is unavailable.' });
   unsetConfigEntry('connectors', 'issues', home);
   await assert.rejects(execute({ contract_id: proposed.contractId, confirmation: 'go' }), { message: 'Connector issues is unavailable.' });
+});
+
+test('amending away a connector affects running tasks and supersedes their workers and MCP files', async t => {
+  const oldPath = process.env.PATH;
+  installProcessIdentity();
+  const home = process.env.ROUNDTABLE_HOME;
+  setConnectorConfig('issues', spec(), home);
+  const repo = makeRepo();
+  const persona = new URL('../fixtures/ultraplan/cfo.md', import.meta.url).pathname;
+  const proposed = await proposeContract({
+    goal: 'Build an issue view', originalPrompt: 'Build it', orchestrator: 'main', repoDir: repo.root, consent: false,
+    contract: { tasks: ['api', 'ui', 'later'].map(id => ({ id, title: id, persona, paths: { write: [`src/${id}/**`] }, acceptance: ['Works'] })), connectors: ['issues'], budget: { usd: 10, per_task_usd: 3, wall_clock_min: 10, max_parallel: 2 } },
+  });
+  const frozen = await freezeContract(proposed.contractId, { orchestrator: 'main', excuse: [{ agent: persona, reason: 'fixture participant' }] });
+  const store = await openContractStore(proposed.contractId);
+  await store.transact(() => ({ events: [{ type: 'execution.started', source: runner, payload: { confirmation: 'go', visibility: { dashboard: false, chat_only: true }, budget: frozen.contract.budget, lead: persona, sandbox: 'local', drivers: ['claude-code'] } }] }));
+  const driver = scriptedDriver(t, l => ({ init: { ...goodInit, mcp_servers: Object.keys(JSON.parse(readFileSync(l.mcpConfigPath, 'utf8')).mcpServers).map(name => ({ name, status: 'connected' })) } }));
+  const r = new Runner(store.id, { drivers: { 'claude-code': driver }, sandbox: sandbox(), tickMs: 10 });
+  await r.start();
+  t.after(async () => { r.stop('test cleanup'); await r.run(); process.env.PATH = oldPath; rmSync(repo.root, { recursive: true, force: true }); });
+  await r.tick();
+  assert.equal(driver.calls.length, 2);
+  const old = [...driver.calls];
+  const paths = old.map(h => h.mcpConfigPath);
+  assert.ok(paths.every(path => existsSync(path)));
+  await store.transact(() => ({ events: [{ type: 'execution.paused', source: runner, payload: { scope: 'all', reason: 'Inspect revocation' } }] }));
+  const amended = await amendContract(store, { connectors: [] }, { by: 'main', reason: 'Revoke issues access', overrideConsent: true });
+  assert.deepEqual(amended.affected.all, ['api', 'ui']);
+  const event = (await store.events()).find(e => e.type === 'contract.amended');
+  assert.deepEqual(event.payload.affected_tasks, ['api', 'ui']);
+  await r.tick();
+  assert.ok(paths.every(path => !existsSync(path)));
+  const exits = (await store.events()).filter(e => e.type === 'agent.exited');
+  assert.ok(old.every(h => exits.some(e => e.payload.agent === h.agent && e.payload.reason === 'killed')));
+  await store.transact(() => ({ events: [{ type: 'execution.resumed', source: runner, payload: { scope: 'all', reason: 'Continue' } }] }));
+  for (let i = 0; i < 100 && driver.calls.length < 4; i++) {
+    await r.tick();
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(driver.calls.length, 4);
+  for (const h of driver.calls.slice(2)) {
+    const config = JSON.parse(readFileSync(h.mcpConfigPath, 'utf8'));
+    assert.deepEqual(Object.keys(config.mcpServers), ['roundtable']);
+  }
 });
 
 test('prepared connectors resolve at spawn, use private files, filter inherited env and redact relay/tool events', async t => {

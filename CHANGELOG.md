@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Hardening follow-ups (#204, WS29b).** Guarded requests connect to approved addresses while retaining hostname TLS verification. Automated host git calls disable configured filters and diff programs and replace named merge drivers with a fixed Git text merge. Shell variables, including empty values, take precedence over the package `.env`. Completion tools refuse token limits outside 1–32768 or non-integers, and temperatures outside 0–2. Session tests pin persona and grounding containment and bounded reads.
+
 ## 2.0.0 (unreleased)
 
 Work on `release/2.0.0` so far. `package.json` and `VERSION` stay at 1.0.0 until the 2.0 version bump.

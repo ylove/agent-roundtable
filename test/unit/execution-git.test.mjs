@@ -259,3 +259,52 @@ test("runGit caps output and times out", async () => {
   // Hashing 64 MiB from stdin takes far longer than 10 ms, on any machine.
   await assert.rejects(G.runGit(repo, ["hash-object", "--stdin"], { timeoutMs: 10, input: "x".repeat(64 * 1024 * 1024) }), /timed out after 10 ms/);
 });
+
+test("configured filters, diff drivers and merge drivers are replaced on every invocation", async (t) => {
+  const ex = makeRepo({ "f.txt": "one\ntwo\nthree\n" });
+  t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+  const marker = join(ex.root, "driver.ran");
+  const script = join(ex.root, "driver.sh");
+  executable(script, `#!/bin/sh\necho ran >> "${marker}"\ncat\n`);
+  write(ex.root, ".gitattributes", "*.txt filter=fixture diff=fixture merge=fixture\n");
+  // Include files and worktree config are read alongside the repository config.
+  const included = write(ex.root, "drivers.config", `[filter "fixture"]\nclean = ${script}\nsmudge = ${script}\nrequired = true\n[diff "fixture"]\ntextconv = ${script}\ncommand = ${script}\n`);
+  git(ex.root, "config", "include.path", included);
+  git(ex.root, "config", "extensions.worktreeConfig", "true");
+  git(ex.root, "config", "--worktree", "merge.fixture.driver", script);
+  const repo = await G.openRepo(ex.root);
+  await G.runGit(repo, ["add", ".gitattributes"]);
+  await G.runGit(repo, ["commit", "-qm", "attributes"]);
+  await G.runGit(repo, ["checkout", "-qb", "other"]);
+  write(ex.root, "f.txt", "ONE\ntwo\nthree\n");
+  await G.runGit(repo, ["status", "--porcelain"]);
+  assert.match((await G.runGit(repo, ["diff", "HEAD"])).stdout, /^\+ONE$/m);
+  await G.runGit(repo, ["add", "f.txt"]);
+  await G.runGit(repo, ["commit", "-qm", "other"]);
+  await G.runGit(repo, ["checkout", "-q", "main"]);
+  write(ex.root, "f.txt", "one\ntwo\nTHREE\n");
+  await G.runGit(repo, ["add", "f.txt"]);
+  await G.runGit(repo, ["commit", "-qm", "main"]);
+  await G.runGit(repo, ["merge", "--no-edit", "other"]);
+  assert.equal((await import("node:fs")).readFileSync(join(ex.root, "f.txt"), "utf8"), "ONE\ntwo\nTHREE\n");
+  assert.equal(existsSync(marker), false);
+  // A process filter added after the first call is discovered too.
+  git(ex.root, "config", "filter.fixture.process", script);
+  write(ex.root, "f.txt", "ONE\nTWO\nTHREE\n");
+  await G.runGit(repo, ["status", "--porcelain"]);
+  await G.runGit(repo, ["add", "f.txt"]);
+  await G.runGit(repo, ["commit", "-qm", "process filter configured"]);
+  assert.equal(existsSync(marker), false);
+});
+
+test("a repository without drivers keeps normal status, add, diff and commit behavior", async (t) => {
+  const ex = makeRepo({ "f.txt": "before\n" });
+  t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+  const repo = await G.openRepo(ex.root);
+  assert.equal((await G.runGit(repo, ["status", "--porcelain"])).stdout, "");
+  write(ex.root, "f.txt", "after\n");
+  assert.match((await G.runGit(repo, ["diff"])).stdout, /^\+after$/m);
+  await G.runGit(repo, ["add", "f.txt"]);
+  await G.runGit(repo, ["commit", "-qm", "ordinary change"]);
+  assert.equal((await G.runGit(repo, ["status", "--porcelain"])).stdout, "");
+});

@@ -24,10 +24,11 @@
 //    gitlink is refused outright (assertNoGitlinks*): submodules are not supported in heads-down
 //    runs in 1.0. Untracked nested repositories are listed, never entered, and never staged.
 // No protocol is allowed, not even file: worktree, merge and commit operations never use a
-// transport. Filter and merge drivers that the user's own config defines (git-lfs, typically)
-// still run when .gitattributes names them; changing .gitattributes needs an explicit lease.
+// transport. Configured filters and diff drivers are disabled; named merge drivers use git's
+// own merge-file command with fixed arguments instead of the configured command.
 // ============================================================================
 
+import { findExecutable } from "../executables.js";
 import { spawn } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -338,8 +339,40 @@ interface SpawnOpts extends GitOptions {
   env?: Record<string, string>;
 }
 
+// Config inspection reads all scopes, including includeIf and worktree config, on every call.
+async function driverOverrides(cwd: string, pre: string[]): Promise<string[]> {
+  const configured = await spawnGitRaw(cwd, ["config", "--null", "--name-only", "--get-regexp",
+    "^(filter\\..*|merge\\..*\\.driver|diff\\..*)$"], { allowExit: [1] }, pre);
+  const settings = new Set<string>();
+  for (const key of splitZ(configured.stdout)) {
+    const filter = /^filter\.(.+)\.[^.]+$/i.exec(key);
+    const merge = /^merge\.(.+)\.driver$/i.exec(key);
+    const diff = /^diff\.(.+)\.[^.]+$/i.exec(key);
+    if (filter) {
+      for (const field of ["clean", "smudge", "process"]) settings.add(`filter.${filter[1]}.${field}=`);
+      settings.add(`filter.${filter[1]}.required=false`);
+    }
+    if (merge) {
+      const git = findExecutable("git");
+      if (!git) throw new GitSafetyError("git executable not found");
+      const quoted = "'" + git.replace(/'/g, "'\\''") + "'";
+      settings.add(`merge.${merge[1]}.driver=${quoted} -c core.hooksPath=/dev/null -c core.fsmonitor=false merge-file -- %A %O %B`);
+    }
+    if (diff) {
+      settings.add(`diff.${diff[1]}.textconv=`);
+      settings.add(`diff.${diff[1]}.command=`);
+    }
+  }
+  return [...settings].flatMap(setting => ["-c", setting]);
+}
+
+async function spawnGit(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] = []): Promise<GitResult> {
+  const overrides = await driverOverrides(cwd, pre);
+  return spawnGitRaw(cwd, args, o, [...pre, ...overrides]);
+}
+
 /** Spawn git with the hardening options; cwd is the work tree. Throws GitError on failure. */
-function spawnGit(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] = []): Promise<GitResult> {
+function spawnGitRaw(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] = []): Promise<GitResult> {
   const sub = args[0];
   const argv = [
     ...pre,

@@ -77,7 +77,18 @@ test("import rejects malformed JSON and too many files, and returns per-file ref
   assert.equal((await post(JSON.stringify({ files: "not an array" }))).status, 400);
   const mixed = await post(JSON.stringify({ files: [null, { filename: "../escape.md", content: "a" }, { filename: "huge.md", content: "x".repeat(131073) }] }));
   assert.deepEqual((await mixed.json()).results.map(result => result.status), ["refused", "refused", "refused"]);
-  assert.equal((await post("x".repeat(MAX_BODY_BYTES + 1))).status, 413);
+  // Declare an oversized body but send none: the server answers from the header, before any upload
+  // bytes can race its Connection: close into a reset on the client's write.
+  const status = await new Promise((resolve, reject) => {
+    let answered = false;
+    const req = request(server.url + "import", { method: "POST", headers: { ...headers, "Content-Length": String(MAX_BODY_BYTES + 1) } }, res => {
+      answered = true;
+      res.resume(); res.on("end", () => { req.destroy(); resolve(res.statusCode); });
+    });
+    req.on("error", error => { if (!answered) reject(error); });
+    req.flushHeaders();
+  });
+  assert.equal(status, 413);
 });
 
 test("the body cap also applies to chunked requests", async t => {

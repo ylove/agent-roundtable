@@ -42,7 +42,7 @@ const smokeEnv = {
   ROUNDTABLE_PROVIDER_RETRIES: "0",
   // Prototype sandboxes stay under the temp root; never spawn a browser or headless Chrome.
   ROUNDTABLE_PROTOTYPE_DIR: join(root, "prototypes"),
-  ROUNDTABLE_PROTOTYPE_SCREENSHOTS: "0",
+  ROUNDTABLE_PROTOTYPE_SCREENSHOTS: "0", ROUNDTABLE_PAGE_CHECKS: "0",
   ROUNDTABLE_PROTOTYPE_OPEN: "",
 };
 const PROTOTYPE_START_TOOLS = ["start_meeting", "start_local_meeting", "start_collaboration"];

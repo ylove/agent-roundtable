@@ -415,11 +415,18 @@ function lfsStub(t, bin) {
   bin ??= join(dir, "bin");
   const marker = join(dir, "lfs.ran");
   executable(join(bin, "git-lfs"), `#!/bin/sh\nprintf '%s\\n' "$1" >> "${marker}"\ncat\n`);
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+  // Hosts with git-lfs installed add a global filter.lfs.process, which the stub does not speak:
+  // read neither global nor system git configuration while the stub is on PATH.
+  const previous = { PATH: process.env.PATH, HOME: process.env.HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL };
+  process.env.PATH = `${bin}${delimiter}${previous.PATH ?? ""}`;
+  process.env.HOME = dir;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+  delete process.env.GIT_CONFIG_GLOBAL;
   t.after(() => {
-    if (previousPath === undefined) delete process.env.PATH;
-    else process.env.PATH = previousPath;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
   return { bin, marker };
 }

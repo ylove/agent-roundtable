@@ -129,4 +129,4 @@ Build and run `npm test` before a pull request. See [contributing](docs/contribu
 
 ## License
 
-[Apache License 2.0](LICENSE); see also [NOTICE](NOTICE). Releases before 2.0.0 were published under the MIT License and remain available under it.
+[Apache License 2.0](LICENSE); see also [NOTICE](NOTICE).

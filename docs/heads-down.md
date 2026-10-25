@@ -80,7 +80,7 @@ Without an execution id it lists runs. Views are `summary`, `tasks`, `escalation
 
 ## Work, leases and checks
 
-The runner schedules ready tasks up to `budget.max_parallel` (default 3). Each task owns a branch and worktree. Workers claim tasks, request leases on write paths, post progress and publish interfaces through the seven [worker tools](tools.md#workers-both-servers). Conflicting path requests queue FIFO. A task waiting on an interface unblocks when its owner publishes it and other blockers clear.
+The runner schedules ready tasks up to `budget.max_parallel` (default 3). Each task owns a branch and worktree. Workers claim tasks, request leases on write paths, post progress and publish interfaces through the [worker tools](tools.md#workers-both-servers). Conflicting path requests queue FIFO. A task waiting on an interface unblocks when its owner publishes it and other blockers clear.
 
 Claude workers have restricted file tools, no Bash and a PreToolUse lease hook. Commands go through sandboxed `run_command`. `submit_work(ready: false)` checkpoints; `ready: true` commits leased changes and runs checks in a separate checkout of that exact commit. The runner merges the checked commit serially into the integration branch, runs integration checks, and either accepts it or returns conflict/check context to the worker. Changes outside leases are refused. Submodules and escaping symlink chains are unsupported. Final validation and a lead goal review run before completion.
 
@@ -89,6 +89,26 @@ Optional [worker connectors](connectors.md) add locally configured stdio MCP ser
 External workers register with `join_execution` and receive an `agent_token` once. The orchestrator server's worker tools require it and `execution_id` on every call; their claims expire after 15 minutes without a tool call. External workers are trusted like the host chat and are unsandboxed. Every worker response also delivers inbox directives and decisions; directives need acknowledgement.
 
 Tasks may add `verify: [{"page_loads": {"path": "index.html"}}]` alongside command `checks`. `page_loads` serves that committed file from the task's private check checkout on a loopback capability server and checks that it loads without exceptions. Paths are repository-relative files; traversal and symlinks are refused. Only the named file is served, so this predicate is intended for self-contained static pages; development servers are outside its scope. The existing application CSP and deny-all proxy isolate agent code. A missing browser skips the predicate with a recorded `note.posted` entry; exceptions, timeouts and load failures reject the submission. Web duel drafts and plans from shortlisted web prototypes add this acceptance check automatically. Refine the entry path before consent.
+
+## Swarms
+
+Swarms require consent to a frozen contract with `budget.max_agents >= 2`. Without it workers cannot delegate. `max_parallel` still caps top-level workers; `max_agents` caps every live worker, including parents and children (1–32). `max_subtasks` caps the total children created over the run, including failed and cancelled children (default 16, maximum 64).
+
+A worker calls `spawn_subtasks({subtasks: [{id, title, instructions, paths, depends_on?}]})` with 1–8 children. Each slug becomes `<parent>.<id>`. Instructions are at most 4000 characters. Dependencies name other siblings in that call, without cycles. Children inherit the parent's persona and checks and run through the usual claims, checks and merge queue. Subtasks cannot spawn more subtasks, and a parent may have only one open batch.
+
+Paths must be inside the parent's current leases and cannot overlap siblings. The parent hands those paths to its children for their lifetime: its write hook and submission checks exclude them, while its remaining paths stay writable. The reservation also protects children waiting for a worker slot. Paths return after children finish. A parent cannot submit while children are open, or before merged child work has been brought back into its worktree.
+
+Call `await_subtasks({timeout_s: 30})` for status, scrubbed final notes, changed files and merge status. It waits at most 120 seconds; `still_running: true` means call again. Once children merge, the runner snapshots the parent's leased work and merges integration into the parent's worktree with host git. `ready: true` means every child merged and fan-in finished. Conflicts use the existing conflict escalation path; resolve the parent worktree and await again.
+
+A failed or cancelled child is returned to the parent, which can spawn a replacement with a new id if the limits allow, or escalate. Cancelling or failing the parent cancels its open children. Events and blackboard state retain every child and its result across runner restarts. `execution_status`, the DAG and task pages show the tree. Worker `Task` and `Agent` tools remain disallowed: all delegation goes through the runner.
+
+Child spend counts toward the execution and the child's own task cap, without charging the parent's task cap. Spawning reserves no money. It refuses if the parent has no budget left or the remaining execution budget, after outstanding worker allocations, is less than one worker's per-task budget. Worker launches still obey the existing budget gate.
+
+| Contract budget field | Meaning |
+|---|---|
+| `max_parallel` | Top-level workers at once, default 3 (1–16). |
+| `max_agents` | Optional total live workers (1–32); at least 2 enables swarms. |
+| `max_subtasks` | Total subtasks ever spawned, default 16 (1–64). |
 
 ## Escalations and huddles
 

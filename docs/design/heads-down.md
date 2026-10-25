@@ -127,7 +127,7 @@ export interface EventEnvelope<T extends EventType = EventType> {
 ```
 
 - Free-text payload fields pass through `scrub` (`src/security/secrets.ts`) before hashing. Identifiers, refs and paths are stored as given.
-- Payloads whose canonical JSON exceeds 8 KB are refused. The caller stores the large content with `putBlob` and puts the `sha256:<hex>` ref in the payload.
+- Payloads whose canonical JSON exceeds 8 KB are refused. `task.spawned` allows 256 KB for up to eight child specs and their instructions. Other large content goes through `putBlob` with its `sha256:<hex>` ref in the payload.
 - Each type has a small validator in `src/execution/events.ts`. Unknown types, unknown fields and wrongly typed fields are rejected.
 - `canonicalJSON` sorts keys recursively and has no whitespace. It rejects values that do not survive a JSON round trip, such as non-finite numbers.
 
@@ -173,6 +173,9 @@ export interface EventEnvelope<T extends EventType = EventType> {
 | `task.retried` | task, attempt, why |
 | `task.reassigned` | task, from, to |
 | `task.split` | task, into |
+| `task.spawned` | task, by, into (runtime children with parent and instructions) |
+| `task.subtasks_awaited` | task (request durable runner fan-in) |
+| `task.subtasks_joined` | task, children, commit (integration brought into the parent worktree) |
 | `task.failed` | task, why |
 | `task.cancelled` | task, why |
 | `lease.granted` | lease |
@@ -251,6 +254,7 @@ The human's chat is never stored on the blackboard.
 - `blocked_by.needs` lists a task's open interface and artifact needs: `dependency.requested` adds one and `dependency.satisfied` removes it (task needs are `deps`). `task.blocked` on a task that is already blocked keeps its other reasons: a new escalation replaces the old one, deps are added, and open needs are always kept. `task.unblocked` clears them all.
 - A task check that carries `submitted_seq` counts only while that is the task's latest `task.submitted`; a stale one changes nothing. A `task.checks_passed` that carries `submitted_seq` is refused unless it names the latest submission and commit and the task is still `submitted` or `checking`.
 - Task events are checked against the task's state. On the write path, which uses strict mode, an event that names an unknown task, or that would move a task out of `accepted`, `failed` or `cancelled`, is refused before append. The exceptions are a retry or cancel of a failed task, and a merge or accept of an accepted one, which does nothing. Replay ignores such events, so an old log never breaks.
+- `task.spawned` keeps the parent live, adds depth-one children with inherited checks, and records the latest batch in its runtime `subtasks`. Effective parent leases exclude open children's paths. `task.subtasks_awaited` requests fan-in; `task.subtasks_joined` records its commit. Parent failure or cancellation cancels open children on replay. See [Swarms](../heads-down.md#swarms).
 - `task.split` records `splits[task] = parts`. Whenever a contract version is adopted, dependencies on a split task are rewritten to its parts, recursively.
 - Task and command ids match `^[a-z0-9][a-z0-9._-]{0,63}$` in payloads and contracts, so the `/` in a check key is unambiguous.
 - `contract.amended` marks the contract `frozen` and keeps the earlier freeze record unless the blob carries one.
@@ -272,7 +276,7 @@ export interface Contract {
   interfaces: InterfaceSpec[];
   decisions: Decision[];
   validation: { commands: CommandSpec[]; final: string[] };
-  budget: { usd: number; per_task_usd: number; per_agent_usd?: number; wall_clock_min: number; max_parallel: number; max_attempts: number };
+  budget: { usd: number; per_task_usd: number; per_agent_usd?: number; wall_clock_min: number; max_parallel: number; max_agents?: number; max_subtasks?: number; max_attempts: number };
   authority: { lead: string; may: Array<"retry" | "reassign" | "split_task" | "add_task" | "amend_interfaces" | "extend_budget" | "resolve_merge">; budget_extension_pct: number };
   sandbox: { backend: "docker" | "local"; image: string; install?: { argv: string[]; egress: string[] } };
   workers: { driver: "claude-code" | "codex"; model?: string; fallback_model?: string };
@@ -280,7 +284,7 @@ export interface Contract {
   frozen?: { by: string; at: string; hash: string };
 }
 export interface TaskSpec {
-  id: string; title: string; team?: string; persona: string; kind: "build" | "subcontract" | "review";
+  id: string; parent?: string; instructions?: string; title: string; team?: string; persona: string; kind: "build" | "subcontract" | "review";
   depends_on: string[]; paths: { write: string[]; read?: string[] };
   acceptance: string[]; checks: string[]; verify?: { page_loads: { path: string } }[]; effort?: "low" | "medium" | "high"; budget_usd?: number; context?: ArtifactRef[];
 }
@@ -306,7 +310,9 @@ export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout
 - A wildcard egress host needs two labels after `*.` (no `*.com`). Glob lists (`paths.write`, `paths.read`, `scope.paths`) hold at most 64 entries.
 
 **Defaults:**
-- `budget.max_parallel`: 3
+- `budget.max_parallel`: 3 (top-level workers)
+- `budget.max_agents`: optional, 1–32 total live workers; a frozen value >=2 enables swarms
+- `budget.max_subtasks`: optional, default 16, 1–64 total children including failures and cancellations
 - `budget.max_attempts`: 3
 - `authority.budget_extension_pct`: 0
 - `authority.may`: `["retry", "reassign", "resolve_merge"]`

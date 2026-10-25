@@ -43,7 +43,7 @@ import {
   type DriverOutcome,
 } from "./circuit.js";
 import { deadlockRules, type DependencyNeed } from "./deadlock.js";
-import { globsOverlap as leaseGlobsOverlap, matchGlob, staticPrefix as leaseStaticPrefix } from "./leases.js";
+import { globsOverlap as leaseGlobsOverlap, leasesConflict as taskLeasesConflict, matchGlob, staticPrefix as leaseStaticPrefix } from "./leases.js";
 import {
   TERMINAL_TASK_STATES,
   draft,
@@ -348,7 +348,7 @@ function leaseRules(state: BlackboardState, now: number, obs: Observations): Wat
     out.push(emitAction("lease_orphan", key, id, [draft("lease.expired", { lease_id: id }, key)]));
   }
 
-  const held: Array<Pick<Lease, "task" | "paths" | "mode">> = sortedKeys(state.leases)
+  const held: Array<Pick<Lease, "agent" | "task" | "paths" | "mode">> = sortedKeys(state.leases)
     .filter((id) => !ending.has(id))
     .map((id) => state.leases[id]);
   const waiting: LeaseRequest[] = [];
@@ -366,10 +366,10 @@ function leaseRules(state: BlackboardState, now: number, obs: Observations): Wat
     const blocked =
       req.blocking.some((id) => {
         const l = own(state.leases, id);
-        return l !== undefined && l.task !== req.task && !ending.has(id);
+        return l !== undefined && l.task !== req.task && !ending.has(id) && state.tasks[req.task]?.spec.parent !== l.task && state.tasks[l.task]?.spec.parent !== req.task;
       }) ||
-      held.some((l) => l.task !== req.task && leasesConflict(l, req)) ||
-      waiting.some((w) => w.task !== req.task && leasesConflict(w, req));
+      held.some((l) => l.task !== req.task && taskLeasesConflict(l, req, state)) ||
+      waiting.some((w) => w.task !== req.task && taskLeasesConflict(w, req, state));
     if (blocked) {
       waiting.push(req);
       continue;
@@ -453,6 +453,7 @@ function deadWorker(
   const transient = !lost && infra?.lastAttempt === attempt;
   const used = attempt - infraCount;
   const fail = (why: string): WatchdogAction[] => {
+    if (state.tasks[task]?.spec.parent) return [emitAction("worker_dead", key, task, [...before, draft("task.failed", { task, why }, key)])];
     const esc = escalationAction(state, "worker_dead", {
       key,
       task,

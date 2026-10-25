@@ -253,6 +253,7 @@ export function renderOverview(c: PageContext): string {
     `<progress max="100" value="${done.percent}">${done.percent}%</progress><p class="meta">${done.total} task${done.total === 1 ? "" : "s"} ${counts}</p></div>` +
     `<div class="card"><h3>Budget</h3><div class="big">${money(budget.spent)}</div><p class="meta">` +
     (budget.limit !== undefined ? `of ${money(budget.limit)}${budget.pct !== undefined ? ` (${budget.pct}%)` : ""}` : "no budget recorded") +
+    (s.contract ? ` · max agents ${t(s.contract.budget.max_agents ?? "unset (swarms disabled)")} · max subtasks ${t(s.contract.budget.max_subtasks ?? 16)}` : "") +
     (budget.estimated ? " · partly estimated" : "") +
     (s.budget.thresholds_crossed.length ? ` · crossed ${s.budget.thresholds_crossed.map((p) => `${p}%`).join(", ")}` : "") +
     `</p></div>` +
@@ -370,6 +371,8 @@ export function renderTaskDetail(c: PageContext, id: string, d: TaskDetail): str
     `<dt>Attempt</dt><dd>${rt.attempt}</dd><dt>Progress</dt><dd>${progressCell(rt)}</dd>` +
     `<dt>Persona</dt><dd>${t(spec.persona)}</dd><dt>Team</dt><dd>${spec.team ? t(spec.team) : "none"}</dd>` +
     `<dt>Kind</dt><dd>${t(spec.kind)}</dd><dt>Depends on</dt><dd>${spec.depends_on.length ? spec.depends_on.map((x) => taskLink(c.base, x)).join(", ") : "nothing"}</dd>` +
+    (spec.parent ? `<dt>Parent</dt><dd>${taskLink(c.base, spec.parent)}</dd>` : "") +
+    `<dt>Children</dt><dd>${Object.values(c.state.tasks).filter((child) => child.spec.parent === id).map((child) => `${taskLink(c.base, child.spec.id)} ${badge(child.state)}`).join(", ") || "none"}</dd>` +
     `<dt>Writes</dt><dd>${spec.paths.write.map((p) => `<code>${t(p)}</code>`).join(" ")}</dd>` +
     (rt.branch ? `<dt>Branch</dt><dd><code>${t(rt.branch)}</code></dd>` : "") +
     (rt.last_commit ? `<dt>Last commit</dt><dd><code>${t(rt.last_commit)}</code></dd>` : "") +
@@ -622,7 +625,7 @@ export function contractMarkdown(k: Contract): string {
       "## Budget",
       "",
       `- ${money(k.budget.usd)} in all, ${money(k.budget.per_task_usd)} per task; ${k.budget.wall_clock_min} min; ` +
-        `${k.budget.max_parallel} in parallel; ${k.budget.max_attempts} attempts`,
+        `${k.budget.max_parallel} top-level in parallel; max agents ${k.budget.max_agents ?? "unset (swarms disabled)"}; max subtasks ${k.budget.max_subtasks ?? 16}; ${k.budget.max_attempts} attempts`,
       ""
     );
   }

@@ -110,7 +110,7 @@ export function buildTaskCard(state: Readonly<BlackboardState>, taskId: string, 
 
   const scope = [`Write: ${spec.paths.write.length ? spec.paths.write.map((p) => `\`${p}\``).join(", ") : "(nothing)"}`];
   if (spec.paths.read?.length) scope.push(`Read: ${spec.paths.read.map((p) => `\`${p}\``).join(", ")}`);
-  out.push(`## Your task\n\n${cap(spec.title, 1000)}\n\n### Acceptance criteria\n\n${spec.acceptance.length ? bullets(spec.acceptance.map((a) => cap(a, 500))) : "- (none listed)"}\n\n### Write scope\n\n${bullets(scope)}`);
+  out.push(`## Your task\n\n${cap(spec.instructions ?? spec.title, 4000)}\n\n### Acceptance criteria\n\n${spec.acceptance.length ? bullets(spec.acceptance.map((a) => cap(a, 500))) : "- (none listed)"}\n\n### Write scope\n\n${bullets(scope)}`);
 
   const commands = c?.validation.commands ?? [];
   if (spec.checks.length) {

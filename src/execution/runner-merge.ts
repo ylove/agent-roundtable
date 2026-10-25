@@ -49,7 +49,7 @@ export function allAccepted(state: Readonly<BlackboardState>): boolean {
   const tasks = Object.values(state.tasks);
   return (
     tasks.length > 0 &&
-    tasks.every((rt) => rt.state === "accepted" || rt.state === "cancelled") &&
+    tasks.every((rt) => rt.state === "accepted" || rt.state === "cancelled" || (rt.spec.parent && state.tasks[rt.spec.parent]?.state === "accepted" && rt.state === "failed")) &&
     tasks.some((rt) => rt.state === "accepted") &&
     Object.keys(state.claims).length === 0
   );

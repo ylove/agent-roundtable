@@ -42,7 +42,7 @@ interface LeasesFile {
   execution: string;
   agent: string;
   task?: string;
-  leases: Array<{ task: string; paths: string[] }>;
+  leases: Array<{ task: string; paths: string[]; excludes?: string[] }>;
 }
 
 function readLeases(path: string): LeasesFile | null {

@@ -228,6 +228,10 @@ function taskLine(state: Readonly<BlackboardState>, rt: TaskRuntime, full = fals
   return {
     id,
     title: oneLine(rt.spec.title, 200),
+    ...(rt.spec.parent && { parent: rt.spec.parent }),
+    ...(!rt.spec.parent && Object.values(state.tasks).some((c) => c.spec.parent === id) && {
+      children: Object.values(state.tasks).filter((c) => c.spec.parent === id).map((c) => taskLine(state, c, full)),
+    }),
     ...(rt.spec.team && { team: rt.spec.team }),
     state: rt.state,
     weight_pct: Math.round(taskWeight(rt) * 100),
@@ -306,7 +310,7 @@ function budgetSection(state: Readonly<BlackboardState>, full = false): Json {
     ...(b.estimated && { estimated: true }),
     ...(b.extensions_usd && { extensions_usd: b.extensions_usd }),
     ...(b.thresholds_crossed.length && { thresholds_crossed: b.thresholds_crossed }),
-    ...(state.contract && { per_task_usd: state.contract.budget.per_task_usd }),
+    ...(state.contract && { per_task_usd: state.contract.budget.per_task_usd, max_agents: state.contract.budget.max_agents, max_subtasks: state.contract.budget.max_subtasks ?? 16 }),
     by_task: top(b.by_task, full ? 50 : 5),
     ...(full && { by_agent: top(b.by_agent, 50), by_team: top(b.by_team, 50) }),
   };
@@ -465,7 +469,7 @@ export async function executionStatusReport(a: StatusInput, now = Date.now()): P
 
   switch (view) {
     case "tasks":
-      return { ...head, view, tasks: scope.slice(0, limit).map((rt) => taskLine(state, rt, true)), warnings };
+      return { ...head, view, tasks: scope.filter((rt) => !rt.spec.parent || !scope.some((p) => p.spec.id === rt.spec.parent)).slice(0, limit).map((rt) => taskLine(state, rt, true)), warnings };
     case "escalations": {
       const list = Object.values(state.escalations)
         .filter((e) => !focus || !matches.length || !e.task || matches.some((m) => m.task === e.task))
@@ -524,7 +528,7 @@ export async function executionStatusReport(a: StatusInput, now = Date.now()): P
         tasks: {
           total: scope.length,
           by_state: scope.reduce<Record<string, number>>((m, rt) => ((m[rt.state] = (m[rt.state] ?? 0) + 1), m), {}),
-          ...(scope.length <= 12 && { list: scope.map((rt) => taskLine(state, rt)) }),
+          ...(scope.length <= 12 && { list: scope.filter((rt) => !rt.spec.parent || !scope.some((p) => p.spec.id === rt.spec.parent)).map((rt) => taskLine(state, rt)) }),
         },
         blockers: blockers(state, scope),
         latest_checks: latestChecks(state, scope),

@@ -86,6 +86,8 @@ export const POST_UPDATE = "post_update";
 export const RUN_COMMAND = "run_command";
 export const SUBMIT_WORK = "submit_work";
 export const ESCALATE = "escalate";
+export const SPAWN_SUBTASKS = "spawn_subtasks";
+export const AWAIT_SUBTASKS = "await_subtasks";
 
 /** Execution tools authenticated with agent_token. Draft FILE_DISSENT also supports worker mode. */
-export const WORKER_TOOL_NAMES = [READ_BLACKBOARD, CLAIM_TASK, LEASE, POST_UPDATE, RUN_COMMAND, SUBMIT_WORK, ESCALATE] as const;
+export const WORKER_TOOL_NAMES = [READ_BLACKBOARD, CLAIM_TASK, LEASE, POST_UPDATE, RUN_COMMAND, SUBMIT_WORK, ESCALATE, SPAWN_SUBTASKS, AWAIT_SUBTASKS] as const;

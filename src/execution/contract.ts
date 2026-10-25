@@ -760,7 +760,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
 
   // --- budget ---
   const b = ck.obj(c.budget, "budget") ?? {};
-  ck.known(b, ["usd", "per_task_usd", "per_agent_usd", "wall_clock_min", "max_parallel", "max_attempts"], "budget");
+  ck.known(b, ["usd", "per_task_usd", "per_agent_usd", "wall_clock_min", "max_parallel", "max_attempts", "max_agents", "max_subtasks"], "budget");
   const parentCap = parentTask && opts.parent
     ? Math.max(0, childBudgetCap(opts.parent, parentTask.id) - (opts.parent.siblingsUsd ?? 0)) || undefined
     : undefined;
@@ -776,6 +776,10 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     max_parallel: ck.num(b.max_parallel, "budget.max_parallel", { min: 1, max: MAX_PARALLEL_LIMIT, int: true }) ?? CONTRACT_DEFAULTS.max_parallel,
     max_attempts: ck.num(b.max_attempts, "budget.max_attempts", { min: 1, max: 10, int: true }) ?? CONTRACT_DEFAULTS.max_attempts,
   };
+  const maxAgents = ck.num(b.max_agents, "budget.max_agents", { min: 1, max: 32, int: true });
+  if (maxAgents !== undefined) budget.max_agents = maxAgents;
+  const maxSubtasks = ck.num(b.max_subtasks, "budget.max_subtasks", { min: 1, max: 64, int: true });
+  if (maxSubtasks !== undefined) budget.max_subtasks = maxSubtasks;
   const perAgent = ck.num(b.per_agent_usd, "budget.per_agent_usd", { gt: 0 });
   if (perAgent !== undefined) budget.per_agent_usd = perAgent;
   if (budget.per_task_usd > budget.usd) ck.err("budget.per_task_usd", `($${budget.per_task_usd}) must not exceed budget.usd ($${budget.usd})`);
@@ -1060,7 +1064,7 @@ export function renderContractMarkdown(c: Contract, opts: RenderOptions = {}): s
     : "(no commands)") + `\n\nFinal validation: ${code(c.validation.final)}`);
   const b = c.budget;
   out.push(`## Budget and authority\n\n${usd(b.usd)} total · ${usd(b.per_task_usd)} per task${b.per_agent_usd !== undefined ? ` · ${usd(b.per_agent_usd)} per agent` : ""} · ` +
-    `${b.wall_clock_min} min wall clock · max parallel ${b.max_parallel} · max attempts ${b.max_attempts}\n\n` +
+    `${b.wall_clock_min} min wall clock · max parallel ${b.max_parallel} · max agents ${b.max_agents ?? "unset (swarms disabled)"} · max subtasks ${b.max_subtasks ?? CONTRACT_DEFAULTS.max_subtasks} · max attempts ${b.max_attempts}\n\n` +
     `Lead ${c.authority.lead} may: ${list(c.authority.may)} · budget extension up to ${c.authority.budget_extension_pct}%\n\n` +
     `Sandbox: ${c.sandbox.backend} (\`${c.sandbox.image}\`)${c.sandbox.install ? ` · install \`${argvText(c.sandbox.install.argv)}\` (egress ${list(c.sandbox.install.egress)})` : ""} · ` +
     `workers: ${c.workers.driver}${c.workers.model ? ` (${c.workers.model}${c.workers.fallback_model ? `, fallback ${c.workers.fallback_model}` : ""})` : ""}` +

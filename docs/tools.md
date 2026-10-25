@@ -796,7 +796,7 @@ Example: `resolve_escalation`
 
 ### join_execution
 
-Register an external worker (for example this chat, or another host) in a heads-down run. Returns an agent_token ONCE: pass it with execution_id to every worker tool (read_blackboard, claim_task, lease, post_update, run_command, submit_work, escalate). With task_id, the task's worktree is created (or reused) and its task card returned. External workers are not sandboxed: their leases are checked when they submit.
+Register an external worker (for example this chat, or another host) in a heads-down run. Returns an agent_token ONCE: pass it with execution_id to every worker tool (read_blackboard, claim_task, lease, post_update, run_command, submit_work, escalate, spawn_subtasks, await_subtasks). With task_id, the task's worktree is created (or reused) and its task card returned. External workers are not sandboxed: their leases are checked when they submit.
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
@@ -1094,6 +1094,31 @@ Example: `submit_work`
   "ready": true
 }
 ```
+
+### spawn_subtasks
+
+Delegate through the runner, authenticated like the other worker tools. Requires a frozen contract with `budget.max_agents >= 2`. Returns `{children: ["parent.child", ...]}` and records `task.spawned` on the blackboard.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `subtasks` | array | yes | 1–8 objects with `id`, `title`, `instructions`, `paths`, and optional `depends_on`. |
+| `subtasks[].id` | string | yes | Slug of lowercase letters, digits, `_` or `-`; namespaced under the parent, at most 64 characters including the prefix. |
+| `subtasks[].title` | string | yes | At most 200 characters. |
+| `subtasks[].instructions` | string | yes | At most 4000 characters. |
+| `subtasks[].paths` | string[] | yes | Nonempty relative globs inside the parent's current leases, without sibling overlaps. |
+| `subtasks[].depends_on` | string[] | no | Other sibling slugs in this call, without cycles. |
+
+Children inherit checks and use ordinary workers under `max_agents`. Depth is limited to one; open children, exhausted budgets and `max_subtasks` refuse further spawns. Delegated paths cannot be written or released by the parent until the children finish. Worker `Task` and `Agent` tools stay disallowed.
+
+### await_subtasks
+
+Wait for the latest child batch and request fan-in through the runner. Each child has `id`, `status`, `files`, `merged`, and a scrubbed `summary` when finished. `still_running: true` means call again. `ready: true` means every child merged and the runner merged integration into the parent's worktree. Failed or cancelled children are returned for the parent to retry with new ids or escalate. Merge conflicts escalate. The parent cannot submit before open children finish and merged work is brought back.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `timeout_s` | number | no | Seconds to wait, default 30, between 0 and 120. A timeout returns current status. |
+
+On the orchestrator server, both tools also require `execution_id` and `agent_token`; the worker server binds them to its token identity.
 
 ### escalate
 

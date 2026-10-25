@@ -47,9 +47,9 @@ const smokeEnv = {
 };
 const PROTOTYPE_START_TOOLS = ["start_meeting", "start_local_meeting", "start_collaboration"];
 const RUN_TOOLS = ["execute", "execution_status", "control_execution", "resolve_escalation"];
-const WORKER_TOOLS = ["read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"];
+const WORKER_TOOLS = ["read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate", "spawn_subtasks", "await_subtasks"];
 
-// A worker server (mcp --worker) for a registered agent lists dissent filing and the seven execution tools.
+// A worker server (mcp --worker) for a registered agent lists dissent filing and the nine execution tools.
 async function checkWorkerServer() {
   console.log("worker server");
   Object.assign(process.env, smokeEnv);
@@ -68,7 +68,7 @@ async function checkWorkerServer() {
   try {
     await worker.init();
     const listed = await worker.listTools();
-    check("worker-mode listTools returns dissent filing and the 7 execution tools", () =>
+    check("worker-mode listTools returns dissent filing and the 9 execution tools", () =>
       assert(JSON.stringify(listed.map((t) => t.name)) === JSON.stringify(["file_dissent", ...WORKER_TOOLS]), listed.map((t) => t.name).join(", ")));
     check("the worker server consumed its token file", () => assert(!existsSync(files.tokenPath), files.tokenPath));
     check("the worker server writes only JSON-RPC to stdout", () => assert(worker.noise().length === 0, JSON.stringify(worker.noise())));
@@ -340,7 +340,7 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 44 distinct tools", () => assert(tools.length === 44 && new Set(tools.map((t) => t.name)).size === 44, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 46 distinct tools", () => assert(tools.length === 46 && new Set(tools.map((t) => t.name)).size === 46, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
   check("contract and run tools are strict (additionalProperties: false)", () => {
     for (const name of ["propose_contract", "amend_contract", "freeze_contract", "file_dissent", "score_dissent", "postmortem", "hold_postmortem", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });

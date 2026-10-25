@@ -21,6 +21,7 @@ import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ROUNDTABLE_HOME } from "../config.js";
 import { loadAgent, renderSkillsSection, type LoadedAgent } from "../agents.js";
+import { leasesFor } from "../execution/leases.js";
 import { ID_RE, preview } from "../execution/events.js";
 import { executionDir } from "../execution/store.js";
 import { taskWorktreePath } from "../execution/worktrees.js";
@@ -235,6 +236,7 @@ export function workerProtocol(task: string, driver: WorkerDriverId = "claude-co
       ? "- Edit only files your leases cover. Request them first with `lease(action: \"request\", paths: [...])`; leases are checked when you submit, and a submission that changed anything else is rejected. If someone else holds a path, use `escalate(with: \"path_owner\")`."
       : "- Edit only files your leases cover. Request them first with `lease(action: \"request\", paths: [...])`; an edit outside your leases is refused. If someone else holds a path, use `escalate(with: \"path_owner\")`.",
     "- Make targeted edits instead of rewriting whole files.",
+    "- If the frozen contract enables swarms (budget.max_agents >= 2), delegate with spawn_subtasks, then await_subtasks until ready: true. Delegated paths belong to the children until they finish. Children cannot delegate. Never use Task or Agent tools. Report failures or retry with new ids within the contract limits.",
     codex
       ? "- Your shell is sandboxed to your worktree, with no network: use it to build and test. Contract checks run with `run_command(command_id)` and `submit_work`."
       : "- You have no shell. Run builds, tests and checks with `run_command` (a named `command_id`, or an `argv`), which runs in a sandbox.",
@@ -336,7 +338,7 @@ export interface AgentLeasesFile {
   worktree?: string;
   /** The blackboard seq this projection was taken at. */
   seq: number;
-  leases: Array<{ id: string; task: string; paths: string[]; mode: LeaseMode }>;
+  leases: Array<{ id: string; task: string; paths: string[]; excludes?: string[]; mode: LeaseMode }>;
 }
 
 const own = <T>(rec: Record<string, T>, key: string): T | undefined => (Object.hasOwn(rec, key) ? rec[key] : undefined);
@@ -352,14 +354,14 @@ export function agentTask(state: Readonly<BlackboardState>, agent: string): stri
 
 /** The agent's leases.json projection of a state. */
 export function agentLeasesProjection(state: Readonly<BlackboardState>, execution: string, agent: string, fallbackTask?: string): AgentLeasesFile {
-  const mine = Object.values(state.leases).filter((l) => l.agent === agent);
+  const mine = Object.values(state.tasks).flatMap((rt) => leasesFor(state, rt.spec.id, agent));
   const task = agentTask(state, agent) ?? fallbackTask ?? mine[0]?.task;
   const out: AgentLeasesFile = {
     v: 1,
     execution,
     agent,
     seq: state.seq,
-    leases: mine.map((l) => ({ id: l.id, task: l.task, paths: [...l.paths], mode: l.mode })),
+    leases: mine.map((l) => ({ id: l.id, task: l.task, paths: [...l.paths], ...(l.excludes && { excludes: [...l.excludes] }), mode: l.mode })),
   };
   if (task !== undefined) {
     out.task = task;

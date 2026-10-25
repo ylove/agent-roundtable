@@ -207,12 +207,21 @@ test("withLock serializes critical sections and releases on throw", async () => 
   assert.equal(existsSync(lockDir), false);
 });
 
+test("timeoutMs 0 still takes a dead holder's lock after clearing it", async () => {
+  const lockDir = join(freshDir(), "once.lock");
+  plant(lockDir, { pid: await deadPid(), host: hostname(), token: "dead", at: new Date().toISOString() });
+  const release = await acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 0 });
+  assert.equal(release.held(), true);
+  assert.equal(release(), true);
+});
+
 test("processes racing to steal a dead pid's lock keep mutual exclusion", { timeout: 120_000 }, async (t) => {
   const dir = freshDir();
   const lockDir = join(dir, "race.lock");
   const counter = join(dir, "counter");
   writeFileSync(counter, "0");
-  plant(lockDir, { pid: await deadPid(), host: hostname(), token: "dead", at: new Date().toISOString() });
+  // An old lock with a start time no live process has: cleared at once even if its pid was reused.
+  plant(lockDir, { pid: await deadPid(), host: hostname(), token: "dead", at: ago(60_000), started: "Thu Jan  1 00:00:00 1970" });
   const workers = Array.from({ length: 4 }, (_, i) => {
     const child = spawn(process.execPath, [LOCK_WORKER, lockDir, counter, "25"], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
     let err = "";

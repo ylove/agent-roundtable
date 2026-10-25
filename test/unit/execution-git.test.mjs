@@ -9,6 +9,7 @@ const W = await import("../../dist/execution/worktrees.js");
 const { mergeTask, prepareConflictResolution } = await import("../../dist/execution/merge.js");
 const { WORKTREES_DIR } = await import("../../dist/config.js");
 const { executable, git, gitTry, makeExecution, makeRepo, write } = await import("../fixtures/execution/git-fixture.mjs");
+const { findExecutable } = await import("../../dist/executables.js");
 
 const all = [{ paths: ["**"] }];
 
@@ -351,6 +352,45 @@ test("a required clean filter attached to a tracked or untracked path refuses co
   }
 });
 
+test("worktree creation checks destination branch includes and destination tree attributes before checkout", async (t) => {
+  for (const existing of [false, true]) {
+    await t.test(existing ? "existing branch" : "new branch", async (t) => {
+      const ex = await makeExecution({ "base.md": "base\n" });
+      t.after(async () => {
+        await W.pruneWorktrees(ex.header, { remove: true, branches: true });
+        rmSync(ex.root, { recursive: true, force: true });
+      });
+      // Neither the paths nor their attributes exist in the source checkout or its index.
+      git(ex.root, "checkout", "-qb", "destination-content");
+      write(ex.root, "nested/.gitattributes", "*.txt filter=branch-only\n");
+      write(ex.root, "nested/asset.txt", "destination content\n");
+      git(ex.root, "add", "nested");
+      git(ex.root, "commit", "-qm", "destination attributes");
+      const destination = git(ex.root, "rev-parse", "HEAD");
+      git(ex.root, "checkout", "-q", "main");
+      const branch = G.taskBranch(ex.header.id, "t1");
+      const marker = join(ex.root, "smudge.ran");
+      const script = join(ex.root, "smudge.sh");
+      executable(script, `#!/bin/sh\ntouch "${marker}"\ncat\n`);
+      const included = write(ex.root, "destination.config", `[filter "branch-only"]\nsmudge = ${script}\nrequired = true\n`);
+      git(ex.root, "config", `includeIf.onbranch:${branch}.path`, included);
+
+      // Plain Git activates this include during the initial worktree checkout.
+      const control = join(ex.root, "control");
+      git(ex.root, "worktree", "add", "-q", "-b", branch, control, destination);
+      assert.equal(existsSync(marker), true, "control: destination-only smudge runs in plain Git");
+      git(ex.root, "worktree", "remove", "--force", control);
+      if (!existing) git(ex.root, "branch", "-D", branch);
+      rmSync(marker);
+
+      await assert.rejects(W.ensureTaskWorktree(ex.header, "t1", destination),
+        (e) => e instanceof G.GitSafetyError && /filter "branch-only" applies to "nested\/asset.txt"/.test(e.message));
+      assert.equal(existsSync(marker), false, "destination-only smudge never ran");
+      assert.equal(existsSync(W.taskWorktreePath(ex.header.id, "t1")), false, "refused worktree is cleaned up");
+    });
+  }
+});
+
 test("smudge-only and process-only filters added after opening the repository are checked", async (t) => {
   const ex = makeRepo({ "f.txt": "base\n", ".gitattributes": "*.txt filter=fixture\n" });
   t.after(() => rmSync(ex.root, { recursive: true, force: true }));
@@ -413,15 +453,56 @@ test("standard LFS clean and smudge filters stage, commit and restore content", 
   assert.ok(invocations.includes("clean"));
   assert.ok(invocations.includes("smudge"));
 
-  // Check the process form is preserved without making the identity stub speak its protocol.
+  // Inspect the pinned process command without making the identity stub speak its protocol.
   git(ex.root, "config", "filter.lfs.process", "git-lfs filter-process");
-  assert.equal((await G.runGit(repo, ["config", "--get", "filter.lfs.process"])).stdout.trim(), "git-lfs filter-process");
+  assert.equal((await G.runGit(repo, ["config", "--get", "filter.lfs.process"])).stdout.trim(), `'${join(stub.bin, "git-lfs")}' filter-process`);
   assert.equal((await G.runGit(repo, ["config", "--get", "filter.lfs.required"])).stdout.trim(), "true");
   // Naming a diff or merge driver lfs gives it no exemption.
   git(ex.root, "config", "diff.lfs.textconv", join(stub.bin, "git-lfs"));
   git(ex.root, "config", "merge.lfs.driver", join(stub.bin, "git-lfs"));
   assert.equal((await G.runGit(repo, ["config", "--get", "diff.lfs.textconv"])).stdout, "\n");
   assert.match((await G.runGit(repo, ["config", "--get", "merge.lfs.driver"])).stdout, /merge-file -- %A %O %B/);
+});
+
+test("LFS commands keep the approved executable when an earlier PATH directory gains git-lfs", async (t) => {
+  for (const operation of ["clean", "smudge"]) {
+    await t.test(operation, async (t) => {
+      const ex = makeRepo({ ".gitattributes": "*.bin filter=lfs\n", "asset.bin": "binary fixture\n" });
+      t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+      const realGit = findExecutable("git");
+      assert.ok(realGit);
+      // Spaces and a quote also exercise shell quoting of the pinned executable.
+      const approvedDir = realpathSync(mkdtempSync(join(tmpdir(), "rt-approved-")));
+      t.after(() => rmSync(approvedDir, { recursive: true, force: true }));
+      const stub = lfsStub(t, join(approvedDir, "lfs' bin"));
+      configureLfs(ex.root);
+      const earlier = join(ex.root, "bin");
+      mkdirSync(earlier);
+      const marker = join(ex.root, "unapproved-lfs.ran");
+      const injected = join(earlier, "git-lfs");
+      const quote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
+      const payload = `#!/bin/sh\ntouch ${quote(marker)}\ncat\n`;
+      const command = operation === "clean" ? "add" : "checkout";
+      // The wrapper inserts the hostile executable only when the actual content command starts,
+      // after the helper has resolved and validated the external LFS stub.
+      executable(join(stub.bin, "git"), `#!/bin/sh\nfor arg do\n  if [ "$arg" = ${quote(command)} ]; then\n    printf '%s' ${quote(payload)} > ${quote(injected)}\n    chmod 755 ${quote(injected)}\n    break\n  fi\ndone\nexec ${quote(realGit)} "$@"\n`);
+      process.env.PATH = `${earlier}${delimiter}${process.env.PATH}`;
+      const repo = await G.openRepo(ex.root);
+      assert.equal(existsSync(injected), false, "earlier PATH entry is empty at validation time");
+      if (operation === "clean") {
+        write(ex.root, "asset.bin", "updated fixture\n");
+        await G.runGit(repo, ["add", "asset.bin"]);
+        assert.equal(git(ex.root, "show", ":asset.bin"), "updated fixture");
+      } else {
+        rmSync(join(ex.root, "asset.bin"));
+        await G.runGit(repo, ["checkout", "--", "asset.bin"]);
+        assert.equal(readFileSync(join(ex.root, "asset.bin"), "utf8"), "binary fixture\n");
+      }
+      assert.equal(existsSync(injected), true, "race fixture installed the earlier executable");
+      assert.equal(existsSync(marker), false, "the unapproved LFS executable never ran");
+      assert.ok(readFileSync(stub.marker, "utf8").trim().split("\n").includes(operation), "the approved external stub ran");
+    });
+  }
 });
 
 test("non-standard LFS values are disabled and refused, including shadowed values", async (t) => {

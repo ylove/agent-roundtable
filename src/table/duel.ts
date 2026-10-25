@@ -1,4 +1,4 @@
-import { checkPage, pageCheckFailed, pageCheckRecord, pageCheckSummary, type PageCheck } from "../prototypes/page-check.js";
+import { checkPage, pageCheckFailed, pageCheckRecord, pageCheckSummary, pageChecksOff, type PageCheck } from "../prototypes/page-check.js";
 import { ChromeProcesses, findChrome } from "../prototypes/browser.js";
 import { startRoom } from "./room.js";
 import { prepareSeats, resolveSeats } from "./seats.js";
@@ -326,7 +326,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
         attachPrototypeFiles(event, prototype.files);
         if (kind === "web") {
           let check: import("../prototypes/page-check.js").PageCheckResult | undefined;
-          if (opts.pageCheck === false) event.check = { loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "disabled" };
+          if (opts.pageCheck === false || (!deps.checkPage && pageChecksOff())) event.check = { loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "disabled" };
           else if (deps.checkPage || findChrome()) {
             let room: Awaited<ReturnType<typeof startRoom>> | undefined;
             try {

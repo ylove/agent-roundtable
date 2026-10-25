@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { SecureServer, type SecureServerOptions } from "../http/secure-server.js";
 import { APP_CSP } from "../prototypes/board.js";
 import { normalizeRelPath } from "../security/fs-safe.js";
-import { checkPage, pageCheckSummary } from "../prototypes/page-check.js";
+import { checkPage, pageCheckSummary, pageChecksOff } from "../prototypes/page-check.js";
 import { ChromeProcesses, findChrome } from "../prototypes/browser.js";
 import { join } from "node:path";
 import { EXECUTIONS_DIR } from "../config.js";
@@ -96,8 +96,9 @@ export async function verifyPageLoads(
 ): Promise<PredicateResult> {
   const path = normalizeRelPath(predicate.page_loads.path);
   if (!path || /[*?]/.test(path)) return { ok: false, note: "page_loads: invalid path" };
-  const chrome = opts.chromePath ?? findChrome();
-  if (!chrome && !opts.checkPage) return { ok: true, skipped: true, note: "page_loads: skipped (no browser)" };
+  const off = opts.chromePath === undefined && pageChecksOff();
+  const chrome = opts.chromePath ?? (off ? null : findChrome());
+  if (!chrome && !opts.checkPage) return { ok: true, skipped: true, note: `page_loads: skipped (${off ? "page checks off" : "no browser"})` };
   const processes = opts.processes ?? new ChromeProcesses();
   const stop = () => processes.killAll();
   let server: Pick<SecureServer, "url" | "close"> | undefined;

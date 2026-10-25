@@ -1,7 +1,7 @@
 // PrototypeTracker: one per prototype-mode session. Parses every turn for prototype blocks, verdicts
 // and decisions; materializes, serves and destroys artifacts; keeps the board and the agent-facing
 // and public views of the transcript in step. Never throws into a session.
-import { checkPage, pageCheckRecord, pageCheckSummary } from "./page-check.js";
+import { checkPage, pageCheckRecord, pageCheckSummary, pageChecksOff } from "./page-check.js";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PROTOTYPE_DIR, PROTOTYPE_OPEN, PROTOTYPE_SCREENSHOTS, PROTOTYPE_TTL_MAX_MS, PROTOTYPE_TTL_MS } from "../config.js";
@@ -357,7 +357,7 @@ export class PrototypeTracker {
     this.byTurn.set(turnKey, { key });
     this.pushBoard();
 
-    if (p.kind === "web" && this.opts.pageCheck !== false && (this.opts.checkPage || findChrome())) {
+    if (p.kind === "web" && this.opts.pageCheck !== false && (this.opts.checkPage || (!pageChecksOff() && findChrome()))) {
       const url = `${this.board.url}p/${key}/app/${(p.entry ?? "index.html").split("/").map(encodeURIComponent).join("/")}`;
       p.check = pageCheckRecord(await (this.opts.checkPage ?? checkPage)(url, { processes: this.chrome }));
       this.pushBoard();

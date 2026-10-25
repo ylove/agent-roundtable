@@ -285,9 +285,15 @@ export async function acquireLock(lockDir: string, opts: LockOptions): Promise<L
   let delay = Math.max(1, opts.waitMs ?? 5);
   for (;;) {
     if (tryCreate(lockDir, token)) return makeRelease(lockDir, token);
-    if (clearIfGone(lockDir, opts.staleMs)) continue;
+    const cleared = clearIfGone(lockDir, opts.staleMs);
+    // The deadline holds on every path, including the immediate retry after a clear.
     const left = deadline - Date.now();
     if (left <= 0) throw new LockTimeoutError(lockDir, opts.timeoutMs, readLockOwner(lockDir));
+    if (cleared) {
+      // Retry at once, but yield first: contenders that keep clearing must not hold the event loop.
+      await new Promise<void>((r) => setImmediate(r));
+      continue;
+    }
     await sleep(Math.min(left, delay / 2 + (Math.random() * delay) / 2));
     delay = Math.min(delay * 2, MAX_WAIT_MS);
   }

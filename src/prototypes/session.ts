@@ -1,6 +1,7 @@
 // PrototypeTracker: one per prototype-mode session. Parses every turn for prototype blocks, verdicts
 // and decisions; materializes, serves and destroys artifacts; keeps the board and the agent-facing
 // and public views of the transcript in step. Never throws into a session.
+import { checkPage, pageCheckRecord, pageCheckSummary } from "./page-check.js";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PROTOTYPE_DIR, PROTOTYPE_OPEN, PROTOTYPE_SCREENSHOTS, PROTOTYPE_TTL_MAX_MS, PROTOTYPE_TTL_MS } from "../config.js";
@@ -63,6 +64,8 @@ export interface TrackerOptions {
   ttlMs?: number;
   root?: string;
   screenshots?: boolean;
+  pageCheck?: boolean;
+  checkPage?: typeof checkPage;
   openBrowser?: boolean;
   now?: () => number;
 }
@@ -354,6 +357,12 @@ export class PrototypeTracker {
     this.byTurn.set(turnKey, { key });
     this.pushBoard();
 
+    if (p.kind === "web" && this.opts.pageCheck !== false && (this.opts.checkPage || findChrome())) {
+      const url = `${this.board.url}p/${key}/app/${(p.entry ?? "index.html").split("/").map(encodeURIComponent).join("/")}`;
+      p.check = pageCheckRecord(await (this.opts.checkPage ?? checkPage)(url, { processes: this.chrome }));
+      this.pushBoard();
+    }
+
     // Screenshots (public sessions, web prototypes; diagrams are posted as mermaid.live links): read
     // into memory before anything can destroy the directory.
     if (pub && this.screenshots && p.kind === "web") {
@@ -451,9 +460,10 @@ export class PrototypeTracker {
       ...(p.entry !== undefined && { entry: p.entry }),
       demo: p.demo,
       status: p.status,
+      ...(p.check && { check: p.check }),
       verdicts: p.assessors
         .filter((a) => p.verdictMap.has(a))
-        .map((a) => ({ assessor: this.nameOf(a, forPublic), ...p.verdictMap.get(a)! })),
+        .map((a) => ({ assessor: this.nameOf(a, forPublic), ...p.verdictMap.get(a)!, ...(p.check && { check: p.check }) })),
       ...(p.decision && { decision: p.decision }),
       ...(p.supersededBy && { supersededBy: p.supersededBy }),
     };
@@ -495,6 +505,7 @@ export class PrototypeTracker {
     if (toVerdict.length) {
       lines.push("Awaiting your verdict (judge the artifact itself and its demo, shown in full above):");
       for (const p of toVerdict) {
+        if (p.kind === "web") lines.push(`${p.label}: ${pageCheckSummary(p.check)}`);
         lines.push(
           `- ${p.label} "${p.title}" (${p.kind}) by ${p.proposer}. Give a line: ` +
             `Verdict on ${p.id}: APPROVE|REVISE|REJECT — reason`
@@ -597,7 +608,7 @@ export class PrototypeTracker {
   /** Summary for tool results; drains the "destroyed since last call" list. */
   takeCallSummary(): {
     board_url: string;
-    live: Array<{ label: string; title: string; kind: PrototypeKind; proposer: string; url: string; awaiting_verdicts_from: string[] }>;
+    live: Array<{ check?: import("./page-check.js").PageCheck; label: string; title: string; kind: PrototypeKind; proposer: string; url: string; awaiting_verdicts_from: string[] }>;
     destroyed_this_call: string[];
     notice: string;
   } {
@@ -609,6 +620,7 @@ export class PrototypeTracker {
         .filter((p) => p.status === "live")
         .map((p) => ({
           label: p.label,
+          ...(p.check && { check: p.check }),
           title: p.title,
           kind: p.kind,
           proposer: p.proposer,
@@ -618,6 +630,19 @@ export class PrototypeTracker {
       destroyed_this_call: destroyed,
       notice: NOTICE,
     };
+  }
+
+  /** Assessment metadata retained in the session archive, without source or screenshots. */
+  assessmentRecords(): Array<Pick<PrototypeRecord, "label" | "kind" | "check" | "verdicts">> {
+    return this.protos.map(p => {
+      const record = this.toRecord(p);
+      return { label: record.label, kind: record.kind, ...(record.check && { check: record.check }), verdicts: record.verdicts };
+    });
+  }
+
+  /** Entry paths of the human's shortlisted web artifacts, for contract drafting. */
+  shortlistedWebPaths(): string[] {
+    return [...new Set(this.protos.filter(p => p.status === "shortlisted" && p.kind === "web").map(p => p.entry ?? "index.html"))];
   }
 
   /** Outcomes of every version plus the shortlist (full source of shortlisted versions). */

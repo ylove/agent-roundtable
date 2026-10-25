@@ -8,6 +8,7 @@
 // The board is also the deny-all proxy of the screenshot browser (see screenshot.ts): a proxied
 // (absolute-form) request is served only when it targets this board's own prototype files; every
 // other target, and every CONNECT or upgrade, is answered 403.
+import { pageCheckSummary } from "./page-check.js";
 import { spawn } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -180,6 +181,7 @@ var t=setInterval(function(){fetch(base+"state.json",{cache:"no-store"}).then(fu
 var p=null;for(var i=0;i<s.prototypes.length;i++)if(s.prototypes[i].key===key)p=s.prototypes[i];
 if(!p||p.destroyed){location.reload();return}
 document.getElementById("status").textContent=p.statusText;
+var check=document.getElementById("page-check");if(check&&p.check){var c=p.check;check.textContent=c.exceptions.length?"Page check: threw "+c.exceptions[0]:c.reason?"Page check: "+c.reason:c.loaded?"Page check: loaded; "+c.consoleErrors.length+" console errors":"Page check: not loaded";}
 var ul=document.getElementById("verdicts");ul.textContent="";
 if(!p.verdicts.length){var e=document.createElement("li");e.className="empty";e.textContent="No verdicts yet.";ul.appendChild(e)}
 p.verdicts.forEach(function(v){var li=document.createElement("li");var b=document.createElement("strong");b.textContent=v.assessor;
@@ -358,6 +360,7 @@ export class PrototypeBoard {
         label: p.label,
         title: p.title,
         kind: p.kind,
+        ...(p.check && { check: p.check }),
         proposer: p.proposer,
         status: p.status,
         statusText: statusText(p),
@@ -460,6 +463,7 @@ export class PrototypeBoard {
       `<p class="meta">${esc(p.kind)} · proposed by ${esc(p.proposer)}</p>` +
       `<p class="notice">Read-only. Feedback opens when the session ends. This prototype is destroyed as soon as it has been assessed.</p>` +
       `<p><span class="badge s-${esc(p.status)}" id="status">${esc(statusText(p))}</span></p>` +
+      (p.kind === "web" ? `<p id="page-check">${esc(pageCheckSummary(p.check))}</p>` : "") +
       `<p class="meta" id="awaiting">${p.awaiting.length ? `Awaiting verdicts from: ${esc(p.awaiting.join(", "))}` : ""}</p>` +
       `<h2>Verdicts so far</h2>${verdictsHtml(p)}` +
       (p.demo.trim() ? `<h2>Demo walkthroughs</h2><div class="demo">${esc(p.demo)}</div>` : "") +

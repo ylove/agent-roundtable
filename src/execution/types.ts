@@ -129,6 +129,7 @@ export interface TaskSpec {
   acceptance: string[];
   /** CommandSpec ids from contract.validation.commands. */
   checks: string[];
+  verify?: import("./verify.js").PageLoadsPredicate[];
   effort?: "low" | "medium" | "high";
   budget_usd?: number;
   context?: ArtifactRef[];

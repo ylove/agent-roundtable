@@ -282,10 +282,12 @@ export interface Contract {
 export interface TaskSpec {
   id: string; title: string; team?: string; persona: string; kind: "build" | "subcontract" | "review";
   depends_on: string[]; paths: { write: string[]; read?: string[] };
-  acceptance: string[]; checks: string[]; effort?: "low" | "medium" | "high"; budget_usd?: number; context?: ArtifactRef[];
+  acceptance: string[]; checks: string[]; verify?: { page_loads: { path: string } }[]; effort?: "low" | "medium" | "high"; budget_usd?: number; context?: ArtifactRef[];
 }
 export interface CommandSpec { id: string; argv: string[]; cwd?: string; timeout_s: number; env?: Record<string, string> }
 ```
+
+**Page-load verification.** A task can set `verify: [{"page_loads": {"path": "index.html"}}]` (at most 16 predicates). `path` names a repository-relative file, with no traversal or glob. At submission the worker and runner rechecks use the exact committed checkout. `src/execution/verify.ts:verifyPageLoads` serves only that file (no symlinks, regular file at most 2 MB), under a random loopback capability URL and the prototype `APP_CSP`, with that server as a deny-all proxy. `checkPage` must load it without exceptions or a check error. Missing Chrome skips with a recorded note; other failures reject. Existing `check.started`, `check.passed`/`check.failed` events bind results to the submission, and `note.posted` records the summary or skip reason. Screenshot bytes never enter the log. This is for self-contained pages; Docker development-server previews are separate work.
 
 **Validation** (`src/execution/contract.ts`):
 - IDs match `^[a-z0-9][a-z0-9._-]{0,63}$`.

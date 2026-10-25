@@ -114,7 +114,8 @@ export async function startMeeting(
   mode: MeetingMode = "standard",
   debateFocus?: string,
   isPublic: boolean = false,
-  isPrototype: boolean = false
+  isPrototype: boolean = false,
+  pageCheck: boolean = true
 ): Promise<{
   meetingId: string;
   response: string;
@@ -147,6 +148,7 @@ export async function startMeeting(
           participants: [isPublic ? publicLabel(agent) : agent],
           assessorIsCaller: true,
           public: isPublic,
+          pageCheck,
           topic: agenda,
         }
       : undefined,

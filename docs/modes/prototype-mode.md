@@ -40,3 +40,11 @@ When the proposal involves user interaction, agents are told to include a `<demo
 **Public prototype sessions.** The localhost board is never posted. The public channel gets a Markdown reference for each prototype: title, kind, files, demo, code capped at about 8 KB, a mermaid.live link for diagrams, and the draft for text proposals. When Chrome is available, desktop and mobile screenshots of **web** prototypes are posted as ntfy attachments (diagrams get the mermaid.live link instead); a webhook receives a text reference with attachment metadata and no bytes. Files are redacted before they are materialized, so the board, the screenshots and the posted code all come from redacted source, and the end-of-session summary is posted with any board URL removed. Public prototype agents are told they may write fresh prototype code but never reproduce existing or private source. ntfy servers limit attachments (on `ntfy.sh` they expire after a few hours and count toward anonymous visitor limits); check your ntfy server's attachment settings.
 
 See [Prototype tool calls](../tools.md#prototype-tool-calls).
+
+## Page checks
+
+Web prototypes are loaded in local headless Chrome/Chromium after creation and revision, when a browser is available. The check waits for load and about one second of settling, records console errors, exceptions and failed requests, and captures a PNG in memory. Assessors see a one-line page-check summary in their prompt; assessments and archived session metadata retain the same `check` result. Messages are scrubbed and capped at ten entries of 300 characters per list. No browser means not checked. Pass `page_check: false` with `prototype: true` to skip checks.
+
+The browser uses the prototype board as its deny-all proxy, a fresh temporary profile and the restricted `browser` child environment. Timeouts kill its whole process group on POSIX. No DevTools port or tunnel is opened. The board's existing lifetime and destruction rules still apply.
+
+When a contract is drafted from a session with a shortlisted web artifact, its final task gains `verify: [{"page_loads": {"path": "index.html"}}]` (using the artifact's entry path), plus acceptance that the page loads without exceptions. Amend the path if integration places the page elsewhere.

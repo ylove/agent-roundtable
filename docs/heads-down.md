@@ -88,6 +88,8 @@ Optional [worker connectors](connectors.md) add locally configured stdio MCP ser
 
 External workers register with `join_execution` and receive an `agent_token` once. The orchestrator server's worker tools require it and `execution_id` on every call; their claims expire after 15 minutes without a tool call. External workers are trusted like the host chat and are unsandboxed. Every worker response also delivers inbox directives and decisions; directives need acknowledgement.
 
+Tasks may add `verify: [{"page_loads": {"path": "index.html"}}]` alongside command `checks`. `page_loads` serves that committed file from the task's private check checkout on a loopback capability server and checks that it loads without exceptions. Paths are repository-relative files; traversal and symlinks are refused. Only the named file is served, so this predicate is intended for self-contained static pages; development servers are outside its scope. The existing application CSP and deny-all proxy isolate agent code. A missing browser skips the predicate with a recorded `note.posted` entry; exceptions, timeouts and load failures reject the submission. Web duel drafts and plans from shortlisted web prototypes add this acceptance check automatically. Refine the entry path before consent.
+
 ## Escalations and huddles
 
 Keep concerns raised at the table through [dissents and tripwires](dissents.md): notify the dissenter, huddle or pause affected work when recorded evidence matches. The dashboard's **Dissents** page shows firings, huddle outcomes and advisory scores.

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
+import { pageCheckFailed } from "../prototypes/page-check.js";
 import { scrub, scrubArtifact } from "../security/secrets.js";
 import { isDuelId } from "./duel-import.js";
 
@@ -108,7 +109,8 @@ export function loadDuelFocus(id: unknown, opts: { source?: boolean } = {}): Due
   const protoEvents = events.map((e, index) => ({ e, index })).filter((x) => x.e.type === "prototype" && x.e.ok !== false);
   const archived = isObj(archive) && Array.isArray(archive.prototypes) ? archive.prototypes.filter(isObj) : [];
   for (const team of ["A", "B"] as const) {
-    const last = protoEvents.filter((x) => x.e.team === team).at(-1);
+    const built = protoEvents.filter((x) => x.e.team === team);
+    const last = built.filter((x) => !pageCheckFailed(x.e.check)).at(-1) ?? built.at(-1);
     // Match the archived files to the last prototype event; archives without eventIndex fall back to the team's last entry.
     const forTeam = archived.filter((p) => p.team === team);
     const entry = [...forTeam].reverse().find((p) => last && p.eventIndex === last.index) ?? forTeam.at(-1);

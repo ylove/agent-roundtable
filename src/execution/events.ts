@@ -21,7 +21,7 @@ export interface Shape {
   readonly [key: string]: Field;
 }
 
-/** Largest canonical payload the log accepts; anything bigger goes in a blob. */
+/** Default canonical payload limit. task.spawned allows 256 KB for eight task specs. */
 export const PAYLOAD_LIMIT_BYTES = 8192;
 /** Task and command ids (heads-down.md §7). They never contain "/", which check keys rely on. */
 export const ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -70,12 +70,16 @@ const BUDGET: Shape = {
   "per_agent_usd?": "n",
   wall_clock_min: "n",
   max_parallel: "int",
+  "max_agents?": "int",
+  "max_subtasks?": "int",
   max_attempts: "int",
 };
 const TOKENS: Shape = { inputTokens: "n", outputTokens: "n", "cacheReadTokens?": "n", "cacheWriteTokens?": "n" };
 const ARTIFACT_REF: Shape = { kind: "'file'|'blob'|'text'|'url'", ref: "t", "title?": "t" };
 const TASK_SPEC: Shape = {
   id: "id",
+  "parent?": "id",
+  "instructions?": "t",
   title: "t",
   "team?": "s",
   persona: "s",
@@ -189,7 +193,7 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "task.claimed": { task: "id", agent: "s", attempt: "int", ttl_s: "n" },
   "task.released": { task: "id", agent: "s", "note?": "t" },
   "task.progress": { task: "id", "percent?": "n", note: "t" },
-  "task.submitted": { task: "id", commit: "s", diff_blob: "s", stat: "t", files: "s[]", rewrites: "s[]" },
+  "task.submitted": { task: "id", commit: "s", diff_blob: "s", stat: "t", files: "s[]", rewrites: "s[]", "summary?": "t" },
   "task.checks_passed": { task: "id", commands: "id[]", ...SUBMISSION },
   "task.rejected": { task: "id", reasons: "t[]", "violations?": "t[]" },
   "task.merged": { task: "id", integration_sha: "s" },
@@ -199,6 +203,9 @@ export const PAYLOAD_SPECS: { readonly [T in EventType]: Shape } = {
   "task.retried": { task: "id", attempt: "int", why: "t" },
   "task.reassigned": { task: "id", from: "s", to: "s" },
   "task.split": { task: "id", into: [TASK_SPEC] },
+  "task.spawned": { task: "id", by: "s", into: [TASK_SPEC] },
+  "task.subtasks_awaited": { task: "id" },
+  "task.subtasks_joined": { task: "id", children: "id[]", commit: "s" },
   "task.failed": { task: "id", why: "t" },
   "task.cancelled": { task: "id", why: "t" },
 
@@ -493,9 +500,10 @@ export function validateDraft(draft: AnyEventDraft): AnyEventDraft {
     throw e;
   }
   const payloadBytes = Buffer.byteLength(canonicalJSON(out.payload));
-  if (payloadBytes > PAYLOAD_LIMIT_BYTES) {
+  const payloadLimit = type === "task.spawned" ? 256 * 1024 : PAYLOAD_LIMIT_BYTES;
+  if (payloadBytes > payloadLimit) {
     throw new Error(
-      `${type} payload is ${payloadBytes} bytes; the limit is ${PAYLOAD_LIMIT_BYTES}. ` +
+      `${type} payload is ${payloadBytes} bytes; the limit is ${payloadLimit}. ` +
         `Store large content with putBlob() and put the returned "sha256:…" ref in the payload instead.`
     );
   }

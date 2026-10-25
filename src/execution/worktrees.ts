@@ -256,7 +256,7 @@ export function ensureIntegrationWorktree(header: ExecutionHeader): Promise<Work
 export function taskStartPoint(state: Readonly<BlackboardState>, taskId: string): "base" | "integration" {
   const rt = Object.hasOwn(state.tasks, taskId) ? state.tasks[taskId] : undefined;
   const accepted = (rt?.spec.depends_on ?? []).some((d) => Object.hasOwn(state.tasks, d) && state.tasks[d].state === "accepted");
-  return accepted ? "integration" : "base";
+  return accepted || rt?.spec.parent ? "integration" : "base";
 }
 
 /**

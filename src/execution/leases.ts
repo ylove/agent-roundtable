@@ -16,6 +16,7 @@
 // never covered.
 // ============================================================================
 
+import { globWithin } from "./contract.js";
 import { newId } from "../ids.js";
 import { normalizeRelPath } from "../security/fs-safe.js";
 import { ID_RE, preview } from "./events.js";
@@ -144,7 +145,7 @@ export function globsOverlap(a: string, b: string): boolean {
 // ============================================================================
 
 /** Anything with lease paths: Lease, LeaseRequest, or { paths } built from a task spec. */
-export type LeaseLike = { readonly paths: readonly string[] };
+export type LeaseLike = { readonly paths: readonly string[]; readonly excludes?: readonly string[] };
 
 const isGitMeta = (seg: string) => /^\.git/i.test(seg);
 
@@ -175,6 +176,7 @@ export function pathCovered(path: string, leases: readonly LeaseLike[]): boolean
   if (segs.some((s) => s.toLowerCase() === ".git")) return false;
   const meta = segs.filter(isGitMeta);
   for (const l of leases) {
+    if (l.excludes?.some((g) => matchGlob(g, p))) continue;
     for (const g of l.paths) {
       if (matchGlob(g, p) && (!meta.length || explicitlyNames(g, meta))) return true;
     }
@@ -197,7 +199,8 @@ type Holder = Pick<Lease, "agent" | "task" | "paths" | "mode">;
  * Exclusive conflicts with everything that overlaps; shared conflicts only with an overlapping
  * exclusive one. The same agent on the same task never conflicts with itself.
  */
-export function leasesConflict(a: Holder, b: Holder): boolean {
+export function leasesConflict(a: Holder, b: Holder, state?: Readonly<BlackboardState>): boolean {
+  if (state?.tasks[a.task]?.spec.parent === b.task || state?.tasks[b.task]?.spec.parent === a.task) return false;
   if (a.agent === b.agent && a.task === b.task) return false;
   if (a.mode === "shared" && b.mode === "shared") return false;
   return a.paths.some((p) => b.paths.some((q) => globsOverlap(p, q)));
@@ -336,6 +339,9 @@ export function decideLeaseRequest(state: Readonly<BlackboardState>, request: Le
   const mode: LeaseMode = request.mode ?? "exclusive";
   if (mode !== "exclusive" && mode !== "shared") throw new Error(`Lease mode must be exclusive or shared, not ${preview(mode)}`);
   const paths = normalizeLeasePaths(request.paths);
+  const spec = state.tasks[request.task]?.spec;
+  if (spec?.parent && paths.some((p) => !spec.paths.write.some((g) => globWithin(p, g)))) throw new Error("A subtask may lease only its delegated paths");
+  if (Object.values(state.tasks).some((rt) => rt.spec.parent === request.task && !TERMINAL.has(rt.state) && paths.some((p) => rt.spec.paths.write.some((g) => globsOverlap(p, g))))) throw new Error("Those paths are delegated to open subtasks; await_subtasks before writing them");
   const reason = typeof request.reason === "string" ? request.reason : "";
   const id = request.id ?? newId("lease");
   if (typeof id !== "string" || !id.trim()) throw new Error("Lease ids must be non-empty strings");
@@ -350,12 +356,12 @@ export function decideLeaseRequest(state: Readonly<BlackboardState>, request: Le
   const holders: LeaseHolder[] = [];
   const percent = (task: string) => own(state.tasks, task)?.percent;
   for (const l of Object.values(state.leases)) {
-    if (l.id !== id && leasesConflict(me, l)) {
+    if (l.id !== id && leasesConflict(me, l, state)) {
       holders.push({ lease: l.id, agent: l.agent, task: l.task, percent: percent(l.task), paths: [...l.paths], mode: l.mode, queued: false });
     }
   }
   for (const r of state.lease_queue) {
-    if (r.id !== id && leasesConflict(me, r)) {
+    if (r.id !== id && leasesConflict(me, r, state)) {
       holders.push({ lease: r.id, agent: r.agent, task: r.task, percent: percent(r.task), paths: [...r.paths], mode: r.mode, queued: true });
     }
   }
@@ -390,7 +396,7 @@ export function nextGrants(state: Readonly<BlackboardState>, source: EventSource
       drafts.push(leaseDrafts.released(r.id, source));
       continue;
     }
-    if (live.some((l) => leasesConflict(r, l)) || waiting.some((w) => leasesConflict(r, w))) {
+    if (live.some((l) => leasesConflict(r, l, state)) || waiting.some((w) => leasesConflict(r, w, state))) {
       waiting.push(r);
       continue;
     }
@@ -456,5 +462,9 @@ export function releaseLeases(
 
 /** The live leases of a task (optionally of one agent on it). */
 export function leasesFor(state: Readonly<BlackboardState>, task: string, agent?: string): Lease[] {
-  return Object.values(state.leases).filter((l) => l.task === task && (agent === undefined || l.agent === agent));
+  const excludes = Object.values(state.tasks)
+    .filter((rt) => rt.spec.parent === task && !TERMINAL.has(rt.state))
+    .flatMap((rt) => rt.spec.paths.write);
+  return Object.values(state.leases).filter((l) => l.task === task && (agent === undefined || l.agent === agent))
+    .map((l) => excludes.length ? { ...l, excludes } : l);
 }

@@ -45,6 +45,8 @@ import { autoFindings } from "../postmortem/auto.js";
 import { cardLessons } from "../postmortem/lessons.js";
 import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
+import { batchChildren, openSubtasks, SUBTASK_TERMINAL } from "./swarms.js";
+import { prepareConflictResolution, mergeDrafts } from "./merge.js";
 import { classifyFailure } from "./circuit.js";
 import { createRunnerHooks } from "./escalation.js";
 import { stopMicroHuddles } from "./huddle.js";
@@ -93,7 +95,7 @@ import {
   type WatchdogAction,
   type WatchdogConfig,
 } from "./watchdog.js";
-import { ensureIntegrationWorktree, taskDiffSummary, taskStartPoint, ensureTaskWorktree, snapshotWip, taskWorktreePath } from "./worktrees.js";
+import { ensureIntegrationWorktree, taskDiffSummary, taskStartPoint, ensureTaskWorktree, snapshotWip, taskWorktreePath, withGitLock } from "./worktrees.js";
 import { startDashboard, type Dashboard } from "../dashboard/server.js";
 import { taskHeld, blockingIds } from "./task-holds.js";
 import { GitHubSync } from "../github/sync.js";
@@ -354,6 +356,7 @@ export class Runner {
   private driverChecked?: Promise<{ ok: boolean; missing: string[] }>;
   private driverCheckedId?: WorkerDriverId;
   private merge!: MergeQueue;
+  private readonly joining = new Set<string>();
   private dashboard?: Dashboard;
   private github?: GitHubSync;
   private githubTimer?: NodeJS.Timeout;
@@ -596,6 +599,9 @@ export class Runner {
         if (a) touched.add(a);
       }
     }
+    if (fresh.some((e) => ["task.spawned", "task.merged", "task.accepted", "task.failed", "task.cancelled"].includes(e.type))) {
+      for (const l of Object.values((await this.store.state()).leases)) touched.add(l.agent);
+    }
     for (const agent of touched) {
       try {
         await writeAgentLeases(this.store, agent);
@@ -644,6 +650,7 @@ export class Runner {
     if (Object.entries(state.agents).some(([id, a]) => !a.external && !this.workers.has(id) && !this.busy.has(id) && ["registered", "running"].includes(a.status))) {
       await this.reconcile();
     }
+    await this.recordChildCancellations(state);
     await this.stopSuperseded();
     await this.applyStops();
     await this.pollWorkers();
@@ -666,7 +673,8 @@ export class Runner {
     this.passEscalations();
     await this.postmortemPass();
     await this.retireMerged();
-    await this.schedule(state);
+    this.joinSubtasks(state);
+    await this.schedule(await this.store.state());
     this.merge.feed(await this.store.state());
     await this.checkFailure(await this.store.state());
     this.checkIdle(state);
@@ -1318,17 +1326,59 @@ export class Runner {
     return false;
   }
 
+  private async recordChildCancellations(state: Readonly<BlackboardState>): Promise<void> {
+    const events: AnyEventDraft[] = [];
+    for (const rt of Object.values(state.tasks)) {
+      if (rt.state !== "cancelled" || !rt.spec.parent || !["failed", "cancelled"].includes(state.tasks[rt.spec.parent]?.state)) continue;
+      if (this.log.some((e) => e.type === "task.cancelled" && e.payload.task === rt.spec.id)) continue;
+      events.push({ type: "task.cancelled", source: this.source, payload: { task: rt.spec.id, why: `parent ${rt.spec.parent} ${state.tasks[rt.spec.parent].state}` } });
+    }
+    if (events.length) await this.commit(events);
+  }
+
+  private joinSubtasks(state: Readonly<BlackboardState>): void {
+    if (state.status !== "running") return;
+    for (const rt of Object.values(state.tasks)) {
+      const task = rt.spec.id;
+      const children = batchChildren(state, task);
+      if (!rt.subtasks_waiting || rt.subtasks_joined || this.joining.has(task) || taskHeld(state, task) || state.paused_tasks.includes(task) || SUBTASK_TERMINAL.has(rt.state)) continue;
+      if (!children.length || children.some((c) => !SUBTASK_TERMINAL.has(c.state)) || !children.some((c) => c.state === "accepted")) continue;
+      this.joining.add(task);
+      this.track((async () => {
+        try {
+          const prep = await withGitLock(this.execution, async () => {
+            await snapshotWip(taskWorktreePath(this.execution, task), "rt: wip snapshot", leasesFor(await this.store.state(), task));
+            return prepareConflictResolution(this.header, task);
+          });
+          if (prep.conflicts.length) {
+            await this.store.transact(({ state: s }) => ({ events: [
+              mergeDrafts.conflicted(task, prep.conflicts, this.source),
+              ...runnerEscalation(s, { key: `swarm_conflict:${task}:${rt.subtasks!.join(",")}`, task, kind: "conflict", summary: `Subtask fan-in conflicts in ${prep.conflicts.join(", ")}. Resolve the merge in the parent worktree, then await_subtasks again.`, block: true }, this.source),
+            ] }));
+            return;
+          }
+          await this.store.transact(({ state: s }) => {
+            const parent = s.tasks[task];
+            if (SUBTASK_TERMINAL.has(parent.state) || JSON.stringify(parent.subtasks) !== JSON.stringify(rt.subtasks)) return { events: [] };
+            return { events: [{ type: "task.subtasks_joined", source: this.source, payload: { task, children: rt.subtasks!, commit: prep.head } }] };
+          });
+          await this.refreshLog();
+        } catch (e) {
+          await this.store.transact(({ state: s }) => ({ events: runnerEscalation(s, { key: `swarm_join:${task}:${rt.subtasks!.join(",")}`, task, kind: "conflict", summary: `Subtask fan-in failed: ${scrubAndCap(errText(e), 1500)}. Resolve the parent worktree, then await_subtasks again.`, block: true }, this.source) }));
+        } finally { this.joining.delete(task); }
+      })());
+    }
+  }
+
   /** Spawn ready tasks, in contract order, up to max_parallel. */
   private async schedule(state: Readonly<BlackboardState>): Promise<void> {
     if (state.status !== "running" || this.spawnBlocked || !state.contract) return;
-    const max = Math.max(1, state.contract.budget.max_parallel);
-    let active = Object.values(state.tasks).filter((rt) => ACTIVE_TASK.has(rt.state) || this.hasLiveWorker(rt.spec.id)).length;
-    for (const rt of Object.values(state.tasks)) {
-      if (active >= max) break;
+    const tasks = Object.values(state.tasks).sort((a, b) => Number(!!b.spec.parent) - Number(!!a.spec.parent));
+    for (const rt of tasks) {
       const task = rt.spec.id;
       if (rt.state !== "ready" || own(state.claims, task) || state.paused_tasks.includes(task) || this.starting.has(task)) continue;
-      if (await this.startWorker(task, { claim: true })) active++;
-      else if (this.spawnBlocked) break;
+      await this.startWorker(task, { claim: true });
+      if (this.spawnBlocked) break;
     }
   }
 
@@ -1344,8 +1394,11 @@ export class Runner {
     // A person asked for this agent to stop: whatever lost or resumed it must not undo that. The stop settles first.
     if (own(s.agents, agent)?.stop?.state === "requested") return `a stop for ${agent} is waiting`;
     if (this.hasLiveWorker(task)) return `a worker already runs on ${task}`;
-    const active = Object.values(s.tasks).filter((t) => t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id))).length;
-    if (active >= (s.contract?.budget.max_parallel ?? 1)) return "max_parallel workers already run";
+    const active = Object.values(s.tasks).filter((t) => t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id) || !!own(s.agents, own(s.claims, t.spec.id)?.agent)?.external)).length;
+    if (s.contract?.budget.max_agents !== undefined && active >= s.contract.budget.max_agents) return "max_agents workers already run";
+    const top = Object.values(s.tasks).filter((t) => !t.spec.parent && t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id) || !!own(s.agents, own(s.claims, t.spec.id)?.agent)?.external)).length;
+    if (!rt.spec.parent && top >= (s.contract?.budget.max_parallel ?? 1)) return "max_parallel workers already run";
+    if (rt.spec.parent && (SUBTASK_TERMINAL.has(s.tasks[rt.spec.parent]?.state) || s.paused_tasks.includes(rt.spec.parent))) return "the parent task is finished or paused";
     const c = own(s.claims, task);
     if (claim) {
       if (c) return `${task} is claimed by ${c.agent}`;
@@ -1454,7 +1507,7 @@ export class Runner {
           },
         ];
         if (o.claim) events.push({ type: "task.claimed", source: this.source, payload: { task, agent, attempt, ttl_s: 0 } });
-        if (spec.paths.write.length) {
+        if (spec.paths.write.length && !(openSubtasks(s, task) && leasesFor(s, task, agent).length)) {
           const queued = s.lease_queue.some((q) => q.agent === agent && q.task === task);
           const d = decideLeaseRequest(s, { agent, task, paths: spec.paths.write, mode: "exclusive", reason: `the write scope of task ${task}` });
           if ("grant" in d) {

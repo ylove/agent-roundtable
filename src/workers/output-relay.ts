@@ -7,7 +7,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, constants, fchmodSync, openSync, writeSync, rmSync } from "node:fs";
 import { acquireLock, processStart, type LockRelease } from "../execution/lock.js";
 import { writeFileAtomic } from "../security/fs-safe.js";
-import { SECRET_KEY_RE } from "../security/redaction-rules.js";
+import { secretKeyName } from "../security/redaction-rules.js";
 import { scrubSecrets } from "../security/secrets.js";
 import { launchLock, readLaunchIntent } from "./launch-intent.js";
 import type { SpawnWorkerOptions } from "./process.js";
@@ -38,7 +38,7 @@ function parseJSONLine(line: string): unknown {
  */
 function scrubJSON(v: unknown, key?: string, depth = 0, budget = { remaining: 10_000 }): unknown {
   if (depth >= 64 || budget.remaining-- <= 0) return "[redacted:limit]";
-  if (typeof v === "string") return key !== undefined && v && SECRET_KEY_RE.test(key) ? "[redacted:secret]" : scrubSecrets(v).text;
+  if (typeof v === "string") return key !== undefined && v && secretKeyName(key) ? "[redacted:secret]" : scrubSecrets(v).text;
   if (Array.isArray(v)) {
     if (v.length > budget.remaining) return "[redacted:limit]";
     return v.map((x) => scrubJSON(x, key, depth + 1, budget));

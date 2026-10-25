@@ -5,7 +5,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 const [lockDir, counter, count] = process.argv.slice(2);
 const { withLock } = await import("../../../dist/execution/lock.js");
-const options = { staleMs: 10_000, timeoutMs: 180_000 };
+// Shorter than the test's own timeout, so a stuck worker reports the lock and its owner on stderr.
+const options = { staleMs: 10_000, timeoutMs: 60_000 };
 
 // Finish module loading and the cached process-start lookup before joining the start barrier.
 await withLock(`${lockDir}.warmup.${process.pid}`, options, () => {});
@@ -14,6 +15,7 @@ await new Promise((resolve, reject) => {
   process.send("ready");
 });
 process.disconnect();
+process.stderr.write(`started ${process.pid}\n`);
 
 for (let i = 0; i < Number(count); i++) {
   await withLock(lockDir, options, async () => {

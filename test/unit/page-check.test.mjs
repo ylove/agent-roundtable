@@ -78,7 +78,7 @@ test("page check: no browser is not a page failure; refuses other URLs; never th
   assert.equal((await checkPage(url, { chromePath: "/missing/chrome" })).ok, false);
 });
 
-test("real Chrome: loads a tiny page and records its deliberate throw", { skip: !findChrome() && "no browser" }, async t => {
+test("real Chrome: loads a tiny page and records its deliberate throw", { skip: (process.env.ROUNDTABLE_TEST_CHROME !== "1" && "set ROUNDTABLE_TEST_CHROME=1 to run") || (!findChrome() && "no browser") }, async t => {
   let room;
   try { room = await startRoom({ hold: false }); }
   catch (e) { if (e.code === "EPERM") { t.skip("loopback listeners blocked"); return; } throw e; }

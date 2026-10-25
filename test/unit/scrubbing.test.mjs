@@ -200,3 +200,14 @@ test("artifact and normal modes share the hardened Basic, Bearer and sk rules", 
     assert.deepEqual(redact("sk-" + "z".repeat(32)), { text: "[redacted:api_key]", counts: { api_key: 1 } });
   }
 });
+
+test("a secret word inside a generated id is not a secret key; named keys still are", async () => {
+  const { scrub } = await import("../../dist/security/secrets.js");
+  // Random execution ids can contain "pwd", "auth" or "token"; markers built from them must survive.
+  for (const id of ["exe-01m5rpwdqrx8mtc2", "exe-0auth9k2m4p6r8t1", "exe-1x2tokenq9w8e7r6"]) {
+    assert.equal(scrub(`<!-- roundtable:${id}:b:e1 -->`), `<!-- roundtable:${id}:b:e1 -->`);
+  }
+  for (const line of ["API_KEY=abcdefgh12", "db_password: hunter2hunter", "accessToken=abcd1234efgh", "MYSQL_PWD=passw0rd!", "githubtoken2: abcdefghij", "x-api-key: abcdefghij"]) {
+    assert.match(scrub(line), /\[redacted:secret\]$/, line);
+  }
+});

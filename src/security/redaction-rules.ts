@@ -12,6 +12,12 @@ const NOT_ALREADY = "(?!\\[redacted:)";
 const SECRET_WORD = "secret|token|password|passwd|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth(?!or(?!iz)|ority)";
 /** A JSON key or identifier whose value is a secret, the same vocabulary as the key=value rule. */
 export const SECRET_KEY_RE = new RegExp(SECRET_WORD, "i");
+/** A run of 12+ letters and digits holding at least two digits is a generated id, not a word ("exe-01m5rpwdq…"). */
+const ID_RUN = /(?<![A-Za-z0-9])(?=(?:[A-Za-z]*\d){2})[A-Za-z0-9]{12,}(?![A-Za-z0-9])/g;
+/** True when a key or identifier names a secret; a secret word inside a generated id does not count. */
+export function secretKeyName(name: string): boolean {
+  return SECRET_KEY_RE.test(name.replace(ID_RUN, ""));
+}
 
 type Replace = (re: RegExp, kind: string, fn?: (match: string, ...groups: string[]) => string | null) => void;
 
@@ -122,7 +128,7 @@ function redactAssignments(result: RedactionResult): RedactionResult {
   for (let m; (m = keys.exec(input));) {
     const key = m[1];
     const field = key.slice(key.lastIndexOf(".") + 1);
-    if (!SECRET_KEY_RE.test(field)) continue;
+    if (!secretKeyName(field)) continue;
     value.lastIndex = keys.lastIndex;
     const v = value.exec(input);
     if (!v) continue;

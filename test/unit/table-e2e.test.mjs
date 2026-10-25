@@ -54,7 +54,7 @@ function run(args, env, onStderr) {
 const events = out => out.split('\n').filter(Boolean).map(line => JSON.parse(line));
 const baseEnv = (root, agents) => ({
   PATH: process.env.PATH, HOME: join(root, 'home'), ROUNDTABLE_HOME: join(root, 'state'), ROUNDTABLE_PROTOTYPE_DIR: join(root, 'prototypes'),
-  ROUNDTABLE_AGENTS_DIR: agents, ROUNDTABLE_DOTENV: 'off', ROUNDTABLE_PROTOTYPE_SCREENSHOTS: '0', ROUNDTABLE_PROVIDER_RETRIES: '0',
+  ROUNDTABLE_AGENTS_DIR: agents, ROUNDTABLE_DOTENV: 'off', ROUNDTABLE_PROTOTYPE_SCREENSHOTS: '0', ROUNDTABLE_PAGE_CHECKS: '0', ROUNDTABLE_PROVIDER_RETRIES: '0',
 });
 
 test('duel end to end against a scripted OpenAI-compatible server streams NDJSON and feeds the room', async t => {

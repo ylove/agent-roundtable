@@ -34,6 +34,9 @@ export function pageCheckSummary(check?: PageCheck): string {
   return `Page check: loaded; ${check.consoleErrors.length} console errors; ${check.failedRequests} failed requests`;
 }
 
+/** ROUNDTABLE_PAGE_CHECKS=0 turns page checks off everywhere (the test environment sets it). */
+export const pageChecksOff = (): boolean => process.env.ROUNDTABLE_PAGE_CHECKS === "0";
+
 /** A page that was checked and did not load cleanly. An unchecked page never counts as failed. Accepts archived records. */
 export function pageCheckFailed(check: unknown): boolean {
   if (!check || typeof check !== "object") return false;

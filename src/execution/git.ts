@@ -24,17 +24,20 @@
 //    gitlink is refused outright (assertNoGitlinks*): submodules are not supported in heads-down
 //    runs in 1.0. Untracked nested repositories are listed, never entered, and never staged.
 // No protocol is allowed, not even file: worktree, merge and commit operations never use a
-// transport. Configured filter programs and diff drivers are disabled. Before staging or writing
-// working-tree content (including worktree add), configured clean/smudge/process filters attached
-// to tracked or untracked non-ignored paths are refused: filtered paths are not supported in
-// heads-down runs. Unattached filters and read-only calls remain available. Named merge drivers
-// use git's own merge-file command with fixed arguments instead of the configured command.
+// transport. Configured filter programs and diff drivers are disabled, except the standard Git
+// LFS filter when git-lfs is installed outside the repository, its git dir and worker worktree
+// roots. Before staging or writing working-tree content (including worktree add), configured
+// clean/smudge/process filters attached to tracked or untracked non-ignored paths are refused,
+// except for that standard LFS filter. Unattached filters and read-only calls remain available.
+// Named merge drivers use git's own merge-file command with fixed arguments instead of the
+// configured command.
 // ============================================================================
 
 import { findExecutable } from "../executables.js";
+import { WORKTREES_DIR } from "../config.js";
 import { spawn } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { executionTag, EXECUTION_ID_RE } from "../ids.js";
 import { canonicalWorkdir } from "../sandbox/common.js";
 import { killTree } from "../sandbox/process.js";
@@ -353,17 +356,57 @@ interface SpawnOpts extends GitOptions {
   env?: Record<string, string>;
 }
 
+const STANDARD_LFS = new Map([
+  ["clean", "git-lfs clean -- %f"],
+  ["smudge", "git-lfs smudge -- %f"],
+  ["process", "git-lfs filter-process"],
+  ["required", "true"],
+]);
+
+function inside(path: string, root: string): boolean {
+  const rel = relative(real(root), path);
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+
+/** Every value from every scope must match its field; never accept a shell newline as spacing. */
+async function standardLfsAllowed(cwd: string, pre: string[], entries: [string, string][]): Promise<boolean> {
+  const lfs = entries.filter(([key]) => key.startsWith("filter.lfs."));
+  if (!lfs.length || !lfs.every(([key, value]) => {
+    const normalized = value.replace(/^[ \t]+|[ \t]+$/g, "").replace(/[ \t]+/g, " ");
+    return STANDARD_LFS.get(key.slice("filter.lfs.".length)) === normalized;
+  })) return false;
+
+  // Resolve relative (and empty) PATH entries as git's child will, from the work tree cwd.
+  const searchPath = (process.env.PATH ?? "").split(delimiter).map(dir => resolve(cwd, dir)).join(delimiter);
+  const executable = findExecutable("git-lfs", searchPath);
+  if (!executable || !isAbsolute(executable)) return false;
+  const dirs = await spawnGitRaw(cwd, ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], {}, pre);
+  const [gitDir, commonDir] = dirs.stdout.trimEnd().split("\n");
+  if (!gitDir || !commonDir) return false;
+  const roots = [cwd, gitDir, commonDir, WORKTREES_DIR];
+  // Also exclude the main repository when this call targets one of its linked worktrees.
+  for (const repo of repoCache.values()) if (repo.commonDir === real(commonDir)) roots.push(repo.workTree);
+  return roots.every(root => !inside(executable, root));
+}
+
 // Config inspection reads all scopes, including includeIf and worktree config, on every call.
 async function driverOverrides(cwd: string, pre: string[]): Promise<{ overrides: string[]; filters: Set<string> }> {
-  const configured = await spawnGitRaw(cwd, ["config", "--null", "--name-only", "--get-regexp",
+  const configured = await spawnGitRaw(cwd, ["config", "--null", "--get-regexp",
     "^(filter\\..*|merge\\..*\\.driver|diff\\..*)$"], { allowExit: [1] }, pre);
+  // With --null, each record is key LF value NUL; split only the first LF so values stay intact.
+  const entries: [string, string][] = splitZ(configured.stdout).map(record => {
+    const newline = record.indexOf("\n");
+    return newline < 0 ? [record, ""] : [record.slice(0, newline), record.slice(newline + 1)];
+  });
+  const allowLfs = await standardLfsAllowed(cwd, pre, entries);
   const settings = new Set<string>();
   const filters = new Set<string>();
-  for (const key of splitZ(configured.stdout)) {
+  for (const [key] of entries) {
     const filter = /^filter\.(.+)\.([^.]+)$/i.exec(key);
     const merge = /^merge\.(.+)\.driver$/i.exec(key);
     const diff = /^diff\.(.+)\.[^.]+$/i.exec(key);
     if (filter) {
+      if (filter[1] === "lfs" && allowLfs) continue;
       if (/^(clean|smudge|process)$/i.test(filter[2])) filters.add(filter[1]);
       for (const field of ["clean", "smudge", "process"]) settings.add(`filter.${filter[1]}.${field}=`);
       settings.add(`filter.${filter[1]}.required=false`);
@@ -508,7 +551,8 @@ function spawnGitRaw(cwd: string, args: string[], o: SpawnOpts = {}, pre: string
 /**
  * Run `git <args>` in a verified target with the hardening options, an explicit --git-dir and
  * --work-tree, and cwd at the work tree root. Throws GitSafetyError for an unverified target or
- * an attached configured filter before a content-changing call; throws GitError when git fails.
+ * an attached configured filter (except standard LFS) before a content-changing call; throws
+ * GitError when git fails.
  */
 export async function runGit(target: GitTarget, args: string[], opts: GitOptions = {}): Promise<GitResult> {
   if (!Array.isArray(args) || !args.length || args.some((a) => typeof a !== "string" || a.includes("\0"))) {

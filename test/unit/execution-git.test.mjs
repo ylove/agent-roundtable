@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 const G = await import("../../dist/execution/git.js");
 const W = await import("../../dist/execution/worktrees.js");
@@ -367,6 +367,154 @@ test("smudge-only and process-only filters added after opening the repository ar
     assert.equal(existsSync(marker), false);
     git(ex.root, "config", "--unset", `filter.fixture.${field}`);
   }
+});
+
+function lfsStub(t, bin) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "rt-lfs-")));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  bin ??= join(dir, "bin");
+  const marker = join(dir, "lfs.ran");
+  executable(join(bin, "git-lfs"), `#!/bin/sh\nprintf '%s\\n' "$1" >> "${marker}"\ncat\n`);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  });
+  return { bin, marker };
+}
+
+function configureLfs(root) {
+  git(root, "config", "filter.lfs.clean", "git-lfs clean -- %f");
+  git(root, "config", "filter.lfs.smudge", "git-lfs smudge -- %f");
+  git(root, "config", "filter.lfs.required", "true");
+}
+
+test("standard LFS clean and smudge filters stage, commit and restore content", async (t) => {
+  const ex = makeRepo();
+  t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+  const stub = lfsStub(t);
+  configureLfs(ex.root);
+  // Horizontal whitespace is normalized, and included/worktree config participates.
+  const included = write(ex.root, "lfs.config", '[filter "lfs"]\nclean = git-lfs clean -- %f\n');
+  git(ex.root, "config", "include.path", included);
+  git(ex.root, "config", "extensions.worktreeConfig", "true");
+  git(ex.root, "config", "--worktree", "filter.lfs.clean", " \tgit-lfs\t clean  --   %f\t ");
+  write(ex.root, ".gitattributes", "*.bin filter=lfs\n");
+  write(ex.root, "asset.bin", "binary fixture\n");
+  const repo = await G.openRepo(ex.root);
+  await G.runGit(repo, ["add", ".gitattributes", "asset.bin"]);
+  await G.runGit(repo, ["commit", "-qm", "LFS content"]);
+  assert.equal(git(ex.root, "show", "HEAD:asset.bin"), "binary fixture");
+  rmSync(join(ex.root, "asset.bin"));
+  await G.runGit(repo, ["checkout", "--", "asset.bin"]);
+  assert.equal(readFileSync(join(ex.root, "asset.bin"), "utf8"), "binary fixture\n");
+  const invocations = readFileSync(stub.marker, "utf8").trim().split("\n");
+  assert.ok(invocations.includes("clean"));
+  assert.ok(invocations.includes("smudge"));
+
+  // Check the process form is preserved without making the identity stub speak its protocol.
+  git(ex.root, "config", "filter.lfs.process", "git-lfs filter-process");
+  assert.equal((await G.runGit(repo, ["config", "--get", "filter.lfs.process"])).stdout.trim(), "git-lfs filter-process");
+  assert.equal((await G.runGit(repo, ["config", "--get", "filter.lfs.required"])).stdout.trim(), "true");
+  // Naming a diff or merge driver lfs gives it no exemption.
+  git(ex.root, "config", "diff.lfs.textconv", join(stub.bin, "git-lfs"));
+  git(ex.root, "config", "merge.lfs.driver", join(stub.bin, "git-lfs"));
+  assert.equal((await G.runGit(repo, ["config", "--get", "diff.lfs.textconv"])).stdout, "\n");
+  assert.match((await G.runGit(repo, ["config", "--get", "merge.lfs.driver"])).stdout, /merge-file -- %A %O %B/);
+});
+
+test("non-standard LFS values are disabled and refused, including shadowed values", async (t) => {
+  const cases = [
+    ["clean", "git-lfs clean -- %f --extra"],
+    ["clean", "sh -c 'git-lfs clean -- %f'"],
+    ["clean", "./git-lfs clean -- %f"],
+    ["clean", "ENV=value git-lfs clean -- %f"],
+    ["clean", "git-lfs clean -- %f; true"],
+    ["clean", "git-lfs\nclean -- %f"],
+    ["clean", "git-lfs smudge -- %f"],
+    ["smudge", "git-lfs smudge --skip -- %f"],
+    ["process", "git-lfs filter-process --skip"],
+    ["required", "false"],
+    ["other", "git-lfs clean -- %f"],
+    ["shadowed", "./git-lfs clean -- %f"],
+  ];
+  for (const [field, value] of cases) {
+    await t.test(`${field}: ${JSON.stringify(value)}`, async (t) => {
+      const ex = makeRepo();
+      t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+      const stub = lfsStub(t);
+      configureLfs(ex.root);
+      if (field === "shadowed") {
+        const included = write(ex.root, "lfs.config", `[filter "lfs"]\nclean = ${value}\n`);
+        git(ex.root, "config", "include.path", included);
+        git(ex.root, "config", "--add", "filter.lfs.clean", "git-lfs clean -- %f");
+      } else {
+        git(ex.root, "config", `filter.lfs.${field}`, value);
+      }
+      write(ex.root, ".gitattributes", "*.bin filter=lfs\n");
+      write(ex.root, "asset.bin", "content\n");
+      const repo = await G.openRepo(ex.root);
+      assert.equal((await G.runGit(repo, ["config", "--get", "filter.lfs.clean"])).stdout, "\n", "clean is disabled");
+      await G.runGit(repo, ["status", "--porcelain"]);
+      await assert.rejects(G.runGit(repo, ["add", "asset.bin"]), (e) => e instanceof G.GitSafetyError && /filter "lfs"/.test(e.message));
+      assert.equal(git(ex.root, "diff", "--cached", "--name-only"), "");
+      assert.equal(existsSync(stub.marker), false);
+    });
+  }
+});
+
+test("LFS executables inside the repository, git dir or another worker root are refused", async (t) => {
+  for (const location of ["work tree", "git dir", "other worker", "symlink into work tree"]) {
+    await t.test(location, async (t) => {
+      const ex = makeRepo();
+      t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+      let bin = join(ex.root, "bin");
+      if (location === "git dir") {
+        const admin = realpathSync(mkdtempSync(join(tmpdir(), "rt-lfs-gitdir-")));
+        t.after(() => rmSync(admin, { recursive: true, force: true }));
+        git(ex.root, "init", "-q", "--separate-git-dir", admin);
+        bin = join(admin, "bin");
+      } else if (location === "other worker") {
+        bin = join(WORKTREES_DIR, "other-execution", "other-task", "bin");
+        t.after(() => rmSync(join(WORKTREES_DIR, "other-execution"), { recursive: true, force: true }));
+      }
+      const stub = lfsStub(t, bin);
+      if (location === "symlink into work tree") {
+        const external = realpathSync(mkdtempSync(join(tmpdir(), "rt-lfs-link-")));
+        t.after(() => rmSync(external, { recursive: true, force: true }));
+        symlinkSync(join(bin, "git-lfs"), join(external, "git-lfs"));
+        process.env.PATH = `${external}${delimiter}${process.env.PATH}`;
+      }
+      configureLfs(ex.root);
+      write(ex.root, ".gitattributes", "*.bin filter=lfs\n");
+      write(ex.root, "asset.bin", "content\n");
+      const repo = await G.openRepo(ex.root);
+      assert.equal((await G.runGit(repo, ["config", "--get", "filter.lfs.clean"])).stdout, "\n");
+      await G.runGit(repo, ["status", "--porcelain"]);
+      await assert.rejects(G.runGit(repo, ["add", "asset.bin"]), (e) => e instanceof G.GitSafetyError && /filter "lfs"/.test(e.message));
+      assert.equal(existsSync(stub.marker), false);
+    });
+  }
+});
+
+test("standard LFS config is disabled and refused when git-lfs is missing", async (t) => {
+  const ex = makeRepo();
+  t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+  const { findExecutable } = await import("../../dist/executables.js");
+  const gitExecutable = findExecutable("git");
+  assert.ok(gitExecutable);
+  const stub = lfsStub(t);
+  rmSync(join(stub.bin, "git-lfs"));
+  symlinkSync(gitExecutable, join(stub.bin, "git"));
+  process.env.PATH = stub.bin; // Deterministic even on hosts with real git-lfs installed.
+  configureLfs(ex.root);
+  write(ex.root, ".gitattributes", "*.bin filter=lfs\n");
+  write(ex.root, "asset.bin", "content\n");
+  const repo = await G.openRepo(ex.root);
+  assert.equal((await G.runGit(repo, ["config", "--get", "filter.lfs.clean"])).stdout, "\n");
+  await assert.rejects(G.runGit(repo, ["add", "asset.bin"]), (e) => e instanceof G.GitSafetyError && /filter "lfs"/.test(e.message));
+  assert.equal(existsSync(stub.marker), false);
 });
 
 test("ignored paths and filters without clean, smudge or process settings do not block commits", async (t) => {

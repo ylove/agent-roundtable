@@ -10,7 +10,7 @@
   "engines": {
     "node": ">=22"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ylove/agent-roundtable.git"
@@ -27,7 +27,8 @@
     "SECURITY.md",
     "CHANGELOG.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "keywords": [
     "mcp",

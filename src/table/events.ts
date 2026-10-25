@@ -49,6 +49,8 @@ export type TableEvent =
       files: { path: string; bytes: number }[];
       ok: boolean;
       error?: string;
+      version?: number;
+      check?: import("../prototypes/page-check.js").PageCheck;
     }
   /** A judge assesses a team's submission. */
   | {
@@ -57,6 +59,7 @@ export type TableEvent =
       team: "A" | "B";
       verdict: "APPROVE" | "REVISE" | "REJECT" | "UNCLEAR";
       reason: string;
+      version?: number;
     }
   /** A participant records a dissent, optionally concerning a team. */
   | { type: "dissent"; seat: Seat; text: string; team?: "A" | "B" }
@@ -142,6 +145,7 @@ export interface DuelOptions {
   teamB: string[];
   judges: string[];
   rounds?: 1 | 2;
+  pageCheck?: boolean;
   /** Artifact kind both teams build; default web. */
   kind?: DuelKind;
   /** Judging rubric; default is fit to the brief, quality, usability and accessibility, and risk or safety. */

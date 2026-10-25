@@ -33,6 +33,7 @@ import {
 } from "../config.js";
 import type { LLMMessage } from "../providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "../providers/index.js";
+import { MAX_REQUEST_TOKENS } from "../providers/limits.js";
 import { metered } from "../usage/session-scope.js";
 import { findExecutable } from "../executables.js";
 import { describeUrl } from "../security/url-guard.js";
@@ -163,6 +164,7 @@ export const deliberationTools: ToolDefinition[] = [
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
         provider: {
@@ -266,6 +268,7 @@ export const deliberationTools: ToolDefinition[] = [
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
       },
@@ -362,11 +365,15 @@ export const deliberationTools: ToolDefinition[] = [
           description: MODEL_PARAM_DESCRIPTION,
         },
         max_tokens: {
-          type: "number",
-          description: "Maximum tokens in the response. Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this.",
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_REQUEST_TOKENS,
+          description: "Maximum tokens in the response (integer, 1-32768). Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this.",
         },
         temperature: {
           type: "number",
+          minimum: 0,
+          maximum: 2,
           description: "Sampling temperature (0-2). Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too. Replicate: sent only when the model's schema declares it.",
         },
         base_url: {
@@ -452,6 +459,7 @@ export const deliberationTools: ToolDefinition[] = [
         },
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
         provider: {
@@ -735,7 +743,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Meeting Tools ===
     case START_MEETING: {
-      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype, duel, duel_source } = args as {
+      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype, page_check, duel, duel_source } = args as {
         agent: string;
         agenda: string;
         context?: string;
@@ -748,8 +756,9 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         debate_focus?: string;
         public?: boolean;
         prototype?: boolean;
+        page_check?: boolean;
       };
-      const result = await startMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true);
+      const result = await startMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true, page_check !== false);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -796,7 +805,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Local Meeting Tools (CLI-based) ===
     case START_LOCAL_MEETING: {
-      const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype, duel, duel_source } = args as {
+      const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype, page_check, duel, duel_source } = args as {
         agent: string;
         agenda: string;
         context?: string;
@@ -806,8 +815,9 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         debate_focus?: string;
         public?: boolean;
         prototype?: boolean;
+        page_check?: boolean;
       };
-      const result = await startLocalMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), mode, debate_focus, isPublic === true, prototype === true);
+      const result = await startLocalMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), mode, debate_focus, isPublic === true, prototype === true, page_check !== false);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -878,7 +888,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Collaboration Tools ===
     case START_COLLABORATION: {
-      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, duel, duel_source } = args as {
+      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, page_check, duel, duel_source } = args as {
         agents: string[];
         topic?: string;
         context?: string;
@@ -895,6 +905,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         grounding?: boolean;
         public?: boolean;
         prototype?: boolean;
+        page_check?: boolean;
       };
 
       const result = await startCollaboration(agents, topic, {
@@ -913,6 +924,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         grounding,
         public: isPublic === true,
         ...(prototype === true && { prototype: true }),
+        ...(page_check !== undefined && { pageCheck: page_check }),
       });
 
       return {

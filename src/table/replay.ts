@@ -20,6 +20,14 @@ export function getPrototypeFiles(event: TableEvent): PrototypeFile[] {
   return (contents.get(event) ?? []).map(file => ({ ...file }));
 }
 
+const screenshots = new WeakMap<TableEvent, Buffer>();
+export function attachPrototypeScreenshot(event: TableEvent, screenshot?: Buffer): void {
+  if (screenshot) screenshots.set(event, screenshot);
+}
+export function getPrototypeScreenshot(event: TableEvent): Buffer | undefined {
+  return screenshots.get(event);
+}
+
 const text = (value: unknown): value is string => typeof value === "string";
 const count = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const date = (value: unknown): boolean => text(value) && Number.isFinite(Date.parse(value));
@@ -32,6 +40,11 @@ function seat(value: Seat): boolean {
   return !!value && text(value.id) && text(value.name) && text(value.provider) && text(value.model) &&
     (value.role === undefined || text(value.role)) && (value.team === undefined || team(value.team) || value.team === "judge");
 }
+function validCheck(check: import("../prototypes/page-check.js").PageCheck | undefined): boolean {
+  return check === undefined || (!!check && typeof check.loaded === "boolean" && count(check.failedRequests) &&
+    [check.consoleErrors, check.exceptions].every(xs => Array.isArray(xs) && xs.length <= 10 && xs.every(x => text(x) && x.length <= 300)) &&
+    (check.reason === undefined || (text(check.reason) && check.reason.length <= 300)));
+}
 function validEvent(event: TableEvent): boolean {
   if (!event) return false;
   switch (event.type) {
@@ -41,12 +54,12 @@ function validEvent(event: TableEvent): boolean {
       text(event.id) && text(event.topic) && event.mode === "duel" && date(event.startedAt) &&
       Array.isArray(event.seats) && event.seats.every(seat);
     case "turn": return seat(event.seat) && text(event.round) && text(event.text) && date(event.ts);
-    case "prototype": return team(event.team) && seat(event.seat) && typeof event.ok === "boolean" &&
+    case "prototype": return validCheck(event.check) && (event.version === undefined || (Number.isInteger(event.version) && event.version > 0)) && team(event.team) && seat(event.seat) && typeof event.ok === "boolean" &&
       (event.title === undefined || text(event.title)) && (event.error === undefined || text(event.error)) &&
       (event.kind === undefined || PROTOTYPE_KINDS.includes(event.kind)) &&
       Array.isArray(event.files) && (event.ok ? isSingle(event.kind) ? event.files.length === 1 : event.files.length >= 1 && event.files.length <= MAX_FILES : event.files.length === 0) &&
       event.files.every(file => file && (isWeb(event.kind) ? file.path === "index.html" : !validatePath(file.path)) && count(file.bytes) && file.bytes <= MAX_TOTAL_BYTES);
-    case "assessment": return seat(event.judge) && team(event.team) &&
+    case "assessment": return (event.version === undefined || (Number.isInteger(event.version) && event.version > 0)) && seat(event.judge) && team(event.team) &&
       ["APPROVE", "REVISE", "REJECT", "UNCLEAR"].includes(event.verdict) && text(event.reason);
     case "dissent": return seat(event.seat) && text(event.text) && (event.team === undefined || team(event.team));
     case "usage": return count(event.totalCostUsd) && Array.isArray(event.perSeat) && event.perSeat.every(item =>

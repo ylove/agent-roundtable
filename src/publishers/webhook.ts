@@ -1,7 +1,7 @@
 // Generic webhook publisher: POSTs one JSON object per message. No history download.
 import type { Channel, OutgoingMessage, Publisher, RemoteHistory, SendResult } from "./types.js";
 import { REQUEST_TIMEOUT_MS, buildChannelId, errMessage, failFromStatus, parseRetryAfter } from "./shared.js";
-import { UrlGuardError, checkUrl, guardUrl, type UrlGuardOptions } from "../security/url-guard.js";
+import { UrlGuardError, checkUrl, guardedDispatcher, type UrlGuardOptions } from "../security/url-guard.js";
 
 const WEBHOOK_GUARD: UrlGuardOptions = { label: "ROUNDTABLE_WEBHOOK_URL", allowPrivate: true };
 
@@ -54,14 +54,16 @@ export class WebhookPublisher implements Publisher {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.authName && this.authValue !== undefined) headers[this.authName] = this.authValue;
     let res: Response;
+    let dispatcher;
     try {
-      await guardUrl(this.opts.url, WEBHOOK_GUARD);
+      dispatcher = await guardedDispatcher(this.opts.url, WEBHOOK_GUARD);
     } catch (e) {
       if (e instanceof UrlGuardError) return { ok: false, retryable: e.retryable, error: e.message };
       throw e;
     }
     try {
-      res = await fetch(this.opts.url, {
+      res = await globalThis.fetch(this.opts.url, {
+        ...(dispatcher && { dispatcher }),
         method: "POST",
         headers,
         // The auth header must not follow a redirect to another host: a 3xx fails the send.
@@ -87,14 +89,14 @@ export class WebhookPublisher implements Publisher {
         }),
         signal: AbortSignal.timeout(this.opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS),
       });
+      await res.body?.cancel().catch(() => {});
+      if (res.ok) return { ok: true };
+      return failFromStatus(res.status, res.statusText, parseRetryAfter(res.headers.get("Retry-After")));
     } catch (e) {
       return { ok: false, retryable: true, error: `network error: ${errMessage(e)}` };
+    } finally {
+      await dispatcher?.close();
     }
-    if (res.ok) {
-      await res.body?.cancel().catch(() => {});
-      return { ok: true };
-    }
-    return failFromStatus(res.status, res.statusText, parseRetryAfter(res.headers.get("Retry-After")));
   }
 
   async fetchHistory(): Promise<RemoteHistory | null> {

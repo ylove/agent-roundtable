@@ -306,6 +306,7 @@ export async function startCollaboration(
     public?: boolean;
     grounding?: boolean;
     prototype?: boolean;
+    pageCheck?: boolean;
     origin?: string;
     /** A duel id whose brief is added to the context every participant sees. */
     duel?: string | DuelFocus;
@@ -434,7 +435,7 @@ async function openCollaboration(
   // the board first).
   const { prototype, publicChannel } = await openSessionSurfaces(
     isPrototype
-      ? { sessionId: collaborationId, mode, participants: roleNames, assessorIsCaller: false, public: isPublic, topic }
+      ? { sessionId: collaborationId, mode, participants: roleNames, assessorIsCaller: false, public: isPublic, topic, pageCheck: options.pageCheck }
       : undefined,
     () =>
       options.public

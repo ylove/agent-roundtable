@@ -1165,8 +1165,8 @@ Call an LLM for text completion. Providers: anthropic (claude-opus-5-5 / claude-
 | `messages[].content` | string | yes |  |
 | `provider` | string | no | LLM provider to use. Default: openai. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
 | `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
-| `max_tokens` | number | no | Maximum tokens in the response. Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this. |
-| `temperature` | number | no | Sampling temperature (0-2). Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too. Replicate: sent only when the model's schema declares it. |
+| `max_tokens` | integer | no | Maximum tokens in the response, 1–32768; values outside the range are refused. Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this. |
+| `temperature` | number | no | Sampling temperature (0-2); values outside the range are refused. Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too. Replicate: sent only when the model's schema declares it. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `chat_completion`
@@ -1389,3 +1389,7 @@ create_agent { "from_session": "collab-4k9q2mzt", "write": false }
 improve_agent { "agent": "cfo", "with": ["skeptic"], "focus": "Assumptions and escalation rules" }
 improve_agent { "agent": "cfo", "with": ["product-lead"], "include_self": false, "write": false }
 ```
+
+### Page-check option
+
+`start_duel` accepts `page_check: false` to skip headless checks of web builds and revisions (default on when Chrome/Chromium exists). Prototype-mode `start_collaboration`, `start_meeting` and `start_local_meeting` accept the same option alongside `prototype: true`. Check metadata includes load status, capped/scrubbed console errors and exceptions, failed-request count and an optional reason. No browser means not checked, never a failed artifact. Duel results include each team's check and the version of each verdict; screenshots stay local and outside the result/archive.

@@ -54,7 +54,7 @@
 | `ROUNDTABLE_SESSION_RETENTION_DAYS` | days an archived at-the-table session, and a postmortem draft that was never held, is kept; swept at server start | `30` (`0` or `off` keeps all) |
 | `ROUNDTABLE_AUDIT_RETENTION_DAYS` | days the audit log keeps a month file after the month ended; swept at server start | `365` (`0` or `off` keeps all) |
 
-The package `.env` (next to `package.json`) keeps its existing `override: true` behavior, so its values override the launcher's environment. An optional pointed env file then fills allowed unset variables with `override: false` semantics. See [`.env.example`](../.env.example).
+The launcher's environment takes precedence. The package `.env` (next to `package.json`) fills unset variables; an optional pointed env file then fills allowed unset variables. Existing values, including empty values, are preserved. See [`.env.example`](../.env.example).
 
 ## Saved CLI settings and env files
 
@@ -78,7 +78,7 @@ Only these key names may be copied from the pointed file:
 - `OPENAI_COMPATIBLE_*`
 - `ROUNDTABLE_*_MODEL`
 
-Other credentials, shell settings and paths from that file are ignored. Parsing never populates the entire pointed file into the environment. The pointed file preserves existing values, including empty values. Precedence is package `.env`, then the launcher's environment, then the pointed file.
+Other credentials, shell settings and paths from that file are ignored. Parsing never populates the entire pointed file into the environment. The pointed file preserves existing values, including empty values. Precedence is the launcher's environment, then package `.env`, then the pointed file.
 
 The saved `agentsDir` sets `ROUNDTABLE_AGENTS_DIR` only when the variable is unset, before model and persona configuration is evaluated. `--agents-dir` overrides it for a terminal session. Set paths through `config set` or the shell, because the pointed env-file allowlist excludes `ROUNDTABLE_AGENTS_DIR`.
 

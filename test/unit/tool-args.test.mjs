@@ -167,7 +167,7 @@ test("every tool's arguments are validated before routing, with nested paths for
     ["chat_completion", { messages: ["hi"] }, 'chat_completion: "messages[0]" must be an object'],
     ["chat_completion", { messages: [{ role: "bot", content: "hi" }] }, 'chat_completion: "messages[0].role" must be one of: system, user, assistant'],
     ["chat_completion", { messages: [{ role: "user" }] }, 'chat_completion: "messages[0].content" is required'],
-    ["chat_completion", { messages: [{ role: "user", content: "hi" }], max_tokens: "8" }, 'chat_completion: "max_tokens" must be a finite number'],
+    ["chat_completion", { messages: [{ role: "user", content: "hi" }], max_tokens: "8" }, 'chat_completion: "max_tokens" must be an integer'],
     // Required fields are now enforced for the legacy tools too (after type and provider checks).
     ["say", {}, 'say: "meeting_id" is required'],
     ["improve_agent", { agent: " " }, 'improve_agent: "agent" is required: pass the agent name or .md path to improve'],
@@ -260,5 +260,44 @@ test("run tools check ranges, enums and nested visibility, and are orchestrator-
   for (const name of ["execute", "execution_status", "control_execution", "resolve_escalation"]) {
     const w = await handleToolCall(name, {}, "worker");
     assert.equal(w.content[0].text, `Error: Unknown tool: ${name}`);
+  }
+});
+
+test("every sampling tool lists and enforces the token and temperature bounds", async t => {
+  const { PROVIDER_MAX_TOKENS } = await import("../../dist/providers/limits.js");
+  const { handleDeliberationTool } = await import("../../dist/tools/deliberation.js");
+  const { json, stubFetch } = await import("./helpers.mjs");
+  const cap = Math.max(...Object.values(PROVIDER_MAX_TOKENS));
+  const calls = stubFetch(t, () => json(200, { choices: [{ message: { content: "ok" } }] }));
+  const sampling = tools.filter(tool => tool.inputSchema.properties?.max_tokens || tool.inputSchema.properties?.temperature);
+  assert.deepEqual(sampling.map(tool => tool.name), ["chat_completion"]);
+  const base = { messages: [{ role: "user", content: "hi" }], provider: "openai_compatible", base_url: "http://localhost:1234/v1" };
+  for (const tool of sampling) {
+    const props = tool.inputSchema.properties;
+    assert.equal(props.max_tokens.type, "integer");
+    assert.equal(props.max_tokens.minimum, 1);
+    assert.equal(props.max_tokens.maximum, cap);
+    assert.equal(props.temperature.minimum, 0);
+    assert.equal(props.temperature.maximum, 2);
+    for (const [field, values] of [["max_tokens", [0, -1, 1.5, cap + 1, Infinity, NaN]], ["temperature", [-0.1, 2.1, Infinity, NaN]]]) {
+      for (const value of values) {
+        const args = { ...base, [field]: value };
+        assert.throws(() => checkArgs(tool.name, args), new RegExp(field));
+        assert.equal((await handleToolCall(tool.name, args)).isError, true);
+        await assert.rejects(handleDeliberationTool(tool.name, args), new RegExp(field));
+      }
+    }
+    for (const field of ["max_tokens", "temperature"]) {
+      const args = { ...base, [field]: null };
+      assert.equal((await handleToolCall(tool.name, args)).isError, true);
+      await assert.rejects(handleDeliberationTool(tool.name, args), new RegExp(field));
+    }
+    assert.equal(calls.length, 0);
+    for (const [max_tokens, temperature] of [[1, 0], [cap, 2]]) {
+      const result = await handleToolCall(tool.name, { ...base, max_tokens, temperature });
+      assert.ok(!result.isError, JSON.stringify(result));
+      assert.equal(calls.at(-1).body.max_tokens, max_tokens);
+      assert.equal(calls.at(-1).body.temperature, temperature);
+    }
   }
 });

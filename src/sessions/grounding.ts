@@ -99,7 +99,7 @@ export function workspaceSnapshot(dir: string = WORKSPACE_DIR): string | undefin
     ["Recent commits", ["log", "-12", "--format=%s (%cr)"]],
   ] as const) {
     try {
-      const output = execFileSync("git", ["-C", root, ...args], {
+      const output = execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-C", root, ...args], {
         timeout: 2000, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], env: childEnv("git"),
       }).trim();
       if (output) parts.push(`${label}:\n${output}`);

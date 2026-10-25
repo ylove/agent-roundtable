@@ -123,6 +123,7 @@ export function buildTaskCard(state: Readonly<BlackboardState>, taskId: string, 
       )}`
     );
   }
+  if (spec.verify?.length) out.push(`### Page checks (run by submit_work)\n\n${bullets(spec.verify.map(v => `\`page_loads\`: \`${cap(v.page_loads.path, 200)}\` must load without exceptions; skipped with a note if no browser is available`))}`);
   if (spec.context?.length) {
     out.push(`### Context\n\n${bullets(spec.context.slice(0, CARD_LIMITS.listItems).map((a) => `${a.kind}: ${cap(a.title ? `${a.title} (${a.ref})` : a.ref, 300)}`))}`);
   }

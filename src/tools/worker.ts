@@ -12,6 +12,7 @@
 // happens outside it. Nothing here merges: the runner owns the merge queue.
 // ============================================================================
 
+import { verifyPageLoads, type PageLoadsPredicate } from "../execution/verify.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -585,6 +586,7 @@ interface CheckOutcome {
   /** The submitted commit a submission check ran on (run_command checks run in the worktree). */
   commit?: string;
   status: "passed" | "failed" | "timed_out";
+  skipped?: boolean;
   exit: number | null;
   duration_ms: number;
   signature?: string;
@@ -609,9 +611,9 @@ async function runCheck(
   task: string,
   spec: CommandSpec | undefined,
   commandId: string,
-  opts: { maxTimeoutMs: number; signal?: AbortSignal; image?: string; workdir?: string; bind?: CheckBinding }
+  opts: { maxTimeoutMs: number; signal?: AbortSignal; image?: string; workdir?: string; bind?: CheckBinding; predicate?: PageLoadsPredicate }
 ): Promise<CheckOutcome> {
-  const backend = await sandboxFor(a);
+  const backend = opts.predicate ? undefined : await sandboxFor(a);
   const workdir = opts.workdir ?? worktreeOf(a, task);
   const bind = opts.bind ?? {};
   const at = opts.bind ? { commit: opts.bind.commit } : {};
@@ -621,12 +623,18 @@ async function runCheck(
   let exit: number | null;
   let timedOut = false;
   let duration = 0;
-  if (!spec) {
+  let skipped = false;
+  if (opts.predicate) {
+    const start = Date.now();
+    const result = await verifyPageLoads(workdir, opts.predicate, { signal: opts.signal, timeoutMs: Math.min(opts.maxTimeoutMs, 15_000) });
+    output = result.note; exit = result.ok ? 0 : null; skipped = !!result.skipped; duration = Date.now() - start;
+    await emit(source => ({ type: "note.posted", source, payload: { topic: "page_loads", text: output, refs: [task, commandId] } }));
+  } else if (!spec) {
     output = `The contract defines no command ${commandId}`;
     exit = null;
   } else {
     try {
-      const r = await runCommandSpec(backend, spec, workdir, { maxTimeoutMs: opts.maxTimeoutMs, signal: opts.signal, image: opts.image });
+      const r = await runCommandSpec(backend!, spec, workdir, { maxTimeoutMs: opts.maxTimeoutMs, signal: opts.signal, image: opts.image });
       ({ output, exit, timedOut, durationMs: duration } = r);
     } catch (e) {
       output = scrub(e instanceof Error ? e.message : String(e));
@@ -641,7 +649,7 @@ async function runCheck(
   }
   if (exit === 0) {
     await emit((source) => ({ type: "check.passed", source, payload: { command_id: commandId, scope: "task", task, duration_ms: duration, ...bind } }));
-    return { command_id: commandId, ...at, status: "passed", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
+    return { command_id: commandId, ...at, ...(skipped && { skipped }), status: "passed", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
   }
   const signature = failureSignature(commandId, output);
   await emit((source) => ({ type: "check.failed", source, payload: { command_id: commandId, scope: "task", task, exit, signature, output_blob: blob, ...bind } }));
@@ -1497,9 +1505,12 @@ async function submitLocked(a: Actor, args: Record<string, unknown>, ctx: ToolCa
       }
       results.push(await runCheck(a, task, c?.validation.commands.find((x) => x.id === id), id, { maxTimeoutMs: left, signal: ctx.signal, image: c?.sandbox.image || undefined, workdir: dir, bind }));
     }
+    for (const [index, predicate] of (rt.spec.verify ?? []).entries()) {
+      results.push(await runCheck(a, task, undefined, `page-loads-${index + 1}`, { predicate, maxTimeoutMs: Math.max(1, deadline - Date.now()), signal: ctx.signal, workdir: dir, bind }));
+    }
     return results;
   };
-  const results = ids.length ? await withCommitCheckout(a.store.header(), task, head, runAll) : [];
+  const results = ids.length || rt.spec.verify?.length ? await withCommitCheckout(a.store.header(), task, head, runAll) : [];
   ctx.progress?.(ids.length, ids.length, "checks done");
   const failed = results.filter((r) => r.status !== "passed");
   const view = results.map(({ output_tail, ...r }) => (r.status === "passed" ? r : { ...r, output_tail }));

@@ -334,3 +334,45 @@ test("per-provider caps keep build and retry token limits within what each provi
   assert.ok(calls.length > 0 && calls.every(c => c.body.max_tokens <= 16_384));
   assert.ok(calls.some(c => c.body.max_tokens === 16_384));
 });
+
+test("page checks are recorded; a throwing page uses the single builder retry and judges see the summary and version", async t => {
+  const scripted = setup(t);
+  const events = [];
+  const attempts = { A: 0, B: 0 };
+  const { getPrototypeScreenshot } = await import("../../dist/table/replay.js");
+  const checker = async url => {
+    const team = /\/p\/([AB])\//.exec(url)[1];
+    const thrown = ++attempts[team] === 1 && team === "A";
+    return { ok: !thrown, loaded: true, consoleErrors: [], exceptions: thrown ? ["TypeError: broken button"] : [], failedRequests: 0, screenshot: Buffer.from("png") };
+  };
+  const startRoom = async () => ({ url: "http://127.0.0.1:1/capability/", observer: { onEvent() {} }, close: async () => {} });
+  const result = await runDuel(options, { onEvent(e) { events.push(e); } }, new AbortController().signal, { resolveSeats: () => seats, checkPage: checker, startRoom });
+  assert.equal(scripted.attempts.A, 2); assert.equal(scripted.attempts.B, 1);
+  const prototypes = events.filter(e => e.type === "prototype" && e.team === "A");
+  assert.equal(prototypes.length, 2); assert.deepEqual(prototypes.map(p => p.version), [1, 2]);
+  assert.deepEqual(prototypes[0].check.exceptions, ["TypeError: broken button"]);
+  assert.equal(getPrototypeScreenshot(prototypes[0]).toString(), "png");
+  const prompts = scripted.calls.map(call => JSON.parse(call.init.body).messages.at(-1).content);
+  assert.ok(prompts.some(p => p.startsWith("R1b BUILD") && p.includes("Page check: threw TypeError: broken button")));
+  assert.ok(prompts.some(p => p.startsWith("R2 JUDGE") && p.includes("Page check: loaded; 0 console errors") && p.includes("Version v2")));
+  assert.equal(events.find(e => e.type === "assessment" && e.team === "A").version, 2);
+  const replayed = [];
+  await replayDuel(result.archivePath, { onEvent(e) { replayed.push(e); } }, { speed: 100000 });
+  assert.deepEqual(replayed.filter(e => e.type === "prototype").map(e => e.check), events.filter(e => e.type === "prototype").map(e => e.check));
+  assert.ok(replayed.filter(e => e.type === "prototype").every(e => getPrototypeScreenshot(e) === undefined));
+});
+
+test("--no-page-check and MCP page_check opt out; old archives still replay without checks", async t => {
+  const { parseTableArgs } = await import("../../dist/cli-table.js");
+  const { START_DUEL_SCHEMA } = await import("../../dist/tools/duel.js");
+  const parsed = parseTableArgs("duel", ["A brief", "--team-a", "a", "--team-b", "b", "--judges", "j", "--no-page-check"]);
+  assert.equal(parsed.options.pageCheck, false); assert.equal(START_DUEL_SCHEMA.properties.page_check.type, "boolean");
+  setup(t);
+  const events = [];
+  await runDuel({ ...options, pageCheck: false }, { onEvent(e) { events.push(e); } }, new AbortController().signal,
+    { resolveSeats: () => seats, checkPage: async () => { throw new Error("checker must not run"); }, startRoom: async () => { throw new Error("room must not start"); } });
+  assert.ok(events.filter(e => e.type === "prototype").every(e => e.check.reason === "disabled"));
+  const replayed = [];
+  await replayDuel(new URL("../../examples/duel/demo.json", import.meta.url).pathname, { onEvent(e) { replayed.push(e); } }, { speed: 100000 });
+  assert.ok(replayed.filter(e => e.type === "prototype").every(e => e.check === undefined));
+});

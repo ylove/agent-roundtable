@@ -27,6 +27,7 @@ export const START_DUEL_SCHEMA: JsonSchema & { type: "object" } = {
     judges: personaList(`Judge personas, 1 to ${MAX_JUDGES}.`, MAX_JUDGES),
     kind: { type: "string", enum: [...DUEL_KINDS], description: "What the teams build: web (a self-contained index.html, inline CSS, optional inline JS; default), code (source files, shown as read-only text and never executed), diagram (Mermaid source) or text (markdown or plain text)." },
     criteria: { type: "array", items: { type: "string", minLength: 1, maxLength: 120 }, maxItems: MAX_CRITERIA, description: "Judging rubric. Default: fit to the brief, quality, usability and accessibility, and risk or safety within the judge's own remit." },
+    page_check: { type: "boolean", description: "Check web pages in local headless Chrome when available (default true). Set false to skip." },
     rounds: { type: "number", minimum: 1, maximum: 2, description: "1 (default) judges once; 2 lets a team the judges did not approve revise once and keeps the original tally." },
     seats: {
       type: "object",
@@ -53,7 +54,7 @@ export function summarizeDuel(events: TableEvent[], result: { id: string; winner
   const start = events.find((e): e is Extract<TableEvent, { type: "start" }> => e.type === "start");
   const teams: Record<string, unknown> = {};
   for (const event of events) if (event.type === "prototype") {
-    teams[event.team] = { title: event.title ? one(event.title, 120) : undefined, kind: event.kind ?? "web", ok: event.ok, ...(event.error && { error: one(event.error, 200) }), files: event.files.length };
+    teams[event.team] = { title: event.title ? one(event.title, 120) : undefined, kind: event.kind ?? "web", ok: event.ok, ...(event.check && { check: event.check }), ...(event.error && { error: one(event.error, 200) }), files: event.files.length };
   }
   const usage = [...events].reverse().find((e): e is Extract<TableEvent, { type: "usage" }> => e.type === "usage");
   return {
@@ -65,7 +66,7 @@ export function summarizeDuel(events: TableEvent[], result: { id: string; winner
     criteria: start?.criteria,
     teams,
     routing: start?.seats.map(({ id, provider, model, reason }) => ({ id, provider, model, reason })),
-    verdicts: events.flatMap(e => e.type === "assessment" ? [{ judge: e.judge.name, judge_key: personaKey(e.judge.id), team: e.team, verdict: e.verdict, reason: one(e.reason, 300) }] : []),
+    verdicts: events.flatMap(e => e.type === "assessment" ? [{ judge: e.judge.name, judge_key: personaKey(e.judge.id), team: e.team, version: e.version, verdict: e.verdict, reason: one(e.reason, 300) }] : []),
     dissents: events.flatMap(e => e.type === "dissent" ? [{ team: e.team, persona: e.seat.name, persona_key: personaKey(e.seat.id), text: e.text.slice(0, 600) }] : []),
     usage: usage && {
       total_cost_usd: Number(usage.totalCostUsd.toFixed(6)),
@@ -77,10 +78,11 @@ export function summarizeDuel(events: TableEvent[], result: { id: string; winner
 }
 
 export async function startDuelTool(args: Record<string, unknown>, ctx?: ToolCallContext): Promise<CallToolResult> {
-  const a = args as { topic: string; team_a: string[]; team_b: string[]; judges: string[]; kind?: DuelKind; criteria?: string[]; rounds?: number; seats?: Record<string, SeatSpec>; provider?: import("../config.js").LLMProvider | "auto"; model?: string; turn_timeout_s?: number; max_seconds?: number };
+  const a = args as { topic: string; team_a: string[]; team_b: string[]; judges: string[]; kind?: DuelKind; criteria?: string[]; rounds?: number; page_check?: boolean; seats?: Record<string, SeatSpec>; provider?: import("../config.js").LLMProvider | "auto"; model?: string; turn_timeout_s?: number; max_seconds?: number };
   const opts: DuelOptions = {
     topic: a.topic, teamA: a.team_a, teamB: a.team_b, judges: a.judges,
     ...(a.kind && { kind: a.kind }), ...(a.criteria && { criteria: a.criteria }),
+    ...(a.page_check !== undefined && { pageCheck: a.page_check }),
     rounds: (a.rounds ?? 1) as 1 | 2,
     ...(a.turn_timeout_s !== undefined && { turnTimeoutMs: a.turn_timeout_s * 1000 }),
     ...(a.max_seconds !== undefined && { maxSeconds: a.max_seconds }),

@@ -130,3 +130,7 @@ roundtable cast "Draft an expenses policy" --agents-dir /absolute/path/to/agents
 | `--max-seconds s` | Whole-run deadline, default 300 seconds |
 
 Turns stream using the table renderer. The final roster lists verdicts, roles, overlaps, redundancy, gaps and the recommended cast. When the director supplies teams, it also prints a shell-safe duel command. Archives live at `ROUNDTABLE_HOME/casting/<id>.json` and `casting/latest.json`; the terminal prints the archive path. Ctrl-C still prints and archives the available report. Exit codes: 0 completed, 1 aborted or failed, 2 usage error or missing key. See [Casting Call](modes/casting-call.md) for the report fields, costs and handoff to a contract or duel.
+
+### Web page checks
+
+`roundtable duel --no-page-check` skips headless page checks. By default, web builds and revisions are checked when local Chrome/Chromium is available; no browser is reported as not checked. Checks use local capability pages and a deny-all proxy, with no debugging port. The room keeps a version strip, a current/proposed comparison with a line diff, and a shared Browser screenshot panel. See [duel](modes/duel.md#page-checks-and-design-iterations).

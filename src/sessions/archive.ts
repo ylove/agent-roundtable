@@ -73,6 +73,8 @@ export interface ArchivedSession {
   transcript: string;
   turns: ArchivedTurn[];
   summary?: string;
+  prototypePages?: string[];
+  prototypeAssessments?: ReturnType<import("../prototypes/session.js").PrototypeTracker["assessmentRecords"]>;
   /** Each challenger's/attacker's own closing statement, separate from the proponent/defender summary. */
   dissentSummaries?: Array<{ agent: string; content: string }>;
   /** Ultraplans only. */
@@ -122,6 +124,7 @@ function scrubRecord(r: ArchivedSession): ArchivedSession {
     topic: scrub(r.topic),
     transcript: scrub(r.transcript),
     turns: r.turns.map((turn) => ({ ...turn, content: scrub(turn.content) })),
+    ...(r.prototypeAssessments && { prototypeAssessments: scrubDeep(r.prototypeAssessments) }),
     ...(r.summary !== undefined && { summary: scrub(r.summary) }),
     ...(r.stopped && { stopped: { ...r.stopped, by: scrub(r.stopped.by), ...(r.stopped.reason !== undefined && { reason: scrub(r.stopped.reason) }) } }),
     ...(r.dissentSummaries && { dissentSummaries: r.dissentSummaries.map((s) => ({ ...s, content: scrub(s.content) })) }),
@@ -194,6 +197,7 @@ export function archiveMeeting(kind: "meeting" | "local-meeting", meeting: Meeti
         ? { role: "caller", speaker: "caller", content }
         : { role: "agent", agent: meeting.agent, speaker: agentKey(meeting.agent), content };
     }),
+    ...(meeting.prototype && { prototypePages: meeting.prototype.shortlistedWebPaths(), prototypeAssessments: meeting.prototype.assessmentRecords() }),
     ...(summary && { summary }),
     ...(dissentSummaries?.length && { dissentSummaries }),
     public: publicOf(meeting.publicChannel),
@@ -215,6 +219,7 @@ export function archiveCollaboration(c: Collaboration, transcript: Collaboration
     turns: transcript.map((m): ArchivedTurn => m.agentIndex === undefined
       ? { role: "orchestrator", speaker: "orchestrator", content: m.content, at: m.timestamp.toISOString() }
       : { role: "agent", agent: m.agent, speaker: agentKey(m.agent), content: m.content, at: m.timestamp.toISOString() }),
+    ...(c.prototype && { prototypePages: c.prototype.shortlistedWebPaths(), prototypeAssessments: c.prototype.assessmentRecords() }),
     ...(summary && { summary }),
     ...(dissentSummaries?.length && { dissentSummaries }),
     public: publicOf(c.publicChannel),

@@ -169,7 +169,7 @@ export function draftDuelPlan(duel: DuelImport, personas: { build: string; revie
   // A caller's scope.paths bounds every task; documents narrow to docs/ when the scope allows it.
   const inDocs = (scopePaths ?? []).map((p) => (p === "**" ? "docs/**" : p)).filter((p) => p.startsWith("docs/"));
   const write = scopePaths?.length ? (doc && inDocs.length ? [...new Set(inDocs)] : scopePaths) : doc ? ["docs/**"] : ["**"];
-  // Code checks with a placeholder test command; web and documents have no runnable check to invent.
+  // Code checks with a placeholder test command; web checks load the archived entry path.
   const checks = doc || web ? [] : ["test"];
   const tasks: Array<Record<string, unknown>> = [];
   const add = (id: string, title: string, persona: string, acceptance: string[]) => {
@@ -191,6 +191,10 @@ export function draftDuelPlan(duel: DuelImport, personas: { build: string; revie
       `The repository contains a working version of "${a.title}", rebuilt from the archived artifact files in duel ${duel.id}`,
       `It meets the brief: ${a.brief || duel.topic}`.slice(0, 500), ...keep,
     ]);
+  }
+  if (web) {
+    tasks[0].verify = [{ page_loads: { path: a.files.find(f => /\.html?$/i.test(f.path))?.path ?? "index.html" } }];
+    (tasks[0].acceptance as string[]).push("The page loads without exceptions");
   }
   const where = doc ? " in the revision" : web ? " on the page" : " in the code";
   // At most MAX_FIX_TASKS fix tasks: the rest ride in the last one's acceptance list.

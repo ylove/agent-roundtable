@@ -1364,3 +1364,7 @@ create_agent { "from_session": "collab-4k9q2mzt", "write": false }
 improve_agent { "agent": "cfo", "with": ["skeptic"], "focus": "Assumptions and escalation rules" }
 improve_agent { "agent": "cfo", "with": ["product-lead"], "include_self": false, "write": false }
 ```
+
+### Page-check option
+
+`start_duel` accepts `page_check: false` to skip headless checks of web builds and revisions (default on when Chrome/Chromium exists). Prototype-mode `start_collaboration`, `start_meeting` and `start_local_meeting` accept the same option alongside `prototype: true`. Check metadata includes load status, capped/scrubbed console errors and exceptions, failed-request count and an optional reason. No browser means not checked, never a failed artifact. Duel results include each team's check and the version of each verdict; screenshots stay local and outside the result/archive.

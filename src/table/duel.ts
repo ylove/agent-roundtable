@@ -1,3 +1,6 @@
+import { checkPage, pageCheckRecord, pageCheckSummary, type PageCheck } from "../prototypes/page-check.js";
+import { ChromeProcesses, findChrome } from "../prototypes/browser.js";
+import { startRoom } from "./room.js";
 import { prepareSeats, resolveSeats } from "./seats.js";
 import { PROVIDER_MAX_TOKENS } from "../providers/limits.js";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -18,10 +21,12 @@ import { abortSession, lineFor, metered, sessionSignal } from "../usage/session-
 import type { DuelKind, DuelOptions, DuelResult, RunDuel, Seat, TableEvent, TableObserver } from "./events.js";
 import { validateDuelOptions } from "./duel-options.js";
 import { buildPrompt, closingPrompt, conceptPrompt, critiquePrompt, DEFAULT_CRITERIA, DUEL_MAX_BYTES, duelSystem, judgePrompt, normalizeCriteria } from "./prompts.js";
-import { attachPrototypeFiles, getPrototypeFiles, type DuelArchive } from "./replay.js";
+import { attachPrototypeFiles, getPrototypeFiles, attachPrototypeScreenshot, getPrototypeScreenshot, type DuelArchive } from "./replay.js";
 
 export interface ResolvedDuelSeat extends Seat { prompt?: string }
 export interface DuelDependencies {
+  checkPage?: typeof checkPage;
+  startRoom?: typeof startRoom;
   resolveSeats?: (opts: DuelOptions) => Promise<ResolvedDuelSeat[]> | ResolvedDuelSeat[];
 }
 
@@ -198,7 +203,10 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
       : raw.type === "prototype" && raw.error ? { ...raw, error: scrub(raw.error) }
       : raw.type === "end" && raw.archivePath ? { ...raw, archivePath: `duels/${id}.json` } : raw;
     // Scrubbing builds a new object, which must keep the attached file bytes.
-    if (event !== raw && raw.type === "prototype") attachPrototypeFiles(event, getPrototypeFiles(raw));
+    if (event !== raw && raw.type === "prototype") {
+      attachPrototypeFiles(event, getPrototypeFiles(raw));
+      attachPrototypeScreenshot(event, getPrototypeScreenshot(raw));
+    }
     archive.events.push(event);
     try { await obs.onEvent(event); } catch { /* An observer cannot interrupt archival. */ }
   };
@@ -225,6 +233,11 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   const preferences = { A: 0, B: 0 };
   let sandbox: string | undefined;
   let version = 0;
+  const teamVersions = { A: 0, B: 0 };
+  const checks: Partial<Record<"A" | "B", PageCheck>> = {};
+  const chrome = new ChromeProcesses();
+  const killBrowsers = () => chrome.killAll();
+  for (const stop of [signal, sessionStop, phase.signal]) stop.addEventListener("abort", killBrowsers, { once: true });
   let internalFailure = false;
   const publicSeat = (seat: Seat): Seat => seats.find(s => s.id === seat.id)!;
 
@@ -302,11 +315,33 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
         await mkdir(dir, { mode: 0o700 });
         prototype.files = await materializeFiles(dir, prototype.files.map(f => ({ ...f, content: scrubArtifact(f.content) })), { redactContent: false });
         submissions[team] = prototype;
-        const event: TableEvent = { type: "prototype", team, seat: publicSeat(seat), title: prototype.title, kind, ok: true,
+        const event: TableEvent = { type: "prototype", team, version: ++teamVersions[team], seat: publicSeat(seat), title: prototype.title, kind, ok: true,
           files: prototype.files.map(f => ({ path: f.path, bytes: Buffer.byteLength(f.content) })) };
         attachPrototypeFiles(event, prototype.files);
+        if (kind === "web") {
+          let check: import("../prototypes/page-check.js").PageCheckResult | undefined;
+          if (opts.pageCheck === false) event.check = { loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "disabled" };
+          else if (deps.checkPage || findChrome()) {
+            let room: Awaited<ReturnType<typeof startRoom>> | undefined;
+            try {
+              room = await (deps.startRoom ?? startRoom)({ hold: false });
+              await room.observer.onEvent(event);
+              check = await (deps.checkPage ?? checkPage)(`${room.url}p/${team}/index.html`, { processes: chrome });
+              event.check = pageCheckRecord(check);
+              attachPrototypeScreenshot(event, check.screenshot);
+            } catch { event.check = { loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "page check unavailable" }; }
+            finally { await room?.close(); }
+          } else event.check = { loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "no browser" };
+          checks[team] = event.check;
+        }
         archive.prototypes.push({ eventIndex: archive.events.length, team, files: prototype.files });
         await emit(event);
+        const check = event.check;
+        if (check && check.reason !== "no browser" && check.reason !== "disabled" && check.reason !== "page check unavailable" && (!check.loaded || check.exceptions.length)) {
+          error = pageCheckSummary(check);
+          feedback = `The previous attempt failed validation: ${error}\nReturn a complete corrected prototype.`;
+          continue;
+        }
         return;
       } catch (e) {
         error = e instanceof ValidationError ? e.message : "No valid artifact. It could not be saved.";
@@ -345,7 +380,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
       await emit({ type: "prototype", team, seat: publicSeat(teams[team].at(-1)!), ok: false, files: [], kind, error: cancelled() ? "Duel stopped." : "No valid artifact before the deadline." });
     }
     await mapLimit(judges, PARALLEL_TURNS, async judge => {
-      const source = (team: "A" | "B") => submissions[team] ? listing(submissions[team].files, nonce) : "No valid submission. Automatic REJECT.";
+      const source = (team: "A" | "B") => submissions[team] ? `Version v${teamVersions[team]}\n${kind === "web" ? pageCheckSummary(checks[team]) + "\n" : ""}${listing(submissions[team].files, nonce)}` : "No valid submission. Automatic REJECT.";
       const judging = { kind, criteria, nonce };
       let text = await turn(judge, "R2", judgePrompt(opts.topic, { A: source("A"), B: source("B") }, judging));
       let verdicts = text === undefined ? undefined : parseDuelVerdicts(text);
@@ -358,7 +393,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
       if (preference) preferences[preference]++;
       for (const team of ["A", "B"] as const) {
         if (!verdicts && submissions[team]) continue; // A failed judge casts no verdict.
-        const assessment: Extract<TableEvent, { type: "assessment" }> = { type: "assessment", judge: publicSeat(judge), team,
+        const assessment: Extract<TableEvent, { type: "assessment" }> = { type: "assessment", judge: publicSeat(judge), team, ...(teamVersions[team] && { version: teamVersions[team] }),
           ...(submissions[team] ? verdicts![team] : { verdict: "REJECT", reason: "No valid artifact." }) };
         assessments.push(assessment);
         await emit(assessment);
@@ -396,6 +431,8 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
     catch { result.archivePath = undefined; }
     return result;
   } finally {
+    chrome.killAll();
+    for (const stop of [signal, sessionStop, phase.signal]) stop.removeEventListener("abort", killBrowsers);
     signal.removeEventListener("abort", stop);
     unregisterDuel(id);
     if (sandbox) { removeDirSync(sandbox); releaseSessionDir(sandbox); ownedSandboxes.delete(sandbox); }

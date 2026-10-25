@@ -163,6 +163,7 @@ export const deliberationTools: ToolDefinition[] = [
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
         provider: {
@@ -266,6 +267,7 @@ export const deliberationTools: ToolDefinition[] = [
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
       },
@@ -452,6 +454,7 @@ export const deliberationTools: ToolDefinition[] = [
         },
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
         provider: {
@@ -735,7 +738,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Meeting Tools ===
     case START_MEETING: {
-      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype, duel, duel_source } = args as {
+      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype, page_check, duel, duel_source } = args as {
         agent: string;
         agenda: string;
         context?: string;
@@ -748,8 +751,9 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         debate_focus?: string;
         public?: boolean;
         prototype?: boolean;
+        page_check?: boolean;
       };
-      const result = await startMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true);
+      const result = await startMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true, page_check !== false);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -796,7 +800,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Local Meeting Tools (CLI-based) ===
     case START_LOCAL_MEETING: {
-      const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype, duel, duel_source } = args as {
+      const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype, page_check, duel, duel_source } = args as {
         agent: string;
         agenda: string;
         context?: string;
@@ -806,8 +810,9 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         debate_focus?: string;
         public?: boolean;
         prototype?: boolean;
+        page_check?: boolean;
       };
-      const result = await startLocalMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), mode, debate_focus, isPublic === true, prototype === true);
+      const result = await startLocalMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), mode, debate_focus, isPublic === true, prototype === true, page_check !== false);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -878,7 +883,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Collaboration Tools ===
     case START_COLLABORATION: {
-      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, duel, duel_source } = args as {
+      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, page_check, duel, duel_source } = args as {
         agents: string[];
         topic?: string;
         context?: string;
@@ -895,6 +900,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         grounding?: boolean;
         public?: boolean;
         prototype?: boolean;
+        page_check?: boolean;
       };
 
       const result = await startCollaboration(agents, topic, {
@@ -913,6 +919,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         grounding,
         public: isPublic === true,
         ...(prototype === true && { prototype: true }),
+        ...(page_check !== undefined && { pageCheck: page_check }),
       });
 
       return {

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **License: Apache 2.0.** The project moves from the MIT License to the Apache License 2.0, with a `NOTICE` file. Releases before 2.0.0 were published under MIT and remain available under it.
+- **License: Apache 2.0.** The project moves from the MIT License to the Apache License 2.0, with a `NOTICE` file.
 
 - **Configured content filters (#204).** Automated host git calls refuse staging or writing working-tree content when a configured clean, smudge or process filter applies to a tracked or untracked non-ignored path. The error names the filter and one example path; filtered paths are unsupported in heads-down runs. Filter programs remain disabled, while read-only calls and filters attached to no listed path remain available. Repositories without configured filter programs skip the attribute scan.
 

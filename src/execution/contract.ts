@@ -560,7 +560,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     const p = `tasks[${i}]`;
     const o = ck.obj(raw, p, true);
     if (!o) continue;
-    ck.known(o, ["id", "title", "team", "persona", "kind", "depends_on", "paths", "acceptance", "checks", "effort", "budget_usd", "context"], p);
+    ck.known(o, ["id", "title", "team", "persona", "kind", "depends_on", "paths", "acceptance", "checks", "verify", "effort", "budget_usd", "context"], p);
     const tid = ck.id(o.id, `${p}.id`);
     if (tid !== undefined && RESERVED_TASK_IDS.includes(tid)) {
       ck.err(`${p}.id`, `${q(tid)} is reserved: its branch would clash with the run's integration branch`);
@@ -592,6 +592,19 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
       if (!commandIds.has(cid)) ck.err(`${p}.checks[${j}]`, `names unknown command ${q(cid)} (define it in validation.commands)`);
       else if (!checks.includes(cid)) checks.push(cid);
     }
+    const verify: NonNullable<TaskSpec["verify"]> = [];
+    if (o.verify !== undefined) for (const [j, raw] of ck.arr(o.verify, `${p}.verify`, 16).entries()) {
+      const at = `${p}.verify[${j}]`;
+      const predicate = ck.obj(raw, at, true);
+      if (!predicate) continue;
+      ck.known(predicate, ["page_loads"], at);
+      const page = ck.obj(predicate.page_loads, `${at}.page_loads`, true);
+      if (!page) continue;
+      ck.known(page, ["path"], `${at}.page_loads`);
+      const path = typeof page.path === "string" ? normalizeRelPath(page.path) : null;
+      if (!path || /[*?]/.test(path)) ck.err(`${at}.page_loads.path`, "must be a repository-relative file path");
+      else verify.push({ page_loads: { path } });
+    }
     const effort = ck.oneOf(o.effort, `${p}.effort`, EFFORTS);
     const budget = ck.num(o.budget_usd, `${p}.budget_usd`, { gt: 0 });
     const context = o.context === undefined || o.context === null ? undefined : artifacts(ck, o.context, `${p}.context`);
@@ -603,6 +616,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     tasks.push({
       id: tid, title: taskTitle, ...(team !== undefined && { team }), persona, kind, depends_on: deps,
       paths: { write, ...(read !== undefined && { read }) }, acceptance, checks,
+      ...(o.verify !== undefined && { verify }),
       ...(effort !== undefined && { effort }), ...(budget !== undefined && { budget_usd: budget }),
       ...(context !== undefined && { context }),
     });
@@ -1030,6 +1044,7 @@ export function renderContractMarkdown(c: Contract, opts: RenderOptions = {}): s
     lines.push(`- Writes: ${code(t.paths.write)}${t.paths.read?.length ? ` · reads: ${code(t.paths.read)}` : ""}`);
     lines.push(`- Acceptance:${t.acceptance.length ? "\n" + t.acceptance.map((a) => `  - ${a}`).join("\n") : " (none)"}`);
     lines.push(`- Checks: ${code(t.checks)}`);
+    if (t.verify?.length) lines.push(`- Verify: ${t.verify.map(v => `page_loads \`${v.page_loads.path}\``).join(", ")}`);
     if (t.context?.length) lines.push(`- Context: ${t.context.map((a) => `${a.kind} \`${a.ref}\``).join(", ")}`);
     return lines.join("\n");
   }).join("\n\n"));

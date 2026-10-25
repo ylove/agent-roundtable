@@ -412,6 +412,12 @@ export async function proposeContract(o: ProposeContractOptions): Promise<Contra
         else c.decisions = [...have, duel.decision];
       }
     }
+    if (session?.prototypePages?.length && Array.isArray(c.tasks) && isObj(c.tasks.at(-1))) {
+      const task = c.tasks.at(-1) as Obj;
+      const verify = Array.isArray(task.verify) ? task.verify : [];
+      task.verify = [...verify, ...session.prototypePages.filter(path => !verify.some(v => isObj(v) && isObj(v.page_loads) && v.page_loads.path === path)).map(path => ({ page_loads: { path } }))];
+      if (Array.isArray(task.acceptance)) task.acceptance = [...task.acceptance, "The shortlisted web page loads without exceptions"];
+    }
     if (c.title === undefined) c.title = firstLine(o.goal);
     if (c.participants === undefined && src && Array.isArray(c.tasks)) {
       const personas = c.tasks.map((t) => (isObj(t) && typeof t.persona === "string" ? t.persona : "")).filter(Boolean);

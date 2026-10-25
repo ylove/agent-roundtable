@@ -151,4 +151,4 @@ Build and run `npm test` before a pull request. See [contributing](docs/contribu
 
 ## License
 
-[MIT](LICENSE).
+[Apache License 2.0](LICENSE); see also [NOTICE](NOTICE).

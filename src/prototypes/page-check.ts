@@ -34,6 +34,14 @@ export function pageCheckSummary(check?: PageCheck): string {
   return `Page check: loaded; ${check.consoleErrors.length} console errors; ${check.failedRequests} failed requests`;
 }
 
+/** A page that was checked and did not load cleanly. An unchecked page never counts as failed. Accepts archived records. */
+export function pageCheckFailed(check: unknown): boolean {
+  if (!check || typeof check !== "object") return false;
+  const c = check as Partial<PageCheck>;
+  if (c.reason === "no browser" || c.reason === "disabled" || c.reason === "page check unavailable") return false;
+  return c.loaded !== true || (Array.isArray(c.exceptions) && c.exceptions.length > 0);
+}
+
 /** Metadata only: screenshots never enter event logs or archives. */
 export function pageCheckRecord({ loaded, consoleErrors, exceptions, failedRequests, reason }: PageCheck): PageCheck {
   return { loaded, consoleErrors, exceptions, failedRequests, ...(reason && { reason }) };

@@ -1,4 +1,4 @@
-import { checkPage, pageCheckRecord, pageCheckSummary, type PageCheck } from "../prototypes/page-check.js";
+import { checkPage, pageCheckFailed, pageCheckRecord, pageCheckSummary, type PageCheck } from "../prototypes/page-check.js";
 import { ChromeProcesses, findChrome } from "../prototypes/browser.js";
 import { startRoom } from "./room.js";
 import { prepareSeats, resolveSeats } from "./seats.js";
@@ -235,6 +235,8 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   let version = 0;
   const teamVersions = { A: 0, B: 0 };
   const checks: Partial<Record<"A" | "B", PageCheck>> = {};
+  /** The version the judges see: the latest valid submission, unless a revision's page failed its check. */
+  const judged = { A: 0, B: 0 };
   const chrome = new ChromeProcesses();
   const killBrowsers = () => chrome.killAll();
   for (const stop of [signal, sessionStop, phase.signal]) stop.addEventListener("abort", killBrowsers, { once: true });
@@ -298,6 +300,8 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
     const seat = teams[team].at(-1)!;
     let feedback = revision ? `R3 REVISION. Previous source:\n${submissions[team] ? listing(submissions[team].files, nonce) : "No valid artifact."}\nJudges' feedback:\n${assessments.filter(a => a.team === team).map(a => `${a.verdict}: ${a.reason}`).join("\n")}` : "";
     let error = "No valid artifact. None was submitted before the deadline.";
+    const kept = submissions[team] && !pageCheckFailed(checks[team]) ? { submission: submissions[team], check: checks[team], version: judged[team] } : undefined;
+    let failedCheck = false;
     for (let attempt = 0; attempt < 2 && !cancelled() && !expired(); attempt++) {
       const text = await turn(seat, revision ? "R3" : "R1b", buildPrompt(opts.topic, team, concepts[team] + critiques[team], feedback, kind), false, source => {
         // Source code belongs in prototype files, not in the transcript.
@@ -315,6 +319,8 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
         await mkdir(dir, { mode: 0o700 });
         prototype.files = await materializeFiles(dir, prototype.files.map(f => ({ ...f, content: scrubArtifact(f.content) })), { redactContent: false });
         submissions[team] = prototype;
+        failedCheck = false;
+        judged[team] = teamVersions[team] + 1;
         const event: TableEvent = { type: "prototype", team, version: ++teamVersions[team], seat: publicSeat(seat), title: prototype.title, kind, ok: true,
           files: prototype.files.map(f => ({ path: f.path, bytes: Buffer.byteLength(f.content) })) };
         attachPrototypeFiles(event, prototype.files);
@@ -337,7 +343,8 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
         archive.prototypes.push({ eventIndex: archive.events.length, team, files: prototype.files });
         await emit(event);
         const check = event.check;
-        if (check && check.reason !== "no browser" && check.reason !== "disabled" && check.reason !== "page check unavailable" && (!check.loaded || check.exceptions.length)) {
+        if (pageCheckFailed(check)) {
+          failedCheck = true;
           error = pageCheckSummary(check);
           feedback = `The previous attempt failed validation: ${error}\nReturn a complete corrected prototype.`;
           continue;
@@ -347,6 +354,12 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
         error = e instanceof ValidationError ? e.message : "No valid artifact. It could not be saved.";
         feedback = `The previous attempt failed validation: ${error}\nReturn a complete corrected prototype.`;
       }
+    }
+    // A revision whose page still fails gives way to the last version that worked; the room keeps both.
+    if (failedCheck && kept) {
+      submissions[team] = kept.submission;
+      checks[team] = kept.check;
+      judged[team] = kept.version;
     }
     // A failed revision keeps the previous valid submission available.
     if (!submissions[team]) await emit({ type: "prototype", team, seat: publicSeat(seat), kind, ok: false, files: [], error });
@@ -380,7 +393,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
       await emit({ type: "prototype", team, seat: publicSeat(teams[team].at(-1)!), ok: false, files: [], kind, error: cancelled() ? "Duel stopped." : "No valid artifact before the deadline." });
     }
     await mapLimit(judges, PARALLEL_TURNS, async judge => {
-      const source = (team: "A" | "B") => submissions[team] ? `Version v${teamVersions[team]}\n${kind === "web" ? pageCheckSummary(checks[team]) + "\n" : ""}${listing(submissions[team].files, nonce)}` : "No valid submission. Automatic REJECT.";
+      const source = (team: "A" | "B") => submissions[team] ? `Version v${judged[team]}\n${kind === "web" ? pageCheckSummary(checks[team]) + "\n" : ""}${listing(submissions[team].files, nonce)}` : "No valid submission. Automatic REJECT.";
       const judging = { kind, criteria, nonce };
       let text = await turn(judge, "R2", judgePrompt(opts.topic, { A: source("A"), B: source("B") }, judging));
       let verdicts = text === undefined ? undefined : parseDuelVerdicts(text);
@@ -393,7 +406,7 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
       if (preference) preferences[preference]++;
       for (const team of ["A", "B"] as const) {
         if (!verdicts && submissions[team]) continue; // A failed judge casts no verdict.
-        const assessment: Extract<TableEvent, { type: "assessment" }> = { type: "assessment", judge: publicSeat(judge), team, ...(teamVersions[team] && { version: teamVersions[team] }),
+        const assessment: Extract<TableEvent, { type: "assessment" }> = { type: "assessment", judge: publicSeat(judge), team, ...(judged[team] && { version: judged[team] }),
           ...(submissions[team] ? verdicts![team] : { verdict: "REJECT", reason: "No valid artifact." }) };
         assessments.push(assessment);
         await emit(assessment);

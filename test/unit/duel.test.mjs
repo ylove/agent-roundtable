@@ -362,6 +362,28 @@ test("page checks are recorded; a throwing page uses the single builder retry an
   assert.ok(replayed.filter(e => e.type === "prototype").every(e => getPrototypeScreenshot(e) === undefined));
 });
 
+test("a revision whose page still fails gives way to the last version that worked", async t => {
+  const scripted = setup(t, { build: (team, attempt) => team === "B" && attempt > 1 ? game(team).replace("Save", "Revised") : game(team) });
+  const events = [];
+  const checker = async url => {
+    const broken = /\/p\/B\//.test(url) && events.filter(e => e.type === "prototype" && e.team === "B").length > 0;
+    return { ok: !broken, loaded: true, consoleErrors: [], exceptions: broken ? ["TypeError: revision broke"] : [], failedRequests: 0 };
+  };
+  const startRoom = async () => ({ url: "http://127.0.0.1:1/capability/", observer: { onEvent() {} }, close: async () => {} });
+  const result = await runDuel({ ...options, rounds: 2 }, { onEvent(e) { events.push(e); } }, new AbortController().signal, { resolveSeats: () => seats, checkPage: checker, startRoom });
+  assert.equal(scripted.attempts.B, 3);
+  const b = events.filter(e => e.type === "prototype" && e.team === "B");
+  assert.deepEqual(b.map(p => p.version), [1, 2, 3]);
+  assert.deepEqual(b.map(p => p.check.exceptions.length > 0), [false, true, true]);
+  const { pageCheckFailed } = await import("../../dist/prototypes/page-check.js");
+  assert.equal(pageCheckFailed({ loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "no browser" }), false);
+  assert.equal(pageCheckFailed(undefined), false);
+  const { loadDuelFocus } = await import("../../dist/sessions/duel-focus.js");
+  const id = result.archivePath.split("/").at(-1).replace(/\.json$/, "");
+  const brief = loadDuelFocus(id).brief;
+  assert.ok(brief.includes("Save") && !brief.includes("Revised"));
+});
+
 test("--no-page-check and MCP page_check opt out; old archives still replay without checks", async t => {
   const { parseTableArgs } = await import("../../dist/cli-table.js");
   const { START_DUEL_SCHEMA } = await import("../../dist/tools/duel.js");

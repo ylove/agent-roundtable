@@ -1,6 +1,7 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
+import { pageCheckFailed } from "../prototypes/page-check.js";
 import { scrub } from "../security/secrets.js";
 import type { Contract } from "../execution/types.js";
 
@@ -120,7 +121,9 @@ export function importDuel(id: string): DuelImport {
     return { ...base, summary: { id, winner, imported_decision: false, dissents: dissentCount, note } };
   }
 
-  const proto = [...events].reverse().find((e) => e.type === "prototype" && e.team === winner && e.ok !== false);
+  // The final artifact is the latest one whose page did not fail its check, else the latest.
+  const built = [...events].reverse().filter((e) => e.type === "prototype" && e.team === winner && e.ok !== false);
+  const proto = built.find((e) => !pageCheckFailed(e.check)) ?? built[0];
   const title = clean(str(proto?.title) ?? "", 120);
   const kind = clean(str(proto?.kind) ?? str(start?.kind) ?? (isObj(archive) ? str(archive.kind) : undefined) ?? "", 60);
   const members = seats.filter((s) => s.team === winner).map(labelOf).filter((n): n is string => !!n);

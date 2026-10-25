@@ -37,7 +37,7 @@ async function enabled(repo = makeRepo(), reason = "Yes, please hold postmortem 
 }
 
 test("the combined postmortem, dissent and usage reducer uses version 10", () => {
-  assert.equal(REDUCER_VERSION, 10);
+  assert.equal(REDUCER_VERSION, 11);
 });
 
 test("a project is keyed by the first 16 hex characters of sha256 of the real repository root", async () => {

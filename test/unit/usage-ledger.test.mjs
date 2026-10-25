@@ -29,8 +29,8 @@ const usage = (over = {}) => ({
   tokens: { inputTokens: 1000, outputTokens: 200 }, usd: 0.5, estimated: false, ...over,
 });
 
-test("REDUCER_VERSION combines usage and dissent projections at version 10", () => {
-  assert.equal(REDUCER_VERSION, 10);
+test("REDUCER_VERSION combines usage and dissent projections at version 11", () => {
+  assert.equal(REDUCER_VERSION, 11);
 });
 
 test("budget.usage_recorded: provenance is optional, validated, and old events read as 1.0 meant", () => {

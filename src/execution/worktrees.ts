@@ -35,6 +35,7 @@ import {
   integrationBranch,
   openLinkedWorktree,
   openRepo,
+  populateWorktree,
   resolveCommit,
   runGit,
   splitZ,
@@ -223,16 +224,17 @@ async function ensureWorktree(header: ExecutionHeader, name: string, startPoint:
     let args: string[];
     if (await branchExists(repo, branch)) {
       await assertNoGitlinksInTree(repo, `refs/heads/${branch}`);
-      args = ["worktree", "add", "-q", path, branch];
+      args = ["worktree", "add", "--no-checkout", "-q", path, branch];
     } else {
       const start = await startPoint();
       await assertNoGitlinksInTree(repo, start);
-      args = ["worktree", "add", "-q", "-b", branch, path, start];
+      args = ["worktree", "add", "--no-checkout", "-q", "-b", branch, path, start];
     }
     if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
     mkdirPrivate(path);
     try {
       await runGit(repo, args, { timeoutMs: ADD_TIMEOUT_MS });
+      await populateWorktree(openLinkedWorktree(repo, path), { timeoutMs: ADD_TIMEOUT_MS });
     } catch (e) {
       const left = findWorktreeAdmin(repo, path);
       if (left) rmSync(left, { recursive: true, force: true });
@@ -323,7 +325,8 @@ export async function withCommitCheckout<T>(header: ExecutionHeader, label: stri
     const path = join(realpathSync(base), `${label}-${randomBytes(6).toString("hex")}`);
     mkdirSync(path, { mode: 0o700 });
     try {
-      await runGit(repo, ["worktree", "add", "-q", "--detach", path, commit], { timeoutMs: ADD_TIMEOUT_MS });
+      await runGit(repo, ["worktree", "add", "--no-checkout", "-q", "--detach", path, commit], { timeoutMs: ADD_TIMEOUT_MS });
+      await populateWorktree(openLinkedWorktree(repo, path), { timeoutMs: ADD_TIMEOUT_MS });
       return openLinkedWorktree(repo, path).workTree;
     } catch (e) {
       await dropCheckout(repo, path);

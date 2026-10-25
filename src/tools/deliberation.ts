@@ -33,6 +33,7 @@ import {
 } from "../config.js";
 import type { LLMMessage } from "../providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "../providers/index.js";
+import { MAX_REQUEST_TOKENS } from "../providers/limits.js";
 import { metered } from "../usage/session-scope.js";
 import { findExecutable } from "../executables.js";
 import { describeUrl } from "../security/url-guard.js";
@@ -364,11 +365,15 @@ export const deliberationTools: ToolDefinition[] = [
           description: MODEL_PARAM_DESCRIPTION,
         },
         max_tokens: {
-          type: "number",
-          description: "Maximum tokens in the response. Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this.",
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_REQUEST_TOKENS,
+          description: "Maximum tokens in the response (integer, 1-32768). Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this.",
         },
         temperature: {
           type: "number",
+          minimum: 0,
+          maximum: 2,
           description: "Sampling temperature (0-2). Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too. Replicate: sent only when the model's schema declares it.",
         },
         base_url: {

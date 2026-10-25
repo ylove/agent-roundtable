@@ -141,7 +141,7 @@ export function unsetConfigEntry(kind: "secrets" | "connectors", name: string, h
   saveUserConfig({ ...config, [kind]: entries }, home);
 }
 
-/** Keep package overrides for compatibility; the pointed file fills only allowed gaps. */
+/** Preserve shell values; the package file and allowed pointed keys fill gaps. */
 export function loadUserEnvironment(options: {
   env?: Environment; home?: string; packageEnvFile?: string; warn?: (message: string) => void;
 } = {}): void {
@@ -150,18 +150,18 @@ export function loadUserEnvironment(options: {
   const referenced = new Set<string>();
   const warn = options.warn ?? ((message: string) => console.error(message));
   const enabled = (env.ROUNDTABLE_DOTENV ?? "").trim().toLowerCase() !== "off";
-  const apply = (data: Record<string, string>, filtered: boolean, override = false) => {
+  const apply = (data: Record<string, string>, filtered: boolean) => {
     // The endpoint and its key travel together, and only when the shell set neither.
     const pair = ["OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_API_KEY"];
     const pairFree = pair.every(key => shell[key] === undefined && (env[key] === undefined || referenced.has(key)));
     for (const [key, value] of Object.entries(data)) {
       if (filtered && referenced.has(key)) continue;
-      if (filtered && pair.includes(key)) { if (pairFree && allowedEnvKey(key)) env[key] = value; continue; }
-      if ((!filtered || allowedEnvKey(key)) && (override || env[key] === undefined)) env[key] = value;
+      if (pair.includes(key)) { if (pairFree && (!filtered || allowedEnvKey(key))) env[key] = value; continue; }
+      if ((!filtered || allowedEnvKey(key)) && env[key] === undefined) env[key] = value;
     }
   };
   if (enabled && options.packageEnvFile) {
-    try { apply(parse(readRegular(options.packageEnvFile).text), false, true); }
+    try { apply(parse(readRegular(options.packageEnvFile).text), false); }
     catch { /* The package .env is optional. */ }
   }
   let config: UserConfig = {};

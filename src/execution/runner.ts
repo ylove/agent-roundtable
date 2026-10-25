@@ -1329,9 +1329,9 @@ export class Runner {
   private async recordChildCancellations(state: Readonly<BlackboardState>): Promise<void> {
     const events: AnyEventDraft[] = [];
     for (const rt of Object.values(state.tasks)) {
-      if (rt.state !== "cancelled" || !rt.spec.parent || !["failed", "cancelled"].includes(state.tasks[rt.spec.parent]?.state)) continue;
+      if (rt.state !== "cancelled" || !rt.spec.parent) continue;
       if (this.log.some((e) => e.type === "task.cancelled" && e.payload.task === rt.spec.id)) continue;
-      events.push({ type: "task.cancelled", source: this.source, payload: { task: rt.spec.id, why: `parent ${rt.spec.parent} ${state.tasks[rt.spec.parent].state}` } });
+      events.push({ type: "task.cancelled", source: this.source, payload: { task: rt.spec.id, why: rt.last_note ?? "subtask cancelled" } });
     }
     if (events.length) await this.commit(events);
   }
@@ -1398,6 +1398,8 @@ export class Runner {
     if (s.contract?.budget.max_agents !== undefined && active >= s.contract.budget.max_agents) return "max_agents workers already run";
     const top = Object.values(s.tasks).filter((t) => !t.spec.parent && t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id) || !!own(s.agents, own(s.claims, t.spec.id)?.agent)?.external)).length;
     if (!rt.spec.parent && top >= (s.contract?.budget.max_parallel ?? 1)) return "max_parallel workers already run";
+    if (!rt.spec.parent && s.contract?.budget.max_agents !== undefined && active + 1 >= s.contract.budget.max_agents &&
+        Object.values(s.tasks).some((t) => t.spec.parent && ["pending", "ready"].includes(t.state) && !SUBTASK_TERMINAL.has(s.tasks[t.spec.parent]?.state))) return "max_agents reserves a worker slot for unstarted subtasks";
     if (rt.spec.parent && (SUBTASK_TERMINAL.has(s.tasks[rt.spec.parent]?.state) || s.paused_tasks.includes(rt.spec.parent))) return "the parent task is finished or paused";
     const c = own(s.claims, task);
     if (claim) {

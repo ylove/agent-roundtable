@@ -31,13 +31,14 @@ export function openSubtasks(state: Readonly<BlackboardState>, task: string): bo
   return batchChildren(state, task).some((rt) => !SUBTASK_TERMINAL.has(rt.state));
 }
 
-export function spawnSpecs(state: Readonly<BlackboardState>, task: string, agent: string, input: SubtaskInput[]): TaskSpec[] {
+export function spawnSpecs(state: Readonly<BlackboardState>, task: string, agent: string, input: SubtaskInput[], checkCapacity = true): TaskSpec[] {
   if (state.status !== "running") throw new Error(`The run is ${state.status}; subtasks need a running execution`);
   const parent = state.tasks[task];
   const budget = state.contract?.budget;
   if (state.contract?.status !== "frozen" || (budget?.max_agents ?? 0) < 2) throw new Error("Swarms are not enabled: freeze a contract with budget.max_agents >= 2");
   if (parent?.spec.parent) throw new Error("A subtask cannot spawn subtasks: swarm depth is limited to 1");
   if (!parent || state.claims[task]?.agent !== agent || !["claimed", "in_progress"].includes(parent.state)) throw new Error(`Task ${task} must be claimed and in progress to spawn subtasks`);
+  if (checkCapacity && workerTasks(state).size >= budget!.max_agents!) throw new Error("Cannot spawn subtasks: max_agents workers already run; at least one free worker slot is needed for a child");
   const children = batchChildren(state, task);
   if (openSubtasks(state, task)) throw new Error(`Task ${task} already has open subtasks`);
   if (children.some((rt) => rt.state === "accepted") && !parent.subtasks_joined) throw new Error(`Task ${task} must await_subtasks before spawning again`);

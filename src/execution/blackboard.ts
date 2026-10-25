@@ -55,8 +55,9 @@ import {
  * 9: WS14 combines dissent state with postmortem findings, fix transitions and meetings.
  * 10: WS15 per-agent, per-model usage with provenance (budget.by_agent_usage); agent.stop_requested / agent.stopped.
  * 11: WS27 bounded swarms, durable batches, fan-in and cascading cancellation.
+ * 12: Failed or cancelled subtasks cancel transitive dependent siblings.
  */
-export const REDUCER_VERSION = 11;
+export const REDUCER_VERSION = 12;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -279,6 +280,7 @@ function finish(s: BlackboardState, id: string, rt: TaskRuntime, state: TaskStat
   if (state === "failed" || state === "cancelled") {
     for (const child of Object.values(s.tasks)) {
       if (child.spec.parent === id && !TERMINAL.has(child.state)) finish(s, child.spec.id, child, "cancelled", ts, `parent ${id} ${state}`);
+      else if (rt.spec.parent && child.spec.parent === rt.spec.parent && child.spec.depends_on.includes(id) && !TERMINAL.has(child.state)) finish(s, child.spec.id, child, "cancelled", ts, `dependency ${id} ${state}`);
     }
   }
 }
@@ -708,7 +710,8 @@ const HANDLERS: Handlers = {
     if (!rt) return;
     let into: TaskSpec[];
     try {
-      into = spawnSpecs(s, p.task, p.by, p.into.map((spec) => ({ id: spec.id.slice(p.task.length + 1), title: spec.title, instructions: spec.instructions!, paths: spec.paths.write, depends_on: spec.depends_on.map((id) => id.slice(p.task.length + 1)) })));
+      // Admission applies to new writes; historical batches may have filled the worker cap.
+      into = spawnSpecs(s, p.task, p.by, p.into.map((spec) => ({ id: spec.id.slice(p.task.length + 1), title: spec.title, instructions: spec.instructions!, paths: spec.paths.write, depends_on: spec.depends_on.map((id) => id.slice(p.task.length + 1)) })), x.strict);
     } catch (err) { return refuse(x, `task.spawned: ${(err as Error).message}`); }
     if (canonicalJSON(into) !== canonicalJSON(p.into)) return refuse(x, "task.spawned: children must inherit the parent task's checks and persona");
     for (const spec of p.into) put(s.tasks, spec.id, { spec: clone(spec), state: "pending", attempt: 0 });

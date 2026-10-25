@@ -484,7 +484,7 @@ test("checks and task.checks_passed bound to an older submission change nothing"
 });
 
 test("v10 dissent reducer retains first firing per task and latest advisory score across amendments and replay", async () => {
-  assert.equal(REDUCER_VERSION, 11);
+  assert.equal(REDUCER_VERSION, 12);
   const { readFileSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { canonicalJSON, sha256Hex } = await import("../../dist/execution/chain.js");

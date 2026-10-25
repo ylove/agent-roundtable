@@ -155,6 +155,39 @@ test("parent failure and cancellation cancel open children and restore projectio
   }
 });
 
+test("failed or cancelled children cancel transitive dependent siblings durably and allow a replacement batch", async () => {
+  const { Runner } = await import("../../dist/execution/runner.js");
+  for (const type of ["task.failed", "task.cancelled"]) {
+    const { store, auth } = await setup();
+    const spawned = await call("spawn_subtasks", auth, { subtasks: [sub("z", { depends_on: ["y"] }), sub("y", { depends_on: ["x"] }), sub("x")] });
+    assert.equal(spawned.error, false, JSON.stringify(spawned.body));
+    await append(store, type, { task: "a.x", why: "child broke" });
+    const state = await store.state();
+    assert.equal(state.tasks["a.y"].state, "cancelled");
+    assert.equal(state.tasks["a.z"].state, "cancelled");
+    assert.equal(state.tasks.a.state, "claimed");
+    const failed = await call("await_subtasks", auth, { timeout_s: 0 });
+    assert.equal(failed.body.ready, false);
+    assert.equal(failed.body.still_running, false);
+    assert.deepEqual(failed.body.children.map((c) => c.status), ["cancelled", "cancelled", type === "task.failed" ? "failed" : "cancelled"]);
+    assert.equal(failed.body.children[2].summary, "child broke");
+    assert.deepEqual(await (await openExecutionStore(store.id)).state(), await store.state());
+    const replacement = await call("spawn_subtasks", auth, { subtasks: [sub("retry")] });
+    assert.equal(replacement.error, false, JSON.stringify(replacement.body));
+    assert.deepEqual(replacement.body.children, ["a.retry"]);
+    const r = new Runner(store.id);
+    r.store = store;
+    for (let i = 0; i < 2; i++) {
+      await r.refreshLog();
+      await r.recordChildCancellations(await store.state());
+    }
+    const cancellations = (await store.events()).filter((e) => e.type === "task.cancelled" && ["a.y", "a.z"].includes(e.payload.task));
+    assert.deepEqual(cancellations.map((e) => [e.payload.task, e.payload.why]), [["a.z", "dependency a.y cancelled"], ["a.y", `dependency a.x ${type === "task.failed" ? "failed" : "cancelled"}`]]);
+    assert.equal((await store.state()).tasks["a.retry"].state, "ready");
+    assert.deepEqual(await (await openExecutionStore(store.id)).state(), await store.state());
+  }
+});
+
 test("worker tools remain token-bound and Task/Agent remain disallowed", async () => {
   for (const name of ["spawn_subtasks", "await_subtasks"]) {
     assert.ok(WORKER_TOOL_NAMES.includes(name));

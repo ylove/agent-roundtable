@@ -218,3 +218,46 @@ test("scheduler admission and real git fan-in run without worker processes and s
   await tool(store, "parent", "submit_work", { summary: "parent done", ready: true });
   assert.equal((await store.state()).tasks.a.state, "merging");
 });
+
+test("waiting parents reserve the last agent slot so their children can start and finish", async () => {
+  const { ensureTaskWorktree } = await import("../../dist/execution/worktrees.js");
+  for (const max_agents of [2, 3]) {
+    const ids = ["a", "b", "c"].slice(0, max_agents);
+    const { store, header } = await makeRun({ contract: { tasks: ids.map((id) => task(id)), budget: { ...budget, max_parallel: max_agents, max_agents } } });
+    const r = new Runner(store.id);
+    r.store = store;
+    const auth = {};
+    async function call(id, name, args = {}) {
+      const result = await handleToolCall(name, { execution_id: store.id, agent_token: auth[id], ...args }, "orchestrator");
+      return { error: result.isError === true, body: JSON.parse(result.content[0].text.replace(/^Error: /, "")) };
+    }
+    for (const id of ids) {
+      auth[id] = (await registerWorker(store, `parent-${id}`, id)).token;
+      await ensureTaskWorktree(header, id);
+      await store.transact(({ state }) => ({ events: [leaseDrafts.granted(decideLeaseRequest(state, { agent: `parent-${id}`, task: id, paths: [`src/${id}/**`] }).grant, runner)] }));
+      const spawned = await call(id, "spawn_subtasks", { subtasks: [sub("x", { paths: [`src/${id}/x/**`] })] });
+      if (id === ids.at(-1)) {
+        assert.equal(spawned.error, true);
+        assert.match(spawned.body.error, /max_agents.*free worker slot/);
+      } else {
+        assert.equal(spawned.error, false, JSON.stringify(spawned.body));
+        assert.equal((await call(id, "await_subtasks", { timeout_s: 0 })).body.still_running, true);
+      }
+    }
+    const extra = ids.at(-1);
+    await append(store, "task.released", { task: extra, agent: `parent-${extra}` });
+    assert.match(r.startProblem(await store.state(), extra, `w-${extra}`, true), /reserves.*unstarted subtasks/);
+    assert.equal(await r.startWorker(extra, { claim: true }), false);
+    for (const id of ids.slice(0, -1)) {
+      const child = `${id}.x`;
+      assert.equal(r.startProblem(await store.state(), child, `w-${child}`, true), null);
+      await registerWorker(store, `w-${child}`, child);
+      assert.equal((await store.state()).tasks[child].state, "claimed");
+      assert.equal(await r.startWorker(extra, { claim: true }), false);
+      await append(store, "task.accepted", { task: child });
+      assert.equal((await store.state()).tasks[child].state, "accepted");
+    }
+    assert.equal(r.startProblem(await store.state(), extra, `w-${extra}`, true), null);
+    assert.deepEqual(await (await openExecutionStore(store.id)).state(), await store.state());
+  }
+});

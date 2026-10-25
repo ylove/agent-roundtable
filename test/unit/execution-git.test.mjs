@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -260,13 +260,13 @@ test("runGit caps output and times out", async () => {
   await assert.rejects(G.runGit(repo, ["hash-object", "--stdin"], { timeoutMs: 10, input: "x".repeat(64 * 1024 * 1024) }), /timed out after 10 ms/);
 });
 
-test("configured filters, diff drivers and merge drivers are replaced on every invocation", async (t) => {
+test("unattached filters allow operations while diff and merge drivers remain overridden", async (t) => {
   const ex = makeRepo({ "f.txt": "one\ntwo\nthree\n" });
   t.after(() => rmSync(ex.root, { recursive: true, force: true }));
   const marker = join(ex.root, "driver.ran");
   const script = join(ex.root, "driver.sh");
-  executable(script, `#!/bin/sh\necho ran >> "${marker}"\ncat\n`);
-  write(ex.root, ".gitattributes", "*.txt filter=fixture diff=fixture merge=fixture\n");
+  executable(script, `#!/bin/sh\necho ran >> "${marker}"\nsed 's/^/stored: /'\n`);
+  write(ex.root, ".gitattributes", "*.txt diff=fixture merge=fixture\n*.filtered filter=fixture\n");
   // Include files and worktree config are read alongside the repository config.
   const included = write(ex.root, "drivers.config", `[filter "fixture"]\nclean = ${script}\nsmudge = ${script}\nrequired = true\n[diff "fixture"]\ntextconv = ${script}\ncommand = ${script}\n`);
   git(ex.root, "config", "include.path", included);
@@ -295,6 +295,96 @@ test("configured filters, diff drivers and merge drivers are replaced on every i
   await G.runGit(repo, ["add", "f.txt"]);
   await G.runGit(repo, ["commit", "-qm", "process filter configured"]);
   assert.equal(existsSync(marker), false);
+});
+
+test("a required clean filter attached to a tracked or untracked path refuses content changes", async (t) => {
+  for (const tracked of [true, false]) {
+    await t.test(tracked ? "tracked path" : "untracked path", async (t) => {
+      const ex = makeRepo({ "base.md": "base\n", ...(tracked ? { "f.txt": "stored: base\n" } : {}) });
+      t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+      git(ex.root, "branch", "other");
+      const marker = join(ex.root, "filter.ran");
+      const script = join(ex.root, "filter.sh");
+      executable(script, `#!/bin/sh\necho ran >> "${marker}"\nsed 's/^/stored: /'\n`);
+      // Included and worktree settings participate in the same filter check.
+      const included = write(ex.root, "filter.config", `[filter "fixture"]\nclean = ${script}\n`);
+      git(ex.root, "config", "include.path", included);
+      git(ex.root, "config", "extensions.worktreeConfig", "true");
+      git(ex.root, "config", "--worktree", "filter.fixture.required", "true");
+      write(ex.root, ".gitattributes", "*.txt filter=fixture\n");
+      const path = tracked ? "f.txt" : "new folder/new\nfile.txt";
+      write(ex.root, path, "raw working content\n");
+      const repo = await G.openRepo(ex.root);
+      const index = git(ex.root, "ls-files", "--stage", "-z");
+      const worktree = join(ex.root, "new-worktree");
+      const commands = [
+        ["add", "-A"], ["commit", "-qam", "filtered change"], ["merge", "--no-edit", "other"],
+        ["checkout", "other"], ["rebase", "other"], ["reset", "--hard", "HEAD"],
+        ["stash", "push"], ["apply", "--stat"], ["cherry-pick", "other"], ["revert", "HEAD"],
+        ["restore", path], ["switch", "other"], ["read-tree", "-mu", "HEAD"],
+        ["worktree", "add", "--detach", worktree, "HEAD"],
+      ];
+      for (const args of commands) {
+        await assert.rejects(G.runGit(repo, args), (e) => {
+          assert.ok(e instanceof G.GitSafetyError);
+          assert.match(e.message, /Filtered paths are not supported in heads-down runs/);
+          assert.ok(e.message.includes('filter "fixture"'));
+          assert.ok(e.message.includes(JSON.stringify(path)));
+          return true;
+        }, args.join(" "));
+        assert.equal(git(ex.root, "ls-files", "--stage", "-z"), index, "index is unchanged");
+        assert.equal(git(ex.root, "diff", "--cached", "--name-only"), "", "nothing was staged");
+        assert.equal(git(ex.root, "rev-parse", "HEAD"), ex.sha, "no commit was created");
+        assert.equal(readFileSync(join(ex.root, path), "utf8"), "raw working content\n", "working content is unchanged");
+        assert.equal(existsSync(marker), false, "the filter program never ran");
+      }
+      assert.equal(existsSync(worktree), false, "no worktree was created");
+      assert.equal(git(ex.root, "branch", "--show-current"), "main");
+      assert.equal(git(ex.root, "show", "HEAD:base.md"), "base");
+      if (tracked) assert.equal(git(ex.root, "show", "HEAD:f.txt"), "stored: base", "raw content was not committed");
+      else assert.equal(git(ex.root, "ls-tree", "-r", "--name-only", "HEAD", "--", path), "", "raw content was not committed");
+      for (const args of [["status", "--porcelain"], ["diff"], ["log", "-1", "-p"], ["rev-parse", "HEAD"], ["read-tree", "HEAD"]]) {
+        await G.runGit(repo, args);
+      }
+      assert.equal(existsSync(marker), false, "inspection never ran the filter program");
+    });
+  }
+});
+
+test("smudge-only and process-only filters added after opening the repository are checked", async (t) => {
+  const ex = makeRepo({ "f.txt": "base\n", ".gitattributes": "*.txt filter=fixture\n" });
+  t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+  const marker = join(ex.root, "filter.ran");
+  const script = join(ex.root, "filter.sh");
+  executable(script, `#!/bin/sh\necho ran >> "${marker}"\ncat\n`);
+  const repo = await G.openRepo(ex.root);
+  await G.runGit(repo, ["status", "--porcelain"]);
+  write(ex.root, "f.txt", "changed\n");
+  for (const field of ["smudge", "process"]) {
+    git(ex.root, "config", `filter.fixture.${field}`, script);
+    await assert.rejects(G.runGit(repo, ["add", "f.txt"]), (e) => e instanceof G.GitSafetyError && /filter "fixture" applies to "f.txt"/.test(e.message));
+    assert.equal(git(ex.root, "diff", "--cached", "--name-only"), "");
+    assert.equal(existsSync(marker), false);
+    git(ex.root, "config", "--unset", `filter.fixture.${field}`);
+  }
+});
+
+test("ignored paths and filters without clean, smudge or process settings do not block commits", async (t) => {
+  const ex = makeRepo({ ".gitignore": "ignored.txt\n", ".gitattributes": "*.txt filter=fixture\n", "base.md": "base\n" });
+  t.after(() => rmSync(ex.root, { recursive: true, force: true }));
+  const repo = await G.openRepo(ex.root);
+  git(ex.root, "config", "filter.fixture.clean", "cat");
+  write(ex.root, "ignored.txt", "ignored\n");
+  write(ex.root, "base.md", "updated\n");
+  await G.runGit(repo, ["add", "base.md"]);
+  await G.runGit(repo, ["commit", "-qm", "unfiltered change"]);
+  assert.equal(git(ex.root, "show", "HEAD:base.md"), "updated");
+  git(ex.root, "config", "--unset", "filter.fixture.clean");
+  git(ex.root, "config", "filter.fixture.required", "true");
+  write(ex.root, "new.txt", "content\n");
+  await G.runGit(repo, ["add", "new.txt"]);
+  await G.runGit(repo, ["commit", "-qm", "filter has no program settings"]);
+  assert.equal(git(ex.root, "show", "HEAD:new.txt"), "content");
 });
 
 test("a repository without drivers keeps normal status, add, diff and commit behavior", async (t) => {

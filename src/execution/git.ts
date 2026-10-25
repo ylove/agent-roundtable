@@ -24,8 +24,11 @@
 //    gitlink is refused outright (assertNoGitlinks*): submodules are not supported in heads-down
 //    runs in 1.0. Untracked nested repositories are listed, never entered, and never staged.
 // No protocol is allowed, not even file: worktree, merge and commit operations never use a
-// transport. Configured filters and diff drivers are disabled; named merge drivers use git's
-// own merge-file command with fixed arguments instead of the configured command.
+// transport. Configured filter programs and diff drivers are disabled. Before staging or writing
+// working-tree content (including worktree add), configured clean/smudge/process filters attached
+// to tracked or untracked non-ignored paths are refused: filtered paths are not supported in
+// heads-down runs. Unattached filters and read-only calls remain available. Named merge drivers
+// use git's own merge-file command with fixed arguments instead of the configured command.
 // ============================================================================
 
 import { findExecutable } from "../executables.js";
@@ -69,6 +72,17 @@ export const GIT_HARDENING: readonly string[] = [
 const DIFF_COMMANDS = new Set(["diff", "log", "show"]);
 /** Subcommands that can inspect submodule working directories: --ignore-submodules=all unless the call names a mode. */
 const SUBMODULE_AWARE = new Set(["status", "diff"]);
+/** Commands that stage or write working-tree content, including their abort/reset modes. */
+const CONTENT_COMMANDS = new Set([
+  "add", "commit", "checkout", "merge", "rebase", "reset", "stash", "apply",
+  "cherry-pick", "revert", "restore", "switch",
+]);
+
+function writesContent(args: string[]): boolean {
+  return CONTENT_COMMANDS.has(args[0]) ||
+    (args[0] === "read-tree" && args.slice(1).some((a) => /^-[^-]*u/.test(a))) ||
+    (args[0] === "worktree" && args[1] === "add");
+}
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT = 16 * 1024 * 1024;
@@ -91,7 +105,7 @@ export class GitError extends Error {
   }
 }
 
-/** git was not started: the target is not a work tree we can trust. */
+/** The requested git command was not started because a safety check failed. */
 export class GitSafetyError extends Error {
   constructor(message: string) {
     super(message);
@@ -340,15 +354,17 @@ interface SpawnOpts extends GitOptions {
 }
 
 // Config inspection reads all scopes, including includeIf and worktree config, on every call.
-async function driverOverrides(cwd: string, pre: string[]): Promise<string[]> {
+async function driverOverrides(cwd: string, pre: string[]): Promise<{ overrides: string[]; filters: Set<string> }> {
   const configured = await spawnGitRaw(cwd, ["config", "--null", "--name-only", "--get-regexp",
     "^(filter\\..*|merge\\..*\\.driver|diff\\..*)$"], { allowExit: [1] }, pre);
   const settings = new Set<string>();
+  const filters = new Set<string>();
   for (const key of splitZ(configured.stdout)) {
-    const filter = /^filter\.(.+)\.[^.]+$/i.exec(key);
+    const filter = /^filter\.(.+)\.([^.]+)$/i.exec(key);
     const merge = /^merge\.(.+)\.driver$/i.exec(key);
     const diff = /^diff\.(.+)\.[^.]+$/i.exec(key);
     if (filter) {
+      if (/^(clean|smudge|process)$/i.test(filter[2])) filters.add(filter[1]);
       for (const field of ["clean", "smudge", "process"]) settings.add(`filter.${filter[1]}.${field}=`);
       settings.add(`filter.${filter[1]}.required=false`);
     }
@@ -363,12 +379,28 @@ async function driverOverrides(cwd: string, pre: string[]): Promise<string[]> {
       settings.add(`diff.${diff[1]}.command=`);
     }
   }
-  return [...settings].flatMap(setting => ["-c", setting]);
+  return { overrides: [...settings].flatMap(setting => ["-c", setting]), filters };
+}
+
+/** Inspect attributes without running filters; scan failures prevent the requested command. */
+async function assertNoFilteredPaths(cwd: string, filters: Set<string>, pre: string[], timeoutMs?: number): Promise<void> {
+  const paths = await spawnGitRaw(cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { timeoutMs }, pre);
+  if (!paths.stdout) return;
+  const attrs = await spawnGitRaw(cwd, ["check-attr", "--stdin", "-z", "filter"], { timeoutMs, input: paths.stdout }, pre);
+  const fields = splitZ(attrs.stdout);
+  for (let i = 0; i < fields.length; i += 3) {
+    const [path, , filter] = fields.slice(i, i + 3);
+    if (filters.has(filter)) {
+      throw new GitSafetyError(`Filtered paths are not supported in heads-down runs: filter ${JSON.stringify(filter)} applies to ${JSON.stringify(path)}.`);
+    }
+  }
 }
 
 async function spawnGit(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] = []): Promise<GitResult> {
-  const overrides = await driverOverrides(cwd, pre);
-  return spawnGitRaw(cwd, args, o, [...pre, ...overrides]);
+  const { overrides, filters } = await driverOverrides(cwd, pre);
+  const hardened = [...pre, ...overrides];
+  if (filters.size && writesContent(args)) await assertNoFilteredPaths(cwd, filters, hardened, o.timeoutMs);
+  return spawnGitRaw(cwd, args, o, hardened);
 }
 
 /** Spawn git with the hardening options; cwd is the work tree. Throws GitError on failure. */
@@ -475,8 +507,8 @@ function spawnGitRaw(cwd: string, args: string[], o: SpawnOpts = {}, pre: string
 
 /**
  * Run `git <args>` in a verified target with the hardening options, an explicit --git-dir and
- * --work-tree, and cwd at the work tree root. Throws GitSafetyError when the target no longer
- * checks out, GitError when git fails.
+ * --work-tree, and cwd at the work tree root. Throws GitSafetyError for an unverified target or
+ * an attached configured filter before a content-changing call; throws GitError when git fails.
  */
 export async function runGit(target: GitTarget, args: string[], opts: GitOptions = {}): Promise<GitResult> {
   if (!Array.isArray(args) || !args.length || args.some((a) => typeof a !== "string" || a.includes("\0"))) {

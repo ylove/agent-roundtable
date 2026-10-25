@@ -232,7 +232,10 @@ test("the handoff holds no confirmation, original prompt, diff or command output
 function hangingProvider(t, { hangFrom = 1 } = {}) {
   const calls = stubFetch(t, (_u, init, i) => {
     if (i < hangFrom) return json(200, { choices: [{ message: { content: `reply ${i}` } }], model: "served", usage: { prompt_tokens: 10, completion_tokens: 5 } });
-    return new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason ?? new DOMException("aborted", "AbortError")), { once: true }));
+    return new Promise((_, reject) => {
+      const abort = () => reject(init.signal.reason ?? new DOMException("aborted", "AbortError"));
+      if (init.signal.aborted) abort(); else init.signal.addEventListener("abort", abort, { once: true });
+    });
   });
   return calls;
 }

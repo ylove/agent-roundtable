@@ -7,16 +7,14 @@
 // when private targets are allowed, to private addresses (LAN model servers and webhook receivers).
 // Only the literal name "localhost" and IP literals are classified without DNS.
 //
-// Limitation (DNS rebinding, a TOCTOU gap): the guard resolves the host and checks every address,
-// but fetch resolves the name again when it connects. A hostile resolver can answer the guard with
-// a public address and fetch with a private one moments later. Closing the gap needs a connect-time
-// check (a pinned lookup in a custom dispatcher), which fetch does not offer without a dependency.
-// Callers make redirects manual, so an allowed host cannot bounce a request, or a key, elsewhere.
+// Guarded requests connect through a pinned lookup; TLS still verifies the URL hostname.
+// Callers make redirects manual, so each destination needs its own policy check.
 // ============================================================================
 
 // Called as dns.lookup(...) at call time, so tests can stub dns.promises.lookup.
 import { promises as dns } from "node:dns";
 import { isIP } from "node:net";
+import { Agent } from "undici";
 import { allowPrivateBaseUrls } from "../config.js";
 
 export type AddressClass = "loopback" | "metadata" | "private" | "public";
@@ -252,16 +250,40 @@ async function lookupAll(host: string, label: string, timeoutMs: number): Promis
 /**
  * checkUrl, then resolve a host name (short timeout) and check every address it has, and the scheme
  * against each. IP literals and "localhost" are never sent to DNS; every other name is (*.localhost
- * included). Throws UrlGuardError; returns the parsed URL.
+ * included). Throws UrlGuardError; returns the URL and approved addresses.
  */
-export async function guardUrl(raw: string, opts: UrlGuardOptions = {}): Promise<URL> {
+async function approvedUrl(raw: string, opts: UrlGuardOptions): Promise<{ url: URL; addresses: string[] }> {
   const url = checkUrl(raw, opts);
   const host = hostOf(url);
-  if (isIP(host) || host === "localhost") return url;
+  if (isIP(host)) return { url, addresses: [] };
   const label = opts.label ?? "URL";
   const allowPrivate = opts.allowPrivate ?? allowPrivateBaseUrls();
-  for (const address of await lookupAll(host, label, opts.lookupTimeoutMs ?? URL_GUARD_LOOKUP_TIMEOUT_MS)) {
+  const addresses = host === "localhost" ? ["127.0.0.1", "::1"]
+    : await lookupAll(host, label, opts.lookupTimeoutMs ?? URL_GUARD_LOOKUP_TIMEOUT_MS);
+  for (const address of addresses) {
     assertAllowed(classifyAddress(address), `${host} (${address})`, url, label, allowPrivate);
   }
-  return url;
+  return { url, addresses };
+}
+
+export async function guardUrl(raw: string, opts: UrlGuardOptions = {}): Promise<URL> {
+  return (await approvedUrl(raw, opts)).url;
+}
+
+/** A dispatcher for this URL only. The caller closes it after consuming the response. */
+export async function guardedDispatcher(raw: string, opts: UrlGuardOptions = {}): Promise<Agent | undefined> {
+  const { addresses } = await approvedUrl(raw, opts);
+  if (!addresses.length) return undefined; // IP literals connect directly.
+  return new Agent({ connect: { lookup: (_host, options, callback) => {
+    const family = typeof options === "number" ? options : options.family;
+    const found = addresses.map(address => ({ address, family: isIP(address) }))
+      .filter(address => !family || address.family === Number(family));
+    if (!found.length) {
+      callback(Object.assign(new Error("No approved address for the requested family"), { code: "ENOTFOUND" }), "", 0);
+    } else if (typeof options === "object" && options.all) {
+      callback(null, found);
+    } else {
+      callback(null, found[0].address, found[0].family);
+    }
+  } } });
 }

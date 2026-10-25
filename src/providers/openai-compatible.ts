@@ -5,7 +5,7 @@ import { providerHttpError, withRetry } from "./retry.js";
 import type { LLMProvider } from "../config.js";
 import { openAICompatibleTrustedOrigins, requireEnv } from "../config.js";
 import { scrubAndCap } from "../security/secrets.js";
-import { guardUrl } from "../security/url-guard.js";
+import { guardedDispatcher } from "../security/url-guard.js";
 
 export interface ChatCompletionsResponse {
   error?: { message?: string } | string;
@@ -101,13 +101,14 @@ export function createOpenAICompatibleCall(spec: OpenAICompatibleSpec): Provider
       );
     }
     let apiKey = spec.apiKey();
+    let guardOverride = false;
     if (override !== undefined) {
       // A per-call base_url on an operator-configured origin is trusted like the configured URL. Any
       // other origin comes from a tool call (so possibly from injected text): guard it, and bind the
       // key to the configured origins so it never travels there.
       const origin = originOf(override);
       if (!origin || !trustedOrigins(configured).has(origin)) {
-        await guardUrl(override, { label: "base_url" });
+        guardOverride = true;
         apiKey = undefined;
       }
     }
@@ -123,10 +124,17 @@ export function createOpenAICompatibleCall(spec: OpenAICompatibleSpec): Provider
       ...(o.temperature !== undefined && { temperature: o.temperature }),
     });
     return withRetry(async () => {
-      const response = await fetch(url, { method: "POST", headers, body, signal: o.signal, redirect: "manual" });
-      assertNotRedirect(spec.label, response, url);
-      const result = (await readProviderJson(response)) as ChatCompletionsResponse;
-      return parseChatCompletions(spec.label, spec.provider, response, result, o.model);
+      const dispatcher = guardOverride ? await guardedDispatcher(url, { label: "base_url" }) : undefined;
+      let response: Response | undefined;
+      try {
+        response = await globalThis.fetch(url, { ...(dispatcher && { dispatcher }), method: "POST", headers, body, signal: o.signal, redirect: "manual" });
+        assertNotRedirect(spec.label, response, url);
+        const result = (await readProviderJson(response)) as ChatCompletionsResponse;
+        return parseChatCompletions(spec.label, spec.provider, response, result, o.model);
+      } finally {
+        await response?.body?.cancel().catch(() => {});
+        await dispatcher?.close();
+      }
     }, { signal: o.signal, label: spec.label });
   };
 }

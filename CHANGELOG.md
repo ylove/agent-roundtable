@@ -2,7 +2,11 @@
 
 ## Unreleased
 
+<<<<<<< HEAD
 - **Dev-server previews (#161, WS26b).** `roundtable preview start|list|stop` and the tools `start_preview`, `list_previews`, `stop_preview` run a task's or a duel prototype's dev server in a locked-down Docker container, published on `127.0.0.1` only (no tunnel, never `0.0.0.0`). The source is copied in, never mounted; the server sits on an internal network with no route out; dependencies install with scripts off through the npm-only egress proxy. The dashboard task page, the duel room and the serve index embed it in a sandboxed frame with a `frame-src` for exactly the running previews. See [previews](docs/previews.md).
+=======
+- **`roundtable up` and `doctor` (#149, WS20e).** One command for first-run setup (terminal only, every step skippable), a doctor that checks Node, git, provider keys by name, runtimes, Docker and Chrome, then starts the local service and prints the next steps. `roundtable --version`, `-v` and `version` print the version. Check-in text now masks only path-shaped text, so "50/50" and "and/or" stay readable. See [getting started](docs/getting-started.md#quick-start-roundtable-up).
+>>>>>>> origin/release/2.0.0
 
 - **Long-running runs and private check-in (#163, WS28).** `roundtable serve`: durable local runner supervision, a read-only home index, private check-in channels, optional tailnet bind, and login service printouts. See [long-running runs](docs/long-running.md).
 

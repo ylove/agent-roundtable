@@ -18,6 +18,9 @@ The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts th
 | `notify` | `init ntfy`, `test` | Set up and test private check-in channels. [Setup](long-running.md#private-check-in-channels). |
 | `runtimes` | `[--json]` | List installed CLI runtimes, paths and versions. See [CLI runtimes](runtimes.md). |
 | `agents` | `[--json]`, `import <absolute file\|dir>`, `starter`, or `--open [--no-hold]` | Browse and import personas or open the local drop zone. See [agents library](agents-library.md). |
+| `up` | `[--setup] [--no-input] [--no-serve] [--open] [--check-keys]` | First-run setup (terminal only), the doctor, then the local service and the next steps. [Getting started](getting-started.md#quick-start-roundtable-up). |
+| `doctor` | `[--json] [--check-keys]` | One line per check: Node, git, provider keys (names only), runtimes, Docker, Chrome. Exit 0 when Node, git and a key pass. |
+| `--version` | `-v`, `version` | Print the version. |
 | `help` | none | Print usage. |
 
 These are the **15 named subcommands** for heads-down runs, usage, runtime detection and the agents library of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches seven table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.

@@ -5,8 +5,8 @@
 // and closes everything when the session ends or is stopped. The server runs under the same allowlisted
 // environment and broker-resolved credentials as a heads-down worker's connector (workers/connector-host).
 // A seat sees only the tools the config allows (read-only by annotation, plus the connector's `tools`
-// list), namespaced <connector>__<tool>. Results are untrusted data: scrubbed, capped and fenced with a
-// per-turn nonce; the transcript records only "<seat> used <tool>" with a size, never the payload.
+// list), namespaced <connector>__<tool>. A seat can be limited to a subset of the session's connectors.
+// Results are untrusted data: scrubbed, capped and fenced with a per-turn nonce; the transcript records only "<seat> used <tool>" with a size, never the payload.
 // ============================================================================
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CONNECTOR_NAME, MCP_TOOL_NAME, type ConnectorSpec } from "../connectors/config.js";
+import { agentKey } from "../agents.js";
 import { isExecutableFile } from "../executables.js";
 import { MAX_TOOL_CALLS, MAX_TOOL_RESULT_BYTES, capBytes, type RunTool, type ToolOutcome } from "../providers/tool-loop.js";
 import type { ToolSpec } from "../providers/shared.js";
@@ -57,6 +58,47 @@ export function assertConnectorsKnown(names: readonly string[] | undefined, home
   return list;
 }
 
+/** Per-seat limits: seat name to the session connectors that seat may call. A seat not listed gets them all. */
+export type SeatConnectorMap = Record<string, string[]>;
+const MAX_SEAT_CONNECTOR_SEATS = 48;
+
+/**
+ * Check a per-seat connector map against the session's connector list (and the seat names, when the caller
+ * knows them) and return it keyed by canonical seat name. Throws before anything starts.
+ */
+export function assertSeatConnectors(map: unknown, sessionNames: readonly string[], seatNames?: readonly string[]): SeatConnectorMap | undefined {
+  if (map === undefined || map === null) return undefined;
+  if (typeof map !== "object" || Array.isArray(map)) throw new Error("seat_connectors must map seat names to connector names.");
+  const entries = Object.entries(map as Record<string, unknown>);
+  if (!entries.length) return undefined;
+  if (!sessionNames.length) throw new Error("seat_connectors requires connectors.");
+  if (entries.length > MAX_SEAT_CONNECTOR_SEATS) throw new Error(`Use at most ${MAX_SEAT_CONNECTOR_SEATS} seats in seat_connectors.`);
+  const known = seatNames && new Set(seatNames.map(agentKey));
+  const out: SeatConnectorMap = Object.create(null);
+  for (const [seat, names] of entries) {
+    const key = typeof seat === "string" && seat.length <= 200 ? agentKey(seat) : "";
+    if (!key) throw new Error("seat_connectors names an invalid seat.");
+    if (known && !known.has(key)) throw new Error(`seat_connectors names a seat that is not at this table: ${scrubAndCap(seat, 40)}.`);
+    if (key in out) throw new Error(`seat_connectors names seat ${scrubAndCap(seat, 40)} twice.`);
+    if (!Array.isArray(names) || names.some(n => typeof n !== "string")) throw new Error(`seat_connectors for ${scrubAndCap(seat, 40)} must be a list of connector names.`);
+    for (const n of names as string[]) if (!sessionNames.includes(n)) throw new Error(`seat_connectors for ${scrubAndCap(seat, 40)} names ${scrubAndCap(n, 40)}, which is not in connectors.`);
+    out[key] = [...new Set(names as string[])];
+  }
+  return { ...out };
+}
+
+/** Parse the CLI form `ada=figma,bob=jira+figma` into a per-seat map (a seat may repeat to add connectors). */
+export function parseSeatConnectorsFlag(value: string): SeatConnectorMap {
+  const out: SeatConnectorMap = Object.create(null);
+  for (const part of value.split(",")) {
+    const match = /^([^=\s]{1,200})=([a-z][a-z0-9-]{0,31}(?:\+[a-z][a-z0-9-]{0,31})*)$/.exec(part.trim());
+    if (!match) throw new Error("--seat-connectors expects seat=connector pairs such as ada=figma,bob=jira+figma.");
+    const seat = match[1];
+    out[seat] = [...new Set([...(out[seat] ?? []), ...match[2].split("+")])];
+  }
+  return { ...out };
+}
+
 interface AnnotatedTool { name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: { readOnlyHint?: boolean } }
 
 /** The tools of one connector a seat may call: read-only by annotation, plus the config's explicit list. */
@@ -89,8 +131,15 @@ export function resultText(result: { content?: unknown; structuredContent?: unkn
   return parts.join("\n");
 }
 
+/** Validate connector names and the per-seat map together; throws before anything starts. */
+export function checkSeatConnectorArgs(names: readonly string[] | undefined, map: unknown, seatNames?: readonly string[], home?: string): { names: string[]; seatConnectors?: SeatConnectorMap } {
+  const list = assertConnectorsKnown(names, home);
+  const seatConnectors = assertSeatConnectors(map, list, seatNames);
+  return { names: list, ...(seatConnectors && { seatConnectors }) };
+}
+
 interface Live { client: Client; tools: Map<string, string> }
-export interface StartOptions { home?: string; signal?: AbortSignal; onNote?: (use: SeatToolUse) => void }
+export interface StartOptions { seatConnectors?: SeatConnectorMap; home?: string; signal?: AbortSignal; onNote?: (use: SeatToolUse) => void }
 
 export async function startSeatConnectors(names: readonly string[], options: StartOptions = {}): Promise<SeatConnectorSession> {
   const list = assertConnectorsKnown(names, options.home);
@@ -145,7 +194,11 @@ export async function startSeatConnectors(names: readonly string[], options: Sta
   let note: StartOptions["onNote"] = options.onNote;
   const emit = (use: SeatToolUse): void => { try { note?.({ ...use, note: scrubAndCap(use.note, 300) }); } catch { /* A sink cannot fail a turn. */ } };
   const noticed = new Set<string>();
-  const specsList = [...offered.values()].map(o => o.spec);
+  const seatLimits = options.seatConnectors && assertSeatConnectors(options.seatConnectors, list);
+  const allowedFor = (seat: string) => {
+    const key = agentKey(seat), only = seatLimits && Object.hasOwn(seatLimits, key) ? seatLimits[key] : undefined;
+    return [...offered.values()].filter(o => !only || only.includes(o.connector));
+  };
 
   return {
     connectors: list,
@@ -158,6 +211,7 @@ export async function startSeatConnectors(names: readonly string[], options: Sta
     },
     async close() { if (!closed) await closeAll(); },
     turn(seat) {
+      const mine = allowedFor(seat), specsList = mine.map(o => o.spec);
       if (!specsList.length || closed) return undefined;
       const nonce = randomBytes(6).toString("hex");
       const instruction = `You may call tools from the connected services listed with this request, at most ${MAX_TOOL_CALLS} calls this turn. ` +
@@ -166,7 +220,7 @@ export async function startSeatConnectors(names: readonly string[], options: Sta
       const run: RunTool = async (name, input, signal): Promise<ToolOutcome> => {
         const entry = offered.get(name);
         const l = entry && live.get(entry.connector);
-        if (!entry || !l || closed) return { text: "That tool is not available.", isError: true };
+        if (!entry || !l || closed || !mine.includes(entry)) return { text: "That tool is not available.", isError: true };
         const keys = Object.keys(input as object).slice(0, 8).join(", ");
         let ok = false, size = 0;
         try {

@@ -127,8 +127,8 @@ describe("tool calling shapes", () => {
     assert.deepEqual(calls[0].body.messages, [{ role: "user", content: "hi" }]);
   });
 
-  test("only anthropic and the openai-compatible providers support tools", async () => {
-    assert.deepEqual(["anthropic", "openai", "together", "openai_compatible", "replicate", "ollama"].map(supportsTools), [true, true, true, true, false, false]);
+  test("anthropic, the openai-compatible providers and ollama support tools", async () => {
+    assert.deepEqual(["anthropic", "openai", "together", "openai_compatible", "replicate", "ollama"].map(supportsTools), [true, true, true, true, false, true]);
     await assert.rejects(callLLMWithTools("s", user, { provider: "replicate", model: "m" }, tools, async () => ""), /not available/);
   });
 });

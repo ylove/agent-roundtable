@@ -2,7 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { runCastingCall, type CastingOptions } from "../casting/casting.js";
 import { renderCastingMarkdown } from "../casting/report.js";
 import { START_DUEL_SCHEMA } from "./duel.js";
-import type { ToolCallContext } from "./shared.js";
+import { CONNECTORS_PROP, SEAT_CONNECTORS_PROP, type ToolCallContext } from "./shared.js";
 import type { JsonSchema } from "../validate.js";
 
 export const CASTING_CALL_SCHEMA: JsonSchema & { type: "object" } = {
@@ -17,6 +17,8 @@ export const CASTING_CALL_SCHEMA: JsonSchema & { type: "object" } = {
     provider: START_DUEL_SCHEMA.properties!.provider,
     model: START_DUEL_SCHEMA.properties!.model,
     seat: START_DUEL_SCHEMA.properties!.seats,
+    connectors: CONNECTORS_PROP,
+    seat_connectors: SEAT_CONNECTORS_PROP,
     mix: { type: "string", enum: ["auto", "cheap"], description: "Prefer lower-cost providers using the table's routing judgment." },
     turn_timeout_s: { ...START_DUEL_SCHEMA.properties!.turn_timeout_s, description: "Seconds per turn; default 90." },
     max_seconds: { ...START_DUEL_SCHEMA.properties!.max_seconds, description: "Whole-run deadline; default 300 seconds. Stops new calls and archives available results." },
@@ -31,6 +33,8 @@ export async function castingCallTool(args: Record<string, unknown>, ctx?: ToolC
     brief: args.brief as string, agents: args.agents as string[] | undefined, agentsDir: args.agents_dir as string | undefined,
     seats: args.seats as number | undefined, examine: args.examine as boolean | undefined, dryRun: args.dry_run as boolean | undefined,
     provider: args.provider as CastingOptions["provider"], model: args.model as string | undefined, seat: args.seat as CastingOptions["seat"], mix: args.mix as CastingOptions["mix"],
+    ...((args.connectors as string[] | undefined)?.length && { connectors: args.connectors as string[] }),
+    ...(args.seat_connectors !== undefined && { seatConnectors: args.seat_connectors as CastingOptions["seatConnectors"] }),
     ...(args.turn_timeout_s !== undefined && { turnTimeoutMs: (args.turn_timeout_s as number) * 1000 }),
     ...(args.max_seconds !== undefined && { maxSeconds: args.max_seconds as number }),
   };

@@ -121,7 +121,14 @@ export const CONNECTORS_PROP = {
   type: "array",
   items: { type: "string", minLength: 1, maxLength: 32 },
   maxItems: 8,
-  description: "Optional names of configured MCP connectors (roundtable config set connector) that every seat may call as tools during its turn. Only read-only tools are offered unless the connector's config lists more; tool results are untrusted data and are scrubbed. Seats on providers without tool support (Replicate, Ollama) speak without them. An unknown connector is an error before any provider call.",
+  description: "Optional names of configured MCP connectors (roundtable config set connector) that every seat may call as tools during its turn. Only read-only tools are offered unless the connector's config lists more; tool results are untrusted data and are scrubbed. Seats on providers without tool support (Replicate) speak without them. An unknown connector is an error before any provider call.",
+} as const;
+
+export const SEAT_CONNECTORS_PROP = {
+  type: "object",
+  additionalProperties: true,
+  patternProperties: { "^.+$": { type: "array", items: { type: "string", minLength: 1, maxLength: 32 }, maxItems: 8 } },
+  description: "Optional per-seat limits, used with connectors: a map from a seat (agent) name to the subset of connectors that seat may call, e.g. {\"ada\": [\"figma\"], \"bob\": [\"jira\"]}. A seat not listed gets all of the session's connectors; an empty list gives that seat none. Every connector named must also be in connectors, and every seat must be at the table; otherwise the call fails before anything starts.",
 } as const;
 
 export const DUEL_SOURCE_PROP = {
@@ -165,7 +172,8 @@ export function validateProviderOptions(provider: LLMProvider | "auto" = "anthro
 export function formatUltraplanResult(result: UltraplanStepResult | UltraplanFinalResult): string {
   if (result.status !== "finalized") return JSON.stringify(result, null, 2);
   const trailer = { routing: result.routing, ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally };
-  return result.finalPlan + (result.publicBlock ? `\n\n${result.publicBlock}` : "") +
+  const uses = result.toolUses?.length ? `\n\nConnector use:\n${result.toolUses.map((n) => `- ${n}`).join("\n")}` : "";
+  return result.finalPlan + uses + (result.publicBlock ? `\n\n${result.publicBlock}` : "") +
     "\n\n```json\n" + JSON.stringify(trailer, null, 2) + "\n```";
 }
 

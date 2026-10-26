@@ -29,10 +29,11 @@ export function capBytes(text: string, max: number): string {
 }
 
 /** Provider-native tool-result turns for the assistant turn the model produced. */
-export function toolResultTurns(provider: "anthropic" | "openai", calls: ToolCallRequest[], results: ToolOutcome[]): unknown[] {
+export function toolResultTurns(provider: "anthropic" | "openai" | "ollama", calls: ToolCallRequest[], results: ToolOutcome[]): unknown[] {
   if (provider === "anthropic") {
     return [{ role: "user", content: calls.map((c, i) => ({ type: "tool_result", tool_use_id: c.id, content: results[i].text, ...(results[i].isError && { is_error: true }) })) }];
   }
+  if (provider === "ollama") return calls.map((c, i) => ({ role: "tool", tool_name: c.name, content: results[i].text }));
   return calls.map((c, i) => ({ role: "tool", tool_call_id: c.id, content: results[i].text }));
 }
 

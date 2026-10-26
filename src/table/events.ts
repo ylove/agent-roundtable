@@ -157,6 +157,8 @@ export interface DuelOptions {
   agentsDir?: string;
   /** Configured MCP connectors every seat may use as tools during its turns (read-only tools unless the config lists more). */
   connectors?: string[];
+  /** Limits a persona to some of those connectors (persona name to connector names); other seats get them all. */
+  seatConnectors?: Record<string, string[]>;
 }
 
 /** The outcome returned after a duel finishes or is aborted. */

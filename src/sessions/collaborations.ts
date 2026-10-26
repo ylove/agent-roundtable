@@ -22,7 +22,7 @@ import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type Publi
 import type { CollaborationMode, CollaborationRole, ConversationAngle } from "./modes.js";
 import { withDuelFocus, type DuelFocus } from "./duel-focus.js";
 import { buildGrounding, type Grounding } from "./grounding.js";
-import { assertConnectorsKnown, startSeatConnectors, withSeatConnectors, type SeatConnectorSession, type SeatToolUse } from "../table/seat-connectors.js";
+import { checkSeatConnectorArgs, startSeatConnectors, withSeatConnectors, type SeatConnectorMap, type SeatConnectorSession, type SeatToolUse } from "../table/seat-connectors.js";
 import {
   NUDGE_HELD_ERROR,
   PROTOTYPE_CONVERSATION_ERROR,
@@ -319,6 +319,8 @@ export async function startCollaboration(
     duelSource?: boolean;
     /** Names of configured MCP connectors every seat may use as tools (see docs/connectors.md). */
     connectors?: string[];
+    /** Limits a seat to some of those connectors (seat name to connector names); other seats get them all. */
+    seatConnectors?: SeatConnectorMap;
     /** Called for each connector call or notice, as it happens. */
     onToolNote?: (use: SeatToolUse) => void;
   } = {}
@@ -337,8 +339,8 @@ export async function startCollaboration(
   if (options.duel !== undefined) options = { ...options, context: withDuelFocus(options.context, options.duel, options.duelSource !== false) };
   const collaborationId = newId("collab");
   // An unknown connector fails here, before a session exists or any provider is called.
-  const names = assertConnectorsKnown(options.connectors);
-  const connectors = names.length ? await startSeatConnectors(names, { signal: options.signal }) : undefined;
+  const checked = checkSeatConnectorArgs(options.connectors, options.seatConnectors, agentNames);
+  const connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: options.signal, seatConnectors: checked.seatConnectors }) : undefined;
   try {
     const result = await withSessionLock(collaborationId, collaborationBusy(collaborationId), () =>
       openCollaboration(collaborationId, agentNames, topic, options, connectors)

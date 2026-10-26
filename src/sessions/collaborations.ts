@@ -22,6 +22,7 @@ import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type Publi
 import type { CollaborationMode, CollaborationRole, ConversationAngle } from "./modes.js";
 import { withDuelFocus, type DuelFocus } from "./duel-focus.js";
 import { buildGrounding, type Grounding } from "./grounding.js";
+import { assertConnectorsKnown, startSeatConnectors, withSeatConnectors, type SeatConnectorSession, type SeatToolUse } from "../table/seat-connectors.js";
 import {
   NUDGE_HELD_ERROR,
   PROTOTYPE_CONVERSATION_ERROR,
@@ -100,6 +101,10 @@ export interface Collaboration {
   prototype?: PrototypeTracker;
   /** Who it runs for, e.g. a heads-down huddle; tags its activity entry and archive record. */
   origin?: string;
+  /** MCP connectors seats may call as tools; started once for the session and closed when it ends. */
+  connectors?: SeatConnectorSession;
+  /** One scrubbed line per connector call or notice ("<seat> used <connector>__<tool> ..."); never the payload. */
+  toolNotes?: string[];
   /** Set when a person stopped the collaboration (usage visibility): it then ends without a summary. */
   stopped?: StoppedInfo;
 }
@@ -123,9 +128,9 @@ export const MAX_COLLABORATION_ROUNDS = 20;
 
 function callAgent(collaboration: Collaboration, agent: CollaborationAgent, messages: Parameters<typeof callSeat>[1]): Promise<string> {
   return metered({ session: collaboration.id, kind: "collaboration", agent: agent.name }, () => {
-    const call = () => callSeat(agent.systemPrompt, messages, agentCallOptions(collaboration, agent), {
+    const call = () => withSeatConnectors(collaboration.connectors, () => callSeat(agent.systemPrompt, messages, agentCallOptions(collaboration, agent), {
       agent: agent.name, onModelFallback: model => { agent.model = model; },
-    });
+    }));
     if (!collaboration.signal) return call();
     const sessionStop = activeAbortSignal();
     const signal = sessionStop ? AbortSignal.any([sessionStop, collaboration.signal]) : collaboration.signal;
@@ -312,6 +317,10 @@ export async function startCollaboration(
     duel?: string | DuelFocus;
     /** Default true; false leaves artifact source out of the duel brief. */
     duelSource?: boolean;
+    /** Names of configured MCP connectors every seat may use as tools (see docs/connectors.md). */
+    connectors?: string[];
+    /** Called for each connector call or notice, as it happens. */
+    onToolNote?: (use: SeatToolUse) => void;
   } = {}
 ): Promise<{
   collaborationId: string;
@@ -327,9 +336,19 @@ export async function startCollaboration(
   // A bad or unknown duel fails here, before a session exists or any provider is called.
   if (options.duel !== undefined) options = { ...options, context: withDuelFocus(options.context, options.duel, options.duelSource !== false) };
   const collaborationId = newId("collab");
-  return withSessionLock(collaborationId, collaborationBusy(collaborationId), () =>
-    openCollaboration(collaborationId, agentNames, topic, options)
-  );
+  // An unknown connector fails here, before a session exists or any provider is called.
+  const names = assertConnectorsKnown(options.connectors);
+  const connectors = names.length ? await startSeatConnectors(names, { signal: options.signal }) : undefined;
+  try {
+    const result = await withSessionLock(collaborationId, collaborationBusy(collaborationId), () =>
+      openCollaboration(collaborationId, agentNames, topic, options, connectors)
+    );
+    if (!collaborations.has(collaborationId)) await connectors?.close();
+    return result;
+  } catch (e) {
+    await connectors?.close();
+    throw e;
+  }
 }
 
 /** The opening turn and any auto-run, holding the session lock (the session is listed before the first call). */
@@ -337,7 +356,8 @@ async function openCollaboration(
   collaborationId: string,
   agentNames: string[],
   topic: string | undefined,
-  options: NonNullable<Parameters<typeof startCollaboration>[2]>
+  options: NonNullable<Parameters<typeof startCollaboration>[2]>,
+  connectors?: SeatConnectorSession,
 ): ReturnType<typeof startCollaboration> {
   if (agentNames.length < 2) {
     throw new Error("Collaboration requires at least 2 agents");
@@ -464,7 +484,9 @@ async function openCollaboration(
     ...(publicChannel && { publicChannel }),
     ...(prototype && { prototype }),
     ...(options.origin !== undefined && { origin: options.origin }),
+    ...(connectors && { connectors, toolNotes: [] }),
   };
+  connectors?.onNote(use => { collaboration.toolNotes?.push(use.note); options.onToolNote?.(use); });
 
   collaborations.set(collaborationId, collaboration);
 
@@ -779,6 +801,8 @@ export async function endCollaboration(
   dissentSummaries?: Array<{ agent: string; content: string }>;
   publicBlock?: string;
   publicResult?: FinalizeResult;
+ /** One line per connector call, when the session used connectors. */
+  toolUses?: string[];
   /** Prototype sessions only: "## Prototype outcomes" and "## Shortlist for the human" (full shortlisted source). */
   prototypeOutcomes?: string;
 }> {
@@ -844,6 +868,7 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
   const transcript = [...messages];
   archiveCollaboration(collaboration, transcript, summary, dissentSummaries);
   collaborations.delete(collaborationId);
+  await collaboration.connectors?.close();
   const outcomes = tracker ? { prototypeOutcomes: tracker.outcomesMarkdown() } : undefined;
 
   if (collaboration.publicChannel) {
@@ -855,9 +880,10 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
       publicResult,
       publicBlock: formatPublicBlock(collaboration.publicChannel, publicResult),
       ...outcomes,
+      ...((collaboration.toolNotes?.length ?? 0) > 0 && { toolUses: collaboration.toolNotes }),
     };
   }
-  return { transcript, summary, ...(dissentSummaries.length && { dissentSummaries }), ...outcomes };
+  return { transcript, summary, ...(dissentSummaries.length && { dissentSummaries }), ...outcomes, ...((collaboration.toolNotes?.length ?? 0) > 0 && { toolUses: collaboration.toolNotes }) };
 }
 
 /** The transcript as agents see it: resolved prototypes are stubs (shortlisted source is in the outcomes). */

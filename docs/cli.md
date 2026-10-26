@@ -63,6 +63,6 @@ See [configuration](configuration.md), [contracts and execution](heads-down.md),
 
 `roundtable config set secret <ENV_NAME> <secret://ref>` and `config unset secret <ENV_NAME>` manage credential references. `roundtable secrets check` prints each reference name with `ok` or a safe reason and exits 1 on failure.
 
-`roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value]` configures a stdio MCP server; `--arg` and `--env` repeat. Credential-shaped env names require references. Remove it with `config unset connector <name>`. `config show` lists reference backends and connector/env names without values or locators. See [secrets](secrets.md) and [worker connectors](connectors.md).
+`roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value] [--tool name]` configures a stdio MCP server; `--arg`, `--env` and `--tool` repeat. `--tool` lets seats at the table call that non-read-only tool (see [connectors at the table](connectors.md#at-the-table)). Credential-shaped env names require references. Remove it with `config unset connector <name>`. `config show` lists reference backends and connector/env names without values or locators. See [secrets](secrets.md) and [worker connectors](connectors.md).
 
 `roundtable config set notify.<key> <value>` sets allowlisted private check-in options; credentials must be `secret://` references. `status` also accepts an unambiguous six-character run tag. See [long-running runs](long-running.md).

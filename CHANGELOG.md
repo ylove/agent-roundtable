@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **MCP connectors for seats at the table (#160, WS25b).** Seats in duels, debates, waffles and meetings can call configured connectors as tools (`--connectors a,b`, or `connectors` on `start_duel` and `start_collaboration`): read-only tools by default, a per-connector `tools` list to allow more, broker credentials under the worker launcher's stripped environment, scrubbed and fenced results, a six-call cap per turn, and tool calling for Anthropic and OpenAI-compatible providers. See [connectors at the table](docs/connectors.md#at-the-table).
+
 - **`roundtable up` and `doctor` (#149, WS20e).** One command for first-run setup (terminal only, every step skippable), a doctor that checks Node, git, provider keys by name, runtimes, Docker and Chrome, then starts the local service and prints the next steps. `roundtable --version`, `-v` and `version` print the version. Check-in text now masks only path-shaped text, so "50/50" and "and/or" stay readable. See [getting started](docs/getting-started.md#quick-start-roundtable-up).
 
 - **Runtime adapters as heads-down workers (#191, WS22c).** `workers.driver: "runtime:<name>"` (or `execute(worker_driver: "runtime:<name>")`) runs hermes, openclaw, gemini or a configured runtime profile as a heads-down worker, opt-in with `ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1`, under the Codex driver's controls: task worktree, allowlisted environment, leases enforced at submit, scrubbed output, priced usage. gemini gets the worker MCP server and its own `--sandbox`; runtimes without MCP are submitted for by the driver when they exit 0. See [runtimes as workers](docs/runtimes.md#as-heads-down-workers).

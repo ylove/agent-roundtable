@@ -178,7 +178,7 @@ The standard unit-test preload isolates state, HOME, persona/skill directories a
 
 Use `roundtable config set secret ANTHROPIC_API_KEY secret://keychain/roundtable/anthropic` to save a reference under `secrets` in the user config. Shell values win for referenced keys; otherwise references beat plaintext files. Startup resolves synchronously within 20 seconds; a failure warns by name and leaves the key unset. `ROUNDTABLE_SECRETS=off` disables startup resolution. Workers and hooks never run the startup broker. See [secrets](secrets.md) for backends, checks, caching and the resolver interface.
 
-The `connectors` config defines extra stdio MCP servers by absolute executable path, separate arguments and an env map. Credentials use references. Heads-down contracts opt in with `connectors: ["issues"]`; names are covered by consent. Claude workers support them; Codex workers refuse them. See [worker connectors](connectors.md) for configuration, limits and trust.
+The `connectors` config defines extra stdio MCP servers by absolute executable path, separate arguments and an env map. Credentials use references. Heads-down contracts opt in with `connectors: ["issues"]`; names are covered by consent. Claude workers support them; Codex workers refuse them. An optional `tools` list on a connector allows non-read-only tools for seats at the table, which opt in with `--connectors` or the `connectors` argument. See [connectors](connectors.md) for configuration, limits and trust.
 
 ## Long-running service and private check-ins
 

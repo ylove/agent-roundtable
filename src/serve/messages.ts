@@ -13,12 +13,16 @@ import { NOTIFY_EVENTS, type NotifyKind } from "./config.js";
 
 export interface CheckIn { v: 1; kind: NotifyKind | "test" | "updates"; execution: string; tag: string; title: string; body: string; seq: number; at: string }
 
+// Path-shaped text only: /x…, ~/x… or C:\x… at the start or after whitespace, a quote, "(", "=", ":", "," or ";".
+// "50/50", "and/or" and "a/b testing" are not paths.
+const PATH_SHAPED = /(^|[\s"'(\]=:,;])(?:[A-Za-z]:[\\/]|~[\\/]|\/)(?=[^\s<>"'])[^\s<>"']*/g;
+
 export function privateText(raw: string, max = 300, forbidden: string[] = []): string {
   let text = raw;
   for (const value of [...forbidden, process.env.ROUNDTABLE_HOME, homedir()].filter((v): v is string => !!v)) text = text.split(value).join("[private]");
   text = redact(scrub(text)).text
     .replace(/(?:https?:\/\/|secret:\/\/|www\.)[^\s<>"']+/gi, "[private URL]")
-    .replace(/(?:[A-Za-z]:[\\/]|\/)[^\s<>"']+/g, "[private path]")
+    .replace(PATH_SHAPED, "$1[private path]")
     .replace(/[A-Za-z0-9_-]{24,}/g, "[private token]")
     .replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim();
   return Array.from(text).slice(0, max).join("");

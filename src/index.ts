@@ -10,7 +10,7 @@ const sub = process.argv[2];
 // Heads-down processes create private files; the orchestrator keeps the host's umask.
 if (sub && !sub.startsWith("-") && (sub !== "mcp" || process.argv.slice(3).includes("--worker"))) process.umask(0o077);
 try {
-  if (sub !== undefined && !sub.startsWith("-")) {
+  if (sub !== undefined && (!sub.startsWith("-") || sub === "--version" || sub === "-v")) {
     const { runCli } = await import("./cli.js");
     await runCli(process.argv.slice(2));
   } else {

@@ -35,10 +35,14 @@ export const callOllama: ProviderCall = async (messages, o) => {
         `Set OLLAMA_URL in the MCP server .env or choose another provider.`
     );
   }
+  // Tool rounds add Ollama's documented `tools` field; the reply carries `message.tool_calls`.
   const body = JSON.stringify({
     model: o.model,
-    messages,
+    messages: o.toolRound ? [...messages, ...o.toolRound.turns] : messages,
     stream: false,
+    ...(o.toolRound && !o.toolRound.forbid && {
+      tools: o.toolRound.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })),
+    }),
     options: { num_predict: o.maxTokens, temperature: o.temperature ?? 0.7 },
   });
   const result = await withRetry(async () => {
@@ -52,7 +56,7 @@ export const callOllama: ProviderCall = async (messages, o) => {
     assertNotRedirect("Ollama", response, OLLAMA_URL);
     const parsed = (await readProviderJson(response)) as {
       error?: string;
-      message?: { content?: string };
+      message?: { content?: string; tool_calls?: Array<{ function?: { name?: unknown; arguments?: unknown } }> };
       model?: string;
       done_reason?: string;
       prompt_eval_count?: number;
@@ -65,8 +69,19 @@ export const callOllama: ProviderCall = async (messages, o) => {
     return parsed;
   }, { signal: o.signal, label: "Ollama" });
   const text = stripThinkTags(result.message?.content ?? "");
+  // Ollama gives no call ids and sends arguments as an object; ids are made up here so results pair up by position.
+  const rawCalls = o.toolRound ? (result.message?.tool_calls ?? []).filter((c) => typeof c.function?.name === "string") : [];
+  const toolCalls = rawCalls.map((c, i) => {
+    const args = c.function!.arguments;
+    let input: unknown = null;
+    if (args && typeof args === "object") input = args;
+    else if (typeof args === "string") { try { input = JSON.parse(args || "{}"); } catch { /* the loop reports the bad arguments to the model */ } }
+    else if (args === undefined) input = {};
+    return { id: `call_${i}`, name: c.function!.name as string, input };
+  });
   return {
-    content: assertNonEmpty("Ollama", text, result.done_reason),
+    content: toolCalls.length ? text : assertNonEmpty("Ollama", text, result.done_reason),
+    ...(toolCalls.length > 0 && { toolCalls, assistantTurn: { role: "assistant", content: result.message?.content ?? "", tool_calls: rawCalls } }),
     model: result.model || o.model,
     provider: "ollama",
     usage:

@@ -6,6 +6,7 @@ import { resolveSecret } from "./secrets/broker.js";
 import { secretReason } from "./secrets/backends.js";
 import { parseSecretRef } from "./secrets/ref.js";
 import { ENV_NAME } from "./connectors/config.js";
+import { assertSeatConnectors, parseSeatConnectorsFlag, type SeatConnectorMap } from "./table/seat-connectors.js";
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scrubAndCap } from "./security/secrets.js";
@@ -22,10 +23,11 @@ const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges
   --criteria "a,b,c"           judging rubric (default: fit to the brief, quality, usability and accessibility, risk or safety)
   --no-page-check              skip headless page checks
   --connectors <a,b>           let every seat call these configured MCP connectors (read-only tools unless the config lists more)
+  --seat-connectors <s=a+b,...> limit a seat to some of those connectors, e.g. ada=figma,bob=jira+figma (others get all)
   --rounds 1|2  --turn-timeout <s>  --max-seconds <s>  --agents-dir <abs-path>
   --dry-run                    replay the bundled synthetic duel (no keys)
   --replay <archive.json> [--speed <n>]   replay a saved duel
-roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...] [--duel <duel-id>] [--connectors <a,b>]
+roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...] [--duel <duel-id>] [--connectors <a,b>] [--seat-connectors <seat=a+b,...>]
   --duel makes a saved duel the focus (its brief joins the context); the topic may then be omitted
 roundtable config show | config set env-file|agents-dir <absolute-path>
 roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>
@@ -44,7 +46,7 @@ function quietOnClosedPipe(stream: NodeJS.WriteStream): void {
 }
 type Flags = Record<string, string | true>;
 export interface ParsedTableArgs { duelFocus?: import("./sessions/duel-focus.js").DuelFocus; topic: string; flags: Flags; options: DuelOptions; agents: string[] }
-const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed", "duel", "connectors"];
+const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed", "duel", "connectors", "seat-connectors"];
 const switches = ["open", "no-room", "no-hold", "json", "dry-run", "preflight", "no-preflight", "no-duel-source", "no-page-check"];
 const list = (value: string | true | undefined): string[] => {
   if (value === undefined) return [];
@@ -76,6 +78,13 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const connectors = list(parsed.connectors);
   if (connectors.length && replay) throw new UsageError("--connectors is not available with replay or dry-run.");
   const teamA = list(parsed["team-a"]), teamB = list(parsed["team-b"]), judges = list(parsed.judges), agents = list(parsed.agents);
+  let seatConnectors: SeatConnectorMap | undefined;
+  if (parsed["seat-connectors"] !== undefined) {
+    if (typeof parsed["seat-connectors"] !== "string") throw new UsageError("--seat-connectors expects seat=connector pairs such as ada=figma,bob=jira+figma.");
+    if (!connectors.length) throw new UsageError("--seat-connectors requires --connectors.");
+    try { seatConnectors = assertSeatConnectors(parseSeatConnectorsFlag(parsed["seat-connectors"]), connectors, command === "duel" ? [...teamA, ...teamB, ...judges] : agents); }
+    catch (e) { throw new UsageError(e instanceof Error ? e.message : "Invalid --seat-connectors."); }
+  }
   if (command !== "duel" && (parsed.kind !== undefined || parsed.criteria !== undefined)) throw new UsageError("--kind and --criteria are available for duel.");
   if (parsed.kind !== undefined && !DUEL_KINDS.includes(parsed.kind as never)) throw new UsageError(`--kind must be one of ${DUEL_KINDS.join(", ")}.`);
   if (parsed.criteria !== undefined && typeof parsed.criteria !== "string") throw new UsageError("--criteria requires a comma-separated list.");
@@ -94,7 +103,7 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const turnTimeoutMs = positive(parsed, "turn-timeout", 90) * 1000;
   const maxSeconds = positive(parsed, "max-seconds", 600);
   positive(parsed, "speed", 1);
-  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, ...(parsed["no-page-check"] && { pageCheck: false }), rounds: rounds as 1 | 2, turnTimeoutMs, ...(command !== "duel" || parsed["max-seconds"] !== undefined ? { maxSeconds } : {}), ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }), ...(connectors.length && { connectors }) } };
+  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, ...(parsed["no-page-check"] && { pageCheck: false }), rounds: rounds as 1 | 2, turnTimeoutMs, ...(command !== "duel" || parsed["max-seconds"] !== undefined ? { maxSeconds } : {}), ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }), ...(connectors.length && { connectors }), ...(seatConnectors && { seatConnectors }) } };
 }
 
 /** Merge-time module contracts. String imports let the CLI build before the duel modules land. */
@@ -326,6 +335,7 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
       mode: command === "debate" ? "debate" : command === "waffle" ? "waffle-house" : "collaborate",
       maxRounds: Number(parsed.flags.rounds ?? 2), ...(parsed.duelFocus && { duel: parsed.duelFocus }), seats: parsed.options.seats, origin, signal: stop,
       ...(parsed.options.connectors?.length && { connectors: parsed.options.connectors }),
+      ...(parsed.options.seatConnectors && { seatConnectors: parsed.options.seatConnectors }),
       // Each connector call is a short note in the transcript, like a turn; the payload never appears.
       onToolNote: use => {
         const seat = seats.get(use.seat);

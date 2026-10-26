@@ -70,6 +70,7 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | --- | --- |
 | `--team-a`, `--team-b` | Duel only: 1 to 4 comma-separated agents per team; first writes the concept, last builds, any between critique |
 | `--connectors a,b` | Let every seat call these configured MCP connectors (read-only tools unless the connector config lists more). An unknown name is a usage error before any provider call. See [connectors at the table](connectors.md#at-the-table) |
+| `--seat-connectors s=a+b,...` | With `--connectors`: limit a seat to some of those connectors, e.g. `ada=figma,bob=jira+figma`. Seats not listed get all. A connector outside `--connectors` or a seat not at the table is a usage error. See [limiting a seat](connectors.md#limiting-a-seat) |
 | `--kind` | Duel only: `web` (default), `code`, `diagram` or `text` |
 | `--criteria` | Duel only: judging rubric of 1 to 8 items, comma-separated (separate with `;` instead when an item contains a comma); default: fit to the brief, quality, usability and accessibility, risk or safety |
 | `--judges` | Duel only: 1 to 5 comma-separated agents |
@@ -127,6 +128,8 @@ roundtable cast "Draft an expenses policy" --agents-dir /absolute/path/to/agents
 | `--json` | NDJSON events, then the report object |
 | `--seat …` | Shared table assignments; the neutral director's key is `casting-director` |
 | `--mix auto\|cheap` | Cost-aware provider judgment |
+| `--connectors a,b` | Let every seat call these configured MCP connectors; not with `--dry-run`. See [connectors at the table](connectors.md#at-the-table) |
+| `--seat-connectors s=a+b,...` | Limit a persona to some of those connectors, e.g. `architect=figma` |
 | `--turn-timeout s` | Per-turn timeout, default 90 seconds |
 | `--max-seconds s` | Whole-run deadline, default 300 seconds |
 

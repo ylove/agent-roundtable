@@ -57,7 +57,7 @@ Connectors are trusted host processes, outside the command sandbox. Their tools 
 
 ## At the table
 
-Seats in a meeting, debate, waffle or duel can call configured connectors as tools during their turns. Heads-down contracts are unaffected.
+Seats in a meeting, debate, waffle, duel, ultraplan or casting call can call configured connectors as tools during their turns. Heads-down contracts are unaffected.
 
 Enable them per session, with the same names as `config set connector`:
 
@@ -66,13 +66,25 @@ roundtable duel "A landing page" --team-a a,b --team-b c,d --judges e --connecto
 roundtable debate "Ship the beta?" --agents a,b --connectors issues
 ```
 
-The MCP start tools take an optional `connectors` list (`start_duel`, `start_collaboration`). An unknown or unlaunchable name is refused before seats are prepared or any provider is called. `--connectors` applies to every seat in the session; a per-seat form is not available yet.
+The MCP start tools take an optional `connectors` list: `start_meeting`, `start_collaboration`, `start_ultraplan`, `start_duel` and the casting call (`roundtable cast` and the `casting_call` tool). An unknown or unlaunchable name is refused before seats are prepared or any provider is called. `--connectors` applies to every seat in the session unless you limit a seat (below). `roundtable cast` also takes `--connectors`; it is refused with `--dry-run`, which makes no provider calls.
+
+`start_local_meeting` takes no connectors. It runs the installed Claude CLI, which has its own tool and MCP configuration that the table cannot extend; use `start_meeting` to give a single agent connectors.
+
+### Limiting a seat
+
+A seat can be limited to some of the session's connectors. On the CLI, `--seat-connectors ada=figma,bob=jira+figma` (pairs separated by commas, a seat's connectors by `+`); on the start tools, a `seat_connectors` map such as `{"ada": ["figma"], "bob": ["jira", "figma"]}`. A seat that is not listed gets all of the session's connectors (the behaviour without the option); an empty list gives that seat none. Every connector named must also be in `connectors`, and every seat named must be at the table (a persona in the session, a team member or judge for a duel, the `casting-director` or an auditioning persona for a casting call). Anything else is refused before a server starts. A seat can never call a tool of a connector it was not given, even by guessing the name.
+
+```sh
+roundtable debate "Ship the beta?" --agents ada,bob --connectors figma,jira --seat-connectors ada=figma,bob=jira
+```
+
+Ultraplan agents and the planner, a meeting's single agent and casting personas use the same seat names (persona keys, case-insensitive). In a meeting and an ultraplan the notes appear under "Connector use" in the end result (`toolUses` for an ultraplan's final result).
 
 - **Read-only by default.** A seat is offered only the tools whose MCP annotations say `readOnlyHint: true`. To allow others, list them on the connector: `config set connector issues ... --tool create_comment`, or `"tools": ["create_comment"]` in the user config. The list adds to the read-only tools; a tool the config does not allow is never offered, and a call to any other name is refused.
 - **Namespaced.** Seats see `<connector>__<tool>`. Tool names must match `[A-Za-z0-9_-]` and keep the full name within 64 characters; others are skipped.
 - **Credentials.** Each connector's server starts once per session through the same launcher as worker connectors: the inherited environment is removed and only the configured env (with `secret://` references resolved through the broker and registered for scrubbing) is added. The servers are closed when the session ends, is stopped or aborts.
 - **Untrusted results.** A tool result is data, not instructions. It is scrubbed, capped, and fenced between lines carrying a per-turn random code, and the seat is told to treat it as data. The transcript, room, NDJSON and any publisher receive only a note such as `ada used issues__search (ok, 812 bytes; arguments: query)`: no arguments' values and no payload. A collaboration's `end_collaboration` result lists these notes as `toolUses`.
-- **Providers.** Tool calling works with `anthropic`, `openai`, `together` and `openai_compatible`. A seat on `replicate`, `ollama` or a CLI runtime reports "connectors unavailable for this seat" once and then speaks without tools. Seats that cannot use tools do not block the session.
+- **Providers.** Tool calling works with `anthropic`, `openai`, `together` and `openai_compatible`. It also works with `ollama` through its `/api/chat` `tools` field and `message.tool_calls` reply, for models that support tools (a model without tool support is refused by Ollama and reported as that seat's turn error). A seat on `replicate` or a CLI runtime reports "connectors unavailable for this seat" once and then speaks without tools. Seats that cannot use tools do not block the session.
 - **Caps.** At most 6 tool calls per turn (further calls in the same turn get an error result and the model is told to answer), 30 seconds per call, 8 KiB per result, 8 connectors per session, 64 tools per connector. Every request of a tool turn is metered as usage like any other provider call.
 
-Connectors remain trusted host processes. A read-only annotation is the server's own claim; review each server and scope its credentials. Not covered yet: `start_meeting` and `start_local_meeting`, ultraplan, per-seat connector lists, and Ollama tool calling.
+Connectors remain trusted host processes. A read-only annotation is the server's own claim; review each server and scope its credentials. Not covered: `start_local_meeting` and seats on CLI runtimes, which run their own tool stacks.

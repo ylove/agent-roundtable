@@ -198,8 +198,8 @@ export async function callLLM(
   return (await callLLMDetailed(systemPrompt, messages, options)).content;
 }
 
-/** Providers whose request shape here carries tools. Replicate and Ollama speak without them. */
-export const TOOL_PROVIDERS: readonly LLMProvider[] = ["anthropic", "openai", "together", "openai_compatible"];
+/** Providers whose request shape here carries tools. Replicate speaks without them. */
+export const TOOL_PROVIDERS: readonly LLMProvider[] = ["anthropic", "openai", "together", "openai_compatible", "ollama"];
 export const supportsTools = (provider: string): boolean => (TOOL_PROVIDERS as readonly string[]).includes(provider);
 
 /**
@@ -218,7 +218,7 @@ export async function callLLMWithTools(
   const llmMessages: LLMMessage[] = [{ role: "system", content: systemPrompt }, ...messages];
   return runToolLoop(
     toolRound => chatCompletion(llmMessages, { provider, model, maxTokens, baseUrl, estimateUsageOnFailure, toolRound }),
-    tools, runTool, (calls, results) => toolResultTurns(provider === "anthropic" ? "anthropic" : "openai", calls, results),
+    tools, runTool, (calls, results) => toolResultTurns(provider === "anthropic" ? "anthropic" : provider === "ollama" ? "ollama" : "openai", calls, results),
     activeAbortSignal(), limits,
   );
 }

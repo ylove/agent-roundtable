@@ -64,6 +64,7 @@ import {
 } from "../sessions/collaborations.js";
 import type { MeetingMode, CollaborationMode } from "../sessions/modes.js";
 import { COLLABORATION_MODES } from "../sessions/modes.js";
+import type { SeatConnectorMap } from "../table/seat-connectors.js";
 import { startUltraplan, submitPlan, endUltraplan, ultraplans } from "../sessions/ultraplan.js";
 import { createAgent, improveAgent } from "../sessions/agent-creation.js";
 import { prototypeTrailer } from "../sessions/prototype-mode.js";
@@ -112,6 +113,7 @@ import {
   DUEL_PROP,
   DUEL_SOURCE_PROP,
   CONNECTORS_PROP,
+  SEAT_CONNECTORS_PROP,
   validateProviderOptions,
   formatUltraplanResult,
   formatAgentWorkshopResult,
@@ -169,6 +171,7 @@ export const deliberationTools: ToolDefinition[] = [
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
         connectors: CONNECTORS_PROP,
+        seat_connectors: SEAT_CONNECTORS_PROP,
         provider: {
           type: "string",
           enum: ["auto", ...PROVIDER_IDS],
@@ -464,6 +467,8 @@ export const deliberationTools: ToolDefinition[] = [
         page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
+        connectors: CONNECTORS_PROP,
+        seat_connectors: SEAT_CONNECTORS_PROP,
         provider: {
           type: "string",
           enum: ["auto", ...PROVIDER_IDS],
@@ -621,6 +626,8 @@ export const deliberationTools: ToolDefinition[] = [
         context: { type: "string", description: "Optional background shared with the agents; never posted publicly." },
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
+        connectors: CONNECTORS_PROP,
+        seat_connectors: SEAT_CONNECTORS_PROP,
         draft_plan: { type: "string", description: "Optional full draft: becomes v1 by orchestrator and skips the input phase. Whitespace-only counts as absent." },
         planner: { type: "string", description: "Optional persona that owns drafting and revision server-side; runs the whole loop in one call." },
         revision_rounds: { type: "number", description: "Planner only: review/revise cycles before sign-off, default 1, clamped to 1..3." },
@@ -745,12 +752,14 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Meeting Tools ===
     case START_MEETING: {
-      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype, page_check, duel, duel_source } = args as {
+      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype, page_check, duel, duel_source, connectors, seat_connectors } = args as {
         agent: string;
         agenda: string;
         context?: string;
         duel?: string;
         duel_source?: boolean;
+        connectors?: string[];
+        seat_connectors?: SeatConnectorMap;
         provider?: LLMProvider | "auto";
         model?: string;
         base_url?: string;
@@ -760,7 +769,10 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         prototype?: boolean;
         page_check?: boolean;
       };
-      const result = await startMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true, page_check !== false);
+      const result = await startMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true, page_check !== false, {
+        ...(connectors?.length && { connectors }),
+        ...(seat_connectors !== undefined && { seatConnectors: seat_connectors }),
+      });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -890,9 +902,10 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Collaboration Tools ===
     case START_COLLABORATION: {
-      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, page_check, duel, duel_source, connectors } = args as {
+      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, page_check, duel, duel_source, connectors, seat_connectors } = args as {
         agents: string[];
         connectors?: string[];
+        seat_connectors?: SeatConnectorMap;
         topic?: string;
         context?: string;
         duel?: string;
@@ -916,6 +929,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         duel,
         duelSource: duel_source,
         ...(connectors?.length && { connectors }),
+        ...(seat_connectors !== undefined && { seatConnectors: seat_connectors }),
         maxRounds: max_rounds,
         autoRun: auto_run_rounds !== undefined,
         runRounds: auto_run_rounds,
@@ -1038,8 +1052,10 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Ultraplan Tools ===
     case START_ULTRAPLAN: {
-      const { agents, task, context: given, draft_plan, planner, revision_rounds, execution_ready, repo_dir, duel, duel_source, public: isPublic, provider, model, base_url } = (args ?? {}) as {
+      const { agents, task, context: given, draft_plan, planner, revision_rounds, execution_ready, repo_dir, duel, duel_source, connectors, seat_connectors, public: isPublic, provider, model, base_url } = (args ?? {}) as {
         agents: string[];
+        connectors?: string[];
+        seat_connectors?: SeatConnectorMap;
         task: string;
         context?: string;
         duel?: string;
@@ -1063,6 +1079,8 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         planner,
         revisionRounds: revision_rounds,
         executionReady: execution_ready === true,
+        ...(connectors?.length && { connectors }),
+        ...(seat_connectors !== undefined && { seatConnectors: seat_connectors }),
         public: isPublic === true,
         provider,
         model,

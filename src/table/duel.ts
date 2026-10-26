@@ -20,7 +20,7 @@ import { registerDuel, unregisterDuel } from "./live-duels.js";
 import { abortSession, lineFor, metered, sessionSignal } from "../usage/session-scope.js";
 import type { DuelKind, DuelOptions, DuelResult, RunDuel, Seat, TableEvent, TableObserver } from "./events.js";
 import { validateDuelOptions } from "./duel-options.js";
-import { activeSeatConnectors, startSeatConnectors, withSeatConnectors } from "./seat-connectors.js";
+import { activeSeatConnectors, checkSeatConnectorArgs, startSeatConnectors, withSeatConnectors } from "./seat-connectors.js";
 import { buildPrompt, closingPrompt, conceptPrompt, critiquePrompt, DEFAULT_CRITERIA, DUEL_MAX_BYTES, duelSystem, judgePrompt, normalizeCriteria } from "./prompts.js";
 import { attachPrototypeFiles, getPrototypeFiles, attachPrototypeScreenshot, getPrototypeScreenshot, type DuelArchive } from "./replay.js";
 
@@ -180,7 +180,8 @@ type DuelRunner = (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, d
 export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
   validateDuelOptions(opts);
   if (!opts.connectors?.length) return runDuelBody(opts, obs, signal, deps);
-  const connectors = await startSeatConnectors(opts.connectors, { signal });
+  const checked = checkSeatConnectorArgs(opts.connectors, opts.seatConnectors, [...opts.teamA, ...opts.teamB, ...opts.judges]);
+  const connectors = await startSeatConnectors(checked.names, { signal, seatConnectors: checked.seatConnectors });
   try { return await withSeatConnectors(connectors, () => runDuelBody(opts, obs, signal, deps)); }
   finally { await connectors.close(); }
 };

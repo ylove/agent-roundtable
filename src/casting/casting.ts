@@ -8,6 +8,7 @@ import { isContained, mkdirPrivate, writeFileAtomic } from "../security/fs-safe.
 import { scrub, scrubAndCap } from "../security/secrets.js";
 import { mapLimit } from "../sessions/workshop.js";
 import { callSeat } from "../table/dispatch.js";
+import { checkSeatConnectorArgs, startSeatConnectors, withSeatConnectors, type SeatConnectorMap } from "../table/seat-connectors.js";
 import { parseSeat, type Seat, type SeatSpec, type TableEvent, type TableObserver } from "../table/events.js";
 import { assertSeatCredentials, resolveSeats, SeatUsageError, validateSeatSpecs } from "../table/seats.js";
 import { turnTokens } from "../table/duel.js";
@@ -24,6 +25,10 @@ export interface CastingOptions {
   dryRun?: boolean; provider?: LLMProvider | "auto"; model?: string;
   seat?: string | Record<string, SeatSpec>; mix?: "auto" | "cheap";
   turnTimeoutMs?: number; maxSeconds?: number;
+  /** Configured MCP connectors every seat may call as tools during its turn. */
+  connectors?: string[];
+  /** Limits a persona to some of those connectors (persona key to connector names). */
+  seatConnectors?: SeatConnectorMap;
 }
 
 export function validateCastingOptions(opts: CastingOptions): void {
@@ -178,6 +183,9 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
   validateCastingOptions(opts);
   const agents = await loadCast(opts);
   if (opts.seats !== undefined && opts.seats > agents.length) throw new SeatUsageError("--seats cannot exceed the number of personas in --agents.");
+  // An unknown connector fails here, before anything is started or any provider is called.
+  const checked = checkSeatConnectorArgs(opts.connectors, opts.seatConnectors, [...agents.map(a => a.key), "casting-director"]);
+  if (checked.names.length && opts.dryRun) throw new SeatUsageError("connectors are not available with dry-run, which makes no provider calls.");
   const id = `cast-${randomUUID()}`, createdAt = new Date().toISOString();
   const count = opts.seats ?? Math.min(5, agents.length);
   const overrides = castAssignments(opts.seat, agents.map(a => a.key));
@@ -192,7 +200,9 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
   const timer = setTimeout(() => deadline.abort(new Error("Casting deadline reached.")), (opts.maxSeconds ?? 300) * 1000);
   // Listed with the live duels, so the usage view and stop_session reach it through sessionSignal(id).
   registerDuel({ id, kind: "casting", agents: agents.map(a => a.key), started: createdAt });
+  let connectors: Awaited<ReturnType<typeof startSeatConnectors>> | undefined;
   try {
+    connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal, seatConnectors: checked.seatConnectors }) : undefined;
     const stop = AbortSignal.any([signal, deadline.signal, sessionSignal(id)]);
     const stopped = () => stop.aborted || Date.now() >= ended;
     const assignments: Map<string, Seat> = opts.dryRun || stopped() ? new Map([...agents.map(a => a.key), "casting-director"].map(key => [key, { id: key, name: key, provider: "static", model: "", reason: "static checks; no provider calls" } satisfies Seat]))
@@ -223,9 +233,9 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
             if (usd === undefined) total.unpricedTokens += input + output;
             if (line.tokens_prov === "estimated" || line.usd_prov === "estimated") total.estimated = true;
             ledger?.(r);
-          }, () => withAbortSignal(callStop, () => callSeat(system, [{ role: "user", content: prompt }], {
+          }, () => withAbortSignal(callStop, () => withSeatConnectors(connectors, () => callSeat(system, [{ role: "user", content: prompt }], {
             provider: seat.provider, model: seat.model, maxTokens: Math.min(turnTokens(seat.provider, round), seat.maxOutputTokens ?? Infinity), estimateUsageOnFailure: true,
-          }, { agent: seat.id, onModelFallback: model => { seat.model = model; } })));
+          }, { agent: seat.id, onModelFallback: model => { seat.model = model; } }))));
         }), callStop);
         const words = round === "audition" ? 120 : round === "answer" ? 80 : undefined;
         const safe = scrub(result);
@@ -252,6 +262,11 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
       return;
     }
     await emit({ type: "start", id, topic: report.brief, mode: "casting", seats, startedAt: createdAt });
+    // Each connector call and notice appears as a short note, never as the tool's payload.
+    connectors?.onNote(use => {
+      const seat = seats.find(s => s.id === use.seat) ?? seats[0];
+      void emit({ type: "turn", round: "tool", seat: { ...seat }, text: use.note, ts: new Date().toISOString() });
+    });
     if (!opts.dryRun) {
       await mapLimit(agents, PARALLEL_TURNS, async agent => {
         const text = await turn(seats.find(s => s.id === agent.key)!, "audition", agent.body, auditionPrompt(report.brief));
@@ -297,5 +312,5 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
     writeFileAtomic(archivePath, archive);
     writeFileAtomic(join(ROUNDTABLE_HOME, "casting", "latest.json"), archive);
     return report;
-  } finally { clearTimeout(timer); unregisterDuel(id); }
+  } finally { clearTimeout(timer); unregisterDuel(id); await connectors?.close(); }
 }

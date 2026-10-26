@@ -45,6 +45,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 
 | Terminal command | Purpose |
 | --- | --- |
+| [`roundtable up`, `doctor`](docs/getting-started.md#quick-start-roundtable-up) | Set up, check your install (keys, git, Docker, Chrome) and start the local service. |
 | [`roundtable cast`](docs/modes/casting-call.md) | Audition personas and recommend a cast for a brief. |
 | [`roundtable duel`](docs/modes/duel.md) | Two teams build competing artifacts; judges assess them; dissents are recorded. |
 | [`roundtable debate`, `waffle`, `meeting`](docs/table-cli.md) | Stream a discussion with per-seat models and spend. |

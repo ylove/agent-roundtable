@@ -11,6 +11,8 @@
 //   statusline [--agents N] [--plain] [--no-host]                       a Claude Code status line; always exits 0
 //   usage [--json] [--watch]                                            who is using what, on which platform
 //   stop <agent> [--execution <exe> | --session <id>] [--reason <text>] stop one agent (heads-down or at the table)
+//   up / doctor                                                         set up, check and start the local service
+//   --version | -v | version                                            print the version
 //   help                                                                this text
 //
 // Modules load lazily, so the hook (which Claude Code runs before every edit) never loads the
@@ -41,6 +43,9 @@ export const USAGE = [
   "  roundtable cast <brief> [--agents a,b,... | --agents-dir <abs-path>] [--seats n] [--dry-run] [--json]",
   "  roundtable duel <brief> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--kind web|code|diagram|text] [--criteria a,b] [--open]",
   "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2]",
+  "  roundtable up [--setup] [--no-input] [--no-serve] [--open] [--check-keys]",
+  "  roundtable doctor [--json] [--check-keys]",
+  "  roundtable --version | -v | version",
   "  roundtable serve [--detach] [--no-keep-runners] [--bind loopback|tailnet] | serve status|stop",
   "  roundtable serve --print-service launchd|systemd",
   "  roundtable notify init ntfy | notify test",
@@ -252,6 +257,20 @@ export async function runCli(argv: string[]): Promise<void> {
       return mcp([]);
     case "mcp":
       return mcp(rest);
+    case "--version":
+    case "-v":
+    case "version": {
+      if (rest.length) return usage("version takes no arguments");
+      const { VERSION } = await import("./config.js");
+      process.stdout.write(VERSION + "\n");
+      return;
+    }
+    case "up":
+    case "doctor": {
+      const { runUpCli } = await import("./cli-up.js");
+      process.exitCode = await runUpCli(command, rest);
+      return;
+    }
     case "hook":
       return hook(rest);
     case "run":

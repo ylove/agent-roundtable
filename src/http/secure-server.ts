@@ -1,11 +1,12 @@
 // ============================================================================
-// Secure localhost HTTP server (prototype board, execution dashboard)
+// Secure local HTTP server (prototype board, execution dashboard, home index)
 //
-//   - binds to 127.0.0.1 on a random port; a forgotten server never keeps the process alive
+//   - binds to loopback by default, optionally a validated local tailnet address, on a random port
+//     a forgotten server never keeps the process alive
 //   - every route lives under a random capability token: http://127.0.0.1:<port>/<token>/...
 //     The token is compared in constant time, and a request without it is a plain 404 that says
 //     nothing about how close the guess was. The token is never logged.
-//   - the Host header must name this server (127.0.0.1:<port> or localhost:<port>), else 421:
+//   - the Host header must exactly name the bound address and port, else 421:
 //     a DNS-rebinding page cannot read anything
 //   - GET and HEAD only (405 otherwise), except for a route that names its own methods (Route.methods):
 //     the one mutating route of the execution dashboard allows POST and nothing else. A method no
@@ -22,6 +23,8 @@
 // ============================================================================
 
 import crypto from "node:crypto";
+import { boundHost, hostMatches, validateBindAddress } from "./bind.js";
+export { isTailnetAddress } from "./bind.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
@@ -141,6 +144,8 @@ export interface SecureServerOptions {
   allowProxied?: (path: string) => boolean;
   /** Most concurrent connections (default 128). */
   maxConnections?: number;
+  /** Loopback or a tailnet address assigned to a local interface. */
+  bindAddress?: string;
 }
 
 const TEXT = "text/plain; charset=utf-8";
@@ -156,6 +161,7 @@ function headerList(base: Record<string, string>, extra: Headers = {}): Record<s
 
 export class SecureServer {
   private port = 0;
+  private readonly address: string;
   private closing?: Promise<void>;
   private readonly token = newCapabilityToken();
   /** The methods beyond GET and HEAD that some route allows. */
@@ -166,11 +172,13 @@ export class SecureServer {
     private readonly opts: SecureServerOptions,
     private readonly server: Server
   ) {
+    this.address = validateBindAddress(opts.bindAddress ?? "127.0.0.1");
     this.mutating = new Set(opts.routes.flatMap((r) => (r.methods ?? READ_METHODS).filter((m) => !READ_METHODS.includes(m))));
   }
 
-  /** Listen on 127.0.0.1 with a random port. */
+  /** Listen on a validated local address with a random port. */
   static start(opts: SecureServerOptions): Promise<SecureServer> {
+    validateBindAddress(opts.bindAddress ?? "127.0.0.1");
     const server = createServer();
     const s = new SecureServer(opts, server);
     server.maxConnections = opts.maxConnections ?? 128;
@@ -180,7 +188,7 @@ export class SecureServer {
     server.on("upgrade", (_req: IncomingMessage, socket: Duplex) => refuseSocket(socket));
     return new Promise((resolvePromise, reject) => {
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => {
+      server.listen(0, s.address, () => {
         server.off("error", reject);
         server.on("error", (e) => s.log(`server error: ${e.message}`));
         s.port = (server.address() as AddressInfo).port;
@@ -190,13 +198,13 @@ export class SecureServer {
     });
   }
 
-  /** "http://127.0.0.1:<port>/<token>/". A capability: hand it to the human, never to a log. */
+  /** A capability URL on the bound address: hand it to the human, never to a log. */
   get url(): string {
-    return `http://127.0.0.1:${this.port}${this.base}`;
+    return `http://${boundHost(this.address, this.port)}${this.base}`;
   }
 
   get origin(): string {
-    return `http://127.0.0.1:${this.port}`;
+    return `http://${boundHost(this.address, this.port)}`;
   }
 
   /** "/<token>/": the path prefix of every route. */
@@ -287,13 +295,13 @@ export class SecureServer {
       } catch {
         u = null;
       }
-      if (!u || u.protocol !== "http:" || u.host !== `127.0.0.1:${this.port}` || u.username || u.password) {
+      if (!u || u.protocol !== "http:" || u.host !== boundHost(this.address, this.port) || u.username || u.password) {
         return this.refuseProxied(res);
       }
       target = u.pathname + u.search;
     }
-    const host = String(req.headers.host ?? "").toLowerCase();
-    if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) {
+    const host = req.headers.host;
+    if (!hostMatches(host, this.address, this.port)) {
       return this.text(req, res, 421, "Misdirected request: this server only answers on its own local address.");
     }
     const method = req.method ?? "";

@@ -51,7 +51,7 @@ export const runnerLogPath = (exe: string): string => join(executionDir(exe), "r
 export function readRunnerInfo(exe: string): RunnerInfo | null {
   try {
     const r = JSON.parse(readFileSync(runnerInfoPath(exe), "utf8")) as RunnerInfo;
-    return r && Number.isSafeInteger(r.pid) && typeof r.heartbeatAt === "string" ? r : null;
+    return r && Number.isSafeInteger(r.pid) && r.pid > 1 && typeof r.host === "string" && typeof r.heartbeatAt === "string" ? r : null;
   } catch {
     return null;
   }
@@ -87,7 +87,10 @@ export function runnerLiveness(exe: string, now = Date.now()): RunnerLiveness {
     return { state: "dead", pid: owner.pid, ...(heartbeat && { heartbeatAt: heartbeat }) };
   }
   if (!info) return { state: "stopped" };
+  if (info.host !== hostname()) return { state: "other_host", pid: info.pid, host: info.host };
   if (info.stoppedAt) return { state: "stopped", pid: info.pid, stoppedAt: info.stoppedAt, ...(info.stopReason && { reason: info.stopReason }) };
+  // A missing lock is never permission to replace a live pid.
+  if (pidAlive(info.pid)) return { state: "running", pid: info.pid, heartbeatAt: info.heartbeatAt, stale: now - Date.parse(info.heartbeatAt) > RUNNER_STALE_MS };
   return { state: "dead", pid: info.pid, heartbeatAt: info.heartbeatAt };
 }
 

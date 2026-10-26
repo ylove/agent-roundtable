@@ -178,3 +178,26 @@ The standard unit-test preload isolates state, HOME, persona/skill directories a
 Use `roundtable config set secret ANTHROPIC_API_KEY secret://keychain/roundtable/anthropic` to save a reference under `secrets` in the user config. Shell values win for referenced keys; otherwise references beat plaintext files. Startup resolves synchronously within 20 seconds; a failure warns by name and leaves the key unset. `ROUNDTABLE_SECRETS=off` disables startup resolution. Workers and hooks never run the startup broker. See [secrets](secrets.md) for backends, checks, caching and the resolver interface.
 
 The `connectors` config defines extra stdio MCP servers by absolute executable path, separate arguments and an env map. Credentials use references. Heads-down contracts opt in with `connectors: ["issues"]`; names are covered by consent. Claude workers support them; Codex workers refuse them. See [worker connectors](connectors.md) for configuration, limits and trust.
+
+## Long-running service and private check-ins
+
+These options are independent of public session publishers. Use `roundtable config set notify.<key> <value>`; restart `serve` after changes. See [long-running runs](long-running.md) for setup and privacy details.
+
+| Saved key | Meaning | Default |
+| --- | --- | --- |
+| `notify.events` | Comma-separated list or JSON array of `awaiting_human`, `budget`, `completed`, `failed`, `aborted`, `postmortem_ready`, `runner_keeps_dying` | All listed events |
+| `notify.ntfy.url` | Authenticated ntfy server; HTTPS except loopback | Unset |
+| `notify.ntfy.topic` | Private topic, 16–64 letters/digits/underscores/hyphens; generate with `notify init ntfy` | Unset |
+| `notify.ntfy.token` | `secret://` reference to bearer token | Unset |
+| `notify.ntfy.user` | `secret://` reference to username, paired with password | Unset |
+| `notify.ntfy.password` | `secret://` reference to password | Unset |
+| `notify.webhook.url` | Signed check-in receiver; HTTPS except loopback | Unset |
+| `notify.webhook.secret` | `secret://` reference to HMAC signing secret | Unset |
+| `notify.desktop` | `true` for macOS or Linux desktop check-ins | `false` |
+
+| Environment variable | Meaning | Default |
+| --- | --- | --- |
+| `ROUNDTABLE_NOTIFY_NTFY_TOKEN` | Private ntfy bearer token; overrides the saved reference | Unset |
+| `ROUNDTABLE_NOTIFY_WEBHOOK_SECRET` | Private webhook HMAC secret; overrides the saved reference | Unset |
+
+`serve` uses `ROUNDTABLE_HOME/serve/` for its lock, metadata, private detached log, notification cursors/queues and relaunch history. All state files are 0600. `--bind tailnet` opts into a locally assigned private tailnet address; no wildcard bind or public tunnel is supported. Service definition printouts never contain environment values and must be installed by the person.

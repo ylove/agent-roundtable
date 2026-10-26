@@ -93,7 +93,7 @@ test('package loader and pointed loader compose in a fresh isolated package', t 
   const { home, file } = fixture(t);
   mkdirSync(join(home, 'dist'));
   for (const name of ['env.js', 'user-config.js', 'provider-ids.js']) copyFileSync(resolve('dist', name), join(home, 'dist', name));
-  for (const name of ['secrets', 'security', 'connectors']) cpSync(resolve('dist', name), join(home, 'dist', name), { recursive: true });
+  for (const name of ['secrets', 'security', 'connectors', 'serve', 'http']) cpSync(resolve('dist', name), join(home, 'dist', name), { recursive: true });
   copyFileSync(resolve('dist/executables.js'), join(home, 'dist/executables.js'));
   mkdirSync(join(home, 'dist', 'runtimes'));
   copyFileSync(resolve('dist/runtimes/spec.js'), join(home, 'dist/runtimes/spec.js'));

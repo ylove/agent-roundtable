@@ -142,6 +142,15 @@ export function browserArgs(proxy: string, profile: string): string[] {
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", `--user-data-dir=${profile}`];
 }
 
+/**
+ * Chrome flags for a dev-server preview: every request goes to a dead proxy except the preview's own
+ * 127.0.0.1:<port>, so the page can load itself and nothing else (no other local port, no internet).
+ */
+export function previewBrowserArgs(port: number, profile: string): string[] {
+  const args = browserArgs("http://127.0.0.1:1", profile);
+  return args.map(a => a.startsWith("--proxy-bypass-list=") ? `--proxy-bypass-list=<-loopback>;127.0.0.1:${port}` : a);
+}
+
 export function launchBrowser(chrome: string, args: string[], dir: string, processes?: ChromeProcesses) {
   const child = spawn(chrome, args, { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
     detached: process.platform !== "win32", shell: false, windowsHide: true, env: browserEnv(dir) });

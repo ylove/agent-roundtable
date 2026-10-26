@@ -42,5 +42,8 @@ export function boundHost(address: string, port: number): string {
 }
 
 export function hostMatches(host: string | undefined, address: string, port: number): boolean {
-  return host === boundHost(address, port);
+  if (host === undefined) return false;
+  const h = host.toLowerCase();
+  if (h === boundHost(address, port)) return true;
+  return (address === "127.0.0.1" || address === "::1") && h === `localhost:${port}`;
 }

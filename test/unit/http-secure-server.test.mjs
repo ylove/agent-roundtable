@@ -134,8 +134,8 @@ test("secure-server: the token is compared with crypto.timingSafeEqual, on equal
 test("secure-server: Host header check (421) before anything else is revealed", async (t) => {
   const s = await start(t);
   const port = new URL(s.url).port;
-  assert.equal((await get(s.url, { host: `localhost:${port}` })).status, 421);
-  assert.equal((await get(s.url, { host: `LOCALHOST:${port}` })).status, 421);
+  assert.equal((await get(s.url, { host: `localhost:${port}` })).status, 200);
+  assert.equal((await get(s.url, { host: `LOCALHOST:${port}` })).status, 200);
   for (const host of ["evil.example", `evil.example:${port}`, "127.0.0.1", `127.0.0.1:${Number(port) + 1}`, `127.0.0.1.nip.io:${port}`]) {
     const r = await get(`${s.url}data.json`, { host });
     assert.equal(r.status, 421, host);

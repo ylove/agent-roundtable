@@ -43,7 +43,8 @@ test("serve index capability, escaped fixtures, valid ids, strict CSP and read-o
   t.after(() => index.close());
   assert.equal((await get(new URL("/", index.url).href)).status, 404);
   assert.equal((await get(index.url.replace(index.base, "/wrong-token/"))).status, 404);
-  assert.equal((await get(index.url, "GET", `localhost:${new URL(index.url).port}`)).status, 421);
+  assert.equal((await get(index.url, "GET", `localhost:${new URL(index.url).port}`)).status, 200);
+  assert.equal((await get(index.url, "GET", "evil.example")).status, 421);
   const root = await get(index.url);
   assert.equal(root.status, 200);
   assert.match(root.body, new RegExp(store.id));

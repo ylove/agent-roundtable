@@ -7,7 +7,7 @@
 //
 // The dev server sits alone on a per-preview --internal network, so it has no route out. Docker
 // cannot publish a port from an internal network, so a small forwarder container (fixed code, same
-// hardening) joins that network and the default bridge and carries the one published port, bound to
+// hardening) joins that network and its own per-preview network and carries the one published port, bound to
 // 127.0.0.1 and nothing else (never 0.0.0.0, never host networking).
 // ============================================================================
 
@@ -39,6 +39,8 @@ export interface PreviewLabels {
   execution?: string;
   task?: string;
   prototype?: string;
+  /** The duel a prototype belongs to (the session-directory form of its id). */
+  duel?: string;
 }
 
 interface Common {
@@ -68,19 +70,32 @@ export function previewContainerName(id: string): string {
 export const forwarderName = (id: string): string => `${previewContainerName(id)}-fwd`;
 export const previewNetworkName = (id: string): string => `rt-pvnet-${previewContainerName(id).slice(11)}`;
 
+/** The forwarder's own (non-internal) network, where Docker can publish the one loopback port. */
+export const forwarderNetworkName = (id: string): string => `rt-pvfwd-${previewContainerName(id).slice(11)}`;
+
 /** `docker network create` argv: internal, so nothing on it can reach beyond it. */
 export function buildNetworkCreateArgs(id: string): string[] {
   return ["network", "create", "--internal", "--label", `${PREVIEW_NET_LABEL}=${id}`, previewNetworkName(id)];
+}
+
+/** `docker network create` argv for the forwarder's network: per preview, labelled like the internal one, removed with it. */
+export function buildForwarderNetworkCreateArgs(id: string): string[] {
+  return ["network", "create", "--label", `${PREVIEW_NET_LABEL}=${id}`, forwarderNetworkName(id)];
 }
 
 function appTmpfs(o: Common, size: string): string {
   return `${APP_DIR}:rw,nosuid,nodev,size=${size},uid=${o.uid},gid=${o.gid},mode=0755`;
 }
 
+/** What `hostFlag` appends after `--`. */
+export const HOST_FLAG_ARGS: readonly string[] = ["--host", "0.0.0.0"];
+
 export interface PreviewRunOptions extends Common {
   script: PreviewScript;
   port: number;
   labels?: PreviewLabels;
+  /** Run the script as `npm run <script> -- --host 0.0.0.0` (a dev server that listens on all interfaces only when told to). */
+  hostFlag?: boolean;
   /** Size of the tmpfs the snapshot is unpacked into. */
   appSize?: string;
 }
@@ -100,7 +115,7 @@ export function buildPreviewRunArgs(o: PreviewRunOptions): string[] {
     "--label", `${PREVIEW_LABEL}=${o.id}`,
     "--label", `${PREVIEW_HOST_LABEL}=${hostname()}`,
   ];
-  for (const [key, value] of Object.entries({ execution: o.labels?.execution, task: o.labels?.task, prototype: o.labels?.prototype })) {
+  for (const [key, value] of Object.entries({ execution: o.labels?.execution, task: o.labels?.task, prototype: o.labels?.prototype, duel: o.labels?.duel })) {
     if (value === undefined) continue;
     if (!LABEL_VALUE_RE.test(value)) throw new PreviewError(`invalid ${key} label ${JSON.stringify(value.slice(0, 40))}`);
     args.push("--label", `${PREVIEW_LABEL}-${key}=${value}`);
@@ -116,6 +131,8 @@ export function buildPreviewRunArgs(o: PreviewRunOptions): string[] {
     o.image,
     "sh", "-c", UNPACK_THEN_EXEC, "sh", "npm", "run", o.script
   );
+  // The only argument ever passed through to the script, and only as this fixed pair.
+  if (o.hostFlag) args.push("--", ...HOST_FLAG_ARGS);
   return args;
 }
 
@@ -157,7 +174,7 @@ const FORWARDER_SCRIPT =
 const FORWARDER_LIMITS: DockerLimits = { memory: "128m", cpus: "0.5", pids: 64 };
 
 /**
- * The `docker create` argv of the forwarder. It starts on the default bridge, where Docker can
+ * The `docker create` argv of the forwarder. It starts on its own per-preview network, where Docker can
  * publish `127.0.0.1::<port>` (loopback only; Docker picks the host port); the caller then connects
  * it to the preview's internal network and starts it.
  */
@@ -170,7 +187,7 @@ export function buildForwarderCreateArgs(o: Common & { port: number }): string[]
     "--name", forwarderName(o.id),
     "--label", `${PREVIEW_LABEL}=${o.id}`,
     "--label", `${PREVIEW_HOST_LABEL}=${hostname()}`,
-    ...hardeningArgs({ network: "bridge", uid: o.uid, gid: o.gid, limits: FORWARDER_LIMITS }),
+    ...hardeningArgs({ network: forwarderNetworkName(o.id), uid: o.uid, gid: o.gid, limits: FORWARDER_LIMITS }),
     "-e", `FWD_PORT=${port}`,
     "-e", `FWD_TARGET=${SERVER_ALIAS}`,
     "-p", `127.0.0.1::${port}`,

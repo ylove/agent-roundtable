@@ -20,6 +20,8 @@ export interface PreviewSource {
   task?: string;
   /** The prototype directory's name (never its path). */
   prototype?: string;
+  /** The duel the prototype belongs to, as its session directory spells the duel id. */
+  duel?: string;
 }
 
 export interface PreviewCheckRecord {
@@ -62,6 +64,7 @@ export function parseRecord(value: unknown): PreviewRecord | undefined {
     originPort >= 1 && originPort <= 65_535 && r.host_port === originPort &&
     Number.isInteger(r.container_port) && typeof r.script === "string" && /^[a-z]{1,16}$/.test(r.script) &&
     !!r.source && (r.source.kind === "task" || r.source.kind === "prototype") &&
+    (r.source.duel === undefined || (typeof r.source.duel === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(r.source.duel))) &&
     typeof r.started_at === "string" && typeof r.last_seen === "string" && Number.isFinite(Date.parse(r.last_seen)) &&
     Number.isFinite(r.ttl_ms) && typeof r.host === "string";
   return ok ? (r as PreviewRecord) : undefined;

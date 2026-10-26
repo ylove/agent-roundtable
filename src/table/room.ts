@@ -1,4 +1,5 @@
 import { SecureServer, type Route } from "../http/secure-server.js";
+import { sanitizeSessionId } from "../prototypes/sandbox.js";
 import { livePreviews, previewLabel, previewOrigins, withFrameSrc } from "../previews/embed.js";
 import { APP_CSP, openInBrowser } from "../prototypes/board.js";
 import { MAX_FILES, MAX_TOTAL_BYTES, validatePath, type PrototypeFile } from "../prototypes/parse.js";
@@ -19,6 +20,13 @@ export interface RoomState {
   turns: EventOf<"turn">[];
   usage: EventOf<"usage">;
   end?: EventOf<"end">;
+}
+
+/** The previews that belong to this duel (their prototype directory carries the duel id); none before a duel starts. */
+export function duelPreviewsOf<T extends { source: { duel?: string } }>(duelId: string | undefined, records: readonly T[]): T[] {
+  if (!duelId) return [];
+  const mine = sanitizeSessionId(duelId);
+  return records.filter(r => r.source.duel === mine);
 }
 
 export function createRoomState(): RoomState {
@@ -55,9 +63,10 @@ export async function startRoom({ state = createRoomState(), open = false, hold 
     }
     files.set(team, map);
   };
+  const duelPreviews = () => duelPreviewsOf(state.id, livePreviews());
   const routes: Route[] = [
-    { path: "/", handler: ctx => ctx.html(200, ROOM_HTML, withFrameSrc(ROOM_CSP, previewOrigins(livePreviews()))) },
-    { path: "/previews.json", handler: ctx => ctx.json(200, livePreviews().map(r => ({ id: r.id, origin: r.origin, label: previewLabel(r) }))) },
+    { path: "/", handler: ctx => ctx.html(200, ROOM_HTML, withFrameSrc(ROOM_CSP, previewOrigins(duelPreviews()))) },
+    { path: "/previews.json", handler: ctx => ctx.json(200, duelPreviews().map(r => ({ id: r.id, origin: r.origin, label: previewLabel(r) }))) },
     { path: "/room.js", handler: ctx => ctx.send(200, ROOM_JS, "text/javascript; charset=utf-8") },
     { path: "/room.css", handler: ctx => ctx.send(200, ROOM_CSS, "text/css; charset=utf-8") },
     { path: "/state.json", handler: ctx => ctx.json(200, state) },

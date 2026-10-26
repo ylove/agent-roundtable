@@ -61,3 +61,17 @@ jobs:
           path: sbom.cdx.json
           if-no-files-found: error
           retention-days: 30
+
+  # Builds the image and runs it once. Nothing is pushed and no registry login happens.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build -t agent-roundtable:ci .
+
+      - name: Smoke run
+        run: docker run --rm agent-roundtable:ci help

@@ -39,6 +39,8 @@ import { isExecutableFile } from "../executables.js";
 import type { ConnectorSpec } from "../connectors/config.js";
 import { ClaudeCodeDriver } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
+import { RuntimeWorkerDriver } from "../workers/runtime.js";
+import { isRuntimeDriver, runtimeDriverName, runtimeDriverProblem } from "../runtimes/worker.js";
 import { stopGroup } from "../workers/process.js";
 import { amendContract } from "./contract-lifecycle.js";
 import { openContractStore, orchestratorSource } from "./contract-state.js";
@@ -57,6 +59,7 @@ import type {
   Contract,
   HuddleFormat,
   ResolutionAction,
+  RuntimeDriverId,
   SandboxBackendId,
   Visibility,
   WorkerRecord,
@@ -87,7 +90,7 @@ export interface SandboxProbe {
   image?: string;
 }
 
-export type WorkerCli = "claude-code" | "codex";
+export type WorkerCli = "claude-code" | "codex" | RuntimeDriverId;
 
 export interface OrchestratorDeps {
   launchRunner(exe: string): { pid: number };
@@ -113,7 +116,7 @@ const DEFAULT_DEPS: OrchestratorDeps = {
     });
     return { backend: sel.backend.id, ...(sel.degraded && { degraded: sel.degraded }) };
   },
-  detectDriver: (id) => (id === "codex" ? new CodexDriver() : new ClaudeCodeDriver()).detect(),
+  detectDriver: (id) => (id === "codex" ? new CodexDriver() : isRuntimeDriver(id) ? new RuntimeWorkerDriver(id) : new ClaudeCodeDriver()).detect(),
   checkGh: (opts) => checkGhReady(opts),
   stopGroup: (pgid, graceMs, started) => stopGroup(pgid, graceMs, started),
   dashboardWaitMs: 5_000,
@@ -312,11 +315,11 @@ async function probeWorkers(driver: WorkerCli, explicit: WorkerCli | undefined):
   }
   const d = await deps.detectDriver(driver).catch((e: unknown) => ({ ok: false, missing: [errText(e)] }));
   if (!d.ok) {
-    const name = driver === "codex" ? "codex" : "Claude Code (claude)";
+    const name = driver === "codex" ? "codex" : isRuntimeDriver(driver) ? runtimeDriverName(driver) : "Claude Code (claude)";
     out.push({
       topic: "workers",
       question: `The ${name} CLI that runs the workers is not ready: it needs ${cap(d.missing.join(", "), 600) || "a working install"}. Can you install or update it?`,
-      answer_with: driver === "codex" ? 'install the codex CLI and call execute again, or pass worker_driver: "claude-code"' : "install or update Claude Code (claude --version), then call execute again",
+      answer_with: driver === "codex" || isRuntimeDriver(driver) ? `install the ${name} CLI and call execute again, or pass worker_driver: "claude-code"` : "install or update Claude Code (claude --version), then call execute again",
     });
   }
   return out;
@@ -487,6 +490,7 @@ export async function execute(a: ExecuteInput): Promise<Json> {
     try { connectors = readUserConfig().connectors ?? {}; } catch { /* Report the missing name only. */ }
     for (const name of c.connectors) if (!Object.hasOwn(connectors, name) || !isExecutableFile(connectors[name].command)) throw new Error(`Connector ${name} is unavailable.`);
     if ((a.worker_driver ?? c.workers.driver) === "codex") throw new Error("Connectors are not supported by codex workers; use claude-code.");
+    if (isRuntimeDriver(a.worker_driver ?? c.workers.driver)) throw new Error("Connectors are not supported by runtime workers; use claude-code.");
   }
   const orchestrator = c.scope.orchestrator;
 
@@ -500,7 +504,11 @@ export async function execute(a: ExecuteInput): Promise<Json> {
       answer_with: "budget_usd: <dollars>; ROUNDTABLE_DEFAULT_BUDGET_USD sets a default",
     });
   }
-  const driver: WorkerCli = a.worker_driver ?? (c.workers.driver === "codex" ? "codex" : "claude-code");
+  const driver: WorkerCli = a.worker_driver ?? (c.workers.driver === "codex" || isRuntimeDriver(c.workers.driver) ? c.workers.driver : "claude-code");
+  if (isRuntimeDriver(driver)) {
+    const problem = runtimeDriverProblem(driver);
+    if (problem) throw new Error(`worker_driver ${driver}: ${problem}`);
+  }
   const [sandbox, workerQuestions, github, repository] = await Promise.all([
     probeSandbox(c, a, exe),
     probeWorkers(driver, a.worker_driver),

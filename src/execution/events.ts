@@ -7,7 +7,7 @@
 //   t     string of free text: passed through scrub() before hashing
 //   n     finite number            int   safe integer        b   boolean     null
 //   s[]   array of s               t[]   array of t (each scrubbed)
-//   'x'   the literal string x
+//   'x'   the literal string x           runtime   a runtime worker driver id, runtime:<name>
 // A nested object is a nested shape, and [shape] is an array of that shape. Unknown fields are
 // rejected so nothing unscrubbed or unexpected reaches the log.
 // ============================================================================
@@ -40,7 +40,7 @@ const ENVELOPE_LIMIT_BYTES = 2048;
 // ---------------------------------------------------------------------------
 
 const MODE = "'deliberation'|'execution'";
-const DRIVER = "'claude-code'|'codex'|'external'";
+const DRIVER = "'claude-code'|'codex'|'external'|runtime";
 const SANDBOX = "'docker'|'local'";
 const CHECK_SCOPE = "'task'|'integration'";
 const LEASE_MODE = "'exclusive'|'shared'";
@@ -360,6 +360,8 @@ function primitive(v: unknown, t: string): unknown {
       return typeof v === "boolean" ? v : NO;
     case "null":
       return v === null ? v : NO;
+    case "runtime":
+      return typeof v === "string" && /^runtime:[a-z][a-z0-9_-]{0,31}$/.test(v) ? v : NO;
     case "s[]":
       return Array.isArray(v) && v.every((x) => typeof x === "string" && x.length > 0) ? [...v] : NO;
     case "t[]":
@@ -378,6 +380,7 @@ const NAMES: Record<string, string> = {
   int: "an integer",
   b: "a boolean",
   null: "null",
+  runtime: "a runtime worker driver (runtime:<name>)",
   "s[]": "an array of non-empty strings",
   "t[]": "an array of strings",
 };

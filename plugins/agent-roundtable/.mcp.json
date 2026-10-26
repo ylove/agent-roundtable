@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "roundtable": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "agent-roundtable@1.0.0",
+        "mcp"
+      ]
+    }
+  }
+}

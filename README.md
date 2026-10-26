@@ -18,6 +18,10 @@ claude mcp list        # roundtable should show as connected
 
 Create personas in that directory or install the [starter pack](examples/starter-pack/) with `roundtable agents starter`. Set keys for the [providers](docs/providers.md) you use; local meetings use your Claude CLI login. For source installs, `.env`, `add-json` and project `.mcp.json` registration, see [getting started](docs/getting-started.md) and [configuration](docs/configuration.md). After a rebuild, reconnect with `/mcp`.
 
+## Other ways to install
+
+A Docker image recipe, a Claude Code plugin and an MCP registry listing are described in [distribution](docs/distribution.md). Until the package is published to npm, the `npx` and plugin paths do not resolve.
+
 ## Modes
 
 ### At the table
@@ -129,6 +133,7 @@ No arguments starts the orchestrator MCP server. The binary has **15 subcommands
 ## Docs
 
 - [Getting started and registration](docs/getting-started.md)
+- [Distribution](docs/distribution.md): Docker, Claude Code plugin, MCP registry and the owner release checklist
 - [Mode guides](docs/modes/meetings.md): [collaborations](docs/modes/collaborations.md), [ultraplan](docs/modes/ultraplan.md), [agent workshops](docs/modes/agent-workshops.md), [prototypes](docs/modes/prototype-mode.md), [public sessions](docs/modes/public-sessions.md), [postmortems](docs/modes/postmortem.md)
 - [Heads-down user guide](docs/heads-down.md) and [design specification](docs/design/heads-down.md); [postmortem design specification](docs/design/postmortem.md)
 - [Usage visibility](docs/usage.md): the status line, the usage report, the dashboard Usage page and stopping an agent

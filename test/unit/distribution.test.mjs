@@ -1,0 +1,104 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const text = (p) => readFileSync(join(root, p), "utf8");
+const json = (p) => JSON.parse(text(p));
+
+const pkg = json("package.json");
+const server = json("server.json");
+const plugin = json("plugins/agent-roundtable/.claude-plugin/plugin.json");
+const market = json(".claude-plugin/marketplace.json");
+const mcp = json("plugins/agent-roundtable/.mcp.json");
+const dockerfile = text("Dockerfile");
+const dockerignore = text(".dockerignore");
+
+const added = [
+  "Dockerfile", ".dockerignore", "server.json", ".claude-plugin/marketplace.json", "scripts/sync-version.mjs",
+  "plugins/agent-roundtable/.claude-plugin/plugin.json", "plugins/agent-roundtable/.mcp.json",
+  "plugins/agent-roundtable/README.md", "docs/distribution.md",
+];
+
+test("every distribution file carries the package.json version", () => {
+  const v = pkg.version;
+  assert.equal(server.version, v);
+  assert.equal(server.packages.length, 1);
+  assert.equal(server.packages[0].registryType, "npm");
+  assert.equal(server.packages[0].identifier, pkg.name);
+  assert.equal(server.packages[0].version, v);
+  assert.equal(plugin.version, v);
+  const entry = market.plugins.find((p) => p.name === plugin.name);
+  assert.ok(entry);
+  assert.equal(entry.version, v);
+  assert.equal(entry.source, "./plugins/agent-roundtable");
+  assert.ok(existsSync(join(root, entry.source, ".claude-plugin/plugin.json")));
+  assert.deepEqual(mcp.mcpServers.roundtable.args, ["-y", `${pkg.name}@${v}`, "mcp"]);
+});
+
+test("server.json follows the registry schema shape", () => {
+  assert.equal(server.$schema, "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json");
+  assert.match(server.name, /^[a-zA-Z0-9.-]+\/[a-zA-Z0-9._-]+$/);
+  assert.ok(server.description.length >= 1 && server.description.length <= 100);
+  assert.equal(server.repository.source, "github");
+  const pkgEntry = server.packages[0];
+  assert.deepEqual(pkgEntry.transport, { type: "stdio" });
+  assert.deepEqual(pkgEntry.packageArguments, [{ type: "positional", value: "mcp" }]);
+  for (const e of pkgEntry.environmentVariables) {
+    assert.equal(e.isSecret, true);
+    assert.equal(e.isRequired, false);
+    assert.ok(e.name && e.description);
+  }
+  assert.ok(!server.packages.some((p) => p.registryType === "oci"), "no OCI entry until an image is published");
+});
+
+test("registry name, mcpName and the Docker label agree", () => {
+  assert.equal(pkg.mcpName, server.name);
+  const m = dockerfile.match(/io\.modelcontextprotocol\.server\.name="([^"]+)"/);
+  assert.ok(m);
+  assert.equal(m[1], pkg.mcpName);
+});
+
+test(".dockerignore keeps secrets and the repo history out of the build context", () => {
+  const lines = dockerignore.split("\n").map((l) => l.trim());
+  for (const need of [".env", ".env.*", ".git", "node_modules", "dist", ".claude", "test"]) assert.ok(lines.includes(need), need);
+  assert.doesNotMatch(dockerfile, /^\s*ARG\s+\w*(KEY|TOKEN|SECRET)/mi);
+  assert.doesNotMatch(dockerfile, /\.env/);
+  assert.match(dockerfile, /^USER node$/m);
+  assert.match(dockerfile, /^FROM \$\{NODE_IMAGE\} AS runtime$/m);
+  assert.match(dockerfile, /node:[\w.-]+@sha256:[0-9a-f]{64}/);
+});
+
+test("added files contain no key-shaped values", () => {
+  const re = /(sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|r8_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)/;
+  for (const f of added) assert.doesNotMatch(text(f), re, f);
+  assert.doesNotMatch(JSON.stringify(mcp), /"env"/, "plugin .mcp.json carries no env values");
+});
+
+test("no workflow other than the manual release publishes or logs in", () => {
+  const dir = join(root, ".github/workflows");
+  for (const f of readdirSync(dir)) {
+    if (f === "release.yml") continue;
+    assert.doesNotMatch(readFileSync(join(dir, f), "utf8"), /npm publish|docker push|docker login|mcp-publisher/, f);
+  }
+  assert.match(readFileSync(join(dir, "release.yml"), "utf8"), /on:\s*\n\s*workflow_dispatch:/);
+});
+
+test("the npm tarball ships neither the container, plugin, registry nor secret files", () => {
+  const out = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf8" });
+  const paths = JSON.parse(out)[0].files.map((f) => f.path);
+  for (const p of paths) {
+    assert.doesNotMatch(p, /^(Dockerfile|\.dockerignore|server\.json|plugins\/|\.claude-plugin\/|test\/|scripts\/)/, p);
+    assert.doesNotMatch(p, /(^|\/)\.env$/, p);
+  }
+  assert.ok(paths.includes("dist/index.js"));
+});
+
+test("sync-version.mjs is idempotent on a consistent tree", () => {
+  const before = added.slice(0, 7).map(text);
+  execFileSync("node", ["scripts/sync-version.mjs"], { cwd: root });
+  assert.deepEqual(added.slice(0, 7).map(text), before);
+});

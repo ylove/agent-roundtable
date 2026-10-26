@@ -50,6 +50,7 @@ import { remainingUsd } from "./budget.js";
 import { batchChildren, openSubtasks, SUBTASK_TERMINAL } from "./swarms.js";
 import { prepareConflictResolution, mergeDrafts } from "./merge.js";
 import { classifyFailure } from "./circuit.js";
+import { stopExecutionPreviews } from "../previews/manager.js";
 import { createRunnerHooks } from "./escalation.js";
 import { stopMicroHuddles } from "./huddle.js";
 import { integrationBranch, SubmodulesUnsupportedError } from "./git.js";
@@ -107,6 +108,8 @@ import { GitHubSync } from "../github/sync.js";
 // ============================================================================
 
 export interface RunnerOptions {
+  /** Stops a finished run's dev-server previews (default: the preview manager; tests inject a fake). */
+  stopPreviews?: (execution: string) => Promise<unknown>;
   /**
    * WS10's escalation router, lead fallback, goal review and escalation pass. runRunner installs
    * createRunnerHooks (persona calls per ROUNDTABLE_EXECUTION_*); a Runner built without them uses
@@ -560,6 +563,10 @@ export class Runner {
     const terminal = state !== undefined && TERMINAL_RUN.has(state.status);
     if (terminal && this.github) {
       await bounded(this.github.syncOnce(), 60_000).catch(() => undefined);
+    }
+    if (terminal) {
+      // Best effort and bounded: a preview that will not stop never fails the run; the sweep is the backstop.
+      await bounded((this.opts.stopPreviews ?? stopExecutionPreviews)(this.execution), 30_000).catch((e) => this.say(`previews: ${errText(e)}`));
     }
     await this.dashboard?.close().catch(() => undefined);
     if (this.lock?.held()) {

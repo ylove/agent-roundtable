@@ -23,7 +23,7 @@ export const previewTools: ToolDefinition[] = [
     description:
       "Preview a web app live: run a heads-down task's dev server (execution_id and task_id) or a duel prototype directory (prototype) in a locked-down Docker container, published on 127.0.0.1 only (no tunnel, never 0.0.0.0). " +
       "It runs the package's dev, start or preview script (script picks one) as `npm run <script>`; the server must listen on 0.0.0.0 and honour PORT. " +
-      "When the source has no node_modules the dependencies are installed inside the container, through a proxy that allows only the npm registry, with lifecycle scripts off. " +
+      "When the source has no installed packages the dependencies are installed inside the container, through a proxy that allows only the npm registry, with lifecycle scripts off. " +
       "Returns the preview id and its http://127.0.0.1:<port> url, and the page check. The dashboard task page, the duel room and the serve index embed it. Idle previews stop after 30 minutes; at most 3 run at once.",
     inputSchema: {
       type: "object",

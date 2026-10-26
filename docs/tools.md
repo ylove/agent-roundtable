@@ -820,7 +820,7 @@ Orchestrator server only. A task's build or a duel prototype runs its dev server
 
 ### start_preview
 
-Runs `npm run <script>` (`dev`, `start` or `preview`; never a free-form command) for a task's worktree (`execution_id` and `task_id`) or a prototype directory under the prototype root (`prototype`, absolute). Installs dependencies in a container, with scripts off and only the npm registry reachable, when the source has no `node_modules`. Returns `preview_id`, `url`, `shows`, `script`, `container_port`, `started_at`, `idle_ttl_min` and the `page_check` record.
+Runs `npm run <script>` (`dev`, `start` or `preview`; never a free-form command) for a task's worktree (`execution_id` and `task_id`) or a prototype directory under the prototype root (`prototype`, absolute). Installs dependencies in a container, with scripts off and only the npm registry reachable, when the source has no installed `node_modules` directory. Returns `preview_id`, `url`, `shows`, `script`, `container_port`, `started_at`, `idle_ttl_min` and the `page_check` record.
 
 | Field | Type | Notes |
 | --- | --- | --- |

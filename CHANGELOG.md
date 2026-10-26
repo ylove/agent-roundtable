@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **MCP connectors for seats at the table (#160, WS25b).** Seats in duels, debates, waffles and meetings can call configured connectors as tools (`--connectors a,b`, or `connectors` on `start_duel` and `start_collaboration`): read-only tools by default, a per-connector `tools` list to allow more, broker credentials under the worker launcher's stripped environment, scrubbed and fenced results, a six-call cap per turn, and tool calling for Anthropic and OpenAI-compatible providers. See [connectors at the table](docs/connectors.md#at-the-table).
+
 - **Long-running runs and private check-in (#163, WS28).** `roundtable serve`: durable local runner supervision, a read-only home index, private check-in channels, optional tailnet bind, and login service printouts. See [long-running runs](docs/long-running.md).
 
 - **Distribution (#169, WS31).** A `Dockerfile` (digest-pinned base, non-root, CI build and smoke run, never pushed), a Claude Code plugin and marketplace entry, a `server.json` for the MCP registry with `mcpName`, and `scripts/sync-version.mjs` to keep their versions in step. Nothing is published by automation; see [distribution](docs/distribution.md).

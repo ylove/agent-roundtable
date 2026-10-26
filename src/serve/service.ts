@@ -19,6 +19,7 @@ import { listExecutions, openExecutionStore } from "../execution/store.js";
 import type { ExecutionStore } from "../execution/types.js";
 import { selectBind } from "../http/bind.js";
 import { escapeHtml } from "../http/secure-server.js";
+import { defaultDeps, stopAllPreviews, sweepPreviews } from "../previews/manager.js";
 import { startIndex } from "./index.js";
 import { supervise, type RelaunchHistory } from "./supervisor.js";
 import { Notifier } from "./notifier.js";
@@ -65,6 +66,8 @@ export async function startServe(options: ServeOptions = {}): Promise<RunningSer
   let closing: Promise<void> | undefined;
   let closed = false;
   let supervising = false, notifying = false;
+  let previewTimer: ReturnType<typeof setInterval> | undefined;
+  let sweeping = false;
   const stores = new Map<string, ExecutionStore>();
   const historiesPath = join(serveDir(), "supervisor-state.json");
   let histories: Record<string, RelaunchHistory> = {};
@@ -142,14 +145,24 @@ export async function startServe(options: ServeOptions = {}): Promise<RunningSer
       } catch { log("Check-in scan failed; will retry."); }
       finally { notifying = false; }
     };
+    // Previews: remove idle ones, ones whose run ended and orphaned containers (a down Docker only delays this).
+    const previewTick = async () => {
+      if (closed || sweeping) return;
+      sweeping = true;
+      try { await sweepPreviews(defaultDeps()); } catch { /* retried next minute */ }
+      finally { sweeping = false; }
+    };
     const close = (): Promise<void> => {
       if (!closing) closing = (async () => {
         closed = true;
+        clearInterval(previewTimer);
         clearInterval(supervisorTimer);
         clearInterval(notifyTimer);
         process.off("SIGINT", onSignal);
         process.off("SIGTERM", onSignal);
         await index?.close();
+        // The previews belong to the service: they stop with it.
+        await stopAllPreviews().catch(() => 0);
         // Wait for bounded in-flight sends before releasing the service lock.
         while (notifying || supervising) await new Promise(r => setTimeout(r, 20));
         if (release.held()) rmSync(serveInfoPath(), { force: true });
@@ -163,11 +176,13 @@ export async function startServe(options: ServeOptions = {}): Promise<RunningSer
     if (options.bind === "tailnet") log("Anyone on your tailnet with the URL can read this index. Keep the URL private.");
     supervisorTimer = setInterval(() => { void superviseTick(); }, 15_000);
     notifyTimer = setInterval(() => { void notifyTick(); }, 1000);
-    await Promise.all([superviseTick(), notifyTick()]);
+    previewTimer = setInterval(() => { void previewTick(); }, 60_000);
+    await Promise.all([superviseTick(), notifyTick(), previewTick()]);
     return { url: index.url, close };
   } catch (error) {
     clearInterval(supervisorTimer);
     clearInterval(notifyTimer);
+    clearInterval(previewTimer);
     await index?.close();
     if (release.held()) rmSync(serveInfoPath(), { force: true });
     release();

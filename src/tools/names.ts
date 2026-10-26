@@ -72,6 +72,11 @@ export const CONTROL_EXECUTION = "control_execution";
 export const RESOLVE_ESCALATION = "resolve_escalation";
 export const JOIN_EXECUTION = "join_execution";
 
+// Previews (orchestrator server only)
+export const START_PREVIEW = "start_preview";
+export const LIST_PREVIEWS = "list_previews";
+export const STOP_PREVIEW = "stop_preview";
+
 // Usage (orchestrator server only)
 export const USAGE = "usage";
 // Postmortem mode (orchestrator server only)

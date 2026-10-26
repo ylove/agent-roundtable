@@ -6,6 +6,7 @@ export const ROOM_HTML = `<!doctype html>
 <body><header><p>at the table · duel</p><h1 id="topic">Waiting for the duel</h1><div id="banner" role="status">Participants are taking their seats.</div></header>
 <main><section id="seats" aria-label="Seats"></section><section id="artifacts" aria-label="Artifacts"></section>
 <section aria-label="Shared browser"><h2>Browser</h2><p id="browser-note">No page checked yet.</p><img id="browser-shot" alt="Latest checked page" hidden></section>
+<section id="previews" aria-label="Live previews" hidden><h2>Live previews</h2><p id="preview-note"></p><div id="preview-frames"></div></section>
 <section><h2>Judges' verdicts</h2><div id="verdicts"></div></section><section><h2>Dissents</h2><div id="dissents"></div></section>
 <section><h2>At the table</h2><div id="turns"></div></section></main><footer id="spend">Estimated spend: $0.0000</footer></body></html>`;
 
@@ -106,7 +107,28 @@ function render(state) {
   byId("turns").replaceChildren(...state.turns.map(item => node("p", item.seat.name + " · " + item.round + "\\n" + item.text)));
   byId("spend").textContent = "Estimated spend: " + spendText(state.usage.totalCostUsd, state.usage.totalUnpricedTokens, true);
 }
+/* Live dev-server previews: sandboxed frames, never same-origin, for the origins the page's CSP was served with. */
+let framed = null;
+async function previews() {
+  try {
+    const response = await fetch("previews.json", {cache:"no-store"}); if(!response.ok) return;
+    const list = await response.json();
+    if (framed === null) framed = new Set(list.map(item => item.origin));
+    const holder = byId("preview-frames");
+    const wanted = list.filter(item => framed.has(item.origin));
+    byId("previews").hidden = list.length === 0;
+    byId("preview-note").textContent = wanted.length < list.length ? "A new preview is running: reload this page to show it." : "";
+    for (const old of [...holder.children]) if (!wanted.some(item => item.id === old.dataset.id)) old.remove();
+    for (const item of wanted) {
+      if (holder.querySelector('[data-id="' + item.id + '"]')) continue;
+      const figure = node("figure"); figure.dataset.id = item.id; figure.append(node("figcaption", item.id + " · " + item.label + " · " + item.origin));
+      const frame = document.createElement("iframe"); frame.setAttribute("sandbox", "allow-scripts allow-forms"); frame.referrerPolicy = "no-referrer"; frame.title = "Preview " + item.id; frame.src = item.origin + "/";
+      figure.append(frame); holder.append(figure);
+    }
+  } catch { /* the room keeps working without previews */ }
+}
 async function poll() {
+  previews();
   try { const response = await fetch("state.json", {cache:"no-store"}); if(response.ok) render(await response.json()); }
   catch { byId("banner").textContent = "Room disconnected. The last artifacts remain available."; }
   finally { setTimeout(poll, 1000); }

@@ -77,7 +77,10 @@ export async function runToolLoop(
 }
 
 async function runOne(call: ToolCallRequest, runTool: RunTool, timeoutMs: number, maxBytes: number, stop: AbortSignal | undefined): Promise<ToolOutcome> {
-  const timer = AbortSignal.timeout(timeoutMs);
+  // A ref'd timer: a hung tool must still reach its timeout rather than let the process drain and exit.
+  const limit = new AbortController();
+  const handle = setTimeout(() => limit.abort(), timeoutMs);
+  const timer = limit.signal;
   const signal = stop ? AbortSignal.any([stop, timer]) : timer;
   try {
     stop?.throwIfAborted();
@@ -93,5 +96,7 @@ async function runOne(call: ToolCallRequest, runTool: RunTool, timeoutMs: number
     if (stop?.aborted) throw error;
     const reason = timer.aborted ? "timed out" : "failed";
     return { text: capBytes(`Tool ${reason}: ${scrubAndCap(error instanceof Error ? error.message : "error", 200)}`, maxBytes), isError: true };
+  } finally {
+    clearTimeout(handle);
   }
 }

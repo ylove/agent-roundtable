@@ -15,6 +15,32 @@ export interface LLMCompletionResult {
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
   };
+  /** Tool-calling rounds only: the model asked for these calls instead of (or besides) answering. */
+  toolCalls?: ToolCallRequest[];
+  /** Tool-calling rounds only: the provider-native assistant turn to send back with the results. */
+  assistantTurn?: unknown;
+}
+
+/** A tool a seat may call, in the provider-neutral shape (JSON Schema input). */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface ToolCallRequest {
+  id: string;
+  name: string;
+  /** Parsed arguments; null when the provider sent arguments that were not valid JSON. */
+  input: unknown;
+}
+
+/** One request of a tool loop: the offered tools plus the provider-native turns exchanged so far. */
+export interface ToolRound {
+  tools: ToolSpec[];
+  turns: unknown[];
+  /** The call budget is spent: the model must answer in text. */
+  forbid?: boolean;
 }
 
 export interface LLMMessage {
@@ -29,6 +55,8 @@ export interface ProviderCallOptions {
   signal: AbortSignal;
   /** Only honoured by the openai_compatible provider: overrides OPENAI_COMPATIBLE_BASE_URL. */
   baseUrl?: string;
+  /** Set only by the tool loop (callLLMWithTools); absent for every other caller. */
+  toolRound?: ToolRound;
 }
 
 export type ProviderCall = (

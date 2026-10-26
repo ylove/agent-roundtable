@@ -25,7 +25,8 @@ import { leasesFor } from "../execution/leases.js";
 import { ID_RE, preview } from "../execution/events.js";
 import { executionDir } from "../execution/store.js";
 import { taskWorktreePath } from "../execution/worktrees.js";
-import type { BlackboardState, ExecutionStore, LeaseMode, WorkerDriverId } from "../execution/types.js";
+import type { BlackboardState, ExecutionStore, LeaseMode, RuntimeDriverId, WorkerDriverId } from "../execution/types.js";
+import { isRuntimeDriver, runtimeDriverName, workerProfile } from "../runtimes/worker.js";
 import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { childEnv } from "../security/child-env.js";
 import { configuredSecretLiterals, registerSecretLiteral, SCRUB_LITERALS_ENV } from "../security/secrets.js";
@@ -39,6 +40,8 @@ import { isExecutableFile } from "../executables.js";
 
 /** The worker's own MCP server. Its tools appear as mcp__roundtable__<tool>. */
 export const ROUNDTABLE_SERVER = "roundtable";
+/** The settings file a runtime worker reads its MCP server from (written next to mcp.json by the runtime driver). */
+export const RUNTIME_SETTINGS_FILE = "runtime-settings.json";
 
 /** Agent ids name directories, so they follow the task id rule. */
 export function assertAgentId(agent: string): string {
@@ -166,6 +169,7 @@ export function registerWorkerSecrets(execution: string, agent: string): void {
 
 export function removeWorkerMcpConfig(execution: string, agent: string): void {
   rmSync(join(agentDir(execution, agent), "mcp.json"), { force: true });
+  rmSync(join(agentDir(execution, agent), RUNTIME_SETTINGS_FILE), { force: true });
 }
 
 /** The file-writing tools the lease hook gates (an unanchored regex, as Claude Code reads matchers). */
@@ -226,6 +230,7 @@ export function buildWorkerSettings(c: WorkerCommand): WorkerSettings {
 /** Appended to every worker's system prompt (the task card arrives as the first user message). */
 export function workerProtocol(task: string, driver: WorkerDriverId = "claude-code"): string {
   const codex = driver === "codex";
+  if (isRuntimeDriver(driver)) return runtimeProtocol(task, driver);
   return [
     "## Heads-down worker protocol",
     "",
@@ -246,6 +251,46 @@ export function workerProtocol(task: string, driver: WorkerDriverId = "claude-co
     "- Every tool response may carry an `inbox` of directives and decisions. Follow them; acknowledge directives that ask for it.",
     "- Stay within your budget: stop and escalate rather than retrying the same failing approach.",
     "- Never read or write secrets (.env files, keys, credentials), and never try to reach the network.",
+  ].join("\n");
+}
+
+/**
+ * The protocol for a runtime worker. One with the roundtable worker server (gemini) calls the tools
+ * itself; one without cannot lease, post or submit: it edits the files its task owns and the driver
+ * submits for it when it exits 0, with its final message as the summary.
+ */
+function runtimeProtocol(task: string, driver: RuntimeDriverId): string {
+  const mcp = workerProfile(runtimeDriverName(driver)).mcp;
+  const head = [
+    "## Heads-down worker protocol",
+    "",
+    `You are a worker in a heads-down run of the agent roundtable, assigned to task \`${task}\`. You work alone in your task's git worktree (your working directory). No human is watching this session.`,
+    "",
+  ];
+  const common = [
+    "- Make targeted edits instead of rewriting whole files.",
+    "- Edit only files your task owns (its write paths are in the task card); a submission that changed anything else is rejected.",
+    "- Never read or write secrets (.env files, keys, credentials), and never try to reach the network.",
+  ];
+  if (!mcp) {
+    return [
+      ...head,
+      "- You have no roundtable tools. Do the task by editing files in your worktree.",
+      "- When you are finished, stop and answer with a short summary of what you changed (a few sentences). The roundtable commits your work and runs the task's checks for you.",
+      "- If you cannot finish, say what blocked you in that final answer instead of guessing.",
+      ...common,
+    ].join("\n");
+  }
+  return [
+    ...head,
+    "- You never message other agents. Read what others did with `read_blackboard` (sections, a `query` such as \"is the nav done?\", events, blobs).",
+    "- Request the files you edit first with `lease(action: \"request\", paths: [...])`; leases are checked when you submit. If someone else holds a path, use `escalate(with: \"path_owner\")`.",
+    "- Run builds, tests and checks with `run_command` (a named `command_id`, or an `argv`), which runs in a sandbox.",
+    "- Report progress with `post_update(kind: \"progress\", percent, text)`.",
+    "- When you are blocked or unsure, `escalate`. After a blocking escalation, end your turn with a one-line summary; you will be resumed with the resolution.",
+    "- Finish with `submit_work(summary, ready: true)`: it commits your leased changes and runs your task's checks. `ready: false` saves a checkpoint.",
+    "- Every tool response may carry an `inbox` of directives and decisions. Follow them.",
+    ...common,
   ].join("\n");
 }
 
@@ -302,7 +347,9 @@ export async function prepareWorkerFiles(opts: PrepareWorkerFilesOptions): Promi
   const home = opts.home ?? ROUNDTABLE_HOME;
   const state = await store.state();
   const connectors = state.contract?.connectors ?? [];
-  if (connectors.length && (opts.driver ?? state.contract?.workers.driver) === "codex") throw new Error("Connectors are not supported by codex workers; use claude-code.");
+  const chosen = opts.driver ?? state.contract?.workers.driver;
+  if (connectors.length && chosen === "codex") throw new Error("Connectors are not supported by codex workers; use claude-code.");
+  if (connectors.length && isRuntimeDriver(chosen)) throw new Error("Connectors are not supported by runtime workers; use claude-code.");
   const persona = typeof opts.persona === "string" ? await loadAgent(opts.persona) : opts.persona;
 
   const dir = ensureAgentDir(store.id, opts.agent);

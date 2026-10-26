@@ -17,6 +17,7 @@ import { normalizeRelPath } from "../security/fs-safe.js";
 import { scrubSecrets } from "../security/secrets.js";
 import { DEFAULT_SANDBOX_IMAGE, isPrivilegedCommand, isShellCommand, resolveCwd, validateArgv } from "../sandbox/common.js";
 import { canonicalJSON, sha256Hex } from "./chain.js";
+import { isRuntimeDriver, RUNTIME_DRIVER_PREFIX, runtimeDriverProblem } from "../runtimes/worker.js";
 import { ID_RE } from "./events.js";
 import {
   CONTRACT_DEFAULTS,
@@ -30,6 +31,7 @@ import {
   type Decision,
   type InterfaceSpec,
   type TaskSpec,
+  type WorkerDriverId,
 } from "./types.js";
 
 /** `ctr-<exe6>-<n>`: the execution's 6-character tag and the contract's number within it. */
@@ -297,6 +299,16 @@ class Checker {
   }
 }
 
+/** workers.driver: claude-code (default), codex, or runtime:<name> for a runtime profile (a known one, with the opt-in set). */
+function workerDriver(ck: Checker, v: unknown): WorkerDriverId {
+  if (typeof v === "string" && v.startsWith(RUNTIME_DRIVER_PREFIX)) {
+    const problem = runtimeDriverProblem(v);
+    if (problem) ck.err("workers.driver", problem);
+    return v as WorkerDriverId;
+  }
+  return ck.oneOf(v, "workers.driver", DRIVERS, "claude-code")!;
+}
+
 function artifacts(ck: Checker, v: unknown, path: string): ArtifactRef[] {
   return ck.arr(v, path).flatMap((item, i) => {
     const p = `${path}[${i}]`;
@@ -464,7 +476,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   }
   const wk = ck.obj(c.workers, "workers") ?? {};
   ck.known(wk, ["driver", "model", "fallback_model"], "workers");
-  const workers: Contract["workers"] = { driver: ck.oneOf(wk.driver, "workers.driver", DRIVERS, "claude-code")! };
+  const workers: Contract["workers"] = { driver: workerDriver(ck, wk.driver) };
   const model = ck.str(wk.model, "workers.model");
   const fallback = ck.str(wk.fallback_model, "workers.fallback_model");
   if (model !== undefined) workers.model = model;
@@ -839,6 +851,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
       else out.connectors.push(name);
     }
     if (out.connectors.length && workers.driver === "codex") ck.err("connectors", "are not supported by codex workers; use claude-code");
+    if (out.connectors.length && isRuntimeDriver(workers.driver)) ck.err("connectors", "are not supported by runtime workers; use claude-code");
   }
   if (postmortem) out.postmortem = postmortem;
   if (frozen) out.frozen = frozen;

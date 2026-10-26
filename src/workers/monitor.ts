@@ -176,7 +176,7 @@ export class RunMonitor {
       usd: costUsd ?? estimateUsd(model, tokens).usd,
       estimated: costUsd === undefined,
       // The CLI counted the tokens; the dollars are its own cost when it reported one, else ours.
-      provenance: { tokens: "measured", usd: costUsd === undefined ? "estimated" : "measured" },
+      provenance: { tokens: this.acc.tokensEstimated ? "estimated" : "measured", usd: costUsd === undefined ? "estimated" : "measured" },
     };
     if (this.o.provider) payload.provider = this.o.provider;
     return { type: "budget.usage_recorded", source: this.source, payload };

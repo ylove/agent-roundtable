@@ -69,6 +69,7 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | Flag | Meaning |
 | --- | --- |
 | `--team-a`, `--team-b` | Duel only: 1 to 4 comma-separated agents per team; first writes the concept, last builds, any between critique |
+| `--connectors a,b` | Let every seat call these configured MCP connectors (read-only tools unless the connector config lists more). An unknown name is a usage error before any provider call. See [connectors at the table](connectors.md#at-the-table) |
 | `--kind` | Duel only: `web` (default), `code`, `diagram` or `text` |
 | `--criteria` | Duel only: judging rubric of 1 to 8 items, comma-separated (separate with `;` instead when an item contains a comma); default: fit to the brief, quality, usability and accessibility, risk or safety |
 | `--judges` | Duel only: 1 to 5 comma-separated agents |

@@ -117,6 +117,13 @@ export const DUEL_PROP = {
   description: "Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call.",
 } as const;
 
+export const CONNECTORS_PROP = {
+  type: "array",
+  items: { type: "string", minLength: 1, maxLength: 32 },
+  maxItems: 8,
+  description: "Optional names of configured MCP connectors (roundtable config set connector) that every seat may call as tools during its turn. Only read-only tools are offered unless the connector's config lists more; tool results are untrusted data and are scrubbed. Seats on providers without tool support (Replicate, Ollama) speak without them. An unknown connector is an error before any provider call.",
+} as const;
+
 export const DUEL_SOURCE_PROP = {
   type: "boolean",
   description: "Default true; only with duel. The duel brief is resent on every turn to every participant (a full brief can be about 20k tokens per turn). Set false to leave out artifact file contents and keep titles, file names and sizes, verdicts, tally and dissents.",

@@ -39,7 +39,7 @@
 | `ROUNDTABLE_PROTOTYPE_SCREENSHOTS` | screenshots of web prototypes; only used by public prototype sessions | on (`0`, `false`, `no` or `off` disables) |
 | `ROUNDTABLE_PAGE_CHECKS` | headless page checks of web artifacts (duels, prototype mode, `page_loads` verify) | on when Chrome is found (`0` disables) |
 | `ROUNDTABLE_LOCAL_TIMEOUT_MS` | local meetings: timeout for one `claude -p` call; the CLI's process group is killed after it | `300000` (5 min) |
-| `ROUNDTABLE_WORKER_AUTH` | `api_key` passes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` to the `claude` CLI (local meetings) and `OPENAI_API_KEY` to `codex`; otherwise they use their own login (including `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, and Bedrock, Vertex or Foundry credentials when the CLI is set to use them) and get no provider keys | CLI login |
+| `ROUNDTABLE_WORKER_AUTH` | `api_key` passes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` to the `claude` CLI (local meetings) and `OPENAI_API_KEY` to `codex`, and `GEMINI_API_KEY` / `GOOGLE_API_KEY` to a `runtime:gemini` worker; otherwise they use their own login (including `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, and Bedrock, Vertex or Foundry credentials when the CLI is set to use them) and get no provider keys | CLI login |
 | `ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS` | a per-call `base_url` may reach private, CGNAT, link-local and ULA addresses, over plain http too (cloud metadata stays blocked; loopback is always allowed) | off (`1`, `true`, `yes` or `on` enables) |
 | `ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS` | comma-separated origins (`https://host:port`) besides `OPENAI_COMPATIBLE_BASE_URL`'s that receive `OPENAI_COMPATIBLE_API_KEY` when passed as `base_url` | — (the key goes only to the configured origin) |
 | `ROUNDTABLE_AGENT_PATHS` | extra directories (separated by `:`, or `;` on Windows) that path-like agent refs may point into | — (the agents directory, `<workspace>/.claude/agents`, `~/.claude/agents` and the existing non-symlink library are allowed) |
@@ -109,6 +109,7 @@ These settings complete the table above. `SANDBOX_ENV` is re-exported by `src/sa
 | `ROUNDTABLE_PREVIEW_READY_TIMEOUT_SEC` | Seconds to wait for a preview's dev server to answer HTTP (5–1800) | `120` |
 | `ROUNDTABLE_ALLOW_LOCAL_SANDBOX` | Allow the weaker local command backend | off; exactly `1` enables, or explicitly choose `execute(sandbox: "local")` |
 | `ROUNDTABLE_ALLOW_CODEX_DRIVER` | Opt into the Codex worker driver and its broader access model | off; exactly `1` enables, or explicitly choose `execute(worker_driver: "codex")` |
+| `ROUNDTABLE_ALLOW_RUNTIME_WORKERS` | Opt into runtime profiles (`hermes`, `openclaw`, `gemini`, or a configured one) as heads-down workers, `workers.driver: "runtime:<name>"`; contract validation and `execute` refuse the choice without it. See [runtimes as workers](runtimes.md#as-heads-down-workers) | off; exactly `1` enables |
 | `ROUNDTABLE_CODEX_READ_ROOTS` | Extra absolute, colon-separated toolchain read roots in the Codex permissions profile; denied home/state/checkout roots stay denied | none |
 | `ROUNDTABLE_PRICING_FILE` | JSON model-price overrides, USD per million tokens; re-read when file changes | built-in table; unknown rates are estimated |
 | `ROUNDTABLE_SMOKE_CHECKS` | Comma-separated contract command ids for integration checks after each merge | contract `validation.final` |
@@ -180,7 +181,7 @@ The standard unit-test preload isolates state, HOME, persona/skill directories a
 
 Use `roundtable config set secret ANTHROPIC_API_KEY secret://keychain/roundtable/anthropic` to save a reference under `secrets` in the user config. Shell values win for referenced keys; otherwise references beat plaintext files. Startup resolves synchronously within 20 seconds; a failure warns by name and leaves the key unset. `ROUNDTABLE_SECRETS=off` disables startup resolution. Workers and hooks never run the startup broker. See [secrets](secrets.md) for backends, checks, caching and the resolver interface.
 
-The `connectors` config defines extra stdio MCP servers by absolute executable path, separate arguments and an env map. Credentials use references. Heads-down contracts opt in with `connectors: ["issues"]`; names are covered by consent. Claude workers support them; Codex workers refuse them. See [worker connectors](connectors.md) for configuration, limits and trust.
+The `connectors` config defines extra stdio MCP servers by absolute executable path, separate arguments and an env map. Credentials use references. Heads-down contracts opt in with `connectors: ["issues"]`; names are covered by consent. Claude workers support them; Codex workers refuse them. An optional `tools` list on a connector allows non-read-only tools for seats at the table, which opt in with `--connectors` or the `connectors` argument. See [connectors](connectors.md) for configuration, limits and trust.
 
 ## Long-running service and private check-ins
 

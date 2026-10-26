@@ -12,6 +12,7 @@ export type ChildEnvProfile =
   | "runtime"
   | "claude-worker"
   | "codex-worker"
+  | "runtime-worker"
   | "local-meeting"
   | "git"
   | "gh"
@@ -48,7 +49,7 @@ const RUNNER_CONFIG = [
   "ROUNDTABLE_EXECUTION_ID", "ROUNDTABLE_EXECUTION_PROVIDER", "ROUNDTABLE_EXECUTION_MODEL", "ROUNDTABLE_EXECUTION_BASE_URL",
   "ROUNDTABLE_DEFAULT_VISIBILITY", "ROUNDTABLE_DEFAULT_BUDGET_USD", "ROUNDTABLE_PRICING_FILE",
   "ROUNDTABLE_EXECUTION_RETENTION_DAYS", "ROUNDTABLE_SESSION_RETENTION_DAYS", "ROUNDTABLE_AUDIT_RETENTION_DAYS",
-  "ROUNDTABLE_RUNNER_TICK_MS", "ROUNDTABLE_SMOKE_CHECKS", "ROUNDTABLE_ALLOW_CODEX_DRIVER", "ROUNDTABLE_CODEX_READ_ROOTS",
+  "ROUNDTABLE_RUNNER_TICK_MS", "ROUNDTABLE_SMOKE_CHECKS", "ROUNDTABLE_ALLOW_CODEX_DRIVER", "ROUNDTABLE_CODEX_READ_ROOTS", "ROUNDTABLE_ALLOW_RUNTIME_WORKERS",
   "ROUNDTABLE_ALLOW_LOCAL_SANDBOX", "ROUNDTABLE_SANDBOX_IMAGE", "ROUNDTABLE_SANDBOX_PROXY_IMAGE",
   "ROUNDTABLE_SANDBOX_MEMORY", "ROUNDTABLE_SANDBOX_CPUS", "ROUNDTABLE_SANDBOX_PIDS",
   "ROUNDTABLE_PUBLISHER", "ROUNDTABLE_NTFY_URL", "ROUNDTABLE_NTFY_TOKEN", "ROUNDTABLE_NTFY_USER", "ROUNDTABLE_NTFY_PASSWORD",
@@ -58,7 +59,10 @@ const RUNNER_CONFIG = [
   "ROUNDTABLE_CHROME_PATH", "ROUNDTABLE_PROTOTYPE_SCREENSHOTS", "ROUNDTABLE_PAGE_CHECKS",
 ];
 
-/** Opt-in: CLI children (claude, codex) get the roundtable's provider key instead of their own login. */
+/** The key variables a runtime worker's CLI may be handed with ROUNDTABLE_WORKER_AUTH=api_key (its own login is used otherwise). */
+export const RUNTIME_WORKER_API_KEYS = ["GEMINI_API_KEY", "GOOGLE_API_KEY"] as const;
+
+/** Opt-in: CLI children (claude, codex, runtimes) get the roundtable's provider key instead of their own login. */
 function cliUsesApiKey(source: NodeJS.ProcessEnv): boolean {
   return (source.ROUNDTABLE_WORKER_AUTH ?? "").toLowerCase() === "api_key";
 }
@@ -108,6 +112,8 @@ const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: s
     pass: [...BASE, ...PROXY, "CODEX_HOME", ...(cliUsesApiKey(s) ? ["OPENAI_API_KEY"] : [])],
     set: { TERM: "dumb", NO_COLOR: "1" },
   }),
+  // A runtime worker: the core environment only. Its profile's own variables and the api-key set above are added by the driver.
+  "runtime-worker": () => ({ pass: [...BASE, ...PROXY], set: { TERM: "dumb", NO_COLOR: "1" } }),
   git: () => ({
     pass: [...BASE, ...PROXY, "SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_CONFIG_NOSYSTEM"],
     set: { GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
@@ -131,7 +137,7 @@ const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: s
   runner: (s) => ({
     pass: [
       ...BASE, ...PROXY, ...RUNNER_PROVIDER, ...RUNNER_CONFIG, "ROUNDTABLE_SECRETS",
-      ...claudeCliNames(s), ...PROFILES["codex-worker"](s).pass,
+      ...claudeCliNames(s), ...PROFILES["codex-worker"](s).pass, ...(cliUsesApiKey(s) ? RUNTIME_WORKER_API_KEYS : []),
       ...PROFILES.git(s).pass, ...PROFILES.docker(s).pass, ...PROFILES.gh(s).pass,
       ...PROFILES["secret-cli"](s).pass,
     ],

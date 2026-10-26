@@ -159,6 +159,26 @@ test("execute: GitHub without the gh scopes, codex without an opt-in, and a cont
   assert.match(errorOf(await handleToolCall("execute", { contract_id: draft.contractId, confirmation: " " })), /"confirmation" is required/);
 });
 
+test("execute: worker_driver runtime:<name> needs the opt-in and a known runtime, then probes that runtime", async (t) => {
+  const f = await frozenRun(t);
+  const old = process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS;
+  t.after(() => (old === undefined ? delete process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS : (process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS = old)));
+  const run = (driver) => handleToolCall("execute", { contract_id: f.contractId, confirmation: "go", budget_usd: 10, worker_driver: driver, visibility: { dashboard: true } });
+  delete process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS;
+  assert.match(errorOf(await run("runtime:gemini")), /worker_driver runtime:gemini: runtime workers need ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1/);
+  process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS = "1";
+  assert.match(errorOf(await run("runtime:nonesuch")), /unknown runtime "nonesuch"/);
+  assert.match(errorOf(await handleToolCall("execute", { contract_id: f.contractId, confirmation: "go", worker_driver: "gemini" })), /"worker_driver"/);
+  restore = ((prev) => {
+    const undo = setOrchestratorDeps({ detectDriver: async (id) => (calls.detect.push(id), { ok: false, missing: ["the gemini CLI on PATH"] }) });
+    return () => (undo(), prev());
+  })(restore);
+  const r = parse(await run("runtime:gemini"));
+  assert.equal(r.status, "needs_input");
+  assert.deepEqual(calls.detect, ["runtime:gemini"]);
+  assert.match(r.questions.find((q) => q.topic === "workers").question, /The gemini CLI that runs the workers is not ready/);
+});
+
 test("execute: starts the run with the human's settings and words, then answers again without starting twice", async (t) => {
   const f = await frozenRun(t);
   writeFileSync(join(f.root, "notes.txt"), "uncommitted\n");

@@ -37,6 +37,7 @@ test("every distribution file carries the package.json version", () => {
   assert.equal(entry.source, "./plugins/agent-roundtable");
   assert.ok(existsSync(join(root, entry.source, ".claude-plugin/plugin.json")));
   assert.deepEqual(mcp.mcpServers.roundtable.args, ["-y", `${pkg.name}@${v}`, "mcp"]);
+  assert.match(text("src/config.ts"), new RegExp(`^export const VERSION = "${v.replace(/\./g, "\\.")}";$`, "m"));
 });
 
 test("server.json follows the registry schema shape", () => {
@@ -70,6 +71,7 @@ test(".dockerignore keeps secrets and the repo history out of the build context"
   assert.match(dockerfile, /^USER node$/m);
   assert.match(dockerfile, /^FROM \$\{NODE_IMAGE\} AS runtime$/m);
   assert.match(dockerfile, /node:[\w.-]+@sha256:[0-9a-f]{64}/);
+  assert.match(dockerfile, /^COPY examples \.\/examples$/m, "duel --dry-run and the starter pack read examples/ at runtime");
 });
 
 test("added files contain no key-shaped values", () => {
@@ -98,7 +100,8 @@ test("the npm tarball ships neither the container, plugin, registry nor secret f
 });
 
 test("sync-version.mjs is idempotent on a consistent tree", () => {
-  const before = added.slice(0, 7).map(text);
+  const synced = [...added.slice(0, 7), "src/config.ts"];
+  const before = synced.map(text);
   execFileSync("node", ["scripts/sync-version.mjs"], { cwd: root });
-  assert.deepEqual(added.slice(0, 7).map(text), before);
+  assert.deepEqual(synced.map(text), before);
 });

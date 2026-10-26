@@ -30,4 +30,10 @@ for (const srv of Object.values(mcp.mcpServers)) {
 }
 write("plugins/agent-roundtable/.mcp.json", mcp);
 
+const configPath = join(root, "src/config.ts");
+const config = readFileSync(configPath, "utf8");
+const synced = config.replace(/^export const VERSION = "[^"]*";$/m, `export const VERSION = "${version}";`);
+if (!/^export const VERSION = "/m.test(config)) throw new Error("src/config.ts has no VERSION constant to sync");
+writeFileSync(configPath, synced);
+
 console.log(`distribution files set to ${version}`);

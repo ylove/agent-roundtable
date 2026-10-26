@@ -16,6 +16,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --from=build /src/dist ./dist
+# The bundled synthetic duel (duel --dry-run) and the starter pack are read from examples/ at runtime.
+COPY examples ./examples
 COPY LICENSE NOTICE README.md ./
 
 LABEL org.opencontainers.image.source="https://github.com/ylove/agent-roundtable" \

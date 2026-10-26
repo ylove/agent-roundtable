@@ -50,13 +50,13 @@ The Dockerfile already carries the `io.modelcontextprotocol.server.name` label t
 
 ## Versions
 
-`package.json` is the one source. `npm version <x.y.z>` runs `scripts/sync-version.mjs`, which writes the version into `server.json`, the plugin manifest, the marketplace entry and the pinned `.mcp.json` argument. A unit test fails if any of them disagree. The `VERSION` constant in `src/config.ts` is bumped by hand in the release PR.
+`package.json` is the one source. `npm version <x.y.z>` runs `scripts/sync-version.mjs`, which writes the version into `server.json`, the plugin manifest, the marketplace entry, the pinned `.mcp.json` argument and the `VERSION` constant in `src/config.ts`. A unit test fails if any of them disagree.
 
 ## Owner release checklist
 
 Automation never publishes; every step below is run by the owner.
 
-1. Bump: `npm version <x.y.z>` (this also syncs the distribution files), and update `VERSION` in `src/config.ts`.
+1. Bump: `npm version <x.y.z>` (this also syncs the distribution files and `VERSION` in `src/config.ts`).
 2. Merge, tag `v<x.y.z>`, then run the manual Release workflow or `npm publish` locally.
 3. Build and push the image to the chosen registry yourself (`docker build`, `docker push`), then add the OCI entry to `server.json`.
 4. `mcp-publisher login github`, then `mcp-publisher publish`.

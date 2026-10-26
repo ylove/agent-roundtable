@@ -7,7 +7,7 @@ import { scrubAndCap } from "../security/secrets.js";
 
 interface MessagesResponse {
   error?: { type?: string; message: string };
-  content?: Array<{ type: string; text?: string }>;
+  content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
   model?: string;
   stop_reason?: string;
   usage?: {
@@ -28,7 +28,11 @@ export const callAnthropic: ProviderCall = async (messages, o) => {
     model: o.model,
     max_tokens: o.maxTokens,
     ...(systemMessage && { system: systemMessage.content }),
-    messages: nonSystemMessages.map((m) => ({ role: m.role, content: m.content })),
+    messages: [...nonSystemMessages.map((m) => ({ role: m.role, content: m.content })), ...(o.toolRound?.turns ?? [])],
+    ...(o.toolRound && {
+      tools: o.toolRound.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema })),
+      ...(o.toolRound.forbid && { tool_choice: { type: "none" } }),
+    }),
     // temperature is deliberately omitted: current Claude models reject sampling params
   });
 
@@ -64,8 +68,14 @@ export const callAnthropic: ProviderCall = async (messages, o) => {
     .join("");
 
   const u = result.usage;
+  const toolCalls = o.toolRound
+    ? (result.content ?? []).filter((b) => b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string")
+        .map((b) => ({ id: b.id!, name: b.name!, input: b.input ?? {} }))
+    : [];
   return {
-    content: assertNonEmpty("Anthropic", text, result.stop_reason),
+    // A reply that only asks for tools carries no text.
+    content: toolCalls.length ? text : assertNonEmpty("Anthropic", text, result.stop_reason),
+    ...(toolCalls.length > 0 && { toolCalls, assistantTurn: { role: "assistant", content: result.content } }),
     model: result.model || o.model,
     provider: "anthropic",
     usage: u

@@ -863,7 +863,9 @@ export interface ExecutionStore {
 // Workers
 // ---------------------------------------------------------------------------
 
-export type WorkerDriverId = "claude-code" | "codex" | "external";
+/** A runtime profile used as a heads-down worker: `runtime:<name>` (src/runtimes/worker.ts). */
+export type RuntimeDriverId = `runtime:${string}`;
+export type WorkerDriverId = "claude-code" | "codex" | "external" | RuntimeDriverId;
 
 export interface WorkerLaunch {
   connectors?: string[];
@@ -909,6 +911,8 @@ export interface RunAccumulator {
   tools?: string[];
   mcpServers?: string[];
   usage?: TokenUsage;
+  /** The token counts were estimated from text lengths (a runtime that reports none). */
+  tokensEstimated?: boolean;
   costUsd?: number;
   resultSubtype?: string;
   isError?: boolean;

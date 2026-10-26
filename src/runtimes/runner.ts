@@ -162,8 +162,8 @@ function usageNumber(event: unknown, paths: UsagePath | undefined): number | und
   }
   return undefined;
 }
-export async function runRuntime(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOptions = {}): Promise<RuntimeResult> {
-  const stdout = await execute(spec, prompt, opts);
+/** The final text and usage of a runtime's stdout, by the profile's output mode (shared by seats and heads-down workers). */
+export function parseRuntimeOutput(spec: RuntimeSpec, stdout: string, env: NodeJS.ProcessEnv = process.env): RuntimeResult {
   const output = spec.output;
   let text: unknown;
   let usage: RuntimeResult["usage"], costUsd: number | undefined;
@@ -193,7 +193,10 @@ export async function runRuntime(spec: RuntimeSpec, prompt: string, opts: Runtim
     }
   }
   if (typeof text !== "string" || !text.trim()) throw new Error("Runtime returned no final text at the configured output path.");
-  return { text: scrubSecrets(text, opts.env ?? process.env).text, ...(usage && { usage }), ...(costUsd !== undefined && { costUsd }) };
+  return { text: scrubSecrets(text, env).text, ...(usage && { usage }), ...(costUsd !== undefined && { costUsd }) };
+}
+export async function runRuntime(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOptions = {}): Promise<RuntimeResult> {
+  return parseRuntimeOutput(spec, await execute(spec, prompt, opts), opts.env ?? process.env);
 }
 export async function detectRuntime(spec: RuntimeSpec, opts: RuntimeRunOptions = {}): Promise<{ found: boolean; path?: string; version?: string; ok: boolean; error?: string }> {
   validateRuntimeSpec(spec);

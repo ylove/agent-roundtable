@@ -37,6 +37,8 @@ import { writeFileAtomic } from "../security/fs-safe.js";
 import { scrub, scrubAndCap } from "../security/secrets.js";
 import { ClaudeCodeDriver, WORKER_ATTESTATION } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
+import { RuntimeWorkerDriver } from "../workers/runtime.js";
+import { isRuntimeDriver } from "../runtimes/worker.js";
 import { agentDir, writeAgentLeases, prepareWorkerFiles, removeWorkerMcpConfig, registerWorkerSecrets } from "../workers/files.js";
 import { RunMonitor, type ExitReason, type MonitorCheckpoint } from "../workers/monitor.js";
 import { reconcileLaunch } from "../workers/launch-intent.js";
@@ -111,7 +113,7 @@ export interface RunnerOptions {
    * DEFAULT_HOOKS, which only log and review COMPLETE (tests).
    */
   hooks?: Partial<RunnerHooks>;
-  /** Worker drivers by id (default ClaudeCodeDriver and CodexDriver). */
+  /** Worker drivers by id (default ClaudeCodeDriver and CodexDriver; a runtime:<name> driver is made when a contract names it). */
   drivers?: Partial<Record<WorkerDriverId, WorkerDriver>>;
   /** First pause before a failed escalation route is retried; doubles per attempt (default 30 s). */
   routeRetryBaseMs?: number;
@@ -171,6 +173,12 @@ const own = <T>(rec: Readonly<Record<string, T>> | undefined, key: string | unde
   rec !== undefined && key !== undefined && Object.hasOwn(rec, key) ? rec[key] : undefined;
 
 /** The runner's agent id for a task: w-<task>, shortened with a hash when that would pass 64 characters. */
+/** The contract's worker driver: codex or a runtime:<name> profile when it names one, else claude-code. */
+function contractDriverId(state: Readonly<BlackboardState>): WorkerDriverId {
+  const d = state.contract?.workers.driver;
+  return d === "codex" || isRuntimeDriver(d) ? d : "claude-code";
+}
+
 export function workerAgentId(task: string): string {
   const id = `w-${task}`;
   if (id.length <= 64) return id;
@@ -434,7 +442,7 @@ export class Runner {
       const state = await this.store.state();
       this.snapSeq = state.seq;
       this.contractConnectors = state.contract?.connectors;
-      this.driverId = state.contract?.workers.driver === "codex" ? "codex" : "claude-code";
+      this.driverId = contractDriverId(state);
       if (TERMINAL_RUN.has(state.status)) {
         if (state.status === "failed") this.exitCode = 1;
         // An abort interrupted before its workers stopped (both the tool and the previous runner
@@ -870,7 +878,7 @@ export class Runner {
     try {
       await this.commit(drafts);
     } catch (e) {
-      t.monitor = this.monitorFor(this.drivers[t.driver] ?? this.driver(), t.agent, t.task, t.outputPath, offset, undefined, checkpoint);
+      t.monitor = this.monitorFor(this.driverFor(t.driver) ?? this.driver(), t.agent, t.task, t.outputPath, offset, undefined, checkpoint);
       t.attested = checkpoint.attestation?.ok;
       throw e;
     }
@@ -1027,7 +1035,7 @@ export class Runner {
       t.exit = { code: null, signal: null };
       return;
     }
-    const d = this.drivers[t.driver];
+    const d = this.driverFor(t.driver);
     if (d) await d.stop(this.handleOf(t), reason);
     else await stopGroup(t.pgid, 10_000, t.started);
   }
@@ -1292,9 +1300,15 @@ export class Runner {
 
   /** The contract's worker driver (claude-code unless it names codex). */
   driver(): WorkerDriver {
-    const d = this.drivers[this.driverId];
+    const d = this.driverFor(this.driverId);
     if (!d) throw new Error(`No worker driver ${this.driverId}`);
     return d;
+  }
+
+  /** A driver by id; a runtime:<name> driver is made on first use. */
+  private driverFor(id: WorkerDriverId): WorkerDriver | undefined {
+    if (isRuntimeDriver(id) && !this.drivers[id]) this.drivers[id] = new RuntimeWorkerDriver(id);
+    return this.drivers[id];
   }
 
   private driverId: WorkerDriverId = "claude-code";
@@ -1303,7 +1317,7 @@ export class Runner {
   /** The driver must pass detect() (its required flags) before the first spawn; a failure escalates once. */
   private async driverReady(state: Readonly<BlackboardState>): Promise<boolean> {
     this.contractConnectors = state.contract?.connectors;
-    this.driverId = state.contract?.workers.driver === "codex" ? "codex" : "claude-code";
+    this.driverId = contractDriverId(state);
     const d = this.driver();
     if (this.driverCheckedId !== d.id) this.driverChecked = undefined;
     this.driverCheckedId = d.id;
@@ -1489,7 +1503,7 @@ export class Runner {
       const rec = own(state.agents, agent);
       const run = readRunFile(this.execution, agent);
       const previous = run && run.task === task ? run.session_id : rec?.task === task ? rec.session_id : undefined;
-      const resume = o.session !== "new" && previous !== undefined && (driver.id === "claude-code" ? /^[0-9a-f-]{36}$/i.test(previous) : true);
+      const resume = o.session !== "new" && previous !== undefined && (driver.id === "claude-code" ? /^[0-9a-f-]{36}$/i.test(previous) : !isRuntimeDriver(driver.id));
       const sessionId = resume ? previous! : randomUUID();
       const attempt = o.claim ? Math.max(1, o.attempt ?? rt.attempt) : (claimed?.attempt ?? Math.max(1, rt.attempt));
       const mode = state.contract?.workers;
@@ -1744,7 +1758,7 @@ export class Runner {
 
   /** Keep tailing a live worker an earlier runner started. */
   private async adopt(agent: string, run: RunFile, registeredOnly: boolean): Promise<void> {
-    const driver = this.drivers[run.driver] ?? this.driver();
+    const driver = this.driverFor(run.driver) ?? this.driver();
     const spawnSeq = this.lastSeq((e) => e.type === "agent.spawned" && e.payload.agent === agent);
     const after = this.log.filter((e) => e.seq > spawnSeq);
     const attestedEv = after.find((e) => e.type === "agent.attested" && e.payload.agent === agent);
@@ -1785,7 +1799,7 @@ export class Runner {
   /** The rest of a dead run's output (usage it reported) and its agent.exited {lost}. */
   private lostDrafts(agent: string, task: string | undefined, run: RunFile | null): AnyEventDraft[] {
     if (run && task !== undefined && run.task === task) {
-      const driver = this.drivers[run.driver] ?? this.driver();
+      const driver = this.driverFor(run.driver) ?? this.driver();
       const spawnSeq = this.lastSeq((e) => e.type === "agent.spawned" && e.payload.agent === agent);
       const after = this.log.filter((e) => e.seq > spawnSeq);
       const t = {

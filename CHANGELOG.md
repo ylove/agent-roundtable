@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Preview follow-ups (#220, WS26c).** A finished run's runner now stops that run's previews; duel prototype previews carry the duel id and the duel room shows only its own duel's; the forwarder gets its own per-preview network instead of the default bridge (removed with the preview and by the sweep); a plain `vite` dev script gets `--host 0.0.0.0` passed through, and a complex one without `--host` is refused with a clear message. See [previews](docs/previews.md).
+
 - **Dev-server previews (#161, WS26b).** `roundtable preview start|list|stop` and the tools `start_preview`, `list_previews`, `stop_preview` run a task's or a duel prototype's dev server in a locked-down Docker container, published on `127.0.0.1` only (no tunnel, never `0.0.0.0`). The source is copied in, never mounted; the server sits on an internal network with no route out; dependencies install with scripts off through the npm-only egress proxy. The dashboard task page, the duel room and the serve index embed it in a sandboxed frame with a `frame-src` for exactly the running previews. See [previews](docs/previews.md).
 
 - **MCP connectors for seats at the table (#160, WS25b).** Seats in duels, debates, waffles and meetings can call configured connectors as tools (`--connectors a,b`, or `connectors` on `start_duel` and `start_collaboration`): read-only tools by default, a per-connector `tools` list to allow more, broker credentials under the worker launcher's stripped environment, scrubbed and fenced results, a six-call cap per turn, and tool calling for Anthropic and OpenAI-compatible providers. See [connectors at the table](docs/connectors.md#at-the-table).

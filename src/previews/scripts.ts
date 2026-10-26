@@ -91,8 +91,15 @@ export function previewArgv(script: PreviewScript): string[] {
 // Dev servers that only listen on all interfaces when told to (vite)
 // ============================================================================
 
-/** A script that is one plain `vite` command: optional npx, optional subcommand, plain flags, no shell syntax. */
-const PLAIN_VITE_RE = /^(?:npx\s+)?vite(?:\s+(?:dev|serve|preview))?(?:\s+--?[A-Za-z][\w-]*(?:[= ][\w./:@-]+)?)*$/;
+/** One plain word of a command line: no quotes, no shell syntax. */
+const PLAIN_WORD_RE = /^[\w./:@=-]+$/;
+
+/** A script that is one plain `vite` command: optional npx, optional subcommand, then plain words (flags and values). */
+function isPlainVite(body: string): boolean {
+  const words = body.split(/\s+/);
+  if (words[0] === "npx") words.shift();
+  return words[0] === "vite" && words.every((w) => PLAIN_WORD_RE.test(w));
+}
 
 /**
  * Whether the script needs `--host 0.0.0.0` to be reachable from the forwarder. A script that does not
@@ -105,7 +112,7 @@ export function viteHostFlag(pkg: PackageLike, script: PreviewScript): boolean {
   const body = typeof scripts[script] === "string" ? (scripts[script] as string).trim() : "";
   if (!/(?:^|[\s;&|(`])vite(?![\w.-])/.test(body)) return false;
   if (/(?:^|\s)--host(?:[=\s]|$)/.test(body)) return false;
-  if (PLAIN_VITE_RE.test(body)) return true;
+  if (isPlainVite(body)) return true;
   throw new PreviewError(
     `the "${script}" script runs vite without --host, so the preview cannot reach it. Add --host to the script (for example "vite --host") and start the preview again.`
   );

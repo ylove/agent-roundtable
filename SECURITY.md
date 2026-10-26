@@ -1,12 +1,12 @@
 # Security policy
 
-This policy covers agent-roundtable 1.0.0 and the maintained 1.x release line.
+This policy covers agent-roundtable 2.0.0 and the maintained 2.x release line.
 
 | Version | Security fixes |
 | --- | --- |
-| Latest 1.x | Supported |
-| Earlier 1.x patch/minor releases | Upgrade to the latest 1.x |
-| 0.x | Not supported after 1.0.0 is released |
+| Latest 2.x | Supported |
+| Earlier 2.x patch/minor releases | Upgrade to the latest 2.x |
+| 1.x and earlier | Not supported (1.x was never published to npm) |
 
 ## Reporting a vulnerability
 

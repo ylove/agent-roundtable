@@ -10,7 +10,7 @@
       "name": "agent-roundtable",
       "source": "./plugins/agent-roundtable",
       "description": "Multi-agent meetings, duels and collaborations over MCP",
-      "version": "1.0.0"
+      "version": "2.0.0"
     }
   ]
 }

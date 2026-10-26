@@ -1,0 +1,16 @@
+{
+  "name": "agent-roundtable",
+  "description": "Plugins for the agent-roundtable MCP server",
+  "owner": {
+    "name": "Yitz Jordan",
+    "url": "https://github.com/ylove"
+  },
+  "plugins": [
+    {
+      "name": "agent-roundtable",
+      "source": "./plugins/agent-roundtable",
+      "description": "Multi-agent meetings, duels and collaborations over MCP",
+      "version": "1.0.0"
+    }
+  ]
+}

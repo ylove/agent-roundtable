@@ -82,14 +82,14 @@ export async function ensurePrototypeRoot(root: string = PROTOTYPE_DIR): Promise
   return real;
 }
 
-const sanitize = (s: string) => (String(s ?? "").replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "session");
+export const sanitizeSessionId = (s: string) => (String(s ?? "").replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "session");
 
 /** Session directories this process created and has not released: the sweep never touches them. */
 const ownSessionDirs = new Set<string>();
 
 /** Create a fresh 0700 directory for one session and record its owner (pid, host, time) in owner.json. */
 export async function createSessionDir(root: string, sessionId: string): Promise<string> {
-  const dir = await mkdtemp(join(root, sanitize(sessionId) + "-"));
+  const dir = await mkdtemp(join(root, sanitizeSessionId(sessionId) + "-"));
   ownSessionDirs.add(dir);
   await chmod(dir, 0o700);
   const owner = { pid: process.pid, host: hostname(), createdAt: new Date().toISOString() };

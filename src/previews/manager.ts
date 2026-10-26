@@ -29,9 +29,9 @@ import { ensureEgressNetwork, type EgressNetwork } from "../sandbox/egress-proxy
 import { childEnv } from "../security/child-env.js";
 import { isContained, mkdirPrivate } from "../security/fs-safe.js";
 import { scrubAndCap } from "../security/secrets.js";
-import { buildForwarderCreateArgs, buildInstallRunArgs, buildNetworkCreateArgs, buildPreviewRunArgs, forwarderName, installContainerName, PREVIEW_HOST_LABEL, PREVIEW_ID_RE, PREVIEW_LABEL, PREVIEW_NET_LABEL, previewContainerName, previewNetworkName } from "./args.js";
+import { buildForwarderCreateArgs, buildForwarderNetworkCreateArgs, buildInstallRunArgs, buildNetworkCreateArgs, buildPreviewRunArgs, forwarderName, forwarderNetworkName, installContainerName, PREVIEW_HOST_LABEL, PREVIEW_ID_RE, PREVIEW_LABEL, PREVIEW_NET_LABEL, previewContainerName, previewNetworkName } from "./args.js";
 import { realDocker, type PreviewDocker } from "./docker-io.js";
-import { defaultPort, parsePackageJson, pickScript, previewArgv, PreviewError, type PackageLike } from "./scripts.js";
+import { defaultPort, parsePackageJson, pickScript, PreviewError, viteHostFlag, type PackageLike } from "./scripts.js";
 import { previewsDir, readRecord, readRecords, removeRecord, touchRecord, writeRecord, type PreviewRecord, type PreviewSource } from "./store.js";
 
 const execFileP = promisify(execFile);
@@ -120,7 +120,9 @@ export function resolveSource(input: StartInput, prototypeRoot = PROTOTYPE_DIR, 
   if (dir === root || !isContained(root, dir)) throw new PreviewError("the prototype directory must be inside the prototype root");
   const name = dir.slice(root.length + 1).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 64);
   if (!name) throw new PreviewError("the prototype directory has no usable name");
-  return { dir, source: { kind: "prototype", prototype: name } };
+  // A duel's prototypes live in <duel id>-<random>/submission-N under the root: carry the duel id.
+  const duel = /^(duel-[A-Za-z0-9_-]{1,35})-[A-Za-z0-9]{6}(?:\/|$)/.exec(dir.slice(root.length + 1))?.[1];
+  return { dir, source: { kind: "prototype", prototype: name, ...(duel && { duel }) } };
 }
 
 /** The real path of a directory that is not itself a symlink. */
@@ -234,16 +236,23 @@ export function parsePublishedPort(output: string): number | undefined {
   return undefined;
 }
 
-/** The preview's own internal network: nothing attached to it can reach beyond it. */
+/** The preview's own networks: the internal one nothing can leave, and the forwarder's, where the loopback port is published. */
 export async function createPreviewNetwork(docker: PreviewDocker, id: string): Promise<void> {
-  const made = await docker.quiet(buildNetworkCreateArgs(id));
-  if (!made.ok && !/already exists/i.test(made.output)) throw new PreviewError(`cannot create the preview network: ${scrubAndCap(made.output, 300)}`);
+  for (const args of [buildNetworkCreateArgs(id), buildForwarderNetworkCreateArgs(id)]) {
+    const made = await docker.quiet(args);
+    if (!made.ok && !/already exists/i.test(made.output)) throw new PreviewError(`cannot create the preview network: ${scrubAndCap(made.output, 300)}`);
+  }
+}
+
+/** Remove a preview's networks (idempotent; the containers must be gone first). */
+async function removePreviewNetworks(docker: PreviewDocker, id: string): Promise<void> {
+  for (const net of [previewNetworkName(id), forwarderNetworkName(id)]) await docker.quiet(["network", "rm", net], 15_000);
 }
 
 /** Remove a preview's containers and then its network (all idempotent). */
 async function removePreviewParts(docker: PreviewDocker, id: string): Promise<void> {
   await removeContainers(docker, [forwarderName(id), previewContainerName(id), installContainerName(id)]);
-  await docker.quiet(["network", "rm", previewNetworkName(id)], 15_000);
+  await removePreviewNetworks(docker, id);
 }
 
 async function removeContainers(docker: PreviewDocker, names: string[]): Promise<void> {
@@ -259,6 +268,7 @@ export async function startPreview(input: StartInput, deps: PreviewDeps = defaul
   const pkg = readPackage(dir);
   const script = pickScript(pkg, input.script);
   const port = defaultPort(pkg, input.port);
+  const hostFlag = viteHostFlag(pkg, script);
 
   const avail = await deps.docker.info();
   if (!avail.ok) throw new PreviewError(`Docker is not available (${avail.reason ?? "unknown"}). Start Docker Desktop or the docker daemon, then try again.`);
@@ -299,7 +309,7 @@ export async function startPreview(input: StartInput, deps: PreviewDeps = defaul
     }
 
     await createPreviewNetwork(deps.docker, id);
-    client = deps.docker.start(buildPreviewRunArgs({ ...common, script, port, labels: { execution: source.execution, task: source.task, prototype: source.prototype } }), stdin);
+    client = deps.docker.start(buildPreviewRunArgs({ ...common, script, port, hostFlag, labels: { execution: source.execution, task: source.task, prototype: source.prototype, duel: source.duel } }), stdin);
     let early: { code: number | null; tail: string } | undefined;
     void client.exited.then((e) => { early = e; });
 
@@ -369,9 +379,23 @@ export async function stopPreview(id: string, deps: Pick<PreviewDeps, "docker"> 
   if (!record) return false;
   const r = await deps.docker.quiet(["rm", "-f", forwarderName(id), record.container], 20_000);
   if (!r.ok && !/No such container/i.test(r.output)) throw new PreviewError(`could not remove the container: ${scrubAndCap(r.output, 300)}`);
-  await deps.docker.quiet(["network", "rm", previewNetworkName(id)], 15_000);
+  await removePreviewNetworks(deps.docker, id);
   removeRecord(id);
   return true;
+}
+
+/**
+ * Stop every preview that belongs to a run (called when the run ends). Best effort: a failure on one
+ * preview does not stop the others, and the sweep retries what is left. Touches Docker only when the
+ * run has previews. Returns how many were stopped.
+ */
+export async function stopExecutionPreviews(execution: string, deps?: Pick<PreviewDeps, "docker">): Promise<number> {
+  const mine = readRecords().filter((r) => r.source.execution === execution);
+  if (!mine.length) return 0;
+  const d = deps ?? { docker: defaultDeps().docker };
+  let n = 0;
+  for (const r of mine) { try { if (await stopPreview(r.id, d)) n++; } catch { /* the sweep retries */ } }
+  return n;
 }
 
 export async function stopAllPreviews(deps: Pick<PreviewDeps, "docker"> = defaultDeps()): Promise<number> {
@@ -438,7 +462,7 @@ export async function sweepPreviews(deps: Pick<PreviewDeps, "docker" | "now" | "
       if (nets.ok) {
         for (const line of nets.output.split("\n")) {
           const [name, id] = line.trim().split(/\s+/);
-          if (name && id && PREVIEW_ID_RE.test(id) && !known.has(id) && !strayIds.includes(id) && name === previewNetworkName(id)) await deps.docker.quiet(["network", "rm", name], 15_000);
+          if (name && id && PREVIEW_ID_RE.test(id) && !known.has(id) && !strayIds.includes(id) && (name === previewNetworkName(id) || name === forwarderNetworkName(id))) await deps.docker.quiet(["network", "rm", name], 15_000);
         }
       }
     }

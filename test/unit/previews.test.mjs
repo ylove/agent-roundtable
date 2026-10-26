@@ -3,17 +3,17 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readdirSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { PROTOTYPE_DIR, WORKTREES_DIR } from "../../dist/config.js";
-import { buildForwarderCreateArgs, buildInstallRunArgs, buildNetworkCreateArgs, buildPreviewRunArgs, forwarderName, previewContainerName, previewNetworkName } from "../../dist/previews/args.js";
-import { defaultPort, parsePackageJson, pickScript, previewArgv, validatePort } from "../../dist/previews/scripts.js";
+import { buildForwarderCreateArgs, buildForwarderNetworkCreateArgs, forwarderNetworkName, buildInstallRunArgs, buildNetworkCreateArgs, buildPreviewRunArgs, forwarderName, previewContainerName, previewNetworkName } from "../../dist/previews/args.js";
+import { defaultPort, parsePackageJson, pickScript, previewArgv, validatePort, viteHostFlag } from "../../dist/previews/scripts.js";
 import { ORIGIN_RE, parseRecord, previewsDir, readRecords, writeRecord } from "../../dist/previews/store.js";
 import { livePreviews, previewFramesHtml, previewOrigins, withFrameSrc } from "../../dist/previews/embed.js";
-import { defaultDeps, createPreviewNetwork, parsePublishedPort, previewSettings, refreshPreviews, resolveSource, startPreview, stopAllPreviews, stopPreview, sweepPreviews } from "../../dist/previews/manager.js";
+import { defaultDeps, createPreviewNetwork, parsePublishedPort, previewSettings, refreshPreviews, resolveSource, startPreview, stopAllPreviews, stopExecutionPreviews, stopPreview, sweepPreviews } from "../../dist/previews/manager.js";
 import { parsePreviewArgs } from "../../dist/cli-preview.js";
 import { renderIndex, INDEX_CSP } from "../../dist/serve/index.js";
 import { DASHBOARD_CSP } from "../../dist/dashboard/server.js";
 import { ROOM_CSP } from "../../dist/table/room-assets.js";
 import { hostname } from "node:os";
-import { startRoom } from "../../dist/table/room.js";
+import { duelPreviewsOf, startRoom } from "../../dist/table/room.js";
 
 const limits = { memory: "2g", cpus: "2", pids: 512 };
 const ID = "prv-0123456z";
@@ -82,6 +82,33 @@ test("preview run argv: internal network only, nothing published, hardened, labe
   assert.equal(previewNetworkName(ID), "rt-pvnet-0123456z");
 });
 
+test("host flag: only the fixed pair after --, only when asked; a duel label is a safe token", () => {
+  const plain = buildPreviewRunArgs(runOpts);
+  assert.ok(!plain.includes("--"), "no pass-through by default");
+  const flagged = buildPreviewRunArgs({ ...runOpts, hostFlag: true });
+  assert.deepEqual(flagged.slice(-6), ["npm", "run", "dev", "--", "--host", "0.0.0.0"]);
+  const duel = buildPreviewRunArgs({ ...runOpts, labels: { prototype: "P1v1", duel: "duel-1234" } });
+  assert.ok(duel.join(" ").includes("--label roundtable.preview-duel=duel-1234"));
+  assert.throws(() => buildPreviewRunArgs({ ...runOpts, labels: { duel: "x; rm -rf /" } }), /invalid duel label/);
+});
+
+test("vite detection: a plain vite script gets --host; --host already there or another tool needs nothing; a composite vite script is refused", () => {
+  const pkg = (dev) => ({ scripts: { dev } });
+  assert.equal(viteHostFlag(pkg("vite"), "dev"), true);
+  assert.equal(viteHostFlag(pkg("vite --port 4000"), "dev"), true);
+  assert.equal(viteHostFlag(pkg("npx vite preview"), "dev"), true);
+  assert.equal(viteHostFlag(pkg("vite --host"), "dev"), false);
+  assert.equal(viteHostFlag(pkg("vite --host 0.0.0.0 --port 80"), "dev"), false);
+  assert.equal(viteHostFlag(pkg("vite --host=0.0.0.0"), "dev"), false);
+  assert.equal(viteHostFlag(pkg("next dev"), "dev"), false);
+  assert.equal(viteHostFlag(pkg("node server.js"), "dev"), false);
+  assert.equal(viteHostFlag(pkg("devite --x"), "dev"), false);
+  assert.equal(viteHostFlag({}, "dev"), false);
+  for (const bad of ["vite && echo hi", "tsc -w & vite", "vite; rm -rf x", "vite $(id)", "vite `id`", "cross-env A=1 vite"]) {
+    assert.throws(() => viteHostFlag(pkg(bad), "dev"), /runs vite without --host.*Add --host to the script/, bad);
+  }
+});
+
 test("forwarder argv: the one published port is 127.0.0.1 only; the network is internal", () => {
   const args = buildForwarderCreateArgs({ id: ID, uid: 1000, gid: 1000, image: "node:22-bookworm-slim", limits, port: 5173 });
   const text = args.join(" ");
@@ -96,6 +123,11 @@ test("forwarder argv: the one published port is 127.0.0.1 only; the network is i
   assert.equal(args[args.indexOf("--memory") + 1], "128m");
   assert.ok(text.includes(`--label roundtable.preview=${ID}`));
   assert.deepEqual(buildNetworkCreateArgs(ID), ["network", "create", "--internal", "--label", `roundtable.preview-net=${ID}`, "rt-pvnet-0123456z"]);
+  // The forwarder has a network of its own (not the shared default bridge), labelled like the internal one.
+  assert.equal(args[args.indexOf("--network") + 1], "rt-pvfwd-0123456z");
+  assert.equal(forwarderNetworkName(ID), "rt-pvfwd-0123456z");
+  assert.ok(!args.includes("bridge") && !args.includes("host"));
+  assert.deepEqual(buildForwarderNetworkCreateArgs(ID), ["network", "create", "--label", `roundtable.preview-net=${ID}`, "rt-pvfwd-0123456z"]);
   assert.throws(() => buildForwarderCreateArgs({ id: ID, uid: 0, gid: 0, image: "node", limits, port: 5173 }), /never runs as root/);
   assert.throws(() => buildForwarderCreateArgs({ id: ID, uid: 1, gid: 1, image: "node", limits, port: 22 }), /port must be/);
 });
@@ -406,6 +438,72 @@ test("records: only exactly-shaped files are trusted", async () => {
   assert.equal(livePreviews(r => r.id === "other").length, 0);
 });
 
+test("the runner hook stops only that run's previews; the sweep removes both networks of a stray", async () => {
+  await clean();
+  const docker = fakeDocker();
+  const { deps } = makeDeps(docker);
+  const other = await startPreview({ prototype: prototypeDir("P7a") }, deps);
+  assert.equal(await stopExecutionPreviews(EXE, { docker }), 0, "nothing to stop");
+  assert.ok(!docker.calls.some(c => c[0] === "rm" && c.includes(other.container)));
+  writeRecord(record({ id: "prv-0000000z", container: "rt-preview-0000000z", host_port: 4001, origin: "http://127.0.0.1:4001" }));
+  docker.containers.set("rt-preview-0000000z", "prv-0000000z");
+  docker.networks.add("rt-pvnet-0000000z").add("rt-pvfwd-0000000z");
+  assert.equal(await stopExecutionPreviews(EXE, { docker }), 1);
+  assert.deepEqual(readRecords().map(x => x.id), [other.id], "another preview is untouched");
+  assert.ok(!docker.networks.has("rt-pvnet-0000000z") && !docker.networks.has("rt-pvfwd-0000000z"));
+  assert.ok(docker.networks.has(previewNetworkName(other.id)) && docker.networks.has(forwarderNetworkName(other.id)));
+  docker.networks.add("rt-pvfwd-qqqqqqqq");
+  await sweepPreviews(deps);
+  assert.ok(!docker.networks.has("rt-pvfwd-qqqqqqqq"), "a forwarder network with nothing behind it is removed");
+  assert.equal(await stopExecutionPreviews(EXE, { docker: { quiet: async () => { throw new Error("down"); } } }), 0);
+  await clean();
+});
+
+test("start: a vite script gets --host through the script; the server is refused when it cannot be told", async () => {
+  await clean();
+  const docker = fakeDocker();
+  const { deps } = makeDeps(docker);
+  const r = await startPreview({ prototype: prototypeDir("P8a", { scripts: { dev: "vite" }, devDependencies: { vite: "5" } }) }, deps);
+  const run = docker.calls.find(c => c[0] === "start-client");
+  assert.deepEqual(run.slice(-6), ["npm", "run", "dev", "--", "--host", "0.0.0.0"]);
+  await stopPreview(r.id, { docker });
+  const before = docker.calls.length;
+  await assert.rejects(startPreview({ prototype: prototypeDir("P8b", { scripts: { dev: "vite && echo" } }) }, deps), /Add --host to the script/);
+  assert.equal(docker.calls.length, before, "refused before Docker is touched");
+});
+
+test("duel previews carry the duel id: the source, and the room shows only the current duel's", async t => {
+  await clean();
+  const duelId = "duel-12345678-aaaa-bbbb-cccc-1234567890ab";
+  const session = mkdtempSync(join(PROTOTYPE_DIR, `${duelId.slice(0, 40)}-`));
+  mkdirSync(join(session, "submission-1"));
+  writeFileSync(join(session, "submission-1", "package.json"), JSON.stringify({ scripts: { dev: "node s.js" } }));
+  const src = resolveSource({ prototype: join(session, "submission-1") }).source;
+  assert.equal(src.duel, duelId.slice(0, 40));
+  assert.equal(resolveSource({ prototype: prototypeDir("P1v1") }).source.duel, undefined);
+  assert.equal(parseRecord(record({ source: { ...src } })) !== undefined, true);
+  assert.equal(parseRecord(record({ source: { kind: "prototype", duel: "../x" } })), undefined);
+  // Filtering: none before a duel starts, only the matching duel afterwards.
+  const mine = record({ id: "prv-0000000a", source: { kind: "prototype", prototype: "p", duel: duelId.slice(0, 40) } });
+  const theirs = record({ id: "prv-0000000b", source: { kind: "prototype", prototype: "q", duel: "duel-other" } });
+  const none = record({ id: "prv-0000000c", source: { kind: "prototype", prototype: "r" } });
+  assert.deepEqual(duelPreviewsOf(undefined, [mine]), []);
+  assert.deepEqual(duelPreviewsOf(duelId, [mine, theirs, none]).map(x => x.id), ["prv-0000000a"]);
+  // The room: previews.json and the CSP follow the duel that is running.
+  const room = await startRoom({ open: false, hold: false });
+  t.after(async () => { await room.close(); await clean(); });
+  const base = new URL(room.url);
+  writeRecord({ ...mine, id: "prv-0000000a", container: "rt-preview-0000000a", host_port: 4010, origin: "http://127.0.0.1:4010" });
+  writeRecord({ ...theirs, id: "prv-0000000b", container: "rt-preview-0000000b", host_port: 4011, origin: "http://127.0.0.1:4011" });
+  assert.deepEqual(await (await fetch(new URL("previews.json", base))).json(), [], "no duel yet");
+  await room.observer.onEvent({ type: "start", id: duelId, topic: "t", mode: "duel", seats: [], startedAt: new Date().toISOString() });
+  const list = await (await fetch(new URL("previews.json", base))).json();
+  assert.deepEqual(list.map(x => x.id), ["prv-0000000a"]);
+  const csp = (await fetch(base)).headers.get("content-security-policy");
+  assert.match(csp, /127\.0\.0\.1:4010/);
+  assert.doesNotMatch(csp, /127\.0\.0\.1:4011/);
+});
+
 test("network setup is idempotent", async () => {
   const docker = fakeDocker();
   docker.quiet = async () => ({ ok: false, output: "Error response from daemon: network with name rt-pvnet-0123456z already exists" });
@@ -464,7 +562,8 @@ test("the room serves previews.json and adds frame-src only for running previews
   let page = await fetch(base);
   assert.doesNotMatch(page.headers.get("content-security-policy"), /127\.0\.0\.1:\d/);
   assert.deepEqual(await (await fetch(new URL("previews.json", base))).json(), []);
-  writeRecord(record({ source: { kind: "prototype", prototype: "P1v1" } }));
+  writeRecord(record({ source: { kind: "prototype", prototype: "P1v1", duel: "duel-room-test" } }));
+  await room.observer.onEvent({ type: "start", id: "duel-room-test", topic: "t", mode: "duel", seats: [], startedAt: new Date().toISOString() });
   page = await fetch(base);
   const csp = page.headers.get("content-security-policy");
   assert.match(csp, /frame-src 'self' http:\/\/127\.0\.0\.1:4000;/);
@@ -507,6 +606,7 @@ test("real Docker: a tiny dev server is previewed on 127.0.0.1 and removed", { s
   assert.deepEqual(server.HostConfig.PortBindings ?? {}, {}, "the server publishes nothing");
   assert.equal((server.Mounts ?? []).filter(m => m.Type === "bind").length, 0);
   assert.deepEqual(Object.keys(server.NetworkSettings.Networks), [`rt-pvnet-${r.id.slice(4)}`]);
+  assert.deepEqual(Object.keys(fwd.NetworkSettings.Networks).sort(), [`rt-pvfwd-${r.id.slice(4)}`, `rt-pvnet-${r.id.slice(4)}`], "the forwarder has its own network, not the default bridge");
   assert.deepEqual(fwd.HostConfig.PortBindings["8080/tcp"], [{ HostIp: "127.0.0.1", HostPort: "" }]);
   assert.deepEqual(fwd.HostConfig.CapDrop, ["ALL"]);
   // No route out of the dev server's network.

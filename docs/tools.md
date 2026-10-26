@@ -1,6 +1,6 @@
 # MCP tool reference
 
-Generated from the registered definitions in `src/tools/*.ts` after building: **44 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
+Generated from the registered definitions in `src/tools/*.ts` after building: **49 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
 
 Use these through your MCP client; Claude Code names them `mcp__<server name>__<tool>`, for example `mcp__roundtable__start_meeting`. Omitted optional fields use the behavior described below. A nested field marked required is required only when its enclosing object/item is supplied. Null optional values are treated as absent. New contract, run and worker tools reject unknown arguments.
 
@@ -813,6 +813,35 @@ Example: `join_execution`
   "agent": "reviewer"
 }
 ```
+
+## Previews
+
+Orchestrator server only. A task's build or a duel prototype runs its dev server in a locked-down Docker container published on `127.0.0.1` only; see [previews](previews.md) for what is isolated and the limits.
+
+### start_preview
+
+Runs `npm run <script>` (`dev`, `start` or `preview`; never a free-form command) for a task's worktree (`execution_id` and `task_id`) or a prototype directory under the prototype root (`prototype`, absolute). Installs dependencies in a container, with scripts off and only the npm registry reachable, when the source has no `node_modules`. Returns `preview_id`, `url`, `shows`, `script`, `container_port`, `started_at`, `idle_ttl_min` and the `page_check` record.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `execution_id` | string `exe-…` | With `task_id`. |
+| `task_id` | string | The task whose worktree to preview. |
+| `prototype` | string | Instead of a task: an absolute prototype directory. |
+| `script` | `dev` \| `start` \| `preview` | Default: the first the package defines. |
+| `port` | integer 1024–65535 | Container port; default the dev server's usual port, else 3000. |
+
+```json
+start_preview { "execution_id": "exe-0123456789abcdef", "task_id": "frontend" }
+start_preview { "prototype": "<prototype root>/<session>/P2v1", "script": "start", "port": 8080 }
+```
+
+### list_previews
+
+Takes no arguments. Lists the running previews and counts as use (restarts their idle time).
+
+### stop_preview
+
+`{ "preview_id": "prv-…" }` stops the preview and removes its containers and network.
 
 ## Usage
 

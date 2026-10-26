@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Dev-server previews (#161, WS26b).** `roundtable preview start|list|stop` and the tools `start_preview`, `list_previews`, `stop_preview` run a task's or a duel prototype's dev server in a locked-down Docker container, published on `127.0.0.1` only (no tunnel, never `0.0.0.0`). The source is copied in, never mounted; the server sits on an internal network with no route out; dependencies install with scripts off through the npm-only egress proxy. The dashboard task page, the duel room and the serve index embed it in a sandboxed frame with a `frame-src` for exactly the running previews. See [previews](docs/previews.md).
+
 - **Long-running runs and private check-in (#163, WS28).** `roundtable serve`: durable local runner supervision, a read-only home index, private check-in channels, optional tailnet bind, and login service printouts. See [long-running runs](docs/long-running.md).
 
 - **Distribution (#169, WS31).** A `Dockerfile` (digest-pinned base, non-root, CI build and smoke run, never pushed), a Claude Code plugin and marketplace entry, a `server.json` for the MCP registry with `mcpName`, and `scripts/sync-version.mjs` to keep their versions in step. Nothing is published by automation; see [distribution](docs/distribution.md).

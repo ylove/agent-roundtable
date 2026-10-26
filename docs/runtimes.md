@@ -41,6 +41,34 @@ Only the codex profile runs sandboxed (read-only); hermes, openclaw and gemini r
 
 The hermes heuristic removes ANSI color sequences, lines containing only box/border characters, and leading lines beginning with `Hermes`, `Hermes Agent`, `loading` or `connected`. It can remove legitimate prose resembling a banner; override `output` with `{ "mode": "text" }` to preserve it. `hermes acp` is a possible future upgrade; this adapter uses `chat`.
 
+## As heads-down workers
+
+The same profiles can run [heads-down](heads-down.md) tasks. Name one as the contract's worker driver, `workers.driver: "runtime:<name>"`, or pass `execute(worker_driver: "runtime:<name>")`:
+
+```sh
+ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1
+```
+
+Runtime workers are opt-in: with the variable unset, contract validation and `execute` refuse the choice with a message naming it, and an unknown runtime name is refused the same way (`roundtable runtimes` lists the names). `runtime:codex` is not offered; use the [Codex driver](heads-down.md#codex-opt-in), which has the full integration (permissions profile, thread resume). Connector contracts are refused on runtime workers.
+
+| Runtime | Gets the roundtable tools | How it submits | Sandbox flag |
+| --- | --- | --- | --- |
+| `gemini` | yes, through a settings file (`GEMINI_CLI_SYSTEM_SETTINGS_PATH`, written next to the worker's other private files and removed when the run ends) naming the roundtable worker server | calls `submit_work` itself | `--sandbox`, plus `--approval-mode auto_edit` and `--allowed-mcp-server-names roundtable` |
+| `hermes`, `openclaw` | no (no MCP in non-interactive mode) | the driver calls `submit_work` when the runtime exits 0, with the runtime's final output (scrubbed, capped) as the summary | none |
+| a configured runtime | no | as above | none |
+
+Every runtime worker runs in the task worktree. The prompt (the worker protocol, then the task card) is passed the way the profile takes input: on argv for the profiles whose `argv` has `{prompt}` (so other local processes can see it in a process listing, as for seats), otherwise on stdin. The environment is the core allowlist (`PATH`, `HOME`, locale, proxy and certificate names, `TERM=dumb`, `NO_COLOR=1`) plus the names the profile lists in `env`; no `ROUNDTABLE_*` setting and no provider key reaches the runtime. With `ROUNDTABLE_WORKER_AUTH=api_key`, `gemini` also gets `GEMINI_API_KEY` and `GOOGLE_API_KEY`; otherwise the CLI's own login is used.
+
+A small wrapper process starts the runtime and relays its output as JSON lines through the same scrubbing relay and monitor as other workers. For a runtime without MCP the wrapper takes the worker's single-use token before the runtime starts, so the runtime never sees it. A non-zero exit fails the attempt and nothing is submitted; a stop request ends the runtime's whole process group. Runtime conversations are not resumed: a resumed task starts a fresh run with the new task card. While the runtime runs, the wrapper writes a heartbeat line every minute, since these CLIs print little before they finish; the contract's wall clock and budget still bound the run.
+
+Leases are enforced at submit, as for Codex: `submit_work` commits only the paths the task's lease covers and rejects the submission when anything else changed, which fails the attempt with the paths named. A runtime without MCP cannot request more leases; it works within the task's write paths from the task card.
+
+**Usage.** A runtime that reports tokens or cost (gemini does, through its `usage` paths) is recorded as reported. Otherwise the wrapper estimates tokens from text lengths and the monitor prices them from the pricing table with the contract's `workers.model` (or `ROUNDTABLE_PRICING_FILE` for models the table lacks), recorded as estimated; the watchdog enforces the budget on that figure. Set `workers.model` for a profile that reports nothing, or the estimate prices at zero.
+
+**Confinement.** `gemini` runs with its own `--sandbox` flag. The other profiles have no sandbox flag: their commands run with the user's permissions inside the task worktree, which is why the opt-in exists. The launch log says which applies, and the driver does not launch a worker while another worker's token file is still unconsumed. Use a runtime's own permission settings for more. The `gemini` flags are those of its CLI at the time of writing and were not run against a live install in this repository's tests; the fixtures cover how the roundtable starts it.
+
+Tests use fake executables in `test/fixtures/runtime-workers/`; none needs the real CLIs.
+
 ## Configuration
 
 Add `runtimes` to `~/.agent-roundtable/config.json` (or the configured `ROUNDTABLE_HOME`). Existing settings remain alongside it:

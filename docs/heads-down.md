@@ -146,6 +146,10 @@ Docker is the default command/check backend: no network, non-root user, read-onl
 
 A local backend requires `ROUNDTABLE_ALLOW_LOCAL_SANDBOX=1` or the human's explicit `execute(sandbox: "local")` choice. Its weaker isolation is surfaced as degradation; macOS uses Seatbelt when available, while Linux may provide only network isolation or no isolation. It lacks Docker's resource limits and install egress support. This sandbox contains commands, not the entire orchestrator or worker CLI. See the [threat model](THREAT_MODEL.md) and [security policy](../SECURITY.md).
 
+## Runtime workers
+
+A contract can also name a [runtime profile](runtimes.md#as-heads-down-workers) as the worker driver: `workers.driver: "runtime:gemini"` (or `runtime:hermes`, `runtime:openclaw`, or a profile you configured), or `execute(worker_driver: "runtime:gemini")`. They are off unless `ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1`; an unknown runtime or a missing opt-in fails at contract validation, not at launch. They run under the same controls as the Codex driver: the task worktree, an allowlisted environment, leases enforced at submit, scrubbed relayed output, usage priced from the table when the runtime reports none, and the usual timeout and stop handling. Connector contracts are refused.
+
 ## Codex opt-in
 
 Claude Code is the default driver. To use Codex, opt in with `ROUNDTABLE_ALLOW_CODEX_DRIVER=1` or explicitly choose `execute(worker_driver: "codex")`. Preflight reports missing CLI capabilities and the broader access model. Codex keeps its own sandboxed shell, and leases are enforced at submission rather than before every edit. Its profile denies the user's home, roundtable state and main checkout, reopens the task worktree for writes and toolchain/git roots for reads, and disables network. Reads outside denied roots remain possible. `ROUNDTABLE_CODEX_READ_ROOTS` adds absolute toolchain roots where needed; it cannot reopen denied roots. Use the CLI's login by default; `ROUNDTABLE_WORKER_AUTH=api_key` explicitly forwards provider API credentials.

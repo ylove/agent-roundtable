@@ -4,6 +4,8 @@
 
 - **`roundtable up` and `doctor` (#149, WS20e).** One command for first-run setup (terminal only, every step skippable), a doctor that checks Node, git, provider keys by name, runtimes, Docker and Chrome, then starts the local service and prints the next steps. `roundtable --version`, `-v` and `version` print the version. Check-in text now masks only path-shaped text, so "50/50" and "and/or" stay readable. See [getting started](docs/getting-started.md#quick-start-roundtable-up).
 
+- **Runtime adapters as heads-down workers (#191, WS22c).** `workers.driver: "runtime:<name>"` (or `execute(worker_driver: "runtime:<name>")`) runs hermes, openclaw, gemini or a configured runtime profile as a heads-down worker, opt-in with `ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1`, under the Codex driver's controls: task worktree, allowlisted environment, leases enforced at submit, scrubbed output, priced usage. gemini gets the worker MCP server and its own `--sandbox`; runtimes without MCP are submitted for by the driver when they exit 0. See [runtimes as workers](docs/runtimes.md#as-heads-down-workers).
+
 - **Long-running runs and private check-in (#163, WS28).** `roundtable serve`: durable local runner supervision, a read-only home index, private check-in channels, optional tailnet bind, and login service printouts. See [long-running runs](docs/long-running.md).
 
 - **Distribution (#169, WS31).** A `Dockerfile` (digest-pinned base, non-root, CI build and smoke run, never pushed), a Claude Code plugin and marketplace entry, a `server.json` for the MCP registry with `mcpName`, and `scripts/sync-version.mjs` to keep their versions in step. Nothing is published by automation; see [distribution](docs/distribution.md).

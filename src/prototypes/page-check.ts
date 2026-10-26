@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { scrubAndCap } from "../security/secrets.js";
-import { browserArgs, CdpPipe, ChromeProcesses, findChrome, launchBrowser } from "./browser.js";
+import { browserArgs, previewBrowserArgs, CdpPipe, ChromeProcesses, findChrome, launchBrowser } from "./browser.js";
 import { DESKTOP_VIEWPORT, type Viewport } from "./screenshot.js";
 
 export interface PageCheck {
@@ -24,6 +24,8 @@ export interface PageCheckOptions {
   viewport?: Viewport;
   chromePath?: string;
   processes?: ChromeProcesses;
+  /** The page is a dev-server preview on 127.0.0.1:<port> (any path) instead of a board or room page. */
+  preview?: boolean;
 }
 
 export function pageCheckSummary(check?: PageCheck): string {
@@ -63,17 +65,18 @@ export async function checkPage(url: string, opts: PageCheckOptions = {}): Promi
     if (!chrome) return { ...result, reason: "no browser" };
     const target = new URL(url);
     if (target.protocol !== "http:" || target.hostname !== "127.0.0.1" || !target.port || target.username || target.password ||
-        !/^\/[A-Za-z0-9_-]+\/p\//.test(target.pathname)) return { ...result, reason: "only a local board or room page can be checked" };
+        (!opts.preview && !/^\/[A-Za-z0-9_-]+\/p\//.test(target.pathname))) return { ...result, reason: "only a local board or room page can be checked" };
     if (opts.processes?.killed) return { ...result, reason: "browser closed" };
     dir = await mkdtemp(join(tmpdir(), "roundtable-page-"));
     const vp = opts.viewport ?? DESKTOP_VIEWPORT;
-    browser = launchBrowser(chrome, [...browserArgs(target.origin, join(dir, "profile")),
+    browser = launchBrowser(chrome, [...(opts.preview ? previewBrowserArgs(Number(target.port), join(dir, "profile")) : browserArgs(target.origin, join(dir, "profile"))),
       "--remote-debugging-pipe", "about:blank"], dir, opts.processes);
     pipe = new CdpPipe(browser.child.stdio[3] as Writable, browser.child.stdio[4] as Readable);
     browser.child.on("error", () => pipe?.close());
     browser.child.on("exit", () => pipe?.close());
     const cdp = pipe;
-    const message = (value: string) => clean(value.split(target.pathname.split("/")[1]).join("<token>"));
+    const secret = opts.preview ? "" : target.pathname.split("/")[1];
+    const message = (value: string) => clean(secret ? value.split(secret).join("<token>") : value);
     const add = (list: string[], value: string) => { if (list.length < 10) list.push(message(value)); };
     let loaded: () => void = () => {};
     const load = new Promise<void>(resolve => { loaded = resolve; });

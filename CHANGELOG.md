@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Dev-server previews (#161, WS26b).** `roundtable preview start|list|stop` and the tools `start_preview`, `list_previews`, `stop_preview` run a task's or a duel prototype's dev server in a locked-down Docker container, published on `127.0.0.1` only (no tunnel, never `0.0.0.0`). The source is copied in, never mounted; the server sits on an internal network with no route out; dependencies install with scripts off through the npm-only egress proxy. The dashboard task page, the duel room and the serve index embed it in a sandboxed frame with a `frame-src` for exactly the running previews. See [previews](docs/previews.md).
+
 - **MCP connectors for seats at the table (#160, WS25b).** Seats in duels, debates, waffles and meetings can call configured connectors as tools (`--connectors a,b`, or `connectors` on `start_duel` and `start_collaboration`): read-only tools by default, a per-connector `tools` list to allow more, broker credentials under the worker launcher's stripped environment, scrubbed and fenced results, a six-call cap per turn, and tool calling for Anthropic and OpenAI-compatible providers. See [connectors at the table](docs/connectors.md#at-the-table).
 
 - **`roundtable up` and `doctor` (#149, WS20e).** One command for first-run setup (terminal only, every step skippable), a doctor that checks Node, git, provider keys by name, runtimes, Docker and Chrome, then starts the local service and prints the next steps. `roundtable --version`, `-v` and `version` print the version. Check-in text now masks only path-shaped text, so "50/50" and "and/or" stay readable. See [getting started](docs/getting-started.md#quick-start-roundtable-up).

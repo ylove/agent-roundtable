@@ -1,0 +1,44 @@
+# Dev-server previews
+
+A heads-down task, or a duel prototype, that builds a web app can be previewed live. Its dev server runs in a locked-down Docker container and is published on `127.0.0.1` only. There is no tunnel, no `0.0.0.0` binding and no host networking. The dashboard task page, the duel room and the [`roundtable serve`](long-running.md) index show a running preview in a sandboxed frame.
+
+```sh
+roundtable preview start exe-… my-task            # a task's worktree
+roundtable preview start --prototype <dir>        # a prototype directory (a duel team's version, a losing team's too)
+roundtable preview list [--json]
+roundtable preview stop prv-…
+```
+
+The same operations are the orchestrator tools `start_preview`, `list_previews` and `stop_preview` ([tools](tools.md#previews)).
+
+## What runs
+
+- The command is always `npm run <script>`, where `<script>` is `dev`, `start` or `preview`: the one you pass with `--script`, otherwise the first the package defines. Anything else is refused; a free-form command is never run.
+- The container port is `--port`, otherwise the usual port of the dev server the package depends on (Vite 5173, Astro 4321, Parcel 1234, Angular 4200, Next and Create React App 3000), otherwise 3000. The server must listen on all interfaces inside the container; the container sets `HOST=0.0.0.0`, `HOSTNAME=0.0.0.0` and `PORT=<port>`, which most dev servers honour. For a server that needs a flag instead (Vite's `--host`), put it in the package script.
+- A preview is ready when the published port answers HTTP (default timeout 120 seconds). Then the [page check](modes/prototype-mode.md) loads it in headless Chrome, unless page checks are off (`ROUNDTABLE_PAGE_CHECKS=0`) or there is no browser. The result is recorded as page-check metadata; a failed check does not stop the preview. While it runs, the browser can reach only the preview's own address.
+
+## What is isolated
+
+- The container has a read-only root, every capability dropped, `no-new-privileges`, pid, memory and CPU limits (the `ROUNDTABLE_SANDBOX_*` ones), a non-root user and no container log. It is the same set of flags the command sandbox uses.
+- **The host source is never mounted.** The source is copied in as a tar snapshot on the container's stdin and unpacked into a tmpfs at `/app`, so the server and anything it installs can write only inside the container. The snapshot leaves out `.git`, `.env*`, `.npmrc` and `.netrc` (and a host `node_modules` that is empty or missing). It is capped at 256 MB. Writes inside the container are lost when it stops; the task's worktree is unchanged.
+- **No network from the dev server.** Each preview gets its own `--internal` Docker network that the server alone sits on, so it has no route out. Docker cannot publish a port from an internal network, so a small forwarder container (fixed code, same hardening, 128 MB) joins that network and the default bridge and carries the single published port, `-p 127.0.0.1::<port>`. Docker picks the host port and `roundtable` reads it back with `docker port`.
+- **Dependencies.** If the source already has a `node_modules` directory it is used as is. Otherwise `npm ci` (with a lockfile) or `npm install` runs in a container first, with lifecycle scripts off (`--ignore-scripts`) and the npm registry as the only reachable host, through the same egress proxy as contract install steps. The installed tree (capped at 1 GB) is then carried into the server container, which has no network.
+- Containers carry the labels `roundtable.preview=<id>` (plus `roundtable.preview-execution`, `-task` or `-prototype`). A prototype directory must be inside the prototype root (`ROUNDTABLE_PROTOTYPE_DIR`) and not a symlink.
+
+## Embedding
+
+The dashboard's task page (`/tasks/<id>`), the duel room and the serve index show each running preview in an `<iframe sandbox="allow-scripts allow-forms">`. There is no `allow-same-origin`, so a previewed page cannot read the embedding page, its URL capability or its storage. Each of those pages adds a `frame-src` for exactly the running previews' `http://127.0.0.1:<port>` origins to its Content-Security-Policy and loosens nothing else. Text about a preview is redacted and escaped. The room's page policy is fixed when it loads: reload the room after starting a preview. The serve index stops its 15-second refresh while a preview is on the page, so the previewed app is not restarted.
+
+A preview is also an ordinary local address: opening `http://127.0.0.1:<port>/` in your own browser works, from this machine only.
+
+## Lifecycle and limits
+
+| Rule | Value |
+| --- | --- |
+| Idle TTL | 30 minutes (`ROUNDTABLE_PREVIEW_TTL_MIN`). Starting, `preview list`, `list_previews` and opening the task page count as use. The room and the index do not, since they refresh on their own. |
+| Concurrent previews | 3 (`ROUNDTABLE_PREVIEW_MAX`); a fourth start is refused until one is stopped. |
+| Readiness timeout | 120 seconds (`ROUNDTABLE_PREVIEW_READY_TIMEOUT_SEC`). |
+| Stop | `preview stop <id>`, when the run ends (task previews), and when `roundtable serve` stops (all previews). |
+| Sweep | At every start, list and once a minute in `serve`: removes expired previews, previews whose run ended, records whose container is gone, and labelled containers (and networks) of this host that have no record. |
+
+If Docker is not running, `preview start` says so and starts nothing; the sweep waits for the daemon. State is one private file per preview in `ROUNDTABLE_HOME/previews/<id>.json`.

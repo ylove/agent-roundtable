@@ -13,10 +13,13 @@ import { runnerLiveness, type RunnerLiveness } from "../execution/runner-launch.
 import { renderOverview, renderEscalations, t, type RunnerHealth } from "../dashboard/render.js";
 import { DASHBOARD_CSS } from "../dashboard/assets.js";
 import { SecureServer, escapeHtml, type Route } from "../http/secure-server.js";
+import { livePreviews, previewFramesHtml, previewOrigins, withFrameSrc } from "../previews/embed.js";
+import type { PreviewRecord } from "../previews/store.js";
 import { persistedLiveDuels, type LiveDuel } from "../table/live-duels.js";
 
 export const INDEX_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
-const POLL_JS = 'setInterval(() => { if (!document.hidden) location.reload(); }, 15000);';
+// A page with a live preview does not reload: that would restart the previewed app every 15 seconds.
+const POLL_JS = 'setInterval(() => { if (!document.hidden && !document.querySelector("iframe.preview")) location.reload(); }, 15000);';
 export interface IndexRun { report: ExecutionStatusReport; lastEvent?: string }
 export interface ArchiveSummary { id: string; topic: string; winner: string }
 
@@ -25,7 +28,7 @@ export function indexFrame(base: string, title: string, body: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${t(title)}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head><body><main><nav><a href="${b}">All runs</a></nav>${body}</main><script src="${b}static/dashboard.js"></script></body></html>`;
 }
 
-export function renderIndex(base: string, runs: IndexRun[], duels: ArchiveSummary[] = [], live: Array<LiveDuel & { host: string }> = [], casting?: string): string {
+export function renderIndex(base: string, runs: IndexRun[], duels: ArchiveSummary[] = [], live: Array<LiveDuel & { host: string }> = [], casting?: string, previews: PreviewRecord[] = []): string {
   const rows = runs.map(({ report: r, lastEvent }) => {
     if (!EXECUTION_ID_RE.test(r.execution)) return "";
     const link = `${escapeHtml(base)}x/${r.execution}/`;
@@ -34,6 +37,7 @@ export function renderIndex(base: string, runs: IndexRun[], duels: ArchiveSummar
   const body = `<h1>Roundtable</h1><p>Read-only. Refreshes every 15 seconds.</p><h2>Executions</h2><table><thead><tr><th>Run</th><th>State</th><th>Complete</th><th>Spend / budget</th><th>Awaiting you</th><th>Runner</th><th>Last event</th></tr></thead><tbody>${rows.join("")}</tbody></table>` +
     `<h2>Live duels and casting</h2><ul>${live.map(d => `<li>${t(d.id)} · ${t(d.kind ?? "duel")} · ${t(d.agents.join(", "))} · ${t(d.started)} · ${t(d.host)}</li>`).join("")}</ul>` +
     `<h2>Archived duels</h2><ul>${duels.filter(d => ID_RE.test(d.id)).map(d => `<li><a href="${escapeHtml(base)}duels/${d.id}">${t(d.id)}</a> · ${t(d.topic)} · winner ${t(d.winner)}</li>`).join("")}</ul>` +
+    previewFramesHtml(previews) +
     `<h2>Latest casting report</h2>${casting ? `<a href="${escapeHtml(base)}casting">Read report</a><pre>${t(casting)}</pre>` : "<p>No casting report yet.</p>"}`;
   return indexFrame(base, "Roundtable", body);
 }
@@ -70,7 +74,8 @@ export function indexRoutes(): Route[] {
           runs.push({ report, lastEvent: last?.ts });
         } catch { /* purged or corrupt runs cannot hide the others */ }
       }
-      c.html(200, renderIndex(c.base, runs, archives(), persistedLiveDuels(), castingReport()), INDEX_CSP);
+      const previews = livePreviews();
+      c.html(200, renderIndex(c.base, runs, archives(), persistedLiveDuels(), castingReport(), previews), withFrameSrc(INDEX_CSP, previewOrigins(previews)));
     } },
     { path: /^\/x\/([^/]+)\/(|escalations|static\/dashboard\.(?:css|js))$/, async handler(c) {
       const id = c.match![1], page = c.match![2];

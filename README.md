@@ -49,6 +49,7 @@ Ask in chat; the host calls the tools and keeps session ids for follow-ups.
 | [`roundtable cast`](docs/modes/casting-call.md) | Audition personas and recommend a cast for a brief. |
 | [`roundtable duel`](docs/modes/duel.md) | Two teams build competing artifacts; judges assess them; dissents are recorded. |
 | [`roundtable debate`, `waffle`, `meeting`](docs/table-cli.md) | Stream a discussion with per-seat models and spend. |
+| [`roundtable preview`](docs/previews.md) | Preview a task's or prototype's dev server live in a locked-down container on `127.0.0.1`. |
 | [`roundtable config`](docs/configuration.md#saved-cli-settings-and-env-files) | Save env-file and persona-directory settings; show set/unset status. |
 | [`roundtable agents`](docs/agents-library.md) | Browse and import personas, install the starter pack, or open the library drop zone. |
 

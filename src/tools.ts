@@ -10,6 +10,7 @@ import { executionTools, handleExecutionTool } from "./tools/execution.js";
 import { handleHoldPostmortemTool, holdPostmortemTools } from "./tools/hold-postmortem.js";
 import { handlePostmortemTool, postmortemTools } from "./tools/postmortem.js";
 import { handleWorkerTool, workerTools } from "./tools/worker.js";
+import { handlePreviewTool, previewTools } from "./tools/previews.js";
 import { handleUsageTool, usageTools } from "./tools/usage.js";
 import { schemaFor, type ToolArgs, type ToolCallContext, type ToolDefinition, type ToolGroup, type ToolMode } from "./tools/shared.js";
 import { scrub } from "./security/secrets.js";
@@ -26,6 +27,7 @@ const groups: ToolGroup[] = [
   { definitions: postmortemTools, handle: handlePostmortemTool },
   { definitions: holdPostmortemTools, handle: handleHoldPostmortemTool },
   { definitions: workerTools, handle: handleWorkerTool },
+  { definitions: previewTools, handle: handlePreviewTool },
   { definitions: usageTools, handle: handleUsageTool },
 ];
 

@@ -104,6 +104,9 @@ These settings complete the table above. `SANDBOX_ENV` is re-exported by `src/sa
 | `ROUNDTABLE_SANDBOX_MEMORY` | Docker memory limit with swap disabled; invalid values warn and fall back | `2g` |
 | `ROUNDTABLE_SANDBOX_CPUS` | Positive Docker CPU quota; invalid values warn and fall back | `2` |
 | `ROUNDTABLE_SANDBOX_PIDS` | Docker process limit, integer 16–1000000; invalid values warn and fall back | `512` |
+| `ROUNDTABLE_PREVIEW_TTL_MIN` | Minutes a [dev-server preview](previews.md) may sit unused before it is stopped (1–1440) | `30` |
+| `ROUNDTABLE_PREVIEW_MAX` | Most previews running at once (1–20) | `3` |
+| `ROUNDTABLE_PREVIEW_READY_TIMEOUT_SEC` | Seconds to wait for a preview's dev server to answer HTTP (5–1800) | `120` |
 | `ROUNDTABLE_ALLOW_LOCAL_SANDBOX` | Allow the weaker local command backend | off; exactly `1` enables, or explicitly choose `execute(sandbox: "local")` |
 | `ROUNDTABLE_ALLOW_CODEX_DRIVER` | Opt into the Codex worker driver and its broader access model | off; exactly `1` enables, or explicitly choose `execute(worker_driver: "codex")` |
 | `ROUNDTABLE_ALLOW_RUNTIME_WORKERS` | Opt into runtime profiles (`hermes`, `openclaw`, `gemini`, or a configured one) as heads-down workers, `workers.driver: "runtime:<name>"`; contract validation and `execute` refuse the choice without it. See [runtimes as workers](runtimes.md#as-heads-down-workers) | off; exactly `1` enables |

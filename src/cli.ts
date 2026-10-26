@@ -11,6 +11,7 @@
 //   statusline [--agents N] [--plain] [--no-host]                       a Claude Code status line; always exits 0
 //   usage [--json] [--watch]                                            who is using what, on which platform
 //   stop <agent> [--execution <exe> | --session <id>] [--reason <text>] stop one agent (heads-down or at the table)
+//   preview start|list|stop                                             Docker dev-server previews on 127.0.0.1
 //   up / doctor                                                         set up, check and start the local service
 //   --version | -v | version                                            print the version
 //   help                                                                this text
@@ -48,6 +49,8 @@ export const USAGE = [
   "  roundtable --version | -v | version",
   "  roundtable serve [--detach] [--no-keep-runners] [--bind loopback|tailnet] | serve status|stop",
   "  roundtable serve --print-service launchd|systemd",
+  "  roundtable preview start <exe> <task> | --prototype <dir> [--script dev|start|preview] [--port <n>]",
+  "  roundtable preview list [--json] | preview stop <id>",
   "  roundtable notify init ntfy | notify test",
   "  roundtable config set notify.<key> <value>",
   "  roundtable runtimes [--json]",
@@ -289,6 +292,11 @@ export async function runCli(argv: string[]): Promise<void> {
       return usageReport(rest);
     case "stop":
       return stopAgentCommand(rest);
+    case "preview": {
+      const { runPreviewCli } = await import("./cli-preview.js");
+      process.exitCode = await runPreviewCli(rest);
+      return;
+    }
     case "serve": {
       const { runServeCli } = await import("./cli-serve.js");
       process.exitCode = await runServeCli(rest);

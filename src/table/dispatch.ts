@@ -1,5 +1,6 @@
 import { PROVIDER_IDS, type LLMProvider } from "../config.js";
-import { callLLM, type CallLLMOptions } from "../providers/index.js";
+import { callLLM, callLLMWithTools, supportsTools, type CallLLMOptions } from "../providers/index.js";
+import { activeSeatConnectors } from "./seat-connectors.js";
 import { activeAbortSignal, reportUsage } from "../providers/usage.js";
 import { getRuntime } from "../runtimes/registry.js";
 import { runRuntime } from "../runtimes/runner.js";
@@ -16,7 +17,13 @@ export interface SeatCallContext {
 export async function callSeat(system: string, messages: Parameters<typeof callLLM>[1], options: Omit<CallLLMOptions, "provider"> & { provider: string }, context?: SeatCallContext): Promise<string> {
   if ((PROVIDER_IDS as readonly string[]).includes(options.provider)) {
     const provider = options.provider as LLMProvider;
-    const call = () => callLLM(system, messages, { ...options, provider });
+    // Connectors apply per table session; a seat whose provider cannot call tools says so once and speaks without them.
+    const connectors = activeSeatConnectors(), seatName = context?.agent ?? "seat";
+    if (connectors && !supportsTools(provider)) connectors.unavailable(seatName);
+    const toolTurn = connectors && supportsTools(provider) ? connectors.turn(seatName) : undefined;
+    const call = toolTurn
+      ? async () => (await callLLMWithTools(`${system}\n\n${toolTurn.instruction}`, messages, { ...options, provider }, toolTurn.tools, toolTurn.run)).content
+      : () => callLLM(system, messages, { ...options, provider });
     try { return await call(); }
     catch (error) {
       const fallback = defaultModelFor(provider);
@@ -31,6 +38,7 @@ export async function callSeat(system: string, messages: Parameters<typeof callL
   }
   const spec = getRuntime(options.provider);
   if (!spec) throw new Error("Unknown seat runtime.");
+  activeSeatConnectors()?.unavailable(context?.agent ?? "seat");
   const prompt = `${system}\n\n${messages.map(m => `${m.role}:\n${m.content}`).join("\n\n")}`;
   try {
     const result = await runRuntime(spec, prompt, { ...(options.model && { model: options.model }), signal: activeAbortSignal(), runtimeName: options.provider });

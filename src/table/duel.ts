@@ -20,6 +20,7 @@ import { registerDuel, unregisterDuel } from "./live-duels.js";
 import { abortSession, lineFor, metered, sessionSignal } from "../usage/session-scope.js";
 import type { DuelKind, DuelOptions, DuelResult, RunDuel, Seat, TableEvent, TableObserver } from "./events.js";
 import { validateDuelOptions } from "./duel-options.js";
+import { activeSeatConnectors, startSeatConnectors, withSeatConnectors } from "./seat-connectors.js";
 import { buildPrompt, closingPrompt, conceptPrompt, critiquePrompt, DEFAULT_CRITERIA, DUEL_MAX_BYTES, duelSystem, judgePrompt, normalizeCriteria } from "./prompts.js";
 import { attachPrototypeFiles, getPrototypeFiles, attachPrototypeScreenshot, getPrototypeScreenshot, type DuelArchive } from "./replay.js";
 
@@ -175,7 +176,16 @@ function failureReason(error: unknown): string {
 }
 
 type DuelRunner = (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps?: DuelDependencies) => Promise<DuelResult>;
+/** Start the requested seat connectors (an unknown one fails here, before any provider call) and close them when the duel ends. */
 export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
+  validateDuelOptions(opts);
+  if (!opts.connectors?.length) return runDuelBody(opts, obs, signal, deps);
+  const connectors = await startSeatConnectors(opts.connectors, { signal });
+  try { return await withSeatConnectors(connectors, () => runDuelBody(opts, obs, signal, deps)); }
+  finally { await connectors.close(); }
+};
+
+const runDuelBody: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
   validateDuelOptions(opts);
   const kind: DuelKind = opts.kind ?? "web";
   // Every extra critique turn needs time, so the default deadline grows with the larger team.
@@ -242,6 +252,11 @@ export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: Tabl
   for (const stop of [signal, sessionStop, phase.signal]) stop.addEventListener("abort", killBrowsers, { once: true });
   let internalFailure = false;
   const publicSeat = (seat: Seat): Seat => seats.find(s => s.id === seat.id)!;
+  // Each connector call and notice appears in the transcript as a short note, never as the tool's payload.
+  activeSeatConnectors()?.onNote(use => {
+    const seat = resolved.find(s => s.id.replace(/^(?:A|B|judge):/, "") === use.seat) ?? resolved[0];
+    void emit({ type: "turn", seat: publicSeat(seat), round: "tool", text: use.note, ts: new Date().toISOString() });
+  });
 
   async function turn(seat: ResolvedDuelSeat, round: string, prompt: string, closing = false, show: (text: string) => string = text => text): Promise<string | undefined> {
     if (cancelled() || (!closing && expired())) return;

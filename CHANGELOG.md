@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **MCP connectors for seats at the table (#160, WS25b).** Seats in duels, debates, waffles and meetings can call configured connectors as tools (`--connectors a,b`, or `connectors` on `start_duel` and `start_collaboration`): read-only tools by default, a per-connector `tools` list to allow more, broker credentials under the worker launcher's stripped environment, scrubbed and fenced results, a six-call cap per turn, and tool calling for Anthropic and OpenAI-compatible providers. See [connectors at the table](docs/connectors.md#at-the-table).
+
 - **`roundtable up` and `doctor` (#149, WS20e).** One command for first-run setup (terminal only, every step skippable), a doctor that checks Node, git, provider keys by name, runtimes, Docker and Chrome, then starts the local service and prints the next steps. `roundtable --version`, `-v` and `version` print the version. Check-in text now masks only path-shaped text, so "50/50" and "and/or" stay readable. See [getting started](docs/getting-started.md#quick-start-roundtable-up).
 
 - **Long-running runs and private check-in (#163, WS28).** `roundtable serve`: durable local runner supervision, a read-only home index, private check-in channels, optional tailnet bind, and login service printouts. See [long-running runs](docs/long-running.md).

@@ -111,6 +111,7 @@ import {
   PROTOTYPE_PROP,
   DUEL_PROP,
   DUEL_SOURCE_PROP,
+  CONNECTORS_PROP,
   validateProviderOptions,
   formatUltraplanResult,
   formatAgentWorkshopResult,
@@ -167,6 +168,7 @@ export const deliberationTools: ToolDefinition[] = [
         page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
         duel: DUEL_PROP,
         duel_source: DUEL_SOURCE_PROP,
+        connectors: CONNECTORS_PROP,
         provider: {
           type: "string",
           enum: ["auto", ...PROVIDER_IDS],
@@ -888,8 +890,9 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Collaboration Tools ===
     case START_COLLABORATION: {
-      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, page_check, duel, duel_source } = args as {
+      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, page_check, duel, duel_source, connectors } = args as {
         agents: string[];
+        connectors?: string[];
         topic?: string;
         context?: string;
         duel?: string;
@@ -912,6 +915,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
         context,
         duel,
         duelSource: duel_source,
+        ...(connectors?.length && { connectors }),
         maxRounds: max_rounds,
         autoRun: auto_run_rounds !== undefined,
         runRounds: auto_run_rounds,

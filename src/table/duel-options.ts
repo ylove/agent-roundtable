@@ -16,6 +16,7 @@ export function validateDuelOptions(opts: DuelOptions): void {
   const dup = keys.find((key, i) => keys.indexOf(key) !== i);
   if (dup) throw new Error(`Persona "${dup}" appears more than once; each persona holds one seat across both teams and the judges.`);
   if (opts.kind !== undefined && !DUEL_KINDS.includes(opts.kind)) throw new Error(`kind must be one of ${DUEL_KINDS.join(", ")}.`);
+  if (opts.connectors !== undefined && (!Array.isArray(opts.connectors) || opts.connectors.some(c => typeof c !== "string"))) throw new Error("connectors must be a list of connector names.");
   if (opts.criteria !== undefined) {
     if (!Array.isArray(opts.criteria) || opts.criteria.some(c => typeof c !== "string" || !c.trim())) throw new Error("criteria must be a list of non-empty strings.");
     if (opts.criteria.length > MAX_CRITERIA) throw new Error(`Use at most ${MAX_CRITERIA} criteria.`);

@@ -20,7 +20,8 @@ function recordOutcome(provider: LLMProvider, model: string, started: number, ou
 // LLM Completion Functions (provider table + routing)
 // ============================================================================
 
-import type { LLMMessage, LLMCompletionResult, ProviderCall } from "./shared.js";
+import type { LLMMessage, LLMCompletionResult, ProviderCall, ToolRound, ToolSpec } from "./shared.js";
+import { runToolLoop, toolResultTurns, type RunTool, type ToolLoopLimits, type ToolLoopResult } from "./tool-loop.js";
 import type { LLMProvider } from "../config.js";
 import {
   DEFAULT_MODELS,
@@ -35,7 +36,7 @@ import { callReplicate } from "./replicate.js";
 import { callOllama, isOllamaAvailable } from "./ollama.js";
 import { activeAbortSignal, activeUsageSink, reportUsage, StoppedError, withProviderOutcome, reportProviderFailure, type ProviderOutcome } from "./usage.js";
 
-export type { LLMMessage, LLMCompletionResult, ProviderCall, ProviderCallOptions } from "./shared.js";
+export type { LLMMessage, LLMCompletionResult, ProviderCall, ProviderCallOptions, ToolSpec } from "./shared.js";
 export { isOllamaAvailable };
 export {
   withUsageSink,
@@ -66,6 +67,8 @@ export interface ChatCompletionOptions {
   baseUrl?: string;
   /** Postmortems retain a text-length estimate for a dispatched call that fails without usage. */
   estimateUsageOnFailure?: boolean;
+  /** Set only by callLLMWithTools: one request of a tool loop. */
+  toolRound?: ToolRound;
 }
 
 export async function chatCompletion(
@@ -111,6 +114,7 @@ export async function chatCompletion(
       temperature: options.temperature,
       signal: stop ? AbortSignal.any([timeout, stop]) : timeout,
       ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
+      ...(options.toolRound && { toolRound: options.toolRound }),
     });
     providerHealth.recordCall(provider, true, undefined, process.env, options.baseUrl, model);
     const outcome = recordOutcome(provider, model, started, "ok", true, options.baseUrl);
@@ -192,4 +196,29 @@ export async function callLLM(
   options: CallLLMOptions
 ): Promise<string> {
   return (await callLLMDetailed(systemPrompt, messages, options)).content;
+}
+
+/** Providers whose request shape here carries tools. Replicate and Ollama speak without them. */
+export const TOOL_PROVIDERS: readonly LLMProvider[] = ["anthropic", "openai", "together", "openai_compatible"];
+export const supportsTools = (provider: string): boolean => (TOOL_PROVIDERS as readonly string[]).includes(provider);
+
+/**
+ * Like callLLMDetailed, but the model may call `tools` (runTool executes them) before it answers.
+ * Every round trip is metered through chatCompletion. Callers that pass no tools use callLLM, unchanged.
+ */
+export async function callLLMWithTools(
+  systemPrompt: string,
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+  { provider, model, maxTokens = MAX_TOKENS, baseUrl, estimateUsageOnFailure }: CallLLMOptions,
+  tools: ToolSpec[],
+  runTool: RunTool,
+  limits?: ToolLoopLimits,
+): Promise<ToolLoopResult> {
+  if (!supportsTools(provider)) throw new Error(`Tool use is not available for the ${provider} provider.`);
+  const llmMessages: LLMMessage[] = [{ role: "system", content: systemPrompt }, ...messages];
+  return runToolLoop(
+    toolRound => chatCompletion(llmMessages, { provider, model, maxTokens, baseUrl, estimateUsageOnFailure, toolRound }),
+    tools, runTool, (calls, results) => toolResultTurns(provider === "anthropic" ? "anthropic" : "openai", calls, results),
+    activeAbortSignal(), limits,
+  );
 }

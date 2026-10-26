@@ -41,6 +41,10 @@ export const USAGE = [
   "  roundtable cast <brief> [--agents a,b,... | --agents-dir <abs-path>] [--seats n] [--dry-run] [--json]",
   "  roundtable duel <brief> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--kind web|code|diagram|text] [--criteria a,b] [--open]",
   "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2]",
+  "  roundtable serve [--detach] [--no-keep-runners] [--bind loopback|tailnet] | serve status|stop",
+  "  roundtable serve --print-service launchd|systemd",
+  "  roundtable notify init ntfy | notify test",
+  "  roundtable config set notify.<key> <value>",
   "  roundtable runtimes [--json]",
   "  roundtable agents [--json] | agents import <absolute file|dir> | agents starter | agents --open",
   "  roundtable config set env-file|agents-dir <absolute-path> | config show",
@@ -157,6 +161,16 @@ async function watch(args: string[]): Promise<void> {
 
 async function status(args: string[]): Promise<void> {
   process.umask(0o077);
+  if (/^[0-9a-hjkmnp-tv-z]{6}$/.test(args[0] ?? "")) {
+    const { listExecutions } = await import("./execution/store.js");
+    const matches = (await listExecutions()).filter(h => h.id.endsWith(args[0]));
+    if (matches.length !== 1) {
+      console.error(matches.length ? "Run tag is ambiguous; use the full execution id." : "Run tag not found.");
+      process.exitCode = 1;
+      return;
+    }
+    args = [matches[0].id, ...args.slice(1)];
+  }
   const p = withExecution("status", args, { values: [], flags: ["json"] });
   if (typeof p === "string") return usage(p);
   const { executionStatus, formatStatus } = await import("./execution/run-admin.js");
@@ -256,6 +270,16 @@ export async function runCli(argv: string[]): Promise<void> {
       return usageReport(rest);
     case "stop":
       return stopAgentCommand(rest);
+    case "serve": {
+      const { runServeCli } = await import("./cli-serve.js");
+      process.exitCode = await runServeCli(rest);
+      return;
+    }
+    case "notify": {
+      const { runNotifyCli } = await import("./cli-serve.js");
+      process.exitCode = await runNotifyCli(rest);
+      return;
+    }
     case "agents": {
       const { runAgentsCli } = await import("./cli-agents.js");
       process.exitCode = await runAgentsCli(rest);

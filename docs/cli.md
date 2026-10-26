@@ -8,17 +8,19 @@ The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts th
 | `hook` | `pre-tool-use` | Run the worker lease hook on hook JSON from stdin. |
 | `run` | `<exe>` | Run a heads-down runner; normally started by `execute`. |
 | `watch` | `<exe> --as <orchestrator> [--timeout-min 50]` | Wait for one orchestrator wake and print one JSON line. |
-| `status` | `<exe> [--json]` | Show tasks, budget, escalations, runner and watchers. |
+| `status` | `<exe-or-tag> [--json]` | Show tasks, budget, escalations, runner and watchers. |
 | `verify` | `<exe> [--json]` | Verify execution and global audit chains. |
 | `purge` | `<exe> --confirm` | Delete a terminal run's worktrees, branches and log. |
 | `statusline` | `[--agents N] [--plain] [--no-host]` | A Claude Code `statusLine` command: the host's line, the roundtable's spend, the busiest agents. Always exits 0. |
 | `usage` | `[--json] [--watch]` | Who is using what, on which platform, with measured / reported / estimated labels. `--watch` refreshes every 2 s. |
 | `stop` | `<agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent: a heads-down worker or an at-the-table session. |
+| `serve` | `[--detach] [--no-keep-runners] [--bind loopback\|tailnet]`, `status`, `stop`, `--print-service launchd\|systemd` | Local supervisor and read-only index. [Long-running runs](long-running.md). |
+| `notify` | `init ntfy`, `test` | Set up and test private check-in channels. [Setup](long-running.md#private-check-in-channels). |
 | `runtimes` | `[--json]` | List installed CLI runtimes, paths and versions. See [CLI runtimes](runtimes.md). |
 | `agents` | `[--json]`, `import <absolute file\|dir>`, `starter`, or `--open [--no-hold]` | Browse and import personas or open the local drop zone. See [agents library](agents-library.md). |
 | `help` | none | Print usage. |
 
-These are the **13 named subcommands** for heads-down runs, usage, runtime detection and the agents library of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches six table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
+These are the **15 named subcommands** for heads-down runs, usage, runtime detection and the agents library of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches seven table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
 
 ```sh
 agent-roundtable help
@@ -59,3 +61,5 @@ See [configuration](configuration.md), [contracts and execution](heads-down.md),
 `roundtable config set secret <ENV_NAME> <secret://ref>` and `config unset secret <ENV_NAME>` manage credential references. `roundtable secrets check` prints each reference name with `ok` or a safe reason and exits 1 on failure.
 
 `roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value]` configures a stdio MCP server; `--arg` and `--env` repeat. Credential-shaped env names require references. Remove it with `config unset connector <name>`. `config show` lists reference backends and connector/env names without values or locators. See [secrets](secrets.md) and [worker connectors](connectors.md).
+
+`roundtable config set notify.<key> <value>` sets allowlisted private check-in options; credentials must be `secret://` references. `status` also accepts an unambiguous six-character run tag. See [long-running runs](long-running.md).

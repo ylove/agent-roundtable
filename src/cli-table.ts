@@ -1,7 +1,7 @@
 import type { DuelOptions, DuelResult, Seat, TableObserver } from "./table/events.js";
 import { parseFlags } from "./cli.js";
 import { clean, createNdjsonObserver, createTerminalObserver, type TerminalOutput } from "./table/terminal.js";
-import { readUserConfig, setUserConfig, setSecretConfig, setConnectorConfig, unsetConfigEntry } from "./user-config.js";
+import { readUserConfig, setUserConfig, setNotifyConfig, setSecretConfig, setConnectorConfig, unsetConfigEntry } from "./user-config.js";
 import { resolveSecret } from "./secrets/broker.js";
 import { secretReason } from "./secrets/backends.js";
 import { parseSecretRef } from "./secrets/ref.js";
@@ -138,8 +138,14 @@ function configCommand(args: string[], output: TerminalOutput): number {
   if (args.length === 1 && args[0] === "show") {
     const config = readUserConfig();
     output.write(`env-file: ${process.env.ROUNDTABLE_ENV_FILE !== undefined || config.envFile ? "set" : "unset"}\nagents-dir: ${process.env.ROUNDTABLE_AGENTS_DIR !== undefined || config.agentsDir ? "set" : "unset"}\n`);
+    if (config.notify) output.write(`notify: ${Object.keys(config.notify).join(", ")}\n`);
     for (const [name, ref] of Object.entries(config.secrets ?? {})) output.write(`${name}: ${parseSecretRef(ref).backend}\n`);
     for (const [name, spec] of Object.entries(config.connectors ?? {})) output.write(`connector ${name}: ${Object.keys(spec.env).join(", ") || "(no env)"}\n`);
+    return 0;
+  }
+  if (args.length === 3 && args[0] === "set" && args[1].startsWith("notify.")) {
+    setNotifyConfig(args[1], args[2]);
+    output.write(`${args[1]}: set\n`);
     return 0;
   }
   if (args.length === 4 && args[0] === "set" && args[1] === "secret") {

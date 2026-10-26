@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `roundtable serve`: durable local runner supervision, a read-only home index, private check-in channels, optional tailnet bind, and login service printouts. See [long-running runs](docs/long-running.md).
+
 - **License: Apache 2.0.** The project moves from the MIT License to the Apache License 2.0, with a `NOTICE` file.
 
 - **Configured content filters (#204).** Automated host git calls refuse staging or writing working-tree content when a configured clean, smudge or process filter applies to a tracked or untracked non-ignored path. The error names the filter and one example path; filtered paths are unsupported in heads-down runs. Filter programs remain disabled, while read-only calls and filters attached to no listed path remain available. Repositories without configured filter programs skip the attribute scan.

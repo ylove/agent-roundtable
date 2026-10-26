@@ -22,7 +22,8 @@ export type ChildEnvProfile =
   | "cloud-cli"
   | "secret-cli"
   | "connector"
-  | "runner";
+  | "runner"
+  | "serve";
 
 const BASE = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TMPDIR", "TERM"];
 const PROXY = [
@@ -123,6 +124,10 @@ const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: s
   open: () => ({ pass: [...BASE, ...DISPLAY], set: {} }),
   "sandbox-local": () => ({ pass: ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ"], set: { CI: "1" } }),
   "cloud-cli": () => ({ pass: [...BASE, ...PROXY, "CLOUDSDK_CONFIG", "FLY_CONFIG_DIR"], set: {} }),
+  serve: (s) => ({
+    pass: [...PROFILES.runner(s).pass, ...DISPLAY, "ROUNDTABLE_NOTIFY_NTFY_TOKEN", "ROUNDTABLE_NOTIFY_WEBHOOK_SECRET"],
+    set: {},
+  }),
   runner: (s) => ({
     pass: [
       ...BASE, ...PROXY, ...RUNNER_PROVIDER, ...RUNNER_CONFIG, "ROUNDTABLE_SECRETS",
@@ -137,7 +142,7 @@ const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: s
 /**
  * Build a child environment from an allowlist profile. `extra` is applied last (callers use it for
  * per-run values such as ROUNDTABLE_EXECUTION_ID); undefined values in `extra` delete a key.
- * The private scrub-literal variable is computed for the runner and excluded from other profiles.
+ * The private scrub-literal variable is computed for the runner and supervisor and excluded from other profiles.
  */
 export function childEnv(
   profile: ChildEnvProfile,
@@ -156,7 +161,7 @@ export function childEnv(
     else env[k] = v;
   }
   delete env[SCRUB_LITERALS_ENV];
-  if (profile === "runner") {
+  if (profile === "runner" || profile === "serve") {
     const literals = configuredSecretLiterals({ ...source, ...extra });
     if (literals.length) env[SCRUB_LITERALS_ENV] = JSON.stringify(literals);
   }

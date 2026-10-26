@@ -1,3 +1,7 @@
+// ============================================================================
+// Private operator configuration and credential references
+// ============================================================================
+
 import { closeSync, fstatSync, openSync, readFileSync, statSync, constants, mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -10,6 +14,8 @@ import { isExecutableFile } from "./executables.js";
 import { parseSecretRef } from "./secrets/ref.js";
 import { resolveSecretSync } from "./secrets/broker.js";
 import { secretReason } from "./secrets/backends.js";
+
+import { validateNotifyConfig, type NotifyConfig } from "./serve/config.js";
 
 export type RoutingTier = "builder" | "judge" | "balanced";
 export interface RoutingModel { model: string; reasoning?: boolean; maxOutputTokens?: number }
@@ -33,6 +39,7 @@ export function validateRoutingConfig(raw: unknown): RoutingConfig {
 }
 
 export interface UserConfig {
+  notify?: NotifyConfig;
   routing?: RoutingConfig; envFile?: string; agentsDir?: string; runtimes?: Record<string, Partial<RuntimeSpec>>;
   secrets?: Record<string, string>; connectors?: Record<string, ConnectorSpec>;
 }
@@ -74,6 +81,7 @@ export function readUserConfig(home = userConfigHome(), warn: (message: string) 
     for (const key of ["envFile", "agentsDir"]) {
       if (config[key] !== undefined && (typeof config[key] !== "string" || !isAbsolute(config[key] as string))) throw new Error();
     }
+    const notify = config.notify === undefined ? undefined : validateNotifyConfig(config.notify);
     const routing = config.routing === undefined ? undefined : validateRoutingConfig(config.routing);
     const runtimes = config.runtimes === undefined ? undefined : validateRuntimeConfig(config.runtimes);
     const connectors = config.connectors === undefined ? undefined : validateConnectors(config.connectors);
@@ -92,7 +100,7 @@ export function readUserConfig(home = userConfigHome(), warn: (message: string) 
         }
       }
     }
-    return { ...(routing && { routing }), ...(runtimes && { runtimes }), ...(connectors && { connectors }), ...(config.secrets !== undefined && { secrets }), ...(typeof config.envFile === "string" && { envFile: config.envFile }), ...(typeof config.agentsDir === "string" && { agentsDir: config.agentsDir }) };
+    return { ...(notify && { notify }), ...(routing && { routing }), ...(runtimes && { runtimes }), ...(connectors && { connectors }), ...(config.secrets !== undefined && { secrets }), ...(typeof config.envFile === "string" && { envFile: config.envFile }), ...(typeof config.agentsDir === "string" && { agentsDir: config.agentsDir }) };
   } catch {
     try { statSync(join(home, "config.json")); } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
@@ -188,4 +196,21 @@ export function loadUserEnvironment(options: {
       apply(parse(file.text), true);
     } catch { warn("Unable to load the configured env file; it must be an absolute path to a regular file that you own and that others cannot modify."); }
   }
+}
+
+/** Allowlisted dotted check-in keys; credentials are references only. */
+export function setNotifyConfig(key: string, value: string, home = userConfigHome()): void {
+  const parts = key.split(".");
+  const config = readUserConfig(home);
+  const notify = structuredClone(config.notify ?? {}) as Record<string, unknown>;
+  if (parts[0] !== "notify") throw new Error("Invalid notify key.");
+  if (parts.length === 2 && parts[1] === "desktop") {
+    if (!["true", "false"].includes(value)) throw new Error("notify.desktop must be true or false.");
+    notify.desktop = value === "true";
+  } else if (parts.length === 2 && parts[1] === "events") {
+    notify.events = value.startsWith("[") ? JSON.parse(value) : value.split(",").filter(Boolean);
+  } else if (parts.length === 3 && ["ntfy", "webhook"].includes(parts[1])) {
+    notify[parts[1]] = { ...(notify[parts[1]] as object), [parts[2]]: value };
+  } else throw new Error("Invalid notify key.");
+  saveUserConfig({ ...config, notify: validateNotifyConfig(notify) }, home);
 }

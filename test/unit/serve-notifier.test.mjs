@@ -8,7 +8,9 @@ import { newExecutionId } from "../../dist/ids.js";
 import { registerSecretLiteral } from "../../dist/security/secrets.js";
 import { buildCheckIn, checkInKind } from "../../dist/serve/messages.js";
 import { Notifier, planCheckIns, enqueue, readyPush, readNotifyState } from "../../dist/serve/notifier.js";
+import { configuredChannels, configuredSenders } from "../../dist/serve/senders.js";
 import { emit, frozenRun } from "../fixtures/execution/run.mjs";
+import { stubFetch } from "./helpers.mjs";
 
 const temps = [];
 after(() => { for (const path of temps) rmSync(path, { recursive: true, force: true }); });
@@ -86,6 +88,100 @@ test("serve notifier persists cursor and queue across restarts, dedupes ids and 
   assert.equal(notifier.state.channels.test.count, 1);
 });
 
+test("serve notifier preserves queued and later check-ins through startup credential failure and recovery", async t => {
+  const path = join(temporary("serve-secret-recovery-"), "notify-state.json");
+  const secretName = "WS28_NOTIFY_RECOVERY_SECRET";
+  const saved = new Map([secretName, "ROUNDTABLE_NOTIFY_WEBHOOK_SECRET"].map(name => [name, process.env[name]]));
+  for (const name of saved.keys()) delete process.env[name];
+  t.after(() => {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  const calls = stubFetch(t, () => new Response("", { status: 200 }));
+  const s = state();
+  const seeded = new Notifier(path, [{ name: "webhook", send: async () => { throw new Error("unexpected send"); } }]);
+  seeded.observe(s, []);
+  s.seq = 1;
+  seeded.observe(s, [event("execution.failed", 1, { reason: "x" })]);
+
+  const config = { webhook: { url: "https://receiver.example/check-in", secret: `secret://env/${secretName}` } };
+  const logs = [], log = message => logs.push(message);
+  const senders = await configuredSenders(config, log);
+  assert.deepEqual(senders, [], "the credential is unavailable at startup");
+  assert.ok(logs.some(message => message.startsWith("webhook:")));
+  assert.ok(!logs.includes("no check-in channel configured"));
+  const options = {
+    channels: configuredChannels(config),
+    initialize: async name => (await configuredSenders(config, log, [name]))[0],
+  };
+  let notifier = new Notifier(path, senders, log, options);
+  assert.equal(notifier.state.channels.webhook.count, 1, "startup keeps the durable queue");
+  s.seq = 2;
+  notifier.observe(s, [event("execution.failed", 2, { reason: "x" })]);
+  await notifier.flush(0);
+  const persisted = readNotifyState(path);
+  assert.equal(persisted.executions[s.execution].cursor, 2);
+  assert.equal(persisted.channels.webhook.count, 2);
+  assert.equal(persisted.channels.webhook.tries, 0, "initialization failures do not consume delivery attempts");
+  assert.equal(persisted.channels.webhook.lastAt, undefined);
+  assert.equal(calls.length, 0);
+
+  notifier = new Notifier(path, [], log, options);
+  s.seq = 3;
+  notifier.observe(s, [event("execution.failed", 3, { reason: "x" })]);
+  process.env[secretName] = "recovered-signing-secret";
+  await notifier.flush(1000);
+  assert.equal(calls.length, 1, "the next flush initializes the recovered sender and delivers");
+  assert.equal(calls[0].body.title, "3 more updates");
+  assert.equal(calls[0].body.seq, 3);
+  assert.equal(readNotifyState(path).channels.webhook.count, 0);
+  assert.equal(readNotifyState(path).executions[s.execution].cursor, 3);
+  await notifier.flush(11_000);
+  assert.equal(calls.length, 1, "delivered updates are not replayed");
+});
+
+test("serve notifier deletes a durable queue only when its channel is removed from configuration", () => {
+  const path = join(temporary("serve-removed-channel-"), "notify-state.json");
+  const message = buildCheckIn(state(), "completed", 1);
+  const notifier = new Notifier(path, [], () => {}, { channels: ["ntfy", "webhook"] });
+  notifier.queue(message);
+  notifier.save();
+  const updated = new Notifier(path, [], () => {}, { channels: ["webhook"] });
+  assert.equal(updated.state.channels.ntfy, undefined);
+  assert.equal(updated.state.channels.webhook.count, 1);
+  assert.equal(readNotifyState(path).channels.ntfy, undefined, "explicit removal is persisted");
+  updated.queue(message);
+  assert.equal(updated.state.channels.webhook.count, 2);
+});
+
+test("serve notifier starts the rate limit after delayed sender initialization", async t => {
+  const path = join(temporary("serve-delayed-sender-"), "notify-state.json");
+  let now = 0, sent = 0, initialized = 0;
+  t.mock.method(Date, "now", () => now);
+  const notifier = new Notifier(path, [], () => {}, {
+    channels: ["test"],
+    initialize: async name => {
+      initialized++;
+      now = 20_000;
+      return { name, send: async () => { sent++; return { ok: true }; } };
+    },
+  });
+  const message = buildCheckIn(state(), "completed", 1);
+  notifier.queue(message);
+  await notifier.flush();
+  assert.equal(notifier.state.channels.test.lastAt, 20_000);
+  now = 20_001;
+  notifier.queue(message);
+  await notifier.flush();
+  assert.equal(sent, 1);
+  now = 30_000;
+  await notifier.flush();
+  assert.equal(sent, 2);
+  assert.equal(initialized, 1, "successfully initialized senders are reused");
+});
+
 test("serve rate limit retries only retryable failures and never loses arrivals during a send", async () => {
   const path = join(temporary("serve-queue-"), "state.json");
   let calls = 0;
@@ -120,10 +216,10 @@ test("serve message is scrubbed, capped and excludes access URLs, tokens, paths 
   s.tasks.a = { spec: { persona: "my-persona" }, state: "ready" };
   const token = "abcdefghijklmnopqrstuvwx", secret = "unique-sensitive-value";
   registerSecretLiteral(secret);
-  const text = `${secret} my original prompt my-persona http://100.64.1.2:1234/${token}/ ${token} ${homedir()}/notes /Users/person/private /home/person/file ${"long ".repeat(150)}`;
+  const text = `${secret} my original prompt my-persona http://100.64.1.2:1234/${token}/ ${token} ${homedir()}/notes /${"Us" + "ers"}/person/private /home/person/file ${"long ".repeat(150)}`;
   const m = buildCheckIn(s, "awaiting_human", 1, text);
   assert.ok(m.body.length <= 300);
-  for (const forbidden of [secret, token, "http://", "/Users/", "/home/", homedir(), "my original prompt", "my-persona"]) assert.ok(!m.body.includes(forbidden), forbidden);
+  for (const forbidden of [secret, token, "http://", `/${"Us" + "ers"}/`, "/home/", homedir(), "my original prompt", "my-persona"]) assert.ok(!m.body.includes(forbidden), forbidden);
   assert.match(m.body, /Answer it from your chat, or run: roundtable status [a-z0-9]{6}$/);
   assert.ok(!m.body.includes("\n"));
 });

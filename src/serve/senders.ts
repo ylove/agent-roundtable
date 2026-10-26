@@ -64,7 +64,12 @@ export function desktopSender(platform = process.platform, find = findExecutable
   } };
 }
 
-export async function configuredSenders(config: NotifyConfig = {}, log: (s: string) => void = console.error): Promise<CheckInSender[]> {
+/** Configuration is independent of whether credentials or desktop tools are available. */
+export function configuredChannels(config: NotifyConfig = {}): string[] {
+  return ["ntfy", "webhook", "desktop"].filter(name => name === "ntfy" ? !!config.ntfy : name === "webhook" ? !!config.webhook : config.desktop === true);
+}
+
+export async function configuredSenders(config: NotifyConfig = {}, log: (s: string) => void = console.error, names: readonly string[] = configuredChannels(config)): Promise<CheckInSender[]> {
   validateNotifyConfig(config);
   const out: CheckInSender[] = [];
   const credential = async (ref?: string, env?: string) => {
@@ -73,6 +78,7 @@ export async function configuredSenders(config: NotifyConfig = {}, log: (s: stri
     return value;
   };
   for (const name of ["ntfy", "webhook", "desktop"] as const) {
+    if (!names.includes(name)) continue;
     try {
       if (name === "ntfy" && config.ntfy) {
         const c = config.ntfy;
@@ -93,6 +99,6 @@ export async function configuredSenders(config: NotifyConfig = {}, log: (s: stri
       }
     } catch (error) { log(`${name}: ${privateText(error instanceof Error ? error.message : "check-in configuration failed")}`); }
   }
-  if (!out.length) log("no check-in channel configured");
+  if (!configuredChannels(config).length) log("no check-in channel configured");
   return out;
 }

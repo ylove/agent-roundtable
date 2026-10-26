@@ -13,6 +13,11 @@ import type { CheckInSender } from "./senders.js";
 export interface NotifyCursor { cursor: number; escalations: string[] }
 export interface ChannelQueue { lastAt?: number; pending?: CheckIn; count: number; tries: number; notBefore?: number }
 export interface NotifyState { v: 1; executions: Record<string, NotifyCursor>; channels: Record<string, ChannelQueue> }
+export interface NotifierOptions {
+  /** Configured channels, including senders whose credentials are unavailable. */
+  channels?: readonly string[];
+  initialize?: (name: string) => Promise<CheckInSender | undefined>;
+}
 export const emptyNotifyState = (): NotifyState => ({ v: 1, executions: {}, channels: {} });
 
 export function readNotifyState(path: string): NotifyState {
@@ -69,14 +74,23 @@ export function readyPush(queue: ChannelQueue, now: number): CheckIn | null {
 export class Notifier {
   readonly state: NotifyState;
   private flushing = false;
-  constructor(private readonly path: string, private readonly senders: CheckInSender[], private readonly log: (s: string) => void = console.error) {
+  private readonly channels: readonly string[];
+  private readonly senders: Map<string, CheckInSender>;
+  constructor(private readonly path: string, senders: CheckInSender[], private readonly log: (s: string) => void = console.error, private readonly options: NotifierOptions = {}) {
+    this.senders = new Map(senders.map(sender => [sender.name, sender]));
+    this.channels = [...new Set(options.channels ?? this.senders.keys())];
     this.state = readNotifyState(path);
     // An explicitly removed channel must not replay its old queue if re-enabled later.
-    for (const name of Object.keys(this.state.channels)) if (!senders.some(s => s.name === name)) delete this.state.channels[name];
+    let removed = false;
+    for (const name of Object.keys(this.state.channels)) if (!this.channels.includes(name)) {
+      delete this.state.channels[name];
+      removed = true;
+    }
+    if (removed) this.save();
   }
   save(): void { writeFileAtomic(this.path, JSON.stringify(this.state) + "\n"); }
   queue(message: CheckIn): void {
-    for (const sender of this.senders) this.state.channels[sender.name] = enqueue(this.state.channels[sender.name], message);
+    for (const name of this.channels) this.state.channels[name] = enqueue(this.state.channels[name], message);
   }
   observe(state: BlackboardState, events: AnyEvent[], enabled?: readonly NotifyKind[]): void {
     const plan = planCheckIns(state, events, this.state.executions[state.execution], enabled);
@@ -84,17 +98,28 @@ export class Notifier {
     for (const message of plan.messages) this.queue(message);
     this.save();
   }
-  async flush(now = Date.now()): Promise<void> {
+  async flush(now?: number): Promise<void> {
     if (this.flushing) return;
     this.flushing = true;
     try {
-      await Promise.all(this.senders.map(async sender => {
-        const queue = this.state.channels[sender.name];
+      await Promise.all(this.channels.map(async name => {
+        let sender = this.senders.get(name);
+        if (!sender && this.options.initialize) {
+          try {
+            sender = await this.options.initialize(name);
+            if (sender?.name === name) this.senders.set(name, sender);
+            else sender = undefined;
+          } catch { this.log(`${name}: check-in sender initialization failed; will retry`); }
+        }
+        if (!sender) return;
+        const queue = this.state.channels[name];
         if (!queue) return;
-        const message = readyPush(queue, now);
+        // Credential resolution may take time; start the rate limit when sending.
+        const at = now ?? Date.now();
+        const message = readyPush(queue, at);
         if (!message) return;
         const count = queue.count;
-        queue.lastAt = now;
+        queue.lastAt = at;
         queue.tries++;
         this.save();
         let result;
@@ -104,7 +129,7 @@ export class Notifier {
         const current = this.state.channels[sender.name];
         if (!result.ok) this.log(`${sender.name}: ${privateText(result.error)}`);
         if (!result.ok && result.retryable && current.tries < 3) {
-          current.notBefore = now + Math.max(10_000, Math.min(300_000, result.retryAfterMs ?? 10_000));
+          current.notBefore = at + Math.max(10_000, Math.min(300_000, result.retryAfterMs ?? 10_000));
         } else {
           current.count = Math.max(0, current.count - count);
           if (!current.count) delete current.pending;

@@ -22,7 +22,7 @@ import { escapeHtml } from "../http/secure-server.js";
 import { startIndex } from "./index.js";
 import { supervise, type RelaunchHistory } from "./supervisor.js";
 import { Notifier } from "./notifier.js";
-import { configuredSenders } from "./senders.js";
+import { configuredChannels, configuredSenders } from "./senders.js";
 import { buildCheckIn, privateText } from "./messages.js";
 
 export const serveDir = (): string => join(ROUNDTABLE_HOME, "serve");
@@ -76,7 +76,14 @@ export async function startServe(options: ServeOptions = {}): Promise<RunningSer
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Cannot read supervisor history; refusing to reset the relaunch cap.");
     }
     const config = readUserConfig().notify ?? {};
-    const notifier = new Notifier(join(serveDir(), "notify-state.json"), await configuredSenders(config, log), log);
+    const senderWarnings = new Set<string>();
+    const senderLog = (message: string) => {
+      if (!senderWarnings.has(message)) { senderWarnings.add(message); log(message); }
+    };
+    const notifier = new Notifier(join(serveDir(), "notify-state.json"), await configuredSenders(config, senderLog), log, {
+      channels: configuredChannels(config),
+      initialize: async name => (await configuredSenders(config, senderLog, [name]))[0],
+    });
     index = await startIndex(address);
     const owner = readLockOwner(serveLockPath())!;
     const info: ServeInfo = { pid: process.pid, host: hostname(), url: index.url, bind: address, started_at: owner.at, version: VERSION };

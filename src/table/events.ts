@@ -155,6 +155,8 @@ export interface DuelOptions {
   seats?: Record<string, SeatSpec>;
   mix?: "auto" | "cheap";
   agentsDir?: string;
+  /** Configured MCP connectors every seat may use as tools during its turns (read-only tools unless the config lists more). */
+  connectors?: string[];
 }
 
 /** The outcome returned after a duel finishes or is aborted. */

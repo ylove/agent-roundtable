@@ -21,14 +21,15 @@ const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges
   --kind web|code|diagram|text   what the teams build (default web)
   --criteria "a,b,c"           judging rubric (default: fit to the brief, quality, usability and accessibility, risk or safety)
   --no-page-check              skip headless page checks
+  --connectors <a,b>           let every seat call these configured MCP connectors (read-only tools unless the config lists more)
   --rounds 1|2  --turn-timeout <s>  --max-seconds <s>  --agents-dir <abs-path>
   --dry-run                    replay the bundled synthetic duel (no keys)
   --replay <archive.json> [--speed <n>]   replay a saved duel
-roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...] [--duel <duel-id>]
+roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...] [--duel <duel-id>] [--connectors <a,b>]
   --duel makes a saved duel the focus (its brief joins the context); the topic may then be omitted
 roundtable config show | config set env-file|agents-dir <absolute-path>
 roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>
-roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=secret://ref]
+roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=secret://ref] [--tool name]
 roundtable config unset connector <name> | secrets check
 `;
 class UsageError extends Error { readonly exitCode = 2; }
@@ -43,7 +44,7 @@ function quietOnClosedPipe(stream: NodeJS.WriteStream): void {
 }
 type Flags = Record<string, string | true>;
 export interface ParsedTableArgs { duelFocus?: import("./sessions/duel-focus.js").DuelFocus; topic: string; flags: Flags; options: DuelOptions; agents: string[] }
-const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed", "duel"];
+const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed", "duel", "connectors"];
 const switches = ["open", "no-room", "no-hold", "json", "dry-run", "preflight", "no-preflight", "no-duel-source", "no-page-check"];
 const list = (value: string | true | undefined): string[] => {
   if (value === undefined) return [];
@@ -72,6 +73,8 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   if (typeof parsed["agents-dir"] === "string" && !isAbsolute(parsed["agents-dir"])) throw new UsageError("--agents-dir requires an absolute directory.");
   const rounds = positive(parsed, "rounds", command === "duel" ? 1 : 2);
   if (!Number.isInteger(rounds) || (command === "duel" ? rounds > 2 : rounds > 20)) throw new UsageError(command === "duel" ? "--rounds must be 1 or 2." : "--rounds must be a whole number from 1 to 20.");
+  const connectors = list(parsed.connectors);
+  if (connectors.length && replay) throw new UsageError("--connectors is not available with replay or dry-run.");
   const teamA = list(parsed["team-a"]), teamB = list(parsed["team-b"]), judges = list(parsed.judges), agents = list(parsed.agents);
   if (command !== "duel" && (parsed.kind !== undefined || parsed.criteria !== undefined)) throw new UsageError("--kind and --criteria are available for duel.");
   if (parsed.kind !== undefined && !DUEL_KINDS.includes(parsed.kind as never)) throw new UsageError(`--kind must be one of ${DUEL_KINDS.join(", ")}.`);
@@ -91,7 +94,7 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const turnTimeoutMs = positive(parsed, "turn-timeout", 90) * 1000;
   const maxSeconds = positive(parsed, "max-seconds", 600);
   positive(parsed, "speed", 1);
-  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, ...(parsed["no-page-check"] && { pageCheck: false }), rounds: rounds as 1 | 2, turnTimeoutMs, ...(command !== "duel" || parsed["max-seconds"] !== undefined ? { maxSeconds } : {}), ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }) } };
+  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, ...(parsed["no-page-check"] && { pageCheck: false }), rounds: rounds as 1 | 2, turnTimeoutMs, ...(command !== "duel" || parsed["max-seconds"] !== undefined ? { maxSeconds } : {}), ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }), ...(connectors.length && { connectors }) } };
 }
 
 /** Merge-time module contracts. String imports let the CLI build before the duel modules land. */
@@ -160,20 +163,21 @@ function configCommand(args: string[], output: TerminalOutput): number {
   }
   if (args[0] === "set" && args[1] === "connector" && args.length >= 5) {
     let command: string | undefined;
-    const argv: string[] = [], env: Record<string, string> = {};
+    const argv: string[] = [], env: Record<string, string> = {}, tools: string[] = [];
     for (let i = 3; i < args.length; i += 2) {
       const flag = args[i], value = args[i + 1];
       if (value === undefined) throw new UsageError("Connector flags require a value.");
       if (flag === "--command" && command === undefined) command = value;
       else if (flag === "--arg") argv.push(value);
+      else if (flag === "--tool") tools.push(value);
       else if (flag === "--env") {
         const at = value.indexOf("=");
         if (at < 1 || !ENV_NAME.test(value.slice(0, at))) throw new UsageError("Connector env requires VAR=value.");
         env[value.slice(0, at)] = value.slice(at + 1);
-      } else throw new UsageError("Use connector --command, --arg or --env.");
+      } else throw new UsageError("Use connector --command, --arg, --env or --tool.");
     }
     if (!command) throw new UsageError("Connector requires --command <absolute-path>.");
-    setConnectorConfig(args[2], { command, args: argv, env });
+    setConnectorConfig(args[2], { command, args: argv, env, ...(tools.length && { tools }) });
     output.write("connector: set\n");
     return 0;
   }
@@ -241,6 +245,11 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
       parsed.duelFocus = focus;
       if (!parsed.topic.trim()) parsed.topic = defaultDuelTopic(focus);
     }
+    if (parsed.options.connectors?.length) {
+      // An unknown or unlaunchable connector fails here, before seats are prepared or any provider is called.
+      const { assertConnectorsKnown } = await import("./table/seat-connectors.js");
+      try { assertConnectorsKnown(parsed.options.connectors); } catch (e) { throw new UsageError(e instanceof Error ? e.message : "Unknown connector."); }
+    }
     if (!replay) {
       const { prepareSeats } = await import("./table/seats.js");
       seats = await prepareSeats(
@@ -289,6 +298,7 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
   const stop = AbortSignal.any([signal, limits.signal]);
   let id: string | undefined;
   let pending = Promise.resolve();
+  const early: Extract<import("./table/events.js").TableEvent, { type: "turn" }>[] = [];
   const days = new Set([day()]);
   let timedOut: string | undefined;
   const abort = (message: string) => { timedOut ??= message; limits.abort(new Error(message)); };
@@ -299,7 +309,10 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
     if (c.origin !== origin) return;
     const starting = !id;
     id = c.id;
-    if (starting) pending = pending.then(async () => { await observer.onEvent({ type: "start", id: c.id, topic: parsed.topic, mode: command as "meeting" | "debate" | "waffle", seats: [...seats.values()], startedAt: c.startedAt.toISOString() }); });
+    if (starting) {
+      pending = pending.then(async () => { await observer.onEvent({ type: "start", id: c.id, topic: parsed.topic, mode: command as "meeting" | "debate" | "waffle", seats: [...seats.values()], startedAt: c.startedAt.toISOString() }); });
+      for (const note of early.splice(0)) pending = pending.then(async () => { await observer.onEvent(note); });
+    }
     const seat = seats.get(message.agent);
     if (!seat) return;
     const event = { type: "turn" as const, round: String(c.currentRound + 1), seat, text: message.content, ts: message.timestamp.toISOString() };
@@ -312,6 +325,15 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
     const started = await sessions.startCollaboration(parsed.agents, parsed.topic, {
       mode: command === "debate" ? "debate" : command === "waffle" ? "waffle-house" : "collaborate",
       maxRounds: Number(parsed.flags.rounds ?? 2), ...(parsed.duelFocus && { duel: parsed.duelFocus }), seats: parsed.options.seats, origin, signal: stop,
+      ...(parsed.options.connectors?.length && { connectors: parsed.options.connectors }),
+      // Each connector call is a short note in the transcript, like a turn; the payload never appears.
+      onToolNote: use => {
+        const seat = seats.get(use.seat);
+        if (!seat) return;
+        const event = { type: "turn" as const, round: "tool", seat, text: use.note, ts: new Date().toISOString() };
+        // Notes from the opening turn wait for the start event.
+        if (!id) early.push(event); else pending = pending.then(async () => { await observer.onEvent(event); });
+      },
     });
     id = started.collaborationId;
     const collaboration = sessions.collaborations.get(id)!;

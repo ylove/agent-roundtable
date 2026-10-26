@@ -7,9 +7,10 @@ import { runDuel, validateDuelOptions, withChosenSeats } from "../table/duel.js"
 import type { DuelKind, DuelOptions, SeatSpec, TableEvent } from "../table/events.js";
 import { DUEL_KINDS, MAX_CRITERIA } from "../table/prompts.js";
 import { prepareSeats } from "../table/seats.js";
-import type { ToolCallContext } from "./shared.js";
+import { CONNECTORS_PROP, type ToolCallContext } from "./shared.js";
 import type { JsonSchema } from "../validate.js";
 import { MAX_JUDGES, MAX_TEAM_SIZE } from "../table/duel-options.js";
+import { assertConnectorsKnown } from "../table/seat-connectors.js";
 
 const personaList = (what: string, max: number): JsonSchema => ({
   type: "array", items: { type: "string", minLength: 1, maxLength: 200 }, minItems: 1, maxItems: max,
@@ -27,6 +28,7 @@ export const START_DUEL_SCHEMA: JsonSchema & { type: "object" } = {
     judges: personaList(`Judge personas, 1 to ${MAX_JUDGES}.`, MAX_JUDGES),
     kind: { type: "string", enum: [...DUEL_KINDS], description: "What the teams build: web (a self-contained index.html, inline CSS, optional inline JS; default), code (source files, shown as read-only text and never executed), diagram (Mermaid source) or text (markdown or plain text)." },
     criteria: { type: "array", items: { type: "string", minLength: 1, maxLength: 120 }, maxItems: MAX_CRITERIA, description: "Judging rubric. Default: fit to the brief, quality, usability and accessibility, and risk or safety within the judge's own remit." },
+    connectors: CONNECTORS_PROP,
     page_check: { type: "boolean", description: "Check web pages in local headless Chrome when available (default true). Set false to skip." },
     rounds: { type: "number", minimum: 1, maximum: 2, description: "1 (default) judges once; 2 lets a team the judges did not approve revise once and keeps the original tally." },
     seats: {
@@ -78,7 +80,7 @@ export function summarizeDuel(events: TableEvent[], result: { id: string; winner
 }
 
 export async function startDuelTool(args: Record<string, unknown>, ctx?: ToolCallContext): Promise<CallToolResult> {
-  const a = args as { topic: string; team_a: string[]; team_b: string[]; judges: string[]; kind?: DuelKind; criteria?: string[]; rounds?: number; page_check?: boolean; seats?: Record<string, SeatSpec>; provider?: import("../config.js").LLMProvider | "auto"; model?: string; turn_timeout_s?: number; max_seconds?: number };
+  const a = args as { topic: string; team_a: string[]; team_b: string[]; judges: string[]; kind?: DuelKind; criteria?: string[]; rounds?: number; page_check?: boolean; connectors?: string[]; seats?: Record<string, SeatSpec>; provider?: import("../config.js").LLMProvider | "auto"; model?: string; turn_timeout_s?: number; max_seconds?: number };
   const opts: DuelOptions = {
     topic: a.topic, teamA: a.team_a, teamB: a.team_b, judges: a.judges,
     ...(a.kind && { kind: a.kind }), ...(a.criteria && { criteria: a.criteria }),
@@ -86,9 +88,12 @@ export async function startDuelTool(args: Record<string, unknown>, ctx?: ToolCal
     rounds: (a.rounds ?? 1) as 1 | 2,
     ...(a.turn_timeout_s !== undefined && { turnTimeoutMs: a.turn_timeout_s * 1000 }),
     ...(a.max_seconds !== undefined && { maxSeconds: a.max_seconds }),
+    ...(a.connectors?.length && { connectors: a.connectors }),
   };
   if (a.rounds !== undefined && a.rounds !== 1 && a.rounds !== 2) throw new Error("rounds must be 1 or 2.");
   validateDuelOptions(opts);
+  // An unknown connector fails before seats are prepared or any provider is called.
+  assertConnectorsKnown(opts.connectors);
   const seats = await prepareSeats({ teamA: opts.teamA, teamB: opts.teamB, judges: opts.judges, seats: a.seats, provider: a.provider, model: a.model }, { signal: ctx?.signal, preflight: a.provider && a.provider !== "auto" ? false : undefined });
   const events: TableEvent[] = [];
   let step = 0;

@@ -40,6 +40,7 @@ export const START_DUEL_SCHEMA: JsonSchema & { type: "object" } = {
       patternProperties: { "^.+$": { type: "object", properties: { agent: { type: "string" }, provider: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,31}$", description: "Provider or explicit configured runtime name." }, model: { type: "string", minLength: 1 } }, additionalProperties: false } },
     },
     turn_timeout_s: { type: "number", minimum: 1, maximum: 3600, description: "Seconds allowed for each turn. Default 90 (builds get at least 240)." },
+    max_usd: { type: "number", exclusiveMinimum: 0, description: "Optional positive finite session spend cap in USD. Stops with a checkpoint when metered spend reaches the cap; resume through the CLI with a higher --max-usd." },
     max_seconds: { type: "number", minimum: 1, maximum: 3600, description: "Time limit for the whole duel before it moves to closings. Default 600, plus 150 per stage beyond the first and 120 per member beyond two on the larger team, capped at 3600. Hosts need a request timeout longer than this, or one that resets on progress notifications." },
   },
   required: ["topic", "team_a", "team_b", "judges"],
@@ -69,6 +70,7 @@ export function summarizeDuel(events: TableEvent[], result: DuelResult): Record<
     chosen: result.chosen,
     decidedBy: result.decidedBy,
     ...(result.aborted && { aborted: true }),
+    ...(result.resumable && { resumable: true }),
     kind: start?.kind ?? "web",
     criteria: start?.criteria,
     teams,
@@ -76,6 +78,7 @@ export function summarizeDuel(events: TableEvent[], result: DuelResult): Record<
     verdicts: events.flatMap(e => e.type === "assessment" ? [{ judge: e.judge.name, judge_key: personaKey(e.judge.id), team: e.team, version: e.version, verdict: e.verdict, reason: one(e.reason, 300) }] : []),
     dissents: events.flatMap(e => e.type === "dissent" ? [{ team: e.team, persona: e.seat.name, persona_key: personaKey(e.seat.id), text: e.text.slice(0, 600) }] : []),
     usage: usage && {
+      ...(usage.capUsd !== undefined && { max_usd: usage.capUsd, spent_usd: usage.spentUsd, cap_reached: usage.capReached }),
       total_cost_usd: Number(usage.totalCostUsd.toFixed(6)),
       ...(usage.totalUnpricedTokens ? { unpriced_tokens: usage.totalUnpricedTokens } : {}),
       per_persona: usage.perSeat.map(s => ({ persona: personaKey(s.seatId), input_tokens: s.inputTokens, output_tokens: s.outputTokens, cost_usd: Number(s.costUsd.toFixed(6)), ...(s.unpricedTokens ? { unpriced_tokens: s.unpricedTokens } : {}) })),
@@ -85,10 +88,10 @@ export function summarizeDuel(events: TableEvent[], result: DuelResult): Record<
 }
 
 export async function startDuelTool(args: Record<string, unknown>, ctx?: ToolCallContext): Promise<CallToolResult> {
-  const a = args as { topic: string; team_a: string[]; team_b: string[]; judges: string[]; kind?: DuelKind; stages?: number; criteria?: string[]; rounds?: number; page_check?: boolean; connectors?: string[]; seat_connectors?: Record<string, string[]>; seats?: Record<string, SeatSpec>; provider?: import("../config.js").LLMProvider | "auto"; model?: string; turn_timeout_s?: number; max_seconds?: number };
+  const a = args as { topic: string; team_a: string[]; team_b: string[]; judges: string[]; kind?: DuelKind; stages?: number; criteria?: string[]; rounds?: number; page_check?: boolean; connectors?: string[]; seat_connectors?: Record<string, string[]>; seats?: Record<string, SeatSpec>; provider?: import("../config.js").LLMProvider | "auto"; model?: string; turn_timeout_s?: number; max_seconds?: number; max_usd?: number };
   if (args.human_judge !== undefined || args.resume !== undefined) throw new Error("Human judging and resume are CLI-only; start_duel runs a whole duel at once.");
   const opts: DuelOptions = {
-    topic: a.topic, teamA: a.team_a, teamB: a.team_b, judges: a.judges,
+    maxUsd: a.max_usd, topic: a.topic, teamA: a.team_a, teamB: a.team_b, judges: a.judges,
     ...(a.kind && { kind: a.kind }), ...(a.criteria && { criteria: a.criteria }),
     ...(a.page_check !== undefined && { pageCheck: a.page_check }),
     ...(a.stages !== undefined && { stages: a.stages }),

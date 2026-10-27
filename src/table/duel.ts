@@ -1,3 +1,6 @@
+import { ESTIMATED_RATE_PER_MTOK } from "../providers/router.js";
+import { reserveLiveSession } from "../usage/live-limit.js";
+import { setSessionCap, sessionCapView, validateSessionCap, sessionSpend } from "../usage/session-caps.js";
 import { checkPage, pageCheckFailed, pageCheckRecord, pageCheckSummary, pageChecksOff, type PageCheck } from "../prototypes/page-check.js";
 import { ChromeProcesses, findChrome } from "../prototypes/browser.js";
 import { startRoom } from "./room.js";
@@ -213,26 +216,34 @@ function checkFeedback(check?: PageCheck): string {
   return check ? [pageCheckSummary(check), ...check.consoleErrors, ...check.exceptions].join("\n") : "";
 }
 
-export type DuelInput = (Omit<DuelOptions, "judges"> & { judges?: string[] }) | { resume: string };
+export type DuelInput = (Omit<DuelOptions, "judges"> & { judges?: string[] }) | { resume: string; maxUsd?: number };
+const savedSpend = (u: DuelUsage): number => u.capSpendUsd ?? u.costUsd + u.unpricedTokens * ESTIMATED_RATE_PER_MTOK.output / 1e6;
 type DuelRunner = (opts: DuelInput, obs: TableObserver, signal: AbortSignal, deps?: DuelDependencies) => Promise<DuelResult>;
 /** Start the requested seat connectors (an unknown one fails here, before any provider call) and close them when the duel ends. */
 export const runDuel: RunDuel & DuelRunner = async (input: DuelInput, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
   let restored: DuelCheckpoint | undefined;
   if (input.resume !== undefined) {
-    if (Object.keys(input).some(k => k !== "resume")) throw new Error("Resume takes only a duel id; options come from the checkpoint.");
+    if (Object.keys(input).some(k => k !== "resume" && k !== "maxUsd")) throw new Error("Resume takes only a duel id and optional maxUsd; other options come from the checkpoint.");
     restored = readCheckpoint(input.resume);
   }
-  const opts: DuelOptions = restored?.options ?? { ...input, judges: ("judges" in input ? input.judges : undefined) ?? [] } as DuelOptions;
+  validateSessionCap(input.maxUsd);
+  const opts: DuelOptions = restored ? { ...restored.options, ...(input.maxUsd !== undefined && { maxUsd: input.maxUsd }) } : { ...input, judges: ("judges" in input ? input.judges : undefined) ?? [] } as DuelOptions;
   validateDuelOptions(opts);
-  if (opts.humanJudge && !deps.controls) throw new Error("humanJudge requires duel controls from createDuelControls().");
-  if (!opts.connectors?.length) return runDuelBody(opts, obs, signal, deps, restored);
-  const checked = checkSeatConnectorArgs(opts.connectors, opts.seatConnectors, [...opts.teamA, ...opts.teamB, ...opts.judges]);
-  const connectors = await startSeatConnectors(checked.names, { signal, seatConnectors: checked.seatConnectors });
-  try { return await withSeatConnectors(connectors, () => runDuelBody(opts, obs, signal, deps, restored)); }
-  finally { await connectors.close(); }
+  const restoredSpend = restored?.usage.reduce((n, u) => n + savedSpend(u), 0) ?? 0;
+  if (restored && opts.maxUsd !== undefined && restoredSpend >= opts.maxUsd) throw new Error("Spend cap already reached; raise --max-usd to resume this duel.");
+  const liveId = restored?.id ?? `duel-${randomUUID()}`;
+  const releaseRoom = reserveLiveSession(liveId);
+  try {
+    if (opts.humanJudge && !deps.controls) throw new Error("humanJudge requires duel controls from createDuelControls().");
+    if (!opts.connectors?.length) return await runDuelBody(opts, obs, signal, deps, restored, liveId);
+    const checked = checkSeatConnectorArgs(opts.connectors, opts.seatConnectors, [...opts.teamA, ...opts.teamB, ...opts.judges]);
+    const connectors = await startSeatConnectors(checked.names, { signal, seatConnectors: checked.seatConnectors });
+    try { return await withSeatConnectors(connectors, () => runDuelBody(opts, obs, signal, deps, restored, liveId)); }
+    finally { await connectors.close(); }
+  } finally { releaseRoom(); }
 };
 
-async function runDuelBody(opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies, restored?: DuelCheckpoint): Promise<DuelResult> {
+async function runDuelBody(opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies, restored?: DuelCheckpoint, liveId?: string): Promise<DuelResult> {
   validateDuelOptions(opts);
   const kind: DuelKind = opts.kind ?? "web";
   const plan = stagePlan(kind, opts.stages ?? (kind === "web" ? 4 : 1));
@@ -254,13 +265,14 @@ async function runDuelBody(opts: DuelOptions, obs: TableObserver, signal: AbortS
   const teams = { A: resolved.filter(s => s.team === "A"), B: resolved.filter(s => s.team === "B") };
   const judges = resolved.filter(s => s.team === "judge");
   if (!teams.A.length || !teams.B.length || (!opts.humanJudge && !judges.length) || new Set(seats.map(s => s.id)).size !== seats.length) throw new Error("Resolved seats must include distinct seats for both teams and judges.");
-  const id = restored?.id ?? `duel-${randomUUID()}`;
+  const id = liveId ?? restored?.id ?? `duel-${randomUUID()}`;
   const archive: DuelArchive = restored?.archive ?? { version: 2, events: [], prototypes: [] };
   const archivePath = join(ROUNDTABLE_HOME, "duels", `${id}.json`);
-  const usage = new Map<string, DuelUsage>(seats.map(s => [s.id, { seatId: s.id, inputTokens: 0, outputTokens: 0, costUsd: 0, unpricedTokens: 0, estimated: false }]));
+  const usage = new Map<string, DuelUsage>(seats.map(s => [s.id, { seatId: s.id, inputTokens: 0, outputTokens: 0, costUsd: 0, capSpendUsd: 0, unpricedTokens: 0, estimated: false }]));
   for (const total of restored?.usage ?? []) usage.set(total.seatId, { ...total });
   const control = duelControlRunner(deps.controls ?? createDuelControls());
   let stopBy: DuelCommandSource = "tool";
+  let capStopped = false;
   let acceptingUsage = true;
   const abandoners = new Set<() => void>();
   const localStop = new AbortController();
@@ -282,15 +294,18 @@ async function runDuelBody(opts: DuelOptions, obs: TableObserver, signal: AbortS
     try { await obs.onEvent(event); } catch { /* An observer cannot interrupt archival. */ }
   };
   const emitUsage = () => {
-    const perSeat = [...usage.values()].map(total => ({ ...total }));
+    const perSeat = [...usage.values()].map(({ capSpendUsd: _capSpend, ...total }) => ({ ...total }));
     return emit({ type: "usage", perSeat, totalCostUsd: perSeat.reduce((n, seat) => n + seat.costUsd, 0),
-      totalUnpricedTokens: perSeat.reduce((n, seat) => n + seat.unpricedTokens, 0) });
+      totalUnpricedTokens: perSeat.reduce((n, seat) => n + seat.unpricedTokens, 0),
+      ...(sessionCapView(id) && { capUsd: opts.maxUsd, spentUsd: sessionCapView(id)!.spentUsd, capReached: capStopped }) });
   };
   if (restored) resetSessionSignal(id);
   const sessionStop = sessionSignal(id);
   const stop = () => { abortSession(id, "Duel stopped."); };
   control.clear();
-  control.onStop(by => { stopBy = by; localStop.abort(new Error("Duel stopped.")); stop(); });
+  const requestStop = (by: DuelCommandSource) => { stopBy = by; localStop.abort(new Error("Duel stopped.")); stop(); };
+  control.onStop(requestStop);
+  setSessionCap(id, opts.maxUsd, [...usage.values()].reduce((n, u) => n + savedSpend(u), 0), () => { capStopped = true; requestStop("tool"); });
   control.setAvailable({ stop: true });
   registerDuel({ id, agents: [...new Set(seats.map(s => agentKey(s.id.replace(/^(?:A|B|judge):/, ""))))], started: new Date().toISOString() });
   const cancelled = () => stopped.aborted || sessionStop.aborted;
@@ -371,6 +386,7 @@ async function runDuelBody(opts: DuelOptions, obs: TableObserver, signal: AbortS
           const usd = report.usd ?? line.usd;
           total.inputTokens += input;
           total.outputTokens += output;
+          total.capSpendUsd = savedSpend(total) + sessionSpend(line);
           total.costUsd += usd ?? 0;
           // A model with no known price keeps its tokens visible rather than counting as $0.00.
           if (usd === undefined) total.unpricedTokens += input + output;
@@ -563,9 +579,10 @@ async function runDuelBody(opts: DuelOptions, obs: TableObserver, signal: AbortS
     await emitUsage();
     // Freeze the picture before observers can react to the stopped event.
     acceptingUsage = false;
-    await emit({ type: "control", action: "stopped", by: stopBy, ts: new Date().toISOString() });
+    await emit({ type: "control", action: "stopped", by: stopBy, ...(capStopped && { reason: "spend cap" as const }), ts: new Date().toISOString() });
     const options: DuelOptions = { topic: scrub(opts.topic), teamA: opts.teamA, teamB: opts.teamB, judges: opts.judges,
       kind, criteria: criteria.map(c => scrub(c)), stages: plan.length, rounds: opts.rounds ?? 1,
+      ...(opts.maxUsd !== undefined && { maxUsd: opts.maxUsd }),
       maxSeconds: limitSeconds, turnTimeoutMs: opts.turnTimeoutMs ?? 90_000,
       ...(opts.humanJudge !== undefined && { humanJudge: opts.humanJudge }), ...(opts.pageCheck !== undefined && { pageCheck: opts.pageCheck }),
       ...(opts.agentsDir && { agentsDir: opts.agentsDir }), ...(opts.connectors && { connectors: opts.connectors }),
@@ -587,6 +604,7 @@ async function runDuelBody(opts: DuelOptions, obs: TableObserver, signal: AbortS
     }
     await emit(startEvent());
     if (restored) await emit({ type: "control", action: "resumed", by: deps.resumeBy ?? "tool", ts: new Date().toISOString() });
+    if (opts.maxUsd !== undefined) await emitUsage();
     try {
       if (state.phase === "build") {
         if (!cancelled() && !expired()) {

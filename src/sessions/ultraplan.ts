@@ -1,11 +1,13 @@
-import { prepareSeats } from "../table/seats.js";
-import { callSeat } from "../table/dispatch.js";
-import { checkSeatConnectorArgs, startSeatConnectors, withSeatConnectors, type SeatConnectorMap, type SeatConnectorSession } from "../table/seat-connectors.js";
-import type { Seat } from "../table/events.js";
 // ============================================================================
 // Ultraplan: specialist input, independent reviews and final sign-offs
 // ============================================================================
 
+import { reserveLiveSession, registerLiveSessionSource } from "../usage/live-limit.js";
+import { validateSessionCap, setSessionCap, stopCappedSession, clearSessionCap, sessionCapView } from "../usage/session-caps.js";
+import { prepareSeats } from "../table/seats.js";
+import { callSeat } from "../table/dispatch.js";
+import { checkSeatConnectorArgs, startSeatConnectors, withSeatConnectors, type SeatConnectorMap, type SeatConnectorSession } from "../table/seat-connectors.js";
+import type { Seat } from "../table/events.js";
 import { DEFAULT_MODELS, MAX_TOKENS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
 import { agentKey, loadAgentPromptWithPath } from "../agents.js";
 import { recordActivity } from "../activity.js";
@@ -99,6 +101,7 @@ export interface UltraplanFinalResult {
 }
 
 export const ultraplans = new Map<string, Ultraplan>();
+registerLiveSessionSource("ultraplan", () => ultraplans.keys());
 
 function ultraplanBusy(id: string): string {
   return sessionBusyMessage("Ultraplan", id, "a phase");
@@ -431,99 +434,107 @@ function available(id: string): Ultraplan {
 
 export async function startUltraplan(
   agents: string[], task: string,
-  opts: { context?: string; draftPlan?: string; planner?: string; revisionRounds?: number; public?: boolean;
+  opts: { maxUsd?: number; context?: string; draftPlan?: string; planner?: string; revisionRounds?: number; public?: boolean;
     provider?: LLMProvider | "auto"; model?: string; baseUrl?: string; executionReady?: boolean; origin?: string;
     /** Names of configured MCP connectors the agents may use as tools (see docs/connectors.md). */
     connectors?: string[];
     /** Limits an agent to some of those connectors (agent name to connector names). */
     seatConnectors?: SeatConnectorMap; signal?: AbortSignal } = {}
 ): Promise<UltraplanStepResult | UltraplanFinalResult> {
-  if ((opts.provider === undefined || opts.provider === "auto") && opts.baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
-  if (!Array.isArray(agents) || agents.length < 1) throw new Error("Ultraplan requires at least 1 agent");
-  if (typeof task !== "string" || !task.trim()) throw new Error("task is required: describe what the plan is for");
-  // An unknown connector fails here, before a session exists or any provider is called.
-  const checked = checkSeatConnectorArgs(opts.connectors, opts.seatConnectors, [...agents, ...(opts.planner ? [opts.planner] : [])]);
-  const suffix = opts.public ? publicDirectiveSuffix() : "";
-  async function load(name: string, directive: string): Promise<Ultraplan["agents"][number]> {
-    const { path, content } = await loadAgentPromptWithPath(name);
-    return { name, key: agentKey(path), systemPrompt: content + directive + suffix };
-  }
-  const participants = [];
-  for (const name of agents) participants.push(await load(name, buildUltraplanParticipantDirective()));
-  const planner = opts.planner !== undefined ? await load(opts.planner, buildUltraplanPlannerDirective()) : undefined;
-  const seats = opts.provider === undefined || opts.provider === "auto"
-    ? await prepareSeats({ agents: [...new Set([...agents, ...(opts.planner ? [opts.planner] : [])])], model: opts.model, tier: "judge" }) : undefined;
+  validateSessionCap(opts.maxUsd);
   const id = newId("ultraplan");
-  const publicChannel = opts.public ? openPublicChannel(id, {
-    mode: "ultraplan", participants: [...participants.map((a) => publicLabel(a.name)),
-      planner ? `planner: ${publicLabel(planner.name)}` : "planner: orchestrator"], topic: task,
-  }) : undefined;
-  const toolNotes: string[] = [];
-  let connectors: SeatConnectorSession | undefined;
+  const releaseRoom = reserveLiveSession(id);
   try {
-    connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: opts.signal, seatConnectors: checked.seatConnectors, onNote: use => toolNotes.push(use.note) }) : undefined;
-  } catch (e) {
-    if (publicChannel) void publicChannel.finalize();
-    throw e;
-  }
-  const provider = (seats?.values().next().value?.provider ?? opts.provider) as LLMProvider;
-  const u: Ultraplan = {
-    id, task, context: opts.context, agents: participants, planner, provider, model: seats?.values().next().value?.model ?? opts.model ?? DEFAULT_MODELS[provider],
-    ...(seats && { routing: [...seats.values()] }),
-    ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }), status: "awaiting_plan",
-    versions: [], entries: [], startedAt: new Date(), ...(publicChannel && { publicChannel }),
-    ...(opts.executionReady === true && { executionReady: true }),
-    ...(opts.origin !== undefined && { origin: opts.origin }),
-    ...(connectors && { connectors, toolNotes }),
-  };
-  ultraplans.set(id, u);
-  const release = lockSession(id, ultraplanBusy(id));
-  let step = "input";
-  try {
-    const draft = opts.draftPlan?.trim();
-    if (!draft) commitPhase(u, await computePhase(u, "input"));
-    if (!planner) {
-      if (draft) {
-        step = "review of v1";
-        const v = nextVersion(u, draft, "orchestrator");
-        const entries = await computePhase(u, "review", v);
-        commitPlan(u, v);
-        commitPhase(u, entries);
-      }
-      return stepResult(u);
+    if ((opts.provider === undefined || opts.provider === "auto") && opts.baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
+    if (!Array.isArray(agents) || agents.length < 1) throw new Error("Ultraplan requires at least 1 agent");
+    if (typeof task !== "string" || !task.trim()) throw new Error("task is required: describe what the plan is for");
+    // An unknown connector fails here, before a session exists or any provider is called.
+    const checked = checkSeatConnectorArgs(opts.connectors, opts.seatConnectors, [...agents, ...(opts.planner ? [opts.planner] : [])]);
+    const suffix = opts.public ? publicDirectiveSuffix() : "";
+    async function load(name: string, directive: string): Promise<Ultraplan["agents"][number]> {
+      const { path, content } = await loadAgentPromptWithPath(name);
+      return { name, key: agentKey(path), systemPrompt: content + directive + suffix };
     }
-    if (!draft) {
-      step = "draft";
-      await authorPlan(u, buildPlannerDraftPrompt(task, u.context, participants.map((a) => label(u, a.name)), inputsFor(u), u.executionReady === true));
-    }
-    const rounds = Math.min(3, Math.max(1, Math.floor(Number(opts.revisionRounds)) || 1));
-    for (let round = 0; round < rounds; round++) {
-      const v = round === 0 && draft ? nextVersion(u, draft, "orchestrator") : u.versions.at(-1)!;
-      step = `review of v${v.version}`;
-      const entries = await computePhase(u, "review", v);
-      if (round === 0 && draft) commitPlan(u, v);
-      commitPhase(u, entries);
-      step = `revision to v${v.version + 1}`;
-      await authorPlan(u, buildPlannerRevisePrompt(task, v.plan, v.version, verdictsFor(u, entries), u.context, u.executionReady === true));
-    }
-    step = "sign-off";
-    const entries = await computePhase(u, "signoff", u.versions.at(-1)!);
-    commitPhase(u, entries);
-    return await finalize(u, verdictsFor(u, entries), true);
-  } catch (e) {
-    if (!u.entries.length) {
-      ultraplans.delete(id);
-      await connectors?.close();
+    const participants = [];
+    for (const name of agents) participants.push(await load(name, buildUltraplanParticipantDirective()));
+    const planner = opts.planner !== undefined ? await load(opts.planner, buildUltraplanPlannerDirective()) : undefined;
+    const seats = opts.provider === undefined || opts.provider === "auto"
+      ? await prepareSeats({ agents: [...new Set([...agents, ...(opts.planner ? [opts.planner] : [])])], model: opts.model, tier: "judge" }) : undefined;
+    const publicChannel = opts.public ? openPublicChannel(id, {
+      mode: "ultraplan", participants: [...participants.map((a) => publicLabel(a.name)),
+        planner ? `planner: ${publicLabel(planner.name)}` : "planner: orchestrator"], topic: task,
+    }) : undefined;
+    const toolNotes: string[] = [];
+    let connectors: SeatConnectorSession | undefined;
+    try {
+      connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: opts.signal, seatConnectors: checked.seatConnectors, onNote: use => toolNotes.push(use.note) }) : undefined;
+    } catch (e) {
       if (publicChannel) void publicChannel.finalize();
       throw e;
     }
-    if (!planner) throw e;
-    return {
-      ...stepResult(u), ...(u.versions.length && { plan: u.versions.at(-1)!.plan }),
-      error: buildPlannerStoppedError(step, e instanceof Error ? e.message : String(e)),
+    const provider = (seats?.values().next().value?.provider ?? opts.provider) as LLMProvider;
+    const u: Ultraplan = {
+      id, task, context: opts.context, agents: participants, planner, provider, model: seats?.values().next().value?.model ?? opts.model ?? DEFAULT_MODELS[provider],
+      ...(seats && { routing: [...seats.values()] }),
+      ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }), status: "awaiting_plan",
+      versions: [], entries: [], startedAt: new Date(), ...(publicChannel && { publicChannel }),
+      ...(opts.executionReady === true && { executionReady: true }),
+      ...(opts.origin !== undefined && { origin: opts.origin }),
+      ...(connectors && { connectors, toolNotes }),
     };
+    setSessionCap(id, opts.maxUsd);
+    ultraplans.set(id, u);
+    const release = lockSession(id, ultraplanBusy(id));
+    let step = "input";
+    try {
+      const draft = opts.draftPlan?.trim();
+      if (!draft) commitPhase(u, await computePhase(u, "input"));
+      if (!planner) {
+        if (draft) {
+          step = "review of v1";
+          const v = nextVersion(u, draft, "orchestrator");
+          const entries = await computePhase(u, "review", v);
+          commitPlan(u, v);
+          commitPhase(u, entries);
+        }
+        return stepResult(u);
+      }
+      if (!draft) {
+        step = "draft";
+        await authorPlan(u, buildPlannerDraftPrompt(task, u.context, participants.map((a) => label(u, a.name)), inputsFor(u), u.executionReady === true));
+      }
+      const rounds = Math.min(3, Math.max(1, Math.floor(Number(opts.revisionRounds)) || 1));
+      for (let round = 0; round < rounds; round++) {
+        const v = round === 0 && draft ? nextVersion(u, draft, "orchestrator") : u.versions.at(-1)!;
+        step = `review of v${v.version}`;
+        const entries = await computePhase(u, "review", v);
+        if (round === 0 && draft) commitPlan(u, v);
+        commitPhase(u, entries);
+        step = `revision to v${v.version + 1}`;
+        await authorPlan(u, buildPlannerRevisePrompt(task, v.plan, v.version, verdictsFor(u, entries), u.context, u.executionReady === true));
+      }
+      step = "sign-off";
+      const entries = await computePhase(u, "signoff", u.versions.at(-1)!);
+      commitPhase(u, entries);
+      return await finalize(u, verdictsFor(u, entries), true);
+    } catch (e) {
+      if (!u.entries.length && !u.stopped) {
+        ultraplans.delete(id);
+        await connectors?.close();
+        if (publicChannel) void publicChannel.finalize();
+        throw e;
+      }
+      if (!planner) throw e;
+      return {
+        ...stepResult(u), ...(u.versions.length && { plan: u.versions.at(-1)!.plan }),
+        error: buildPlannerStoppedError(step, e instanceof Error ? e.message : String(e)),
+      };
+    } finally {
+      release();
+    }
   } finally {
-    release();
+    releaseRoom();
+    if (!ultraplans.has(id) && !sessionCapView(id)?.reached) clearSessionCap(id);
   }
 }
 

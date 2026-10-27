@@ -66,12 +66,16 @@ test("start_meeting, start_collaboration (every mode) and start_ultraplan with d
   const prompts = recorder(t);
   const meeting = await handleToolCall("start_meeting", { agent: cfo, agenda: "review the duel", duel: ID, ...LLM });
   assert.equal(meeting.isError, undefined, meeting.content[0].text);
+  await handleToolCall("end_meeting", { meeting_id: JSON.parse(meeting.content[0].text).meetingId });
   for (const mode of ["collaborate", "debate", "waffle-house", "conversation"]) {
     const r = await handleToolCall("start_collaboration", { agents: [cfo, skeptic], topic: "the duel", mode, duel: ID, grounding: false, ...LLM });
     assert.equal(r.isError, undefined, `${mode}: ${r.content[0].text}`);
+    await handleToolCall("end_collaboration", { collaboration_id: JSON.parse(r.content[0].text).collaborationId });
   }
   const plan = await handleToolCall("start_ultraplan", { agents: [cfo], task: "Plan from the duel", duel: ID, ...LLM });
   assert.equal(plan.isError, undefined, plan.content[0].text);
+  const { ultraplans, endUltraplan } = await import("../../dist/sessions/ultraplan.js");
+  for (const id of ultraplans.keys()) await endUltraplan(id);
   assert.equal(prompts.length, 6);
   for (const p of prompts) expectBrief(p);
 });

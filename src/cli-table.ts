@@ -1,3 +1,4 @@
+import { validateSessionCap, sessionCapView } from "./usage/session-caps.js";
 import type { DuelControls, DuelOptions, DuelResult, Seat, TableObserver } from "./table/events.js";
 import { parseFlags } from "./cli.js";
 import { clean, createNdjsonObserver, createTerminalObserver, type TerminalOutput } from "./table/terminal.js";
@@ -30,6 +31,7 @@ const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges
   --stages <1-4>               build stages (web default 4; other kinds 1)
   --human-judge                a person chooses; judges, if given, advise
   --resume <duel-id>           continue a stopped duel from its checkpoint
+  --max-usd <n>               stop at this spend cap; raise it on --resume to continue
   --out <dir>                  export the chosen artifact; never overwrite
   --layout auto|split|stack    terminal layout (default auto)
   --no-page-check              skip headless page checks
@@ -38,7 +40,7 @@ const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges
   --rounds 1|2  --turn-timeout <s>  --max-seconds <s>  --agents-dir <abs-path>
   --dry-run                    replay the bundled synthetic duel (no keys)
   --replay <archive.json> [--speed <n>]   replay a saved duel
-roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...] [--duel <duel-id>] [--connectors <a,b>] [--seat-connectors <seat=a+b,...>]
+roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--max-usd n] [--seat ...] [--duel <duel-id>] [--connectors <a,b>] [--seat-connectors <seat=a+b,...>]
   --duel makes a saved duel the focus (its brief joins the context); the topic may then be omitted
 roundtable config show | config set env-file|agents-dir <absolute-path>
 roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>
@@ -57,7 +59,7 @@ function quietOnClosedPipe(stream: NodeJS.WriteStream): void {
 }
 type Flags = Record<string, string | true>;
 export interface ParsedTableArgs { duelFocus?: import("./sessions/duel-focus.js").DuelFocus; topic: string; flags: Flags; options: DuelOptions; agents: string[] }
-const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed", "duel", "connectors", "seat-connectors", "stages", "resume", "out", "layout"];
+const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "max-usd", "replay", "speed", "duel", "connectors", "seat-connectors", "stages", "resume", "out", "layout"];
 const switches = ["open", "no-room", "no-hold", "json", "dry-run", "preflight", "no-preflight", "no-duel-source", "no-page-check", "human-judge"];
 const list = (value: string | true | undefined): string[] => {
   if (value === undefined) return [];
@@ -74,14 +76,16 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const topic = args[0] && !args[0].startsWith("--") ? args[0] : "";
   const parsed = parseFlags(topic ? args.slice(1) : args, { values, flags: switches });
   if (typeof parsed === "string") throw new UsageError(parsed);
+  const maxUsd = parsed["max-usd"] === undefined ? undefined : Number(parsed["max-usd"]);
+  try { validateSessionCap(maxUsd); } catch { throw new UsageError("--max-usd must be a positive finite number."); }
   const replay = !!(parsed.replay || parsed["dry-run"]);
   if (parsed.layout !== undefined && !["auto", "split", "stack"].includes(String(parsed.layout))) throw new UsageError("--layout must be auto, split or stack.");
   if (command !== "duel" && ["stages", "human-judge", "resume", "out"].some(k => parsed[k] !== undefined)) throw new UsageError("--stages, --human-judge, --resume and --out are available for duel.");
   if (parsed.resume !== undefined) {
     if (!isDuelId(parsed.resume)) throw new UsageError("--resume requires a duel id, never a path.");
-    if (topic || Object.keys(parsed).some(k => !["resume", "open", "no-room", "no-hold", "json", "layout", "out"].includes(k))) throw new UsageError("--resume cannot be combined with a topic or duel options; everything comes from the checkpoint.");
+    if (topic || Object.keys(parsed).some(k => !["resume", "open", "no-room", "no-hold", "json", "layout", "out", "max-usd"].includes(k))) throw new UsageError("--resume cannot be combined with a topic or duel options; everything comes from the checkpoint.");
     if (parsed.open && parsed["no-room"]) throw new UsageError("--open requires the room.");
-    return { topic: "", flags: parsed, agents: [], options: { resume: parsed.resume } as DuelOptions };
+    return { topic: "", flags: parsed, agents: [], options: { resume: parsed.resume, ...(maxUsd !== undefined && { maxUsd }) } as DuelOptions };
   }
   const stages = parsed.stages === undefined ? undefined : Number(parsed.stages);
   if (stages !== undefined && (!Number.isInteger(stages) || stages < 1 || stages > 4)) throw new UsageError("--stages must be an integer from 1 to 4.");
@@ -125,7 +129,7 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const turnTimeoutMs = positive(parsed, "turn-timeout", 90) * 1000;
   const maxSeconds = positive(parsed, "max-seconds", 600);
   positive(parsed, "speed", 1);
-  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, ...(stages !== undefined && { stages }), ...(parsed["human-judge"] && { humanJudge: true }), ...(parsed["no-page-check"] && { pageCheck: false }), rounds: rounds as 1 | 2, turnTimeoutMs, ...(command !== "duel" || parsed["max-seconds"] !== undefined ? { maxSeconds } : {}), ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }), ...(connectors.length && { connectors }), ...(seatConnectors && { seatConnectors }) } };
+  return { topic, flags: parsed, agents, options: { ...(maxUsd !== undefined && { maxUsd }), topic, teamA, teamB, judges, ...(stages !== undefined && { stages }), ...(parsed["human-judge"] && { humanJudge: true }), ...(parsed["no-page-check"] && { pageCheck: false }), rounds: rounds as 1 | 2, turnTimeoutMs, ...(command !== "duel" || parsed["max-seconds"] !== undefined ? { maxSeconds } : {}), ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }), ...(connectors.length && { connectors }), ...(seatConnectors && { seatConnectors }) } };
 }
 
 /** Merge-time module contracts. String imports let the CLI build before the duel modules land. */
@@ -262,7 +266,8 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
   let resumeHintShown = false;
   let prompt: Interface | undefined;
   let decisionKeeper: ReturnType<typeof setInterval> | undefined;
-  const resumeHint = () => { if (!resumeHintShown && activeId) { error.write(`Resume with: roundtable duel --resume ${activeId}\n`); resumeHintShown = true; } };
+  let spendCapStopped = false;
+  const resumeHint = () => { if (!resumeHintShown && activeId) { error.write(`Resume with: roundtable duel --resume ${activeId}${spendCapStopped ? " --max-usd <higher-cap>" : ""}\n`); resumeHintShown = true; } };
   const stop = () => {
     interrupts++;
     if (holding || interrupts > 1) {
@@ -322,7 +327,8 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
     }
     const displayed = observer;
     observer = { async onEvent(event) {
-      if (event.type === "start") activeId = event.id;
+      if (event.type === "start") { activeId = event.id; spendCapStopped = false; }
+      if (event.type === "control" && event.action === "stopped") spendCapStopped = event.reason === "spend cap";
       await displayed.onEvent(event);
       if (event.type === "decision" && event.status === "awaiting") decisionKeeper ??= setInterval(() => {}, 60_000);
       if (event.type === "decision" && event.status === "awaiting" && parsed.flags["no-room"] && controls) {
@@ -343,7 +349,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
       : await runner.runDuel(parsed.options, observer, controller.signal, seats.size ? seats : undefined, { controls });
     activeId = current.id;
     if (current.chosen && typeof parsed.flags.out === "string") exportChosenArtifact(current.chosen, parsed.flags.out);
-    while (room && !parsed.flags["no-hold"] && !lifetime.signal.aborted) {
+    while (room && !spendCapStopped && !parsed.flags["no-hold"] && !lifetime.signal.aborted) {
       holding = true;
       const keeper = setInterval(() => {}, 60_000);
       try {
@@ -376,6 +382,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
 }
 
 async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Map<string, Seat>, observer: TableObserver, signal: AbortSignal): Promise<number> {
+  await import("./usage/table-service.js");
   const sessions = await import("./sessions/collaborations.js");
   const { day, readTableLines } = await import("./usage/table.js");
   const origin = `cli-${crypto.randomUUID()}`;
@@ -409,7 +416,7 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
     resetTurn();
     const started = await sessions.startCollaboration(parsed.agents, parsed.topic, {
       mode: command === "debate" ? "debate" : command === "waffle" ? "waffle-house" : "collaborate",
-      maxRounds: Number(parsed.flags.rounds ?? 2), ...(parsed.duelFocus && { duel: parsed.duelFocus }), seats: parsed.options.seats, origin, signal: stop,
+      maxUsd: parsed.options.maxUsd, maxRounds: Number(parsed.flags.rounds ?? 2), ...(parsed.duelFocus && { duel: parsed.duelFocus }), seats: parsed.options.seats, origin, signal: stop,
       ...(parsed.options.connectors?.length && { connectors: parsed.options.connectors }),
       ...(parsed.options.seatConnectors && { seatConnectors: parsed.options.seatConnectors }),
       // Each connector call is a short note in the transcript, like a turn; the payload never appears.
@@ -423,19 +430,25 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
     });
     id = started.collaborationId;
     const collaboration = sessions.collaborations.get(id)!;
-    while (collaboration.status === "running") {
+    while (collaboration && !collaboration.stopped && collaboration.status === "running") {
       stop.throwIfAborted();
       await sessions.advanceCollaboration(collaboration);
     }
     await pending;
-    return stop.aborted ? 1 : 0;
+    return stop.aborted || (id && sessionCapView(id)?.reached) ? 1 : 0;
   } catch (e) {
     // A deadline surfaces inside the provider call as a stop; only a real Stop keeps that wording.
+    if (id && sessionCapView(id)?.reached) return 1;
     if (timedOut && !signal.aborted) throw new TimeoutReport(timedOut);
     throw e;
   } finally {
     clearTimeout(deadline); clearTimeout(turnTimer);
     sessions.setCollaborationRecordHook(undefined);
+    const cap = id ? sessionCapView(id) : undefined;
+    if (id && cap?.reached) {
+      const { stopCappedSession } = await import("./usage/session-caps.js");
+      await stopCappedSession(id);
+    }
     if (id && sessions.collaborations.has(id)) await sessions.endCollaboration(id, false);
     await pending;
     if (id) {
@@ -449,8 +462,9 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
         if (line.usd === undefined) entry.unpricedTokens += used;
         totals.set(line.agent, entry);
       }
-      await observer.onEvent({ type: "usage", perSeat: [...totals.values()], totalCostUsd: [...totals.values()].reduce((n, s) => n + s.costUsd, 0), totalUnpricedTokens: [...totals.values()].reduce((n, s) => n + s.unpricedTokens, 0) });
-      await observer.onEvent({ type: "end", winner: "none", tally: { A: 0, B: 0 }, aborted: stop.aborted });
+      await observer.onEvent({ type: "usage", perSeat: [...totals.values()], totalCostUsd: [...totals.values()].reduce((n, s) => n + s.costUsd, 0), totalUnpricedTokens: [...totals.values()].reduce((n, s) => n + s.unpricedTokens, 0),
+        ...(cap && { capUsd: cap.maxUsd, spentUsd: cap.spentUsd, capReached: cap.reached }) });
+      await observer.onEvent({ type: "end", winner: "none", tally: { A: 0, B: 0 }, aborted: stop.aborted || cap?.reached === true });
     }
   }
 }

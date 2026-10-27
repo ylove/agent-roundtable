@@ -25,6 +25,8 @@ How figures are written: measured is plain (`$0.92`), reported carries `rep` (`$
 
 Two limits to know. The host agent itself (your main chat) is not metered by the roundtable: its only figures come from the host's own status line JSON and are always labelled reported (host). And a **reported** figure can raise a total but never lower measured spend; one report is clamped to $10,000 and 10^10 tokens.
 
+Live capped sessions show **spent $x of $cap cap** in the usage report and dashboard; JSON/tool agent entries include `max_usd`, `spent_usd` and `cap_reached`. These values describe the whole session, so each participant shows the same cap and cumulative spend. The live duel/casting registry and room metrics show them too. Unpriced tokens count toward `spent_usd` using provider judgment’s estimate; known free models count as zero. A spend cap stops a meeting, collaboration or ultraplan as stopped by "spend cap". A duel saves a resumable checkpoint; use `roundtable duel --resume <id> --max-usd <higher-cap>` to continue.
+
 ## The status line
 
 Add this to your Claude Code settings (`~/.claude/settings.json`, or the project's `.claude/settings.json`):

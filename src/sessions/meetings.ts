@@ -1,3 +1,5 @@
+import { reserveLiveSession, registerLiveSessionSource } from "../usage/live-limit.js";
+import { validateSessionCap, setSessionCap, stopCappedSession, clearSessionCap, sessionCapView } from "../usage/session-caps.js";
 import { prepareSeats } from "../table/seats.js";
 import { callSeat } from "../table/dispatch.js";
 import type { Seat } from "../table/events.js";
@@ -77,6 +79,7 @@ function meetingCallOptions(meeting: Pick<Meeting, "provider" | "model" | "baseU
 }
 
 export const meetings = new Map<string, Meeting>();
+registerLiveSessionSource("meetings", () => meetings.keys());
 
 function meetingBusy(id: string): string {
   return sessionBusyMessage("Meeting", id);
@@ -128,7 +131,7 @@ export async function startMeeting(
   isPublic: boolean = false,
   isPrototype: boolean = false,
   pageCheck: boolean = true,
-  connectorOptions: { connectors?: string[]; seatConnectors?: SeatConnectorMap; signal?: AbortSignal } = {}
+  connectorOptions: { maxUsd?: number; connectors?: string[]; seatConnectors?: SeatConnectorMap; signal?: AbortSignal } = {}
 ): Promise<{
   meetingId: string;
   response: string;
@@ -137,104 +140,113 @@ export async function startMeeting(
   /** Prototype meetings only. */
   prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
-  if ((provider === undefined || provider === "auto") && baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
-  assertMeetingMode(mode);
-  // An unknown connector fails here, before a session exists or any provider is called.
-  const checked = checkSeatConnectorArgs(connectorOptions.connectors, connectorOptions.seatConnectors, [agent]);
-  const routed = provider === undefined || provider === "auto";
-  const seats = routed ? await prepareSeats({ agents: [agent], model }) : undefined;
-  const chosen = seats?.get(agent);
-  provider = chosen?.provider as LLMProvider | undefined ?? provider as LLMProvider;
-  model = chosen?.model ?? model;
-  let systemPrompt = await loadAgentPrompt(agent);
-  if (mode === "debate") {
-    systemPrompt += buildChallengerDirective(debateFocus);
-  }
-  if (isPublic) systemPrompt += publicDirectiveSuffix();
-  if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic });
+  validateSessionCap(connectorOptions.maxUsd);
   const meetingId = newId("meeting");
-  // Board, then public channel, both before the first LLM call so the header is the first post. Config
-  // errors fail the start (a public config error closes the blackboard first).
-  const { prototype, publicChannel } = await openSessionSurfaces(
-    isPrototype
-      ? {
-          sessionId: meetingId,
-          mode,
-          participants: [isPublic ? publicLabel(agent) : agent],
-          assessorIsCaller: true,
-          public: isPublic,
-          pageCheck,
-          topic: agenda,
-        }
-      : undefined,
-    () => (isPublic ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda }) : undefined)
-  );
-  let resolvedModel = model || DEFAULT_MODELS[provider];
-
-  let userMessage = agenda;
-  if (context) {
-    userMessage = `${agenda}\n\n---\n\n${context}`;
-  }
-  if (mode === "debate") {
-    userMessage += "\n\n" + DEBATE_MEETING_USER_SUFFIX;
-  }
-
-  let assistantMessage: string;
-  let connectors: SeatConnectorSession | undefined;
-  const toolNotes: string[] = [];
+  const releaseRoom = reserveLiveSession(meetingId);
   try {
-    connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: connectorOptions.signal, seatConnectors: checked.seatConnectors, onNote: use => toolNotes.push(use.note) }) : undefined;
-    assistantMessage = await metered({ session: meetingId, kind: "meeting", agent }, () => {
-      const messages = [{ role: "user" as const, content: userMessage }];
-      const options = meetingCallOptions({ provider: provider as LLMProvider, model: resolvedModel, baseUrl, maxOutputTokens: chosen?.maxOutputTokens });
-      if (connectors) return withSeatConnectors(connectors, () => callSeat(systemPrompt, messages, options, { agent, onModelFallback: replacement => { resolvedModel = replacement; if (chosen) chosen.model = replacement; } }));
-      return routed ? callSeat(systemPrompt, messages, options, { agent, onModelFallback: replacement => { resolvedModel = replacement; if (chosen) chosen.model = replacement; } })
-        : callLLM(systemPrompt, messages, options);
-    });
-  } catch (e) {
-    // The meeting never started; close the channel (and the prototype blackboard) so nothing dangles.
-    await connectors?.close();
-    if (publicChannel) void publicChannel.finalize();
-    await closePrototypeTracker(prototype, "ended");
-    throw e;
-  }
+    setSessionCap(meetingId, connectorOptions.maxUsd);
+    if ((provider === undefined || provider === "auto") && baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
+    assertMeetingMode(mode);
+    // An unknown connector fails here, before a session exists or any provider is called.
+    const checked = checkSeatConnectorArgs(connectorOptions.connectors, connectorOptions.seatConnectors, [agent]);
+    const routed = provider === undefined || provider === "auto";
+    const seats = routed ? await prepareSeats({ agents: [agent], model }) : undefined;
+    const chosen = seats?.get(agent);
+    provider = chosen?.provider as LLMProvider | undefined ?? provider as LLMProvider;
+    model = chosen?.model ?? model;
+    let systemPrompt = await loadAgentPrompt(agent);
+    if (mode === "debate") {
+      systemPrompt += buildChallengerDirective(debateFocus);
+    }
+    if (isPublic) systemPrompt += publicDirectiveSuffix();
+    if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic });
+    // Board, then public channel, both before the first LLM call so the header is the first post. Config
+    // errors fail the start (a public config error closes the blackboard first).
+    const { prototype, publicChannel } = await openSessionSurfaces(
+      isPrototype
+        ? {
+            sessionId: meetingId,
+            mode,
+            participants: [isPublic ? publicLabel(agent) : agent],
+            assessorIsCaller: true,
+            public: isPublic,
+            pageCheck,
+            topic: agenda,
+          }
+        : undefined,
+      () => (isPublic ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda }) : undefined)
+    );
+    let resolvedModel = model || DEFAULT_MODELS[provider];
 
-  const meeting: Meeting = {
-    id: meetingId,
-    agent,
-    agenda,
-    systemPrompt,
-    messages: [],
-    startedAt: new Date(),
-    provider,
-    model: resolvedModel,
-    ...(chosen?.maxOutputTokens !== undefined && { maxOutputTokens: chosen.maxOutputTokens }),
-    ...(baseUrl !== undefined && { baseUrl }),
-    mode,
-    ...(debateFocus !== undefined && { debateFocus }),
-    ...(publicChannel && { publicChannel }),
-    ...(prototype && { prototype }),
-    ...(connectors && { connectors, toolNotes }),
-  };
-  meetings.set(meetingId, meeting);
-  // Listed from here on: hold the lock until the opening exchange is recorded.
-  const release = lockSession(meetingId, meetingBusy(meetingId));
-  try {
-    const record = recorderFor(meeting);
-    // Publish the agenda only: userMessage also carries the private context and the debate suffix.
-    await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
-    await recordMeetingAgentReply(meeting, assistantMessage, record);
+    let userMessage = agenda;
+    if (context) {
+      userMessage = `${agenda}\n\n---\n\n${context}`;
+    }
+    if (mode === "debate") {
+      userMessage += "\n\n" + DEBATE_MEETING_USER_SUFFIX;
+    }
+
+    let assistantMessage: string;
+    let connectors: SeatConnectorSession | undefined;
+    const toolNotes: string[] = [];
+    try {
+      connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: connectorOptions.signal, seatConnectors: checked.seatConnectors, onNote: use => toolNotes.push(use.note) }) : undefined;
+      assistantMessage = await metered({ session: meetingId, kind: "meeting", agent }, () => {
+        const messages = [{ role: "user" as const, content: userMessage }];
+        const options = meetingCallOptions({ provider: provider as LLMProvider, model: resolvedModel, baseUrl, maxOutputTokens: chosen?.maxOutputTokens });
+        if (connectors) return withSeatConnectors(connectors, () => callSeat(systemPrompt, messages, options, { agent, onModelFallback: replacement => { resolvedModel = replacement; if (chosen) chosen.model = replacement; } }));
+        return routed ? callSeat(systemPrompt, messages, options, { agent, onModelFallback: replacement => { resolvedModel = replacement; if (chosen) chosen.model = replacement; } })
+          : callLLM(systemPrompt, messages, options);
+      });
+    } catch (e) {
+      // The meeting never started; close the channel (and the prototype blackboard) so nothing dangles.
+      await connectors?.close();
+      if (publicChannel) void publicChannel.finalize();
+      await closePrototypeTracker(prototype, "ended");
+      throw e;
+    }
+
+    const meeting: Meeting = {
+      id: meetingId,
+      agent,
+      agenda,
+      systemPrompt,
+      messages: [],
+      startedAt: new Date(),
+      provider,
+      model: resolvedModel,
+      ...(chosen?.maxOutputTokens !== undefined && { maxOutputTokens: chosen.maxOutputTokens }),
+      ...(baseUrl !== undefined && { baseUrl }),
+      mode,
+      ...(debateFocus !== undefined && { debateFocus }),
+      ...(publicChannel && { publicChannel }),
+      ...(prototype && { prototype }),
+      ...(connectors && { connectors, toolNotes }),
+    };
+    meetings.set(meetingId, meeting);
+    // Listed from here on: hold the lock until the opening exchange is recorded.
+    const release = lockSession(meetingId, meetingBusy(meetingId));
+    try {
+      const record = recorderFor(meeting);
+      // Publish the agenda only: userMessage also carries the private context and the debate suffix.
+      await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
+      await recordMeetingAgentReply(meeting, assistantMessage, record);
+    } finally {
+      release();
+    }
+
+    await stopCappedSession(meetingId);
+    return {
+      meetingId,
+      response: assistantMessage,
+      ...(seats && { routing: [...seats.values()] }),
+      ...(publicChannel && { public: { url: publicChannel.url, topic: publicChannel.topic } }),
+      ...(prototype && { prototypes: prototype.takeCallSummary() }),
+    };
   } finally {
-    release();
+    releaseRoom();
+    if (!meetings.has(meetingId) && !sessionCapView(meetingId)?.reached) clearSessionCap(meetingId);
   }
-
-  return {
-    meetingId,
-    response: assistantMessage,
-    ...(seats && { routing: [...seats.values()] }),
-    ...(publicChannel && { public: { url: publicChannel.url, topic: publicChannel.topic } }),
-    ...(prototype && { prototypes: prototype.takeCallSummary() }),
-  };
 }
 
 /** The meeting's own choke point, as the shared prototype recorders take it. */

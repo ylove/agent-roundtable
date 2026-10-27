@@ -91,7 +91,7 @@ export type TableEvent =
   /** Each team's process record, sent whenever it changes. */
   | { type: "metrics"; teams: Record<"A" | "B", TeamMetrics>; ts: string }
   /** The duel stopped (in-flight turns are abandoned and a checkpoint is written) or resumed from that checkpoint. */
-  | { type: "control"; action: "stopped" | "resumed"; by: DuelCommandSource | "deadline"; ts: string }
+  | { type: "control"; action: "stopped" | "resumed"; by: DuelCommandSource | "deadline"; reason?: "spend cap"; ts: string }
   /** With a human judge: the duel waits for the choice, then records it. */
   | { type: "decision"; status: "awaiting"; ts: string }
   | { type: "decision"; status: "made"; by: "human"; winner: "A" | "B"; version?: number; ts: string }
@@ -137,6 +137,9 @@ export type TableEvent =
         /** True when any of the seat's token counts were estimated rather than reported by the provider. */
         estimated?: boolean;
       }[];
+      capUsd?: number;
+      spentUsd?: number;
+      capReached?: boolean;
       totalCostUsd: number;
       totalUnpricedTokens?: number;
     }
@@ -228,6 +231,7 @@ export interface DuelOptions {
   criteria?: string[];
   turnTimeoutMs?: number;
   maxSeconds?: number;
+  maxUsd?: number;
   seats?: Record<string, SeatSpec>;
   mix?: "auto" | "cheap";
   agentsDir?: string;

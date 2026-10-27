@@ -67,7 +67,7 @@ function validEvent(event: TableEvent): boolean {
       text(event.name) && ["started", "done", "failed", "skipped"].includes(event.status) && date(event.ts) &&
       (event.version === undefined || positive(event.version));
     case "metrics": return !!event.teams && validMetrics(event.teams) && date(event.ts);
-    case "control": return ["stopped", "resumed"].includes(event.action) && ["room", "terminal", "tool", "deadline"].includes(event.by) && date(event.ts);
+    case "control": return (event.reason === undefined || event.reason === "spend cap") && ["stopped", "resumed"].includes(event.action) && ["room", "terminal", "tool", "deadline"].includes(event.by) && date(event.ts);
     case "decision": return date(event.ts) && (event.status === "awaiting" || (event.status === "made" && event.by === "human" && team(event.winner) && (event.version === undefined || positive(event.version))));
     case "start": return (event.stages === undefined || (Array.isArray(event.stages) && event.stages.length >= 1 && event.stages.length <= 4 && event.stages.every((stage, i) => stage && stage.index === i + 1 && text(stage.name)))) &&
       (event.humanJudge === undefined || typeof event.humanJudge === "boolean") && (event.resumed === undefined || typeof event.resumed === "boolean") && (event.kind === undefined || PROTOTYPE_KINDS.includes(event.kind)) &&
@@ -84,7 +84,7 @@ function validEvent(event: TableEvent): boolean {
     case "assessment": return (event.version === undefined || (Number.isInteger(event.version) && event.version > 0)) && validSeat(event.judge) && team(event.team) &&
       ["APPROVE", "REVISE", "REJECT", "UNCLEAR"].includes(event.verdict) && text(event.reason);
     case "dissent": return validSeat(event.seat) && text(event.text) && (event.team === undefined || team(event.team));
-    case "usage": return count(event.totalCostUsd) && Array.isArray(event.perSeat) && event.perSeat.every(item =>
+    case "usage": return (event.capUsd === undefined || count(event.capUsd) && event.capUsd > 0) && (event.spentUsd === undefined || count(event.spentUsd)) && (event.capReached === undefined || typeof event.capReached === "boolean") && count(event.totalCostUsd) && Array.isArray(event.perSeat) && event.perSeat.every(item =>
       item && text(item.seatId) && count(item.inputTokens) && count(item.outputTokens) && count(item.costUsd) &&
       (item.unpricedTokens === undefined || count(item.unpricedTokens)) && (item.estimated === undefined || typeof item.estimated === "boolean"));
     case "end": return validMetrics(event.metrics) && validChosen(event.chosen) &&

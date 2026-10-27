@@ -7,6 +7,7 @@
 // keeps its provenance. Nothing here reads message text, prompts, diffs or command output.
 // ============================================================================
 
+import { persistedLiveDuels } from "../table/live-duels.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
@@ -22,6 +23,7 @@ import {
   readTableLines,
   usageDir,
   type LiveServer,
+  type LiveSession,
   type TableLine,
 } from "./table.js";
 import {
@@ -205,9 +207,10 @@ function headsDownStops(state: BlackboardState): UsageStop[] {
 // At the table
 // ---------------------------------------------------------------------------
 
-function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string>): { agents: UsageAgent[]; stops: UsageStop[] } {
-  const liveSessions = new Map<string, { busy: boolean }>();
-  for (const s of live) for (const x of s.sessions) liveSessions.set(x.id, { busy: x.busy === true });
+function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string>, home: string): { agents: UsageAgent[]; stops: UsageStop[] } {
+  const liveSessions = new Map<string, LiveSession>();
+  for (const d of persistedLiveDuels(home)) liveSessions.set(d.id, { ...d, kind: d.kind ?? "duel", busy: true });
+  for (const s of live) for (const x of s.sessions) liveSessions.set(x.id, x);
   const stopped = new Map<string, TableLine>();
   const byKey = new Map<string, { id: string; session: string; kind: string; tokens: Tokens; money: Money; models: Map<string, number>; provider?: string; last: string; priced: boolean }>();
   for (const l of lines) {
@@ -228,6 +231,10 @@ function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string
     if (l.provider) e.provider = l.provider;
     e.last = l.at;
   }
+  for (const l of liveSessions.values()) if (l.maxUsd !== undefined) for (const id of l.agents) {
+    const key = `${l.id}\0${id}`;
+    if (!byKey.has(key)) byKey.set(key, { id, session: l.id, kind: l.kind, tokens: zeroTokens(), money: zeroMoney(), models: new Map(), last: l.started, priced: false });
+  }
   const agents: UsageAgent[] = [];
   for (const e of byKey.values()) {
     const l = liveSessions.get(e.session);
@@ -242,6 +249,7 @@ function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string
     agents.push({
       id: e.id,
       where: "at-the-table",
+      ...(l?.maxUsd !== undefined && { max_usd: l.maxUsd, spent_usd: l.spentUsd, cap_reached: l.reached }),
       scope: e.session,
       ...(e.provider && { provider: e.provider }),
       ...(models[0] && { model: models[0] }),
@@ -342,12 +350,12 @@ export async function collectUsage(opts: CollectOptions = {}): Promise<UsageView
   runs.sort((a, b) => Number(b.live) - Number(a.live) || (a.id < b.id ? 1 : -1));
 
   const table: UsageTable = { sessions: 0, agents: 0, money: zeroMoney(), tokens: zeroTokens() };
-  if (opts.table !== false && existsSync(usageDir(home))) {
+  if (opts.table !== false) {
     const live = readLiveServers(now, home);
     const pending = new Set<string>();
     for (const s of live) for (const r of readStopRequests(s.server, home, { quarantine: false })) pending.add(r.session);
     const days = [day(now)];
-    const t = tableAgents(readTableLines(days, home), live, pending);
+    const t = tableAgents(readTableLines(days, home), live, pending, home);
     agents.push(...t.agents);
     stops.push(...t.stops);
     for (const r of pending) if (!t.stops.some((s) => s.scope === r)) stops.push({ agent: t.agents.find((a) => a.scope === r)?.id ?? "", scope: r, at: new Date(now).toISOString(), by: "", status: "requested" });

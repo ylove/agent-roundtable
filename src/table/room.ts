@@ -19,7 +19,7 @@ export interface RoomState {
   humanJudge: boolean;
   progress: Partial<Record<"A" | "B", Pick<EventOf<"stage">, "stage" | "of" | "name" | "status">>>;
   metrics: Partial<Record<"A" | "B", TeamMetrics>>;
-  stopped?: { by: EventOf<"control">["by"]; at: string };
+  stopped?: { by: EventOf<"control">["by"]; at: string; reason?: "spend cap" };
   decision?: { status: "awaiting" | "made"; winner?: "A" | "B"; at: string };
   controls: { stop: boolean; resume: boolean; choose: boolean };
   transcript: TableEvent[];
@@ -29,6 +29,7 @@ export interface RoomState {
   assessments: EventOf<"assessment">[];
   dissents: EventOf<"dissent">[];
   turns: EventOf<"turn">[];
+  /** Metered spend and the optional session cap shown in the metrics strip. */
   usage: EventOf<"usage">;
   end?: EventOf<"end">;
 }
@@ -210,7 +211,7 @@ export async function startRoom({ state = createRoomState(), open = false, hold 
       case "metrics": state.metrics = event.teams; break;
       case "control":
         if (event.action === "resumed") { delete state.stopped; delete state.end; }
-        else state.stopped = { by: event.by, at: event.ts };
+        else state.stopped = { by: event.by, at: event.ts, ...(event.reason && { reason: event.reason }) };
         break;
       case "decision":
         state.decision = { status: event.status, at: event.ts, ...(event.status === "made" && { winner: event.winner }) };

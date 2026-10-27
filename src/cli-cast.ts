@@ -18,13 +18,14 @@ const HELP = `roundtable cast <brief> [options]
   --connectors <a,b>            let every seat call these configured MCP connectors (read-only tools unless the config lists more)
   --seat-connectors <s=a+b,...> limit a persona to some of those connectors, e.g. architect=figma (others get all)
   --turn-timeout <s>            per-call timeout (default 90, up to 3600)
+  --max-usd <n>                stop when metered spend reaches this cap
   --max-seconds <s>             whole-run deadline (default 300, up to 3600)
 `;
 class UsageError extends Error { readonly exitCode = 2; }
 export function parseCastArgs(args: string[]): { options: CastingOptions; json: boolean } {
   const brief = args[0] && !args[0].startsWith("--") ? args[0] : "";
   const flags = parseFlags(brief ? args.slice(1) : args, {
-    values: ["agents", "agents-dir", "seats", "seat", "mix", "turn-timeout", "max-seconds", "connectors", "seat-connectors"], flags: ["no-examine", "dry-run", "json"],
+    values: ["agents", "agents-dir", "seats", "seat", "mix", "turn-timeout", "max-seconds", "max-usd", "connectors", "seat-connectors"], flags: ["no-examine", "dry-run", "json"],
   });
   if (typeof flags === "string") throw new UsageError(flags);
   const agents = typeof flags.agents === "string" ? flags.agents.split(",").map(s => s.trim()) : undefined;
@@ -43,7 +44,7 @@ export function parseCastArgs(args: string[]): { options: CastingOptions; json: 
     if (!Number.isFinite(n) || n <= 0 || n > 3600) throw new UsageError(`--${key} must be a positive number up to 3600.`);
     return n;
   };
-  const options: CastingOptions = { brief, agents, agentsDir: flags["agents-dir"] as string | undefined,
+  const options: CastingOptions = { ...(flags["max-usd"] !== undefined && { maxUsd: Number(flags["max-usd"]) }), brief, agents, agentsDir: flags["agents-dir"] as string | undefined,
     ...(flags.seats !== undefined && { seats: Number(flags.seats) }), seat: flags.seat as string | undefined,
     mix: flags.mix as "auto" | "cheap" | undefined, examine: !flags["no-examine"], dryRun: !!flags["dry-run"],
     ...(connectors?.length && { connectors }), ...(seatConnectors && { seatConnectors }),

@@ -5,12 +5,16 @@
 //   - a usage sink that appends one line per provider call to the table ledger (table.ts), tokens
 //     measured when the provider reported them and estimated from the request and reply lengths
 //     when it did not, cost estimated from the price table (nothing when the model has no price);
+//   - a cumulative spend cap when configured, counting unpriced calls at the routing estimate;
 //   - the session's AbortSignal, which providers/index.ts combines with its own timeout, so
 //     abortSession() cuts the call in flight (usage-visibility.md §6).
 // When an outer sink is already collecting (a heads-down huddle's UsageMeter runs its formats at the
 // table), the call is left to it: the heads-down ledger owns that spend, so it is never counted twice.
 // ============================================================================
 
+import { recordSessionSpend, stopCappedSession, clearSessionCap, sessionCapView } from "./session-caps.js";
+import { scrub } from "../security/secrets.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { agentKey } from "../agents.js";
 import { estimateUsd } from "../execution/pricing.js";
 import { activeProviderOutcome, withProviderFailureSink, activeUsageSink, withAbortSignal, withUsageSink, type UsageReport, type UsageSink } from "../providers/usage.js";
@@ -118,7 +122,7 @@ export function abortSession(session: string, reason: string): void {
 
 /** Forget the controllers of sessions that are no longer live and have no turn in flight. */
 export function sweepControllers(live: ReadonlySet<string>): void {
-  for (const id of [...controllers.keys()]) if (!live.has(id) && !turns.get(id)) controllers.delete(id);
+  for (const id of [...controllers.keys()]) if (!live.has(id) && !turns.get(id)) { controllers.delete(id); clearSessionCap(id); }
 }
 
 export function busySessions(): Set<string> {
@@ -182,12 +186,20 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
   return line;
 }
 
+function checkCap(scope: SessionScope, line: TableLine): void {
+  if (!recordSessionSpend(scope.session, line)) return;
+  abortSession(scope.session, "Spend cap reached");
+  void stopCappedSession(scope.session).catch(() => console.error("[Usage] could not stop capped session"));
+}
+
 function ledgerSink(scope: SessionScope): UsageSink {
   return (r) => {
+    const line = lineFor(scope, r, currentServerId());
+    checkCap(scope, line);
     try {
-      appendTableLine(lineFor(scope, r, currentServerId()), ledgerHome);
+      appendTableLine(line, ledgerHome);
     } catch (e) {
-      console.error(`[Usage] table ledger write failed: ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`[Usage] table ledger write failed: ${scrub(e instanceof Error ? e.message : String(e))}`);
     }
   };
 }
@@ -197,21 +209,31 @@ function ledgerSink(scope: SessionScope): UsageSink {
  * no token counts to read: they are estimated from the lengths, and the CLI has no per-token price.
  */
 export function recordCliCall(scope: SessionScope, chars: { input: number; output: number }): void {
-  if (activeUsageSink()) return;
+  if (activeUsageSink()) {
+    checkCap(scope, lineFor(scope, { provider: "claude-cli", model: "claude-cli", chars }, currentServerId()));
+    return;
+  }
   ledgerSink(scope)({ provider: "claude-cli", model: "claude-cli", chars });
 }
+
+const meteredSession = new AsyncLocalStorage<string>();
 
 /** Run one turn (or one agent's part of it) of a session, metered and stoppable. */
 export async function metered<T>(scope: SessionScope, fn: () => Promise<T>): Promise<T> {
   const signal = sessionSignal(scope.session);
+  if (sessionCapView(scope.session)?.reached) signal.throwIfAborted();
   const run = () => withAbortSignal(signal, fn);
   const outer = activeUsageSink();
+  const parentSession = meteredSession.getStore();
   turns.set(scope.session, (turns.get(scope.session) ?? 0) + 1);
   try {
-    return await withProviderFailureSink(outer ? undefined : outcome => {
+    return await meteredSession.run(scope.session, () => withProviderFailureSink(outer ? undefined : outcome => {
       appendTableLine({ at: new Date(Date.now()).toISOString(), server: currentServerId(), session: scope.session,
         kind: scope.kind, agent: agentKey(scope.agent), ...outcome }, ledgerHome);
-    }, () => withUsageSink(outer ? (r) => outer({ ...r, agent: agentKey(scope.agent) }) : ledgerSink(scope), run));
+    }, () => withUsageSink(outer ? (r) => {
+      try { outer({ ...r, agent: agentKey(scope.agent) }); }
+      finally { if (parentSession !== scope.session) checkCap(scope, lineFor(scope, r, currentServerId())); }
+    } : ledgerSink(scope), run)));
   } finally {
     turns.set(scope.session, (turns.get(scope.session) ?? 1) - 1);
   }

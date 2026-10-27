@@ -2,6 +2,8 @@
 // Local Meeting Functions (CLI-based, uses local Claude installation)
 // ============================================================================
 
+import { reserveLiveSession, registerLiveSessionSource } from "../usage/live-limit.js";
+import { validateSessionCap, setSessionCap, stopCappedSession, clearSessionCap, sessionCapView } from "../usage/session-caps.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -60,6 +62,7 @@ export interface LocalMeeting {
 }
 
 export const localMeetings = new Map<string, LocalMeeting>();
+registerLiveSessionSource("local-meetings", () => localMeetings.keys());
 
 function localMeetingBusy(id: string): string {
   return sessionBusyMessage("Local meeting", id);
@@ -435,7 +438,8 @@ export async function startLocalMeeting(
   debateFocus?: string,
   isPublic: boolean = false,
   isPrototype: boolean = false,
-  pageCheck: boolean = true
+  pageCheck: boolean = true,
+  maxUsd?: number
 ): Promise<{
   meetingId: string;
   response: string;
@@ -443,85 +447,94 @@ export async function startLocalMeeting(
   /** Prototype meetings only. */
   prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
-  assertMeetingMode(mode);
-  const agentInfo = await loadAgent(agent);
+  validateSessionCap(maxUsd);
   const meetingId = newId("local");
-  const challengerDirective = mode === "debate" ? buildChallengerDirective(debateFocus) : undefined;
-  const skillsSection = renderSkillsSection(agentInfo.skills);
-  const appendSystemPrompt = [
-    skillsSection.trim(),
-    challengerDirective?.trim(),
-    isPublic ? publicDirectiveSuffix().trim() : undefined,
-    isPrototype ? prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic }).trim() : undefined,
-  ].filter(Boolean).join("\n\n") || undefined;
-  // Board, then public channel, both before the first CLI call so the header is the first post. Config
-  // errors fail the start (a public config error closes the blackboard first).
-  const { prototype, publicChannel } = await openSessionSurfaces(
-    isPrototype
-      ? {
-          sessionId: meetingId,
-          mode,
-          participants: [isPublic ? publicLabel(agent) : agent],
-          assessorIsCaller: true,
-          public: isPublic,
-          pageCheck,
-          topic: agenda,
-        }
-      : undefined,
-    () => (isPublic ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda }) : undefined)
-  );
-
-  let userMessage = agenda;
-  if (context) {
-    userMessage = `${agenda}\n\n---\n\n${context}`;
-  }
-  if (mode === "debate") {
-    userMessage += "\n\n" + DEBATE_MEETING_USER_SUFFIX;
-  }
-
-  // For initial message, just pass the agenda directly
-  let assistantMessage: string;
+  const releaseRoom = reserveLiveSession(meetingId);
   try {
-    assistantMessage = await executeClaudeCLI(agentInfo.path, userMessage, undefined, appendSystemPrompt, { session: meetingId, kind: "local-meeting", agent });
-  } catch (e) {
-    if (publicChannel) void publicChannel.finalize();
-    await closePrototypeTracker(prototype, "ended");
-    throw e;
-  }
+    setSessionCap(meetingId, maxUsd);
+    assertMeetingMode(mode);
+    const agentInfo = await loadAgent(agent);
+    const challengerDirective = mode === "debate" ? buildChallengerDirective(debateFocus) : undefined;
+    const skillsSection = renderSkillsSection(agentInfo.skills);
+    const appendSystemPrompt = [
+      skillsSection.trim(),
+      challengerDirective?.trim(),
+      isPublic ? publicDirectiveSuffix().trim() : undefined,
+      isPrototype ? prototypeSystemSuffix({ assessorIsCaller: true, public: isPublic }).trim() : undefined,
+    ].filter(Boolean).join("\n\n") || undefined;
+    // Board, then public channel, both before the first CLI call so the header is the first post. Config
+    // errors fail the start (a public config error closes the blackboard first).
+    const { prototype, publicChannel } = await openSessionSurfaces(
+      isPrototype
+        ? {
+            sessionId: meetingId,
+            mode,
+            participants: [isPublic ? publicLabel(agent) : agent],
+            assessorIsCaller: true,
+            public: isPublic,
+            pageCheck,
+            topic: agenda,
+          }
+        : undefined,
+      () => (isPublic ? openPublicChannel(meetingId, { mode, participants: [publicLabel(agent)], topic: agenda }) : undefined)
+    );
 
-  const meeting: LocalMeeting = {
-    id: meetingId,
-    agent,
-    agenda,
-    agentPromptPath: agentInfo.path,
-    systemPrompt: agentInfo.body + skillsSection,
-    messages: [],
-    startedAt: new Date(),
-    mode,
-    ...(debateFocus !== undefined && { debateFocus }),
-    ...(challengerDirective !== undefined && { challengerDirective }),
-    ...(appendSystemPrompt !== undefined && { appendSystemPrompt }),
-    ...(publicChannel && { publicChannel }),
-    ...(prototype && { prototype }),
-  };
-  localMeetings.set(meetingId, meeting);
-  // Listed from here on: hold the lock until the opening exchange is recorded.
-  const release = lockSession(meetingId, localMeetingBusy(meetingId));
-  try {
-    const record = recorderFor(meeting);
-    // Publish the agenda only: userMessage also carries the private context and the debate suffix.
-    await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
-    await recordMeetingAgentReply(meeting, assistantMessage, record);
+    let userMessage = agenda;
+    if (context) {
+      userMessage = `${agenda}\n\n---\n\n${context}`;
+    }
+    if (mode === "debate") {
+      userMessage += "\n\n" + DEBATE_MEETING_USER_SUFFIX;
+    }
+
+    // For initial message, just pass the agenda directly
+    let assistantMessage: string;
+    try {
+      assistantMessage = await executeClaudeCLI(agentInfo.path, userMessage, undefined, appendSystemPrompt, { session: meetingId, kind: "local-meeting", agent });
+    } catch (e) {
+      if (publicChannel) void publicChannel.finalize();
+      await closePrototypeTracker(prototype, "ended");
+      throw e;
+    }
+
+    const meeting: LocalMeeting = {
+      id: meetingId,
+      agent,
+      agenda,
+      agentPromptPath: agentInfo.path,
+      systemPrompt: agentInfo.body + skillsSection,
+      messages: [],
+      startedAt: new Date(),
+      mode,
+      ...(debateFocus !== undefined && { debateFocus }),
+      ...(challengerDirective !== undefined && { challengerDirective }),
+      ...(appendSystemPrompt !== undefined && { appendSystemPrompt }),
+      ...(publicChannel && { publicChannel }),
+      ...(prototype && { prototype }),
+    };
+    localMeetings.set(meetingId, meeting);
+    // Listed from here on: hold the lock until the opening exchange is recorded.
+    const release = lockSession(meetingId, localMeetingBusy(meetingId));
+    try {
+      const record = recorderFor(meeting);
+      // Publish the agenda only: userMessage also carries the private context and the debate suffix.
+      await recordMeetingCallerMessage(meeting, userMessage, record, { agenda });
+      await recordMeetingAgentReply(meeting, assistantMessage, record);
+    } finally {
+      release();
+    }
+
+    await stopCappedSession(meetingId);
+    return {
+      meetingId,
+      response: assistantMessage,
+      ...(publicChannel && { public: { url: publicChannel.url, topic: publicChannel.topic } }),
+      ...(prototype && { prototypes: prototype.takeCallSummary() }),
+    };
   } finally {
-    release();
+    releaseRoom();
+    if (!localMeetings.has(meetingId) && !sessionCapView(meetingId)?.reached) clearSessionCap(meetingId);
   }
-
-  return {
-    meetingId,
-    response: assistantMessage,
-    ...(publicChannel && { public: { url: publicChannel.url, topic: publicChannel.topic } }),
-    ...(prototype && { prototypes: prototype.takeCallSummary() }),
-  };
 }
 
 /** The local meeting's own choke point, as the shared prototype recorders take it. */

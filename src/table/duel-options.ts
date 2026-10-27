@@ -1,3 +1,4 @@
+import { validateSessionCap } from "../usage/session-caps.js";
 import { agentKey } from "../agents.js";
 import type { DuelOptions } from "./events.js";
 import { DUEL_KINDS, MAX_CRITERIA } from "./prompts.js";
@@ -6,6 +7,7 @@ export const MAX_TEAM_SIZE = 4;
 export const MAX_JUDGES = 5;
 /** The caller's mistakes, caught before any provider call. Throws a plain, secret-free Error. */
 export function validateDuelOptions(opts: Omit<DuelOptions, "judges"> & { judges?: string[] }): void {
+  validateSessionCap(opts.maxUsd);
   if (!opts.topic?.trim() || !opts.teamA?.length || !opts.teamB?.length || (!opts.humanJudge && !opts.judges?.length)) throw new Error("A duel needs a topic, two teams, and judges.");
   for (const [label, team] of [["Team A", opts.teamA], ["Team B", opts.teamB]] as const) {
     if (team.length > MAX_TEAM_SIZE) throw new Error(`${label} has ${team.length} members; a team may have 1 to ${MAX_TEAM_SIZE}.`);

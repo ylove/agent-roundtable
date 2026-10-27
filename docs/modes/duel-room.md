@@ -6,9 +6,9 @@ The local room shows two teams building the same brief as events arrive. Open it
 
 Web duels open in **Apps**: Team A and Team B share the screen equally at widths of 960 pixels and up, and stack on smaller screens. Each pane shows the team's seats and provider/model chips, named stage segments, current status and a short note from the table. Segments distinguish building, done, failed and skipped stages. A finished team shows its completion time while the other keeps building.
 
-The metrics strip shows tokens, cost, active time, versions, rewrites and errors. Errors combine failed turns, validation failures and page errors. Time excludes periods spent stopped. Unpriced tokens retain the **no price** label; priced spend covers only calls with known prices. Estimated token counts are marked.
+The footer shows the estimated spend: the larger of the reported usage total and the sum of the teams' metrics, so it never reads lower than the panes. The metrics strip shows tokens, cost, active time, versions, rewrites and errors. Errors combine failed turns, validation failures and page errors. Time excludes periods spent stopped. Unpriced tokens retain the **no price** label; priced spend covers only calls with known prices. Estimated token counts are marked.
 
-A new build loads in a hidden sandboxed frame before replacing the visible frame. A brief version/stage badge marks the change. Choose a version to pin it; incoming builds then show a **new version** chip. **Live** returns to the latest valid build. Failed builds preserve the last valid app. The version buttons include stage names, with page-check status in their tooltips. **Current vs proposed** opens the previous and latest valid builds with a source diff. **Browser · checked screenshots** retains the latest checked or judged screenshot.
+Each app shows as a scaled preview of a desktop-sized page, so a pane shows the whole top of the app rather than a corner of it; pinning a version shows it at full size. A new build loads in a hidden sandboxed frame before replacing the visible frame. A brief version/stage badge marks the change. Choose a version to pin it; incoming builds then show a **new version** chip. **Live** returns to the latest valid build. Failed builds preserve the last valid app. The version buttons include stage names, with page-check status in their tooltips. **Current vs proposed** opens the previous and latest valid builds with a source diff. **Browser · checked screenshots** retains the latest checked or judged screenshot.
 
 **Harness** shows each team's concept, critiques, stage transitions, build notes and connector tool notes in its own column. Judges' turns and verdicts, dissents and closing statements appear beneath the columns. The header switches between Apps and Harness; `#harness` in the URL preserves the choice without browser storage.
 
@@ -38,4 +38,6 @@ The route applies the same-origin checks used by the execution dashboard: an Ori
 
 Prototype frames keep an opaque origin: their sandbox allows scripts, forms and modals, without same-origin access. Their `Origin: null` requests cannot control the room. POST requests to prototype routes remain refused. The room retains its strict CSP, external script and stylesheet, and inserts model text through `textContent`. Web artifacts keep the application CSP; other artifacts are served as inert text.
 
-Screenshot placeholder: a 1280×720 Apps view showing one team finished while the other builds, followed by a Harness view. The promotional GIF will be added later.
+![A live duel in the room: two teams build different apps for the same brief, stage by stage, until Team A wins.](../assets/live-duel.gif)
+
+The recording is the bundled synthetic replay; see [Recording the duel GIF](../demo.md#recording-the-duel-gif) to make it again.

@@ -1,6 +1,7 @@
 // A local stdio MCP server for seat-connector tests: no network, no real service.
 // Tools: lookup (read-only), env_names (read-only), leak (read-only), big (read-only), boom (read-only, errors),
 // post_note (not read-only). SEAT_FIXTURE_PID names a file that receives the server's pid. Every call is appended to the file named by SEAT_FIXTURE_LOG when set.
+// SEAT_FIXTURE_DESCRIPTION sets lookup's listed description.
 import { appendFileSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -9,7 +10,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 if (process.env.SEAT_FIXTURE_PID) appendFileSync(process.env.SEAT_FIXTURE_PID, `${process.pid}\n`);
 const object = { type: "object", properties: { q: { type: "string" } } };
 const tools = [
-  { name: "lookup", description: "Look something up.", inputSchema: object, annotations: { readOnlyHint: true } },
+  { name: "lookup", description: process.env.SEAT_FIXTURE_DESCRIPTION ?? "Look something up.", inputSchema: object, annotations: { readOnlyHint: true } },
   { name: "env_names", description: "Names of the server's environment.", inputSchema: object, annotations: { readOnlyHint: true } },
   { name: "leak", description: "Returns a credential-shaped value.", inputSchema: object, annotations: { readOnlyHint: true } },
   { name: "big", description: "Returns a very large result.", inputSchema: object, annotations: { readOnlyHint: true } },

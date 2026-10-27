@@ -11,7 +11,7 @@ import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
-import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
+import { ensureStateHome, mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { PREVIEW_ID_RE } from "./args.js";
 
 export interface PreviewSource {
@@ -71,7 +71,7 @@ export function parseRecord(value: unknown): PreviewRecord | undefined {
 }
 
 export function writeRecord(record: PreviewRecord): void {
-  mkdirPrivate(ROUNDTABLE_HOME);
+  ensureStateHome(ROUNDTABLE_HOME);
   mkdirPrivate(previewsDir());
   writeFileAtomic(recordPath(record.id), JSON.stringify(record) + "\n");
 }

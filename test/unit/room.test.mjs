@@ -7,6 +7,7 @@ import { startRoom } from "../../dist/table/room.js";
 import { replayDuel } from "../../dist/table/replay.js";
 import { APP_CSP } from "../../dist/prototypes/board.js";
 import { inlineProblems } from "./helpers.mjs";
+import { ROOM_CSS, ROOM_JS } from "../../dist/table/room-assets.js";
 
 const fixture = new URL("../../examples/duel/demo.json", import.meta.url);
 function rawRequest(url, path, headers = {}) {
@@ -41,7 +42,7 @@ test("room capability checks, strict shell CSP, and recorded prototype serving",
   assert.equal(state.dissents.length, 1);
   assert.equal(state.end.winner, "A");
   const archive = JSON.parse(await readFile(fixture, "utf8"));
-  assert.equal(state.usage.totalCostUsd, archive.events.find(e => e.type === "usage").totalCostUsd);
+  assert.equal(state.usage.totalCostUsd, archive.events.findLast(e => e.type === "usage").totalCostUsd);
   assert.ok(!JSON.stringify(state).includes("<script>"));
   for (const team of ["A", "B"]) {
     const response = await fetch(new URL(`p/${team}/index.html`, base));
@@ -94,4 +95,14 @@ test("room script words unpriced spend as tokens with no price", async () => {
   assert.equal(spendText(0, 41200, false), "41.2k tok (no price)");
   assert.equal(spendText(0.0123, 41200, true), "$0.0123 + 41.2k tok unpriced");
   assert.equal(spendText(0.5, 0, true), "$0.5000");
+});
+
+test("live frames render as a scaled desktop preview with classes only, and the footer spend never reads below the panes", () => {
+  assert.match(ROOM_CSS, /\.live\.scaled iframe\{[^}]*width:calc\(100% \/ var\(--s\)\)[^}]*transform:scale\(var\(--s\)\)[^}]*transform-origin:top left/);
+  assert.match(ROOM_CSS, /\.live\.scaled\{[^}]*aspect-ratio/);
+  assert.match(ROOM_CSS, /@media\(min-width:1266px\) and \(max-width:1495px\)\{\.live\.scaled\{--s:\.6\}\}/);
+  assert.match(ROOM_JS, /classList\.toggle\("scaled", web && !selections\.has\(team\)\)/);
+  assert.ok(!/\.style\b|setAttribute\("style"/.test(ROOM_JS), "the room script sets no inline styles");
+  assert.match(ROOM_JS, /Math\.max\(state\.usage\.totalCostUsd \|\| 0, teamSpend\)/);
+  assert.match(ROOM_JS, /frame\.setAttribute\("sandbox", "allow-scripts allow-forms allow-modals"\)/);
 });

@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { PassThrough } from "node:stream";
 
-const { runDoctor, formatDoctor, nodeMeets, onboard, missingSetup, runUpCli, MCP_ADD } = await import("../../dist/cli-up.js");
+const { runDoctor, formatDoctor, nodeMeets, checkRoundtableBin, onboard, missingSetup, runUpCli, MCP_ADD } = await import("../../dist/cli-up.js");
 const { privateText } = await import("../../dist/serve/messages.js");
 const { VERSION } = await import("../../dist/config.js");
 
@@ -11,6 +14,7 @@ const probes = (over = {}) => ({
   nodeVersion: "v22.4.0", engines: ">=22", providers: () => ["anthropic", "openai"],
   keyNames: { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", together: "TOGETHER_API_KEY" },
   findExecutable: () => "/bin/x", runtimes: [{ name: "codex", command: "codex" }],
+  roundtableBin: () => ({ path: "/bin/roundtable", ours: true }),
   docker: async () => ({ ok: true }), chrome: () => "/chrome", ...over,
 });
 const sink = () => { const s = new PassThrough(); let text = ""; s.on("data", d => { text += d; }); return { stream: s, text: () => text }; };
@@ -29,6 +33,71 @@ test("doctor passes with the essentials and names keys without values", async ()
   assert.match(text, /\[ok\] Provider keys: available: anthropic, openai/);
   assert.match(text, /Essentials pass\./);
   assert.doesNotMatch(text, /\/bin\/x|\/chrome/);
+});
+
+test("roundtable bin advice covers this package, another package and no PATH entry", async () => {
+  for (const [bin, ok, detail] of [
+    [{ path: "/bin/roundtable", ours: true }, true, "this package"],
+    [{ path: "/bin/roundtable", ours: false }, false, "another package"],
+    [{ path: null, ours: false }, true, "not on PATH"],
+  ]) {
+    const check = checkRoundtableBin(bin);
+    assert.equal(check.id, "bin");
+    assert.equal(check.label, "roundtable on PATH");
+    assert.equal(check.ok, ok);
+    assert.equal(check.essential, false);
+    assert.equal(check.detail, detail);
+    assert.doesNotMatch(check.detail, /\/bin\//);
+    const result = await runDoctor(probes({ roundtableBin: () => bin }));
+    assert.equal(result.ok, true);
+    assert.equal(result.checks.find(c => c.id === "bin").ok, ok);
+    if (!ok) {
+      assert.match(check.fix, /Uninstall.*reorder PATH/);
+      assert.ok(check.fix.includes(`npx -y agent-roundtable@${VERSION}`));
+      assert.match(check.fix, /absolute path/);
+    }
+  }
+});
+
+test("doctor checks the first PATH bin through symlinks and the nearest package manifest", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "rt-bin-check-"));
+  try {
+    const packageName = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).name;
+    const dirs = ["ours", "other", "absent"].map(name => join(root, name));
+    for (const dir of dirs) mkdirSync(dir);
+    for (const [index, name] of [packageName, "example-roundtable"].entries()) {
+      const install = join(root, `install-${index}`);
+      mkdirSync(join(install, "dist"), { recursive: true });
+      writeFileSync(join(install, "package.json"), JSON.stringify({ name }));
+      const bin = join(install, "dist", "index.js");
+      writeFileSync(bin, 'throw new Error("The bin check must not execute the candidate");\n');
+      chmodSync(bin, 0o755);
+      symlinkSync(bin, join(dirs[index], "roundtable"));
+    }
+    for (const [path, ok, detail] of [
+      [[dirs[0], dirs[1]].join(delimiter), true, "this package"],
+      [[dirs[1], dirs[0]].join(delimiter), false, "another package"],
+      [dirs[2], true, "not on PATH"],
+    ]) {
+      const result = spawnSync(process.execPath, [new URL("../../dist/index.js", import.meta.url).pathname, "doctor", "--json"], {
+        env: { ...process.env, PATH: path, ROUNDTABLE_HOME: join(root, "state"), ROUNDTABLE_DOTENV: "off" }, encoding: "utf8", timeout: 20_000,
+      });
+      assert.ok(result.status === 0 || result.status === 1, result.stderr);
+      const check = JSON.parse(result.stdout).checks.find(c => c.id === "bin");
+      assert.equal(check.ok, ok);
+      assert.equal(check.detail, detail);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("up includes the optional roundtable PATH warning", async () => {
+  const o = sink();
+  const code = await runUpCli("up", ["--no-input", "--no-serve"], { output: o.stream }, {
+    probes: probes({ roundtableBin: () => ({ path: "/bin/roundtable", ours: false }) }), setup: fakeSetup(),
+  });
+  assert.equal(code, 0);
+  assert.match(o.text(), /\[--\] roundtable on PATH: another package\. Uninstall/);
+  assert.ok(o.text().includes(`npx -y agent-roundtable@${VERSION}`));
 });
 
 test("doctor: missing git, keys, Docker and Chrome", async () => {

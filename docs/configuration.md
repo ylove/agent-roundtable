@@ -99,8 +99,8 @@ These settings complete the table above. `SANDBOX_ENV` is re-exported by `src/sa
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `ROUNDTABLE_HOME` | Root for the agents library (`agents/`), execution state, sessions, worktrees, audit, activity and transcripts unless individually overridden | `~/.agent-roundtable`; fresh OS temp directory in a Node test process when unset |
-| `ROUNDTABLE_SANDBOX_IMAGE` | Default Docker command/check image; contract `sandbox.image` can override it | `node:22-bookworm-slim` |
-| `ROUNDTABLE_SANDBOX_PROXY_IMAGE` | Docker HTTPS install-egress proxy image | `node:22-alpine` |
+| `ROUNDTABLE_SANDBOX_IMAGE` | Default Docker command/check image; contract `sandbox.image` can override it | `node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d` |
+| `ROUNDTABLE_SANDBOX_PROXY_IMAGE` | Docker HTTPS install-egress proxy image | `node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914` |
 | `ROUNDTABLE_SANDBOX_MEMORY` | Docker memory limit with swap disabled; invalid values warn and fall back | `2g` |
 | `ROUNDTABLE_SANDBOX_CPUS` | Positive Docker CPU quota; invalid values warn and fall back | `2` |
 | `ROUNDTABLE_SANDBOX_PIDS` | Docker process limit, integer 16–1000000; invalid values warn and fall back | `512` |

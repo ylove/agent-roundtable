@@ -6,6 +6,13 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
+/** Create a state home with mode 0700, preserving the mode of an existing directory. */
+export function ensureStateHome(home: string): void {
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  const st = lstatSync(home);
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`Refusing to use ${home}: not a real directory`);
+}
+
 /** Create a directory (and parents) with mode 0700; refuses when the final path is a symlink. */
 export function mkdirPrivate(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });

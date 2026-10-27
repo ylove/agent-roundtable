@@ -14,7 +14,7 @@ claude mcp add --scope user roundtable \
 claude mcp list        # roundtable should show as connected
 ```
 
-`roundtable mcp` starts the orchestrator server, the same as running the binary with no arguments. Without the global install, use `-- npx -y agent-roundtable` or `-- node /absolute/path/to/dist/index.js` (a source checkout). `--scope user` makes it available in every project; leave it out (or use `--scope project`) to register it for one project only. Then ask Claude Code to "list the roundtable tools": you should see the 43 [tools](#tools), named `mcp__roundtable__<tool>`.
+`roundtable mcp` starts the orchestrator server, the same as running the binary with no arguments. Without the global install, use `-- npx -y agent-roundtable@2.0.0` or `-- node /absolute/path/to/dist/index.js` (a source checkout). `--scope user` makes it available in every project; leave it out (or use `--scope project`) to register it for one project only. Then ask Claude Code to "list the roundtable tools": you should see the 43 [tools](#tools), named `mcp__roundtable__<tool>`.
 
 Create personas in that directory or install the [starter pack](examples/starter-pack/) with `roundtable agents starter`. Set keys for the [providers](docs/providers.md) you use; local meetings use your Claude CLI login. For source installs, `.env`, `add-json` and project `.mcp.json` registration, see [getting started](docs/getting-started.md) and [configuration](docs/configuration.md). After a rebuild, reconnect with `/mcp`.
 

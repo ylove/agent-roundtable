@@ -10,14 +10,15 @@
 // paths and flags through the same setters as `roundtable config set`; it never stores a secret value.
 // ============================================================================
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { parseFlags } from "./cli.js";
 import { bundledUndiciNeedsUpdate } from "./http/fetch.js";
+import { VERSION } from "./config.js";
 import { scrub } from "./security/secrets.js";
 import { loadUserEnvironment, readUserConfig, setNotifyConfig, setUserConfig, userConfigHome } from "./user-config.js";
 
@@ -34,6 +35,7 @@ export interface Probes {
   /** The environment variable that holds each provider's key (by name only). */
   keyNames: Record<string, string>;
   findExecutable(name: string): string | null;
+  roundtableBin(): { path: string | null; ours: boolean };
   /** Names of the configured CLI runtimes and the program each one runs. */
   runtimes: Array<{ name: string; command: string }>;
   docker(): Promise<{ ok: boolean; reason?: string }>;
@@ -57,6 +59,15 @@ export function nodeMeets(version: string, engines: string): boolean {
   return Number(m[1]) > major || (Number(m[1]) === major && Number(m[2]) >= minor);
 }
 
+/** Describe the first roundtable on PATH without printing its path. */
+export function checkRoundtableBin(bin: { path: string | null; ours: boolean }): Check {
+  return {
+    id: "bin", label: "roundtable on PATH", essential: false, ok: bin.path === null || bin.ours,
+    detail: bin.path === null ? "not on PATH" : bin.ours ? "this package" : "another package",
+    fix: `Uninstall the other roundtable or reorder PATH, or use npx -y agent-roundtable@${VERSION} or the absolute path to this package's dist/index.js.`,
+  };
+}
+
 /** Run the checks. Essentials are Node, git and at least one provider key; everything else is advice. */
 export async function runDoctor(probes: Probes, options: { checkKeys?: boolean } = {}): Promise<Doctor> {
   const checks: Check[] = [];
@@ -71,6 +82,7 @@ export async function runDoctor(probes: Probes, options: { checkKeys?: boolean }
   });
   const git = probes.findExecutable("git");
   add({ id: "git", label: "git", essential: true, ok: !!git, detail: git ? "found" : "not found", fix: "Install git; heads-down runs and worktrees need it." });
+  add(checkRoundtableBin(probes.roundtableBin()));
   const keyed = probes.providers();
   const missing = Object.entries(probes.keyNames).filter(([p]) => !keyed.includes(p)).map(([, name]) => name);
   add({
@@ -221,7 +233,12 @@ async function defaultProbes(): Promise<Probes> {
   const { runtimeRegistry } = await import("./runtimes/registry.js");
   const { findChrome } = await import("./prototypes/browser.js");
   let engines = ">=22";
-  try { engines = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")).engines?.node ?? engines; } catch { /* Keep the default range. */ }
+  let packageName: string | undefined;
+  try {
+    const pkg = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));
+    engines = pkg.engines?.node ?? engines;
+    packageName = pkg.name;
+  } catch { /* Keep the default range. */ }
   const keyNames: Record<string, string> = {};
   for (const p of PROVIDER_IDS) {
     const name = PROVIDER_KEYS[p] ?? (p === "openai_compatible" ? "OPENAI_COMPATIBLE_BASE_URL" : "OLLAMA_URL");
@@ -230,6 +247,23 @@ async function defaultProbes(): Promise<Probes> {
   return {
     nodeVersion: process.version, bundledUndiciVersion: process.versions.undici, engines, providers: () => availableProviders(process.env), keyNames,
     findExecutable: name => findExecutable(name),
+    roundtableBin: () => {
+      const path = findExecutable("roundtable");
+      if (!path) return { path: null, ours: false };
+      try {
+        const real = realpathSync(path);
+        if (real === realpathSync(fileURLToPath(new URL("./index.js", import.meta.url)))) return { path, ours: true };
+        for (let dir = dirname(real); ; dir = dirname(dir)) {
+          const manifest = join(dir, "package.json");
+          if (existsSync(manifest)) {
+            const pkg = JSON.parse(readFileSync(manifest, "utf8"));
+            return { path, ours: !!packageName && pkg.name === packageName };
+          }
+          if (dirname(dir) === dir) break;
+        }
+      } catch { /* An unreadable executable or manifest is not confirmed as this package. */ }
+      return { path, ours: false };
+    },
     runtimes: (() => { try { return Object.entries(runtimeRegistry()).map(([name, spec]) => ({ name, command: spec.argv[0] })); } catch { return []; } })(),
     docker: async () => { const { DockerBackend } = await import("./sandbox/docker.js"); return new DockerBackend().available(); },
     chrome: () => findChrome(),

@@ -193,7 +193,7 @@ export function buildDockerRunArgs(req: SandboxRunRequest, opts: DockerRunOption
 export interface DockerBackendOptions {
   /** Names and labels egress networks (rt-egress-<tag>-<id>); random when unset. */
   executionTag?: string;
-  /** Default image; otherwise ROUNDTABLE_SANDBOX_IMAGE or node:22-bookworm-slim. */
+  /** Default image; otherwise ROUNDTABLE_SANDBOX_IMAGE or the digest-pinned DEFAULT_SANDBOX_IMAGE. */
   image?: string;
   limits?: Partial<DockerLimits>;
   /** The docker CLI (default "docker" on PATH). Tests point this at a fake. */

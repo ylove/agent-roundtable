@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { ROUNDTABLE_HOME, VERSION } from "../config.js";
 import { pidAlive } from "../prototypes/sandbox.js";
-import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
+import { ensureStateHome, mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { childEnv } from "../security/child-env.js";
 import { readUserConfig } from "../user-config.js";
 import { parseSecretRef } from "../secrets/ref.js";
@@ -57,7 +57,7 @@ export interface RunningServe { url: string; close(): Promise<void> }
 export async function startServe(options: ServeOptions = {}): Promise<RunningServe> {
   const address = selectBind(options.bind ?? "loopback");
   const log = (message: string) => (options.log ?? console.error)(`[Serve] ${privateText(message, 500)}`);
-  mkdirPrivate(ROUNDTABLE_HOME);
+  ensureStateHome(ROUNDTABLE_HOME);
   mkdirPrivate(serveDir());
   const release = await acquireLock(serveLockPath(), { staleMs: 10_000, timeoutMs: 0 });
   let index: Awaited<ReturnType<typeof startIndex>> | undefined;
@@ -193,7 +193,7 @@ export async function startServe(options: ServeOptions = {}): Promise<RunningSer
 export const serveCliPath = (): string => fileURLToPath(new URL("../index.js", import.meta.url));
 
 export function detachServe(args: string[]): number {
-  mkdirPrivate(ROUNDTABLE_HOME);
+  ensureStateHome(ROUNDTABLE_HOME);
   mkdirPrivate(serveDir());
   const config = readUserConfig();
   const extra: Record<string, string> = {};

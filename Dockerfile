@@ -4,7 +4,7 @@ ARG NODE_IMAGE=node:24-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38
 FROM ${NODE_IMAGE} AS build
 WORKDIR /src
 COPY package.json package-lock.json tsconfig.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY src ./src
 RUN npm run build
 
@@ -26,7 +26,7 @@ LABEL org.opencontainers.image.source="https://github.com/ylove/agent-roundtable
       io.modelcontextprotocol.server.name="io.github.ylove/agent-roundtable"
 
 ENV ROUNDTABLE_HOME=/home/node/.agent-roundtable
-RUN mkdir -p "$ROUNDTABLE_HOME" && chown node:node "$ROUNDTABLE_HOME"
+RUN mkdir -m 0700 -p "$ROUNDTABLE_HOME" && chown node:node "$ROUNDTABLE_HOME"
 USER node
 VOLUME ["/home/node/.agent-roundtable"]
 ENTRYPOINT ["node", "/app/dist/index.js"]

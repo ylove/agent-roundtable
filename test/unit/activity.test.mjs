@@ -1,6 +1,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { json, stubFetch } from "./helpers.mjs";
@@ -49,6 +50,27 @@ test("recordActivity creates directories, timestamps and bounded excerpts, and k
   assert.ok(Number.isFinite(Date.parse(entries[1].at)));
   assert.ok(!("outcome" in entries[1]));
   assert.equal(readFileSync(path, "utf8").trim().split("\n").length, 2);
+});
+
+test("activity creates a private state home and preserves custom directory modes", { skip: process.platform === "win32" }, () => {
+  const home = join(root, "fresh-home");
+  const activityModule = new URL("../../dist/activity.js", import.meta.url).href;
+  const script = `const { recordActivity } = await import(${JSON.stringify(activityModule)}); recordActivity(${JSON.stringify(entry("private-home"))});`;
+  execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, ROUNDTABLE_HOME: home, ROUNDTABLE_ACTIVITY_LOG: join(home, "nested", "history.jsonl"), ROUNDTABLE_DOTENV: "off" },
+  });
+  assert.equal(statSync(home).mode & 0o777, 0o700);
+  assert.equal(readActivity(join(home, "nested", "history.jsonl")).length, 1);
+  chmodSync(home, 0o750);
+  execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, ROUNDTABLE_HOME: home, ROUNDTABLE_ACTIVITY_LOG: join(home, "activity.jsonl"), ROUNDTABLE_DOTENV: "off" },
+  });
+  assert.equal(statSync(home).mode & 0o777, 0o750);
+  const custom = join(root, "custom-log-dir");
+  mkdirSync(custom);
+  chmodSync(custom, 0o755);
+  recordActivity(entry("custom"), join(custom, "history.jsonl"));
+  assert.equal(statSync(custom).mode & 0o777, 0o755);
 });
 
 test("activity is disabled with null, missing files read empty, and write failures never throw", (t) => {

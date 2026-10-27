@@ -2,12 +2,13 @@
 // Private operator configuration and credential references
 // ============================================================================
 
-import { closeSync, fstatSync, openSync, readFileSync, statSync, constants, mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, statSync, constants, writeFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { parse } from "dotenv";
 import { PROVIDER_IDS, type LLMProvider } from "./provider-ids.js";
+import { ensureStateHome } from "./security/fs-safe.js";
 
 import { validateRuntimeConfig, type RuntimeSpec } from "./runtimes/spec.js";
 import { validateConnectors, ENV_NAME, type ConnectorSpec } from "./connectors/config.js";
@@ -136,7 +137,7 @@ export function setUserConfig(key: "envFile" | "agentsDir", path: string, home =
 function saveUserConfig(config: UserConfig, home: string): void {
   const temp = join(home, `.config-${process.pid}-${crypto.randomUUID()}.tmp`);
   try {
-    mkdirSync(home, { recursive: true, mode: 0o700 });
+    ensureStateHome(home);
     writeFileSync(temp, JSON.stringify(config, null, 2) + "\n", { mode: 0o600, flag: "wx" });
     renameSync(temp, join(home, "config.json"));
   } catch { throw new Error("Unable to save user configuration."); }

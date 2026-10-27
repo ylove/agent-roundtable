@@ -5,7 +5,14 @@ import { NO_PRICE_LABEL } from "../usage/format.js";
 import type { Seat, TableEvent, TableObserver } from "./events.js";
 
 export interface TerminalOutput { write(text: string): unknown; isTTY?: boolean; columns?: number }
-export interface TerminalOptions { output?: TerminalOutput; env?: NodeJS.ProcessEnv; width?: number; agentsDir?: string }
+export interface TerminalOptions {
+  output?: TerminalOutput;
+  env?: NodeJS.ProcessEnv;
+  width?: number;
+  agentsDir?: string;
+  /** Two teams side by side ("split"), interleaved ("stack"), or split on a wide TTY ("auto", the default). */
+  layout?: "auto" | "split" | "stack";
+}
 const oneLine = (text: string): string => clean(text).replace(/\s+/g, " ").trim();
 function wrapped(text: string, width: number): string[] {
   const lines: string[] = [];

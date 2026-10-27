@@ -169,7 +169,7 @@ export function childEnv(
   }
   delete env[SCRUB_LITERALS_ENV];
   // Apply after extras so every child and grandchild uses absolute PATH directories.
-  env.PATH = absoluteSearchPath(env.PATH ?? "");
+  if (env.PATH !== undefined) env.PATH = absoluteSearchPath(env.PATH);
   if (profile === "runner" || profile === "serve") {
     const literals = configuredSecretLiterals({ ...source, ...extra });
     if (literals.length) env[SCRUB_LITERALS_ENV] = JSON.stringify(literals);

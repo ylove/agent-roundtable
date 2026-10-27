@@ -37,7 +37,7 @@ test("runner retains provider and execution settings", () => {
     "ROUNDTABLE_PROTOTYPE_DIR", "ROUNDTABLE_PROTOTYPE_TTL_MS", "ROUNDTABLE_PROTOTYPE_OPEN",
     "ROUNDTABLE_CHROME_PATH", "ROUNDTABLE_PROTOTYPE_SCREENSHOTS", "ROUNDTABLE_PAGE_CHECKS",
   ];
-  const source = Object.fromEntries(names.map(name => [name, `setting-${name}`]));
+  const source = Object.fromEntries(names.map(name => [name, name === "PATH" ? "/setting-PATH" : `setting-${name}`]));
   assert.deepEqual(runnerSettings({}, source), source);
 });
 
@@ -77,7 +77,7 @@ test("runner composes worker, git, docker and gh allowlists", () => {
     "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY",
     "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "GH_ENTERPRISE_TOKEN",
   ];
-  const source = Object.fromEntries(names.map(name => [name, `setting-${name}`]));
+  const source = Object.fromEntries(names.map(name => [name, name === "PATH" ? "/setting-PATH" : `setting-${name}`]));
   assert.deepEqual(runnerSettings({}, source), source);
   const conditional = { ANTHROPIC_AUTH_TOKEN: "worker-token", ANTHROPIC_BASE_URL: "http://localhost:8080" };
   for (const name of Object.keys(conditional)) assert.equal(runnerSettings({}, conditional)[name], undefined);
@@ -92,7 +92,7 @@ test("runner composes worker, git, docker and gh allowlists", () => {
     ["CLAUDE_CODE_USE_FOUNDRY", ["ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY",
       "CLAUDE_CODE_SKIP_FOUNDRY_AUTH"]],
   ]) {
-    const platform = Object.fromEntries(credentials.map(name => [name, `setting-${name}`]));
+    const platform = Object.fromEntries(credentials.map(name => [name, name === "PATH" ? "/setting-PATH" : `setting-${name}`]));
     assert.deepEqual(runnerSettings({}, platform), {});
     assert.deepEqual(runnerSettings({}, { ...platform, [flag]: "1" }), { ...platform, [flag]: "1" });
   }

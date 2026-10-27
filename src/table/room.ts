@@ -1,6 +1,6 @@
 import { newCapabilityToken, sameOriginProblem, tokenMatches, SecureServer, type Route } from "../http/secure-server.js";
 import { sanitizeSessionId } from "../prototypes/sandbox.js";
-import { livePreviews, previewLabel, previewOrigins, withFrameSrc } from "../previews/embed.js";
+import { livePreviews, previewOrigins, previewScreenshotRoute, previewView, withFrameSrc } from "../previews/embed.js";
 import { APP_CSP, openInBrowser } from "../prototypes/board.js";
 import { MAX_FILES, MAX_TOTAL_BYTES, validatePath, type PrototypeFile } from "../prototypes/parse.js";
 import { scrubDeep } from "../execution/blobs.js";
@@ -84,8 +84,12 @@ export async function startRoom({ state = createRoomState(), open = false, hold 
   };
   const duelPreviews = () => duelPreviewsOf(state.id, livePreviews());
   const routes: Route[] = [
-    { path: "/", handler: ctx => ctx.html(200, ROOM_HTML.replace("<!-- action nonce -->", `<meta name="roundtable-action" content="${nonce}">`), withFrameSrc(ROOM_CSP, previewOrigins(duelPreviews()))) },
-    { path: "/previews.json", handler: ctx => ctx.json(200, duelPreviews().map(r => ({ id: r.id, origin: r.origin, label: previewLabel(r) }))) },
+    { path: "/", handler: ctx => {
+      const origins = previewOrigins(duelPreviews());
+      ctx.html(200, ROOM_HTML.replace("<!-- action nonce -->", `<meta name="roundtable-action" content="${nonce}"><meta name="roundtable-preview-origins" content="${origins.join(" ")}">`), withFrameSrc(ROOM_CSP, origins));
+    } },
+    { path: "/previews.json", handler: ctx => ctx.json(200, duelPreviews().map(previewView)) },
+    previewScreenshotRoute(duelPreviews),
     { path: "/room.js", handler: ctx => ctx.send(200, ROOM_JS, "text/javascript; charset=utf-8") },
     { path: "/room.css", handler: ctx => ctx.send(200, ROOM_CSS, "text/css; charset=utf-8") },
     { path: "/state.json", handler: ctx => {

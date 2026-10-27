@@ -6,6 +6,8 @@
 // data-* attributes on <body> and changes the page through textContent and class names only.
 // ============================================================================
 
+import { PREVIEW_JS } from "../previews/assets.js";
+
 export const DASHBOARD_CSS = `
 :root{color-scheme:light dark;--bg:#f7f7f5;--fg:#1d1d1f;--muted:#6b6b70;--card:#fff;--line:#e2e2e0;--accent:#2f6fde;
 --ok:#187a40;--warn:#a5660a;--bad:#b3261e;--busy:#7a4cc2;--code:#f0f0ee;--banner:#fff1ef;--chip-bg:#f4f4f2;
@@ -33,7 +35,7 @@ td.num{white-space:nowrap}td.note{max-width:420px;overflow-wrap:anywhere}
 .st-claimed,.st-in_progress,.st-open,.st-in_huddle{color:var(--warn)}.st-submitted,.st-checking,.st-merging{color:var(--busy)}
 .st-blocked,.st-failed,.st-aborted,.st-awaiting_human,.st-timed_out{color:var(--bad)}
 .st-pending,.st-paused,.st-cancelled,.st-created,.st-withdrawn,.st-unknown{color:var(--muted)}.st-alive{color:var(--ok)}.st-stale{color:var(--bad)}
-iframe.preview{display:block;width:100%;height:480px;border:1px solid var(--line);border-radius:8px;background:#fff}figure.preview{margin:0 0 16px}figure.preview figcaption{margin-bottom:6px;font-size:.9em}
+iframe.preview{display:block;width:100%;height:480px;border:1px solid var(--line);border-radius:8px;background:#fff}figure.preview{margin:0 0 16px}figure.preview figcaption{margin-bottom:6px;font-size:.9em}.preview-shot{display:block;max-width:100%;height:auto}
 pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;white-space:pre-wrap;
 word-break:break-word;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
 code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -98,6 +100,8 @@ dialog::backdrop{background:rgba(0,0,0,.45)}dialog h2{margin:0 0 8px}dialog p{ma
  * The script changes the page through textContent, class names and node moves only.
  */
 export const DASHBOARD_JS = `(function(){
+${PREVIEW_JS}
+initPreviewCards();
 var b=document.body,base=b.getAttribute("data-base"),seq=Number(b.getAttribute("data-seq"))||0;
 var mode=b.getAttribute("data-live"),reload=mode==="reload",swap=mode==="swap",note=document.getElementById("live"),loaded=Date.now(),pending=false;
 function say(text,cls){if(note){note.textContent=text;note.className="live "+cls}}

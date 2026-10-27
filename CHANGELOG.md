@@ -2,6 +2,7 @@
 
 ## 2.1.0 (unreleased)
 
+- **Preview display modes (#246, WS35d).** Add `live`, `click` and `screenshot` via CLI `--display`, tool `display` and `ROUNDTABLE_PREVIEW_DISPLAY`. The CLI defaults to `live` from an interactive terminal and `click` otherwise; worker and execution starts default to `click`. Rooms show the recorded mode, and screenshot cards use the latest page-check image. See [previews](docs/previews.md).
 - **Live duel GIF (#229).** A recorded promotional GIF of the room at the top of the README, made by the reproducible `scripts/record-duel.mjs` from a redesigned demo fixture (a coin game against a pocket planner, with per-turn usage). The room now shows each app as a scaled desktop preview, and its footer spend never reads below the pane metrics. See [recording the duel GIF](docs/demo.md#recording-the-duel-gif).
 - **Connector metadata controls (#245).** Bound and scrub seat connector metadata, mark descriptions as untrusted text, pin raw tool lists per configuration, and add `roundtable connectors trust <name>` for renewed acceptance.
 - Persisted lessons need a person’s sign-off, with pending review in the postmortem tool, CLI and dashboard record, signer/time audit and lineage, and informational review notices for legacy lessons (#243).

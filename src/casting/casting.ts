@@ -1,3 +1,5 @@
+import { reserveLiveSession } from "../usage/live-limit.js";
+import { validateSessionCap, setSessionCap, sessionCapView } from "../usage/session-caps.js";
 import { randomUUID } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
@@ -24,7 +26,7 @@ export interface CastingOptions {
   brief: string; agents?: string[]; agentsDir?: string; seats?: number; examine?: boolean;
   dryRun?: boolean; provider?: LLMProvider | "auto"; model?: string;
   seat?: string | Record<string, SeatSpec>; mix?: "auto" | "cheap";
-  turnTimeoutMs?: number; maxSeconds?: number;
+  turnTimeoutMs?: number; maxSeconds?: number; maxUsd?: number;
   /** Configured MCP connectors every seat may call as tools during its turn. */
   connectors?: string[];
   /** Limits a persona to some of those connectors (persona key to connector names). */
@@ -32,6 +34,7 @@ export interface CastingOptions {
 }
 
 export function validateCastingOptions(opts: CastingOptions): void {
+  validateSessionCap(opts.maxUsd);
   if (typeof opts.brief !== "string" || !opts.brief.trim() || opts.brief.length > 4000) throw new SeatUsageError("cast requires a brief of 1 to 4000 characters.");
   if (opts.agents !== undefined && (!Array.isArray(opts.agents) || opts.agents.length < 2 || opts.agents.length > 24 || opts.agents.some(a => typeof a !== "string" || !a.trim()))) throw new SeatUsageError("--agents requires 2 to 24 personas.");
   if (opts.agentsDir !== undefined && !isAbsolute(opts.agentsDir)) throw new SeatUsageError("--agents-dir requires an absolute directory.");
@@ -195,11 +198,13 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
     events.push(event);
     try { await obs.onEvent(event); } catch { /* A failed renderer cannot interrupt archival. */ }
   };
+  const releaseRoom = opts.dryRun ? () => {} : reserveLiveSession(id);
   const deadline = new AbortController();
   const ended = Date.now() + (opts.maxSeconds ?? 300) * 1000;
   const timer = setTimeout(() => deadline.abort(new Error("Casting deadline reached.")), (opts.maxSeconds ?? 300) * 1000);
   // Listed with the live duels, so the usage view and stop_session reach it through sessionSignal(id).
-  registerDuel({ id, kind: "casting", agents: agents.map(a => a.key), started: createdAt });
+  if (!opts.dryRun) setSessionCap(id, opts.maxUsd);
+  if (!opts.dryRun) registerDuel({ id, kind: "casting", agents: agents.map(a => a.key), started: createdAt });
   let connectors: Awaited<ReturnType<typeof startSeatConnectors>> | undefined;
   try {
     connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal, seatConnectors: checked.seatConnectors }) : undefined;
@@ -214,7 +219,8 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
     const usage = new Map(seats.map(s => [s.id, { seatId: s.id, inputTokens: 0, outputTokens: 0, costUsd: 0, unpricedTokens: 0, estimated: false }]));
     const emitUsage = async () => {
       const perSeat = [...usage.values()].map(total => ({ ...total }));
-      await emit({ type: "usage", perSeat, totalCostUsd: perSeat.reduce((n, s) => n + s.costUsd, 0), totalUnpricedTokens: perSeat.reduce((n, s) => n + s.unpricedTokens, 0) });
+      await emit({ type: "usage", perSeat, totalCostUsd: perSeat.reduce((n, s) => n + s.costUsd, 0), totalUnpricedTokens: perSeat.reduce((n, s) => n + s.unpricedTokens, 0),
+        ...(sessionCapView(id) && { capUsd: opts.maxUsd, spentUsd: sessionCapView(id)!.spentUsd, capReached: sessionCapView(id)!.reached }) });
     };
     const failures = new Map<string, string>();
     const auditions: Record<string, string> = Object.create(null), answers: Record<string, string> = Object.create(null);
@@ -262,6 +268,7 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
       return;
     }
     await emit({ type: "start", id, topic: report.brief, mode: "casting", seats, startedAt: createdAt });
+    if (sessionCapView(id)) await emitUsage();
     // Each connector call and notice appears as a short note, never as the tool's payload.
     connectors?.onNote(use => {
       const seat = seats.find(s => s.id === use.seat) ?? seats[0];
@@ -299,10 +306,10 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
       }
     }
     const unpricedTokens = [...usage.values()].reduce((n, s) => n + s.unpricedTokens, 0);
-    report.usage = { totalCostUsd: [...usage.values()].reduce((n, s) => n + s.costUsd, 0), ...(unpricedTokens > 0 && { unpricedTokens }),
+    report.usage = { ...(sessionCapView(id) && { capUsd: opts.maxUsd, spentUsd: sessionCapView(id)!.spentUsd, capReached: sessionCapView(id)!.reached }), totalCostUsd: [...usage.values()].reduce((n, s) => n + s.costUsd, 0), ...(unpricedTokens > 0 && { unpricedTokens }),
       ...((unpricedTokens > 0 || [...usage.values()].some(s => s.estimated)) && { estimated: true }) };
     await emitUsage();
-    if (!opts.dryRun && stopped()) report.note = "Stopped before completion; roster is partial.";
+    if (!opts.dryRun && stopped()) report.note = sessionCapView(id)?.reached ? "Stopped by spend cap; roster is partial." : "Stopped before completion; roster is partial.";
     await emit({ type: "roster", report });
     const archivePath = join(ROUNDTABLE_HOME, "casting", `${id}.json`);
     await emit({ type: "end", mode: "casting", winner: "none", tally: { A: 0, B: 0 }, aborted: !opts.dryRun && stopped(), archivePath: `casting/${id}.json` });
@@ -312,5 +319,5 @@ export async function runCastingCall(opts: CastingOptions, obs: TableObserver, s
     writeFileAtomic(archivePath, archive);
     writeFileAtomic(join(ROUNDTABLE_HOME, "casting", "latest.json"), archive);
     return report;
-  } finally { clearTimeout(timer); unregisterDuel(id); await connectors?.close(); }
+  } finally { clearTimeout(timer); releaseRoom(); unregisterDuel(id); await connectors?.close(); }
 }

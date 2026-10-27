@@ -150,7 +150,7 @@ function render(state) {
   byId("topic").textContent = state.topic || "Waiting for the duel";
   const end = state.end, banner = byId("banner");
   banner.replaceChildren(); banner.hidden = !end && !state.stopped && !state.decision;
-  if (state.stopped) banner.append(node("strong", "Stopped. Resume continues from where it stopped."));
+  if (state.stopped) banner.append(node("strong", state.usage.capReached ? "Stopped by spend cap. Raise --max-usd with roundtable duel --resume " + state.id + " to continue." : "Stopped. Resume continues from where it stopped."));
   else if (end) {
     banner.append(node("strong", end.winner === "tie" ? "It's a tie" : end.winner === "none" ? "No verdict" : "Team " + end.winner + " wins"), node("span", end.decidedBy === "human" ? "Chosen by you" : "Judges' tally A " + end.tally.A + " / B " + end.tally.B));
     const comparison = efficiency(end.metrics || state.metrics); if (comparison) banner.append(node("span", comparison));
@@ -158,7 +158,7 @@ function render(state) {
   } else if (state.decision) banner.append(node("strong", state.decision.status === "awaiting" ? "Waiting for you to choose the winner" : "You chose Team " + state.decision.winner));
   byId("header-controls").replaceChildren();
   if (state.controls.stop) { const b = button("Stop", () => command("stop"), "stop"); b.disabled = busy; byId("header-controls").append(b); }
-  if (state.controls.resume) { const b = button("Resume", () => command("resume")); b.disabled = busy; (state.stopped ? banner : byId("header-controls")).append(b); }
+  if (state.controls.resume && !state.usage.capReached) { const b = button("Resume", () => command("resume")); b.disabled = busy; (state.stopped ? banner : byId("header-controls")).append(b); }
   for (const team of ["A", "B"]) renderTeam(state, team, state.kind === "web");
   byId("judges").replaceChildren(...state.turns.filter(t => teamOf(state, t.seat) !== "A" && teamOf(state, t.seat) !== "B" && !/closing/i.test(t.round)).map(transcriptNode));
   byId("closings").replaceChildren(...state.turns.filter(t => /closing/i.test(t.round)).map(transcriptNode));
@@ -166,7 +166,7 @@ function render(state) {
   byId("dissents").replaceChildren(...state.dissents.map(item => node("article", item.seat.name + (item.team ? " · Team " + item.team : "") + "\n" + item.text, "entry")));
   if (state.browser) { const shot = state.browser, image = byId("browser-shot"); byId("browser-note").textContent = "Team " + shot.team + " · v" + shot.version; const src = "shot/" + shot.team + "/" + shot.version + ".png"; if (image.getAttribute("src") !== src) image.src = src; image.hidden = false; }
   const teamSpend = Object.values(state.metrics).reduce((n, m) => n + (m?.costUsd || 0), 0);
-  byId("spend").textContent = "Estimated spend: " + spendText(Math.max(state.usage.totalCostUsd || 0, teamSpend), state.usage.totalUnpricedTokens, true); setView();
+  byId("spend").textContent = (state.usage.capUsd !== undefined ? "$" + (state.usage.spentUsd ?? state.usage.totalCostUsd).toFixed(4) + " of $" + state.usage.capUsd + " cap" + (state.usage.capReached ? " · stopped by spend cap" : "") : "Estimated spend: " + spendText(Math.max(state.usage.totalCostUsd || 0, teamSpend), state.usage.totalUnpricedTokens, true)); setView();
 }
 byId("apps-tab").addEventListener("click", () => { location.hash = ""; setView(); });
 byId("harness-tab").addEventListener("click", () => { location.hash = "harness"; setView(); });

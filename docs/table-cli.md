@@ -87,6 +87,7 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | `--seat` | One comma-separated set of per-agent assignments; repeated flags are refused |
 | `--mix` | `auto` or `cheap`, using providers that pass automatic preflight |
 | `--turn-timeout` | Per-turn timeout in seconds (default 90) |
+| `--max-usd n` | Optional positive finite session spend cap in USD; checked after each metered call. Available on duel, debate, waffle, meeting and cast. |
 | `--max-seconds` | Overall deadline in seconds: default 600 + 150 per extra build stage + 120 per member beyond two on the larger duel team, capped at 3600; other commands default 600 |
 | `--preflight` | Check selected provider/model pairs and report pass/fail; automatic for routed seats |
 | `--no-preflight` | Skip probes; retain known health exclusions |
@@ -101,6 +102,8 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 `--help` (or `-h`) on any table command prints its usage. The topic is one positional argument before the flags; quote topics containing spaces. Terminal colors require a TTY and an unset `NO_COLOR`. Turns wrap to about six lines, prototype submissions print a short summary, and the closing footer shows spend. JSON output retains full events.
 
 Staged web builds progress independently through Skeleton, Screens, Working and Polish. Live process metrics show time, tokens, cost, versions, rewrites and errors; judges receive an engine-written process record. Final A/B winners keep a private chosen artifact, also exported by `--out`. See [duel](modes/duel.md) and [room/layout](modes/duel-room.md).
+
+A spend cap stops provider work after the call that reaches it. Concurrent calls already in flight can add to the final spend. Unpriced tokens use the same estimate as provider judgment ($15 per million input tokens and $75 per million output tokens); known free models count as zero. The footer and room metrics show spend against the cap. Discussions and casting exit with code 1 when the cap stops them. A capped duel saves a checkpoint and exits with a resume command: `roundtable duel --resume <id> --max-usd 5`. The new cap must exceed its cumulative spend, which carries across resumes.
 
 A completed duel keeps its room open until Ctrl-C unless `--no-hold` is set. During a duel, the first Ctrl-C stops calls and saves a private resumable checkpoint, emitting no end event. The held room can Resume; the next Ctrl-C exits and prints `Resume with: roundtable duel --resume <id>`. With `--no-room` or `--no-hold`, the first stop exits with that line. A deadline instead judges the latest valid versions and finishes. `--human-judge --no-room` prompts `Choose the winner [A/B]:` on a TTY and is a usage error otherwise. Exit codes are 0 for completion or tie, 1 for failure or interruption, and 2 for usage errors or missing credentials.
 
@@ -138,6 +141,7 @@ roundtable cast "Draft an expenses policy" --agents-dir /absolute/path/to/agents
 | `--connectors a,b` | Let every seat call these configured MCP connectors; not with `--dry-run`. See [connectors at the table](connectors.md#at-the-table) |
 | `--seat-connectors s=a+b,...` | Limit a persona to some of those connectors, e.g. `architect=figma` |
 | `--turn-timeout s` | Per-turn timeout, default 90 seconds |
+| `--max-usd n` | Optional positive finite session spend cap in USD |
 | `--max-seconds s` | Whole-run deadline, default 300 seconds |
 
 Turns stream using the table renderer. The final roster lists verdicts, roles, overlaps, redundancy, gaps and the recommended cast. When the director supplies teams, it also prints a shell-safe duel command. Archives live at `ROUNDTABLE_HOME/casting/<id>.json` and `casting/latest.json`; the terminal prints the archive path. Ctrl-C still prints and archives the available report. Exit codes: 0 completed, 1 aborted or failed, 2 usage error or missing key. See [Casting Call](modes/casting-call.md) for the report fields, costs and handoff to a contract or duel.

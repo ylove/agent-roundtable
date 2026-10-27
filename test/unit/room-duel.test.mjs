@@ -227,3 +227,13 @@ test("each room start uses a fresh action nonce", async t => {
   const a = await nonce(first), b = await nonce(second); assert.notEqual(a, b);
   assert.equal((await second.request("control", { method: "POST", headers: { "content-type": "application/json", "x-roundtable-action": a }, body: '{"action":"stop"}' })).status, 403);
 });
+
+test('room metrics retain the cap and cumulative spend from usage events', async t => {
+  const { room, request } = await harness(t);
+  await room.observer.onEvent(start);
+  const usage = { type: 'usage', perSeat: [], totalCostUsd: 0.1, capUsd: 0.2, spentUsd: 0.15, capReached: false };
+  await room.observer.onEvent(usage);
+  const response = await request('state.json');
+  assert.deepEqual(response.body.usage, usage);
+  assert.match(ROOM_JS, /state.usage.capUsd/);
+});

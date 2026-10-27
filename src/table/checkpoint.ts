@@ -22,7 +22,7 @@ export interface DuelProgress {
   completedClosings: ("A" | "B")[];
   decision?: "A" | "B";
 }
-export interface DuelUsage { seatId: string; inputTokens: number; outputTokens: number; costUsd: number; unpricedTokens: number; estimated: boolean }
+export interface DuelUsage { seatId: string; inputTokens: number; outputTokens: number; costUsd: number; capSpendUsd?: number; unpricedTokens: number; estimated: boolean }
 export interface DuelCheckpoint {
   version: 1;
   id: string;
@@ -60,7 +60,7 @@ export function validateCheckpoint(value: unknown, id: string): DuelCheckpoint {
   if (!keys(x, ["version", "id", "nonce", "options", "seats", "archive", "progress", "usage", "activeMs"]) ||
       x.version !== 1 || x.id !== id || !isDuelId(x.id) || !string(x.nonce, 12) || !/^[a-f0-9]{12}$/.test(x.nonce) || !number(x.activeMs)) fail();
   const o = x.options;
-  if (!keys(o, ["topic", "teamA", "teamB", "judges", "kind", "criteria", "stages", "rounds", "humanJudge", "pageCheck", "connectors", "seatConnectors", "maxSeconds", "turnTimeoutMs", "agentsDir"]) ||
+  if (!keys(o, ["topic", "teamA", "teamB", "judges", "kind", "criteria", "stages", "rounds", "humanJudge", "pageCheck", "connectors", "seatConnectors", "maxSeconds", "maxUsd", "turnTimeoutMs", "agentsDir"]) ||
       !string(o.topic, 16_000) || !strings(o.teamA, 4) || !strings(o.teamB, 4) || !strings(o.judges, 5) ||
       !integer(o.stages) || o.stages < 1 || o.stages > 4 || ![1, 2].includes(o.rounds!) ||
       !number(o.maxSeconds) || o.maxSeconds > 3600 || !number(o.turnTimeoutMs) || o.turnTimeoutMs <= 0 || o.turnTimeoutMs > 3_600_000 ||
@@ -119,8 +119,8 @@ export function validateCheckpoint(value: unknown, id: string): DuelCheckpoint {
   }
   if (p.decision && !p.teams[p.decision].submission) fail();
   if (!Array.isArray(x.usage) || x.usage.length !== x.seats.length || new Set(x.usage.map(u => u?.seatId)).size !== x.usage.length ||
-      x.usage.some(u => !keys(u, ["seatId", "inputTokens", "outputTokens", "costUsd", "unpricedTokens", "estimated"]) || !x.seats.some(s => s.id === u.seatId) ||
-        ![u.inputTokens, u.outputTokens, u.unpricedTokens].every(integer) || !number(u.costUsd) || typeof u.estimated !== "boolean")) fail();
+      x.usage.some(u => !keys(u, ["seatId", "inputTokens", "outputTokens", "costUsd", "capSpendUsd", "unpricedTokens", "estimated"]) || !x.seats.some(s => s.id === u.seatId) ||
+        ![u.inputTokens, u.outputTokens, u.unpricedTokens].every(integer) || (u.capSpendUsd !== undefined && !number(u.capSpendUsd)) || !number(u.costUsd) || typeof u.estimated !== "boolean")) fail();
   for (const team of ["A", "B"] as const) {
     const totals = x.usage.filter(u => x.seats.some(s => s.id === u.seatId && s.team === team));
     for (const key of ["inputTokens", "outputTokens", "unpricedTokens", "costUsd"] as const) if (Math.abs(p.teams[team].metrics[key] - totals.reduce((n, u) => n + u[key], 0)) > 1e-9) fail();

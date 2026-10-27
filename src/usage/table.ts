@@ -213,6 +213,9 @@ export interface LiveSession {
   kind: string;
   agents: string[];
   started: string;
+  maxUsd?: number;
+  spentUsd?: number;
+  reached?: boolean;
   /** A turn is in flight. */
   busy?: boolean;
 }
@@ -288,6 +291,7 @@ export function readLiveServers(now = Date.now(), home = ROUNDTABLE_HOME): LiveS
           kind: clean(o.kind, 40),
           agents: (Array.isArray(o.agents) ? o.agents : []).filter((a): a is string => typeof a === "string").slice(0, 32).map((a) => clean(a, 64)),
           started: typeof o.started === "string" ? o.started : "",
+          ...(typeof o.maxUsd === "number" && Number.isFinite(o.maxUsd) && o.maxUsd > 0 && typeof o.spentUsd === "number" && Number.isFinite(o.spentUsd) && o.spentUsd >= 0 && { maxUsd: o.maxUsd, spentUsd: o.spentUsd, reached: o.reached === true }),
           ...(o.busy === true && { busy: true }),
         });
       }

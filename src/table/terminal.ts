@@ -114,10 +114,13 @@ export function createTerminalObserver(options: TerminalOptions = {}): TableObse
     } else output.write([...a, ...b].join("\n") + "\n");
   };
   let spend = 0, unpriced = 0;
+  let cap: number | undefined, capSpend = 0, capReached = false, sessionId = "";
+  const cappedSpend = () => cap === undefined ? totalSpendText(spend, unpriced) : `spent $${capSpend.toFixed(4)} of $${cap} cap${capReached ? " (stopped by spend cap)" : ""}`;
   let perSeat: Extract<TableEvent, { type: "usage" }>["perSeat"] = [];
   return { onEvent(event) {
     switch (event.type) {
       case "start": {
+        sessionId = event.id; cap = undefined; capSpend = 0; capReached = false;
         teams = event.teams ?? { A: event.seats.filter(s => s.team === "A").map(s => s.id), B: event.seats.filter(s => s.team === "B").map(s => s.id) };
         if (!event.resumed) { metrics = {}; delete progress.A; delete progress.B; spend = 0; unpriced = 0; perSeat = []; }
         output.write(`At the table: ${oneLine(event.topic)}\n`);
@@ -146,15 +149,18 @@ export function createTerminalObserver(options: TerminalOptions = {}): TableObse
         if (event.status === "done") statusLine();
         break;
       case "metrics": metrics = event.teams; break;
-      case "control": output.write(event.action === "resumed" ? "Resumed\n" : `Stopped by ${oneLine(event.by)}\n`); break;
+      case "control":
+        output.write(event.action === "resumed" ? "Resumed\n" : `Stopped by ${oneLine(event.reason ?? event.by)}\n`);
+        if (event.reason === "spend cap") output.write(`${cappedSpend()}\nResume with: roundtable duel --resume ${oneLine(sessionId)} --max-usd <higher-cap>\n`);
+        break;
       case "decision": output.write(event.status === "awaiting" ? "Waiting for you to choose the winner in the room.\n" : `You chose Team ${event.winner}.\n`); break;
       case "assessment": output.write(`${oneLine(event.judge.name)} → ${event.team} ${paint(event.verdict === "APPROVE" ? 32 : event.verdict === "REJECT" ? 31 : 33, `[${event.verdict}]`)} ${(lines => (lines[0] ?? "") + (lines.length > 1 ? "…" : ""))(wrapped(event.reason, width))}\n`); break;
       case "dissent": output.write(`Dissent · ${label(event.seat)}\n${wrapped(event.text, width).join("\n")}\n`); break;
-      case "usage": spend = event.totalCostUsd; unpriced = event.totalUnpricedTokens ?? 0; perSeat = event.perSeat; break;
+      case "usage": cap = event.capUsd; capSpend = event.spentUsd ?? event.totalCostUsd; capReached = event.capReached ?? false; spend = event.totalCostUsd; unpriced = event.totalUnpricedTokens ?? 0; perSeat = event.perSeat; break;
       case "roster": output.write("\n" + renderRoster(event.report, options.agentsDir)); break;
       case "end":
-        if (event.mode === "casting") { output.write(`\n${event.aborted ? "Aborted" : "Done"} · Spend: ${totalSpendText(spend, unpriced)}\n`); break; }
-        output.write(`\n${event.aborted ? "Aborted" : event.winner === "tie" ? "Tie" : event.winner === "none" ? "No verdict" : `Winner: ${event.winner}`} · A ${event.tally.A} / B ${event.tally.B}\nSpend: ${totalSpendText(spend, unpriced)}${perSeat.length ? ` (${perSeat.map(s => `${oneLine(s.seatId)} ${seatSpendText(s.costUsd, s.unpricedTokens)}`).join(", ")})` : ""}\n`);
+        if (event.mode === "casting") { output.write(`\n${event.aborted ? "Aborted" : "Done"} · Spend: ${cappedSpend()}\n`); break; }
+        output.write(`\n${event.aborted ? "Aborted" : event.winner === "tie" ? "Tie" : event.winner === "none" ? "No verdict" : `Winner: ${event.winner}`} · A ${event.tally.A} / B ${event.tally.B}\nSpend: ${cappedSpend()}${perSeat.length ? ` (${perSeat.map(s => `${oneLine(s.seatId)} ${seatSpendText(s.costUsd, s.unpricedTokens)}`).join(", ")})` : ""}\n`);
         if (event.decidedBy) output.write(event.decidedBy === "human" ? "Chosen by you\n" : `Judges' tally A ${event.tally.A} / B ${event.tally.B}\n`);
         if (event.chosen) output.write(`Chosen artifact: ${oneLine(event.chosen.dir)}\n`);
         if (event.metrics) metrics = event.metrics;

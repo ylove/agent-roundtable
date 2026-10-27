@@ -144,6 +144,7 @@ function card(a: UsageAgent, series: SpendSeries, budget: number | undefined): s
     `<div class="card-top"><span class="avatar ${avatarClass(a.id)}" aria-hidden="true">${escapeHtml(initials(name))}</span>` +
     `<div class="who"><h3>${t(name)}</h3>${platform}</div>${pill(a)}</div>` +
     `<div class="money">${moneyHtml(a.money, a.tokens)}</div>` +
+    (a.max_usd !== undefined ? `<div class="session-cap">spent $${(a.spent_usd ?? 0).toFixed(4)} of $${a.max_usd} cap</div>` : "") +
     `<div class="tokens">${tokensHtml(a.tokens)}</div>` +
     ((a.calls?.length ?? 0) > 0 ? `<ul class="call-ledger">${a.calls!.map((r) => `<li>${t(r.source)}${r.dissent_id ? ` · dissent ${t(r.dissent_id)}` : ""} · ${t(r.execution)}${r.task ? ` · task ${t(r.task)}` : ""} · charged to ${t(r.agent ?? a.id)} · ${t(r.provider ?? "unknown")} · ${t(r.model)} · ${escapeHtml(usd(r.usd))} ${t(r.provenance.usd)}${r.reservation ? " · outstanding reservation" : ""}</li>`).join("")}</ul>` : "") +
     (share !== undefined && budget

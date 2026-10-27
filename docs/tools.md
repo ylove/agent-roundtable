@@ -14,6 +14,7 @@ Audition 2 to 24 personas for any brief, cross-examine them through a neutral ca
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `brief` | string | yes | Brief of 1 to 4000 characters. |
 | `agents` | array of string | no | 2 to 24 persona identifiers; default every persona in the directory. |
 | `agents_dir` | string | no | Absolute persona directory. |
@@ -44,6 +45,7 @@ Start a meeting with an agent. Returns a meeting ID for follow-up messages. Use 
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `agent` | string | yes | Agent identifier or path to prompt file. Examples: "cfo", "fpa", "product" |
 | `agenda` | string | yes | The topic, question, or task to discuss with the agent. |
 | `context` | string | no | Optional additional context, document content, or data to share. |
@@ -123,6 +125,7 @@ Start a LOCAL meeting with an agent using the installed Claude CLI. This uses yo
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `agent` | string | yes | Agent identifier or path to prompt file. Examples: "cfo", "fpa", "product" |
 | `agenda` | string | yes | The topic, question, or task to discuss with the agent. |
 | `context` | string | no | Optional additional context, document content, or data to share. |
@@ -200,6 +203,7 @@ Start a collaboration where agents take turns responding; returns a collaboratio
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `agents` | array of string | yes | Array of agent identifiers. Examples: ["cfo", "fpa"], ["product", "engineering", "design"] minItems: `2`. |
 | `seats` | object | no | Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (an API provider or explicit [CLI runtime](runtimes.md) name) and model. |
 | `topic` | string | no | Required except in conversation mode, where it is an optional loose theme, not an agenda. |
@@ -239,6 +243,7 @@ Run a duel and return its result: two teams each build an artifact for the same 
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `provider` | string | no | Omit or use `auto` for [provider judgment](providers.md#provider-judgment). Explicit providers retain their defaults. Values: `auto`, `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
 | `model` | string | no | Optional explicit model pin. |
 | `topic` | string | yes | The brief both teams answer, for example a landing page for a product, a module with a given interface, or a written policy. maxLength: `4000`. |
@@ -374,6 +379,7 @@ Plan with specialist agents: you (the orchestrator) own and write the plan; agen
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `agents` | array of string | yes | Specialists contributing input, independent reviews and sign-offs. A planner may also be a participant. minItems: `1`. |
 | `task` | string | yes | What the plan must accomplish; required and non-empty. |
 | `context` | string | no | Optional background shared with the agents; never posted publicly. |
@@ -1425,3 +1431,5 @@ improve_agent { "agent": "cfo", "with": ["product-lead"], "include_self": false,
 ### Page-check option
 
 `start_duel`, `start_collaboration`, `start_meeting`, `start_ultraplan` and the casting call accept `connectors: ["name", ...]`, configured MCP connectors every seat may call as tools (read-only tools unless the connector config lists more; unknown names are refused before any provider call; see [connectors at the table](connectors.md#at-the-table)). They also accept `seat_connectors: {"seat": ["name", ...]}` to limit a seat to some of those connectors (seats not listed get all; see [limiting a seat](connectors.md#limiting-a-seat)). `start_local_meeting` takes neither: it runs the Claude CLI with its own tools. `start_duel` accepts `page_check: false` to skip headless checks of web builds and revisions (default on when Chrome/Chromium exists). Prototype-mode `start_collaboration`, `start_meeting` and `start_local_meeting` accept the same option alongside `prototype: true`. Check metadata includes load status, capped/scrubbed console errors and exceptions, failed-request count and an optional reason. No browser means not checked, never a failed artifact. Duel results include each team's check and the version of each verdict; screenshots stay local and outside the result/archive.
+
+Session spend caps stop meetings, local meetings, collaborations and ultraplans through the normal session stop path, with `by: "spend cap"`. A capped duel saves a checkpoint; resume with `roundtable duel --resume <id> --max-usd <higher-cap>`. Casting archives available results. The process admits at most `ROUNDTABLE_MAX_LIVE_SESSIONS` (default 4) concurrent self-running sessions. Only sessions that run model turns on their own count: duels (including resume) and casting calls, plus a collaboration while it auto-runs rounds inside its start call. Meetings, local meetings, collaborations and ultraplans that advance one tool call per step are not counted (their `max_usd` cap still applies); replays and dry runs are excluded. The slot is released when the run finishes, stops or fails.

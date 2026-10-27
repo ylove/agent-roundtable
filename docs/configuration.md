@@ -14,6 +14,7 @@
 | `ROUNDTABLE_SKILLS_DIR` | last skill lookup location after personal/project skills; new create skills and improve skills outside `.claude/agents` | `skills` beside the agents directory (normally `.claude/skills`) |
 | `ROUNDTABLE_WORKSPACE_DIR` | conversation grounding | project containing `.claude/agents`, otherwise server working directory |
 | `ROUNDTABLE_ACTIVITY_LOG` | stored session activity; excerpts in private conversation grounding and private improve prompts | `~/.agent-roundtable/activity.jsonl`; `off`, `false`, `0` or `no` disables it |
+| `ROUNDTABLE_MAX_LIVE_SESSIONS` | process-wide limit on concurrent self-running table sessions: duels (including resume), casting calls, and collaborations auto-running rounds; caller-driven meetings, collaborations and ultraplans, replays and dry runs are not counted | `4`; positive integer, invalid values use `4` |
 | `ROUNDTABLE_PARALLEL_TURNS` | concurrent ultraplan phases and workshop reviews | `4` (minimum 1) |
 | `ROUNDTABLE_ANTHROPIC_MODEL` | default model for `anthropic` (id or alias) | `claude-sonnet-5-5` |
 | `ROUNDTABLE_OPENAI_MODEL` | default OpenAI model | `gpt-5.6-luna` |

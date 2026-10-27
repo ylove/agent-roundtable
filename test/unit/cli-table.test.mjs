@@ -223,3 +223,14 @@ test('--no-preflight skips mix probes; contradictory preflight flags are refused
   assert.equal(await runTableCli('duel', [...roster, '--preflight'], streams), 2);
   assert.match(streams.error.read(), /Use either --preflight or --no-preflight/);
 });
+
+test('--max-usd parses on table verbs and may override a resume cap', () => {
+  for (const command of ['duel', 'debate', 'waffle', 'meeting']) {
+    const args = command === 'duel' ? roster : ['topic', '--agents', 'designer,builder'];
+    assert.equal(parseTableArgs(command, [...args, '--max-usd', '5000']).options.maxUsd, 5000);
+    for (const value of ['0', '-1', 'NaN', 'Infinity', 'private-value', '']) {
+      assert.throws(() => parseTableArgs(command, [...args, '--max-usd', value]), /--max-usd must be a positive finite number/);
+    }
+  }
+  assert.deepEqual(parseTableArgs('duel', ['--resume', 'duel-fixture', '--max-usd', '2.5']).options, { resume: 'duel-fixture', maxUsd: 2.5 });
+});

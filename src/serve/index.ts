@@ -35,7 +35,7 @@ export function renderIndex(base: string, runs: IndexRun[], duels: ArchiveSummar
     return `<tr><td><a href="${link}">${t(executionTag(r.execution))}</a> ${t(r.contract?.title ?? "")}</td><td>${t(r.status)}</td><td>${r.completion_pct}%</td><td>$${r.budget.spent_usd.toFixed(2)} / $${r.budget.budget_usd.toFixed(2)}</td><td><a href="${link}escalations">${r.escalations.awaiting_human}</a></td><td>${t(r.runner.state)}${r.runner.state === "running" && r.runner.stale ? " (stale heartbeat)" : ""}</td><td>${t(lastEvent ?? "")}</td></tr>`;
   });
   const body = `<h1>Roundtable</h1><p>Read-only. Refreshes every 15 seconds.</p><h2>Executions</h2><table><thead><tr><th>Run</th><th>State</th><th>Complete</th><th>Spend / budget</th><th>Awaiting you</th><th>Runner</th><th>Last event</th></tr></thead><tbody>${rows.join("")}</tbody></table>` +
-    `<h2>Live duels and casting</h2><ul>${live.map(d => `<li>${t(d.id)} · ${t(d.kind ?? "duel")} · ${t(d.agents.join(", "))} · ${t(d.started)} · ${t(d.host)}</li>`).join("")}</ul>` +
+    `<h2>Live duels and casting</h2><ul>${live.map(d => `<li>${t(d.id)} · ${t(d.kind ?? "duel")} · ${t(d.agents.join(", "))} · ${t(d.started)} · ${t(d.host)}${d.maxUsd !== undefined ? ` · spent $${(d.spentUsd ?? 0).toFixed(4)} of $${d.maxUsd} cap` : ""}</li>`).join("")}</ul>` +
     `<h2>Archived duels</h2><ul>${duels.filter(d => ID_RE.test(d.id)).map(d => `<li><a href="${escapeHtml(base)}duels/${d.id}">${t(d.id)}</a> · ${t(d.topic)} · winner ${t(d.winner)}</li>`).join("")}</ul>` +
     previewFramesHtml(previews) +
     `<h2>Latest casting report</h2>${casting ? `<a href="${escapeHtml(base)}casting">Read report</a><pre>${t(casting)}</pre>` : "<p>No casting report yet.</p>"}`;

@@ -17,6 +17,7 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { parseFlags } from "./cli.js";
+import { bundledUndiciNeedsUpdate } from "./http/fetch.js";
 import { scrub } from "./security/secrets.js";
 import { loadUserEnvironment, readUserConfig, setNotifyConfig, setUserConfig, userConfigHome } from "./user-config.js";
 
@@ -25,6 +26,7 @@ export interface Doctor { ok: boolean; checks: Check[] }
 
 export interface Probes {
   nodeVersion: string;
+  bundledUndiciVersion?: string;
   /** The package's `engines.node` range, for example ">=22". */
   engines: string;
   /** Provider ids that have credentials or an endpoint right now (read again after setup). */
@@ -61,6 +63,12 @@ export async function runDoctor(probes: Probes, options: { checkKeys?: boolean }
   const add = (c: Check) => { checks.push({ ...c, detail: clean(c.detail), ...(c.fix && { fix: clean(c.fix) }) }); };
   const node = probes.nodeVersion.replace(/^v/, "");
   add({ id: "node", label: "Node", essential: true, ok: nodeMeets(node, probes.engines), detail: `${node} (needs ${probes.engines})`, fix: `Install Node ${minNode(probes.engines)[0]} or newer from nodejs.org.` });
+  add({
+    id: "bundled-undici", label: "Bundled undici", essential: false,
+    ok: !bundledUndiciNeedsUpdate(probes.bundledUndiciVersion),
+    detail: `${probes.bundledUndiciVersion ?? "not reported"}; outbound requests use the pinned npm undici package`,
+    fix: "Update Node for GHSA-xjj6-f33q-929c. This notice is informational; the package supplies global fetch.",
+  });
   const git = probes.findExecutable("git");
   add({ id: "git", label: "git", essential: true, ok: !!git, detail: git ? "found" : "not found", fix: "Install git; heads-down runs and worktrees need it." });
   const keyed = probes.providers();
@@ -220,7 +228,7 @@ async function defaultProbes(): Promise<Probes> {
     keyNames[p] = name;
   }
   return {
-    nodeVersion: process.version, engines, providers: () => availableProviders(process.env), keyNames,
+    nodeVersion: process.version, bundledUndiciVersion: process.versions.undici, engines, providers: () => availableProviders(process.env), keyNames,
     findExecutable: name => findExecutable(name),
     runtimes: (() => { try { return Object.entries(runtimeRegistry()).map(([name, spec]) => ({ name, command: spec.argv[0] })); } catch { return []; } })(),
     docker: async () => { const { DockerBackend } = await import("./sandbox/docker.js"); return new DockerBackend().available(); },

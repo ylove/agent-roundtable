@@ -1,8 +1,10 @@
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { ntfySender, webhookSender, desktopSender, configuredSenders } from "../../dist/serve/senders.js";
-import { stubFetch } from "./helpers.mjs";
+import { stubDns, stubFetch } from "./helpers.mjs";
+
+beforeEach(t => { stubDns(t); });
 
 const message = { v: 1, kind: "test", execution: "exe", tag: "abcdef", title: "Run abcdef needs a decision", body: "Approve?", seq: 1, at: "2026-01-02T03:04:05Z" };
 const topic = "private_topic_0123456789";

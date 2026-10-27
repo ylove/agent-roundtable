@@ -163,7 +163,7 @@ function usageNumber(event: unknown, paths: UsagePath | undefined): number | und
   return undefined;
 }
 /** The final text and usage of a runtime's stdout, by the profile's output mode (shared by seats and heads-down workers). */
-export function parseRuntimeOutput(spec: RuntimeSpec, stdout: string, env: NodeJS.ProcessEnv = process.env): RuntimeResult {
+export function parseRuntimeOutput(spec: RuntimeSpec, stdout: string, env: NodeJS.ProcessEnv = process.env, strictDenials = false): RuntimeResult {
   const output = spec.output;
   let text: unknown;
   let usage: RuntimeResult["usage"], costUsd: number | undefined;
@@ -185,6 +185,19 @@ export function parseRuntimeOutput(spec: RuntimeSpec, stdout: string, env: NodeJ
     try { events = output.mode === "json" ? [JSON.parse(stdout)] : stdout.split(/\r?\n/).filter(v => v.trim()).map(v => JSON.parse(v)); }
     catch { throw new Error("Runtime returned invalid JSON output."); }
     for (const event of events) {
+      if (output.mode === "json" && output.status) {
+        const status = runtimePath(event, output.status.path);
+        if (status !== output.status.success) {
+          const error = output.status.errorPath ? runtimePath(event, output.status.errorPath) : undefined;
+          const reason = [typeof status === "string" ? status : "missing or invalid status", typeof error === "string" ? error : ""].filter(Boolean).join(": ");
+          // Scrub decoded strings before capping, so truncation cannot expose a partial secret.
+          throw new Error(`Runtime returned failure status: ${scrubSecrets(reason, env).text.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 500)}`);
+        }
+      }
+      if (strictDenials && output.mode === "json" && output.status?.deniedPath) {
+        const denied = runtimePath(event, output.status.deniedPath);
+        if (Array.isArray(denied) && denied.length) throw new Error("Runtime reported denied actions; the work is incomplete.");
+      }
       extract(event);
       if (output.mode === "json" || Object.entries(output.filter).every(([path, expected]) => {
         const actual = runtimePath(event, path);

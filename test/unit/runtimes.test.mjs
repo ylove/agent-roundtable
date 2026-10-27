@@ -21,7 +21,7 @@ const text = name => ({ argv: [name], output: { mode: 'text' } });
 const load = async () => ({ frontmatter: {} });
 
 test('built-in profiles parse text, JSON, JSONL final messages and usage', async () => {
-  const expected = { hermes: 'A useful answer.', openclaw: 'Gateway answer.', gemini: 'Structured answer.', codex: 'Final answer.' };
+  const expected = { hermes: 'A useful answer.', openclaw: 'Gateway answer.', gemini: 'Structured answer.', agy: 'ok\n', codex: 'Final answer.' };
   for (const [name, spec] of Object.entries(BUILTIN_RUNTIMES)) {
     const result = await runRuntime(spec, 'Say something.', { env, model: 'fixture-model' });
     assert.equal(result.text, expected[name]);
@@ -43,6 +43,63 @@ test('stdin prompts, one-element argv prompts, separate model values and fresh r
   for (const model of ['--bad', '-m', 'two words', 'x;echo', '$(x)', 'x\n']) await assert.rejects(runRuntime(spec, prompt, { env, model }), /model/);
   const echoCwd = JSON.parse((await runRuntime({ ...text('argv-echo'), cwd: fixtures }, prompt, { env })).text);
   assert.equal(echoCwd.cwd, fixtures); assert.ok(existsSync(fixtures));
+});
+
+test('agy seat keeps literal -p values on argv, its model and safety flags; stderr warning is harmless', async () => {
+  const spec = BUILTIN_RUNTIMES.agy;
+  for (const prompt of ['-CHECK_ARGV ; $(no-shell)', '/CHECK_ARGV skill-name']) {
+    const result = await runRuntime(spec, prompt, { env, model: 'gemini-3.8-flash-medium' });
+    const report = JSON.parse(result.text);
+    assert.deepEqual(report.args, [
+      '-p', prompt, '--output-format', 'json', '--mode', 'plan', '--disable-slash-commands',
+      '--model', 'gemini-3.8-flash-medium',
+    ]);
+    assert.equal(report.stdin, '');
+    assert.equal(existsSync(report.cwd), false);
+    assert.deepEqual(result.usage, { inputTokens: 7709, outputTokens: 1 });
+    assert.equal(result.costUsd, undefined);
+    assert.ok(!report.args.includes('--dangerously-skip-permissions'));
+  }
+  assert.deepEqual(spec.versionArgv, ['--version']);
+  assert.equal(runtimeRegistry({ agy: { timeoutMs: 5000 } }).agy.timeoutMs, 5000);
+  assert.throws(() => runtimeRegistry({ agy: { modelFlag: '-m' } }), /Built-in runtime overrides/);
+  assert.deepEqual(parseSeat('x=agy:gemini-3.8-flash-medium'), { agent: 'x', provider: 'agy', model: 'gemini-3.8-flash-medium' });
+  validateSeatSpecs({ x: { provider: 'agy', model: 'gemini-3.8-flash-medium' } });
+});
+
+test('agy exit-0 ERROR is a bounded scrubbed failure; SUCCESS without a reply also fails', async () => {
+  const secret = 'fixture-agy-private-value';
+  await assert.rejects(runRuntime(BUILTIN_RUNTIMES.agy, `FAIL_ME ${secret} ${'x'.repeat(2000)}`, {
+    env: { ...env, FIXTURE_SECRET: secret },
+  }), error => {
+    assert.match(error.message, /failure status: ERROR: boom FAIL_ME \[redacted:env:FIXTURE_SECRET\]/);
+    assert.doesNotMatch(error.message, /fixture-agy-private-value/);
+    assert.ok(error.message.length < 550);
+    return true;
+  });
+  await assert.rejects(runRuntime(BUILTIN_RUNTIMES.agy, 'DENY_ME', { env }), /no final text/);
+  const spec = { ...BUILTIN_RUNTIMES.agy, argv: ['json-output'] };
+  for (const status of ['ERROR', 'CANCELLED', null, undefined]) {
+    await assert.rejects(runRuntime(spec, JSON.stringify({ status, response: 'A reply must not hide failure', error: 'boom' }), { env }), /failure status/);
+  }
+  const result = await runRuntime(spec, JSON.stringify({ status: 'SUCCESS', response: 'ok', usage: {
+    input_tokens: 7709, output_tokens: 1, thinking_tokens: 300, total_tokens: 8010,
+  } }), { env });
+  assert.deepEqual(result.usage, { inputTokens: 7709, outputTokens: 1 });
+  assert.equal(result.costUsd, undefined);
+});
+
+test('JSON result status configuration validates paths, values and allowed fields', () => {
+  const spec = { argv: ['json-output'], output: { mode: 'json', path: 'response' } };
+  validateRuntimeSpec({ ...spec, output: BUILTIN_RUNTIMES.agy.output });
+  for (const status of [null, {}, { path: '__proto__.status', success: 'SUCCESS' },
+    { path: 'status', success: '' }, { path: 'status', success: 'SUCCESS', errorPath: 'constructor' },
+    { path: 'status', success: 'SUCCESS', typo: true }]) {
+    assert.throws(() => validateRuntimeSpec({ ...spec, output: { ...spec.output, status } }), /output status/);
+  }
+  for (const output of [{ mode: 'text' }, { mode: 'jsonl', path: 'response', filter: { type: 'result' } }]) {
+    assert.throws(() => validateRuntimeSpec({ ...spec, output: { ...output, status: { path: 'status', success: 'SUCCESS' } } }), /output status/);
+  }
 });
 
 test('runtime environment excludes provider keys unless the spec explicitly lists each name', async () => {
@@ -125,7 +182,7 @@ test('text failures use a capped scrubbed stdout tail and keep stderr', async ()
 });
 
 test('argv prompt limits use bytes, name the runtime, and recommend stdin before spawning', async () => {
-  for (const runtimeName of ['hermes', 'openclaw', 'gemini']) {
+  for (const runtimeName of ['hermes', 'openclaw', 'gemini', 'agy']) {
     for (const prompt of ['x'.repeat(100 * 1024 + 1), '界'.repeat(35_000)]) {
       await assert.rejects(runRuntime(BUILTIN_RUNTIMES[runtimeName], prompt, { env, runtimeName }), error => {
         assert.ok(error.message.startsWith(`Runtime ${runtimeName}: an argument exceeds the 100 KiB limit`));
@@ -223,19 +280,48 @@ test('preflight detects path and version; failure is local and runtime credentia
 test('seat dispatch persists estimated and reported runtime usage/cost in the table ledger', async t => {
   const oldPath = process.env.PATH; process.env.PATH = env.PATH; t.after(() => { process.env.PATH = oldPath; setLedgerHome(undefined); });
   const home = mkdtempSync(join(tmpdir(), 'runtime-ledger-')); setLedgerHome(home); t.after(() => rmSync(home, { recursive: true, force: true }));
-  for (const provider of ['openclaw', 'gemini', 'codex']) await metered({ session: 'runtime-fixture', kind: 'collaboration', agent: 'designer' }, () => callSeat('Persona', [{ role: 'user', content: 'Reply.' }], { provider, model: '' }));
+  for (const provider of ['openclaw', 'gemini', 'codex', 'agy']) await metered({ session: 'runtime-fixture', kind: 'collaboration', agent: 'designer' }, () => callSeat('Persona', [{ role: 'user', content: 'Reply.' }], { provider, model: '' }));
   const lines = readTableLines([day(new Date())], home);
-  assert.equal(lines.length, 3);
+  assert.equal(lines.length, 4);
   assert.equal(lines[0].tokens_prov, 'estimated'); assert.ok(lines[0].tokens.input > 0); assert.equal(lines[0].usd, undefined);
   assert.equal(lines[1].tokens_prov, 'reported'); assert.equal(lines[1].tokens.input, 11); assert.equal(lines[1].usd, 0.012); assert.equal(lines[1].usd_prov, 'reported');
   assert.equal(lines[2].tokens_prov, 'reported'); assert.equal(lines[2].tokens.output, 9);
+  assert.equal(lines[3].provider, 'agy'); assert.equal(lines[3].tokens_prov, 'reported');
+  assert.deepEqual(lines[3].tokens, { input: 7709, output: 1, cache_read: 0, cache_write: 0 }); assert.equal(lines[3].usd, undefined);
   assert.ok(lines.every(l => !JSON.stringify(l).includes('Persona')));
 });
 
 test('runtimes command lists profile detections in JSON', () => {
   const profiles = JSON.parse(execFileSync(process.execPath, ['dist/index.js', 'runtimes', '--json'], { env: { ...process.env, PATH: env.PATH }, encoding: 'utf8' }));
-  assert.deepEqual(profiles.map(p => p.name), ['hermes', 'openclaw', 'gemini', 'codex']);
+  assert.deepEqual(profiles.map(p => p.name), ['hermes', 'openclaw', 'gemini', 'agy', 'codex']);
   assert.ok(profiles.every(p => p.found && p.path.startsWith(fixtures) && p.version.includes('fixture')));
+});
+
+test('doctor discovers agy through the default registry', () => {
+  // Other optional probes/credentials can fail; the runtime check must still appear.
+  let stdout;
+  try {
+    stdout = execFileSync(process.execPath, ['dist/index.js', 'doctor', '--json'], {
+      env: { ...process.env, PATH: env.PATH }, encoding: 'utf8', timeout: 15_000,
+    });
+  } catch (error) {
+    assert.equal(error.status, 1);
+    stdout = error.stdout;
+  }
+  const result = JSON.parse(stdout);
+  const check = result.checks.find(c => c.id === 'runtime-agy');
+  assert.ok(check);
+  assert.equal(check.ok, true);
+  assert.equal(check.essential, false);
+});
+
+test('general live runtime smoke excludes agy without its dedicated opt-in', () => {
+  const stdout = execFileSync(process.execPath, ['test/live-smoke.mjs'], {
+    env: { ...process.env, PATH: env.PATH, ROUNDTABLE_LIVE_RUNTIMES: 'agy', ROUNDTABLE_TEST_AGY: '0', ROUNDTABLE_LIVE_TEST: '0' },
+    encoding: 'utf8', timeout: 5000,
+  });
+  assert.match(stdout, /skip agy: set ROUNDTABLE_TEST_AGY=1/);
+  assert.doesNotMatch(stdout, /ok\s+agy/);
 });
 
 

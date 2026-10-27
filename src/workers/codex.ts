@@ -25,7 +25,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
-import { findExecutable } from "../executables.js";
+import { findExecutable, isExecutableFile } from "../executables.js";
 import { executionDir } from "../execution/store.js";
 import type { ExecutionHeader, RunAccumulator, WorkerDriver, WorkerHandle, WorkerLaunch, WorkerRecord } from "../execution/types.js";
 import { childEnv } from "../security/child-env.js";
@@ -276,6 +276,7 @@ export class CodexDriver implements WorkerDriver {
   }
 
   private cli(): string {
+    if (this.cliOverride !== undefined && !isExecutableFile(this.cliOverride)) throw new Error("The codex CLI override must be an absolute path to a regular executable.");
     const cli = this.cliOverride ?? findExecutable("codex");
     if (!cli) throw new Error("The codex CLI is not on PATH");
     return cli;

@@ -17,6 +17,7 @@
 import { installHttpStack } from "../http/fetch.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { parseRuntimeOutput } from "../runtimes/runner.js";
+import { argvPrompt } from "../runtimes/spec.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { SUBMIT_WORK } from "../tools/names.js";
 import { bindWorkerIdentity, handleWorkerTool } from "../tools/worker.js";
@@ -85,7 +86,7 @@ async function main(): Promise<void> {
   if (stopping) return finish(failure("stopped before the runtime started", { inputTokens: 0, outputTokens: 0 }), 1);
 
   const onArgv = config.args.includes("{prompt}");
-  const args = config.args.map((a) => (a === "{prompt}" ? prompt : a));
+  const args = config.args.map((a) => (a === "{prompt}" ? argvPrompt(prompt) : a));
   const sizes = [config.binary, ...args].map((a) => Buffer.byteLength(a));
   if (sizes.some((n) => n > MAX_ARG_BYTES) || sizes.reduce((s, n) => s + n + 1, 0) > MAX_ARGV_BYTES) {
     return finish(failure(`${config.runtime}: the task prompt is too large for this profile's argv (100 KiB per argument); use a profile that reads the prompt on stdin`, { inputTokens: promptTokens, outputTokens: 0 }), 1);

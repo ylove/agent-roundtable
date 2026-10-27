@@ -414,7 +414,8 @@ function lfsStub(t, bin) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   bin ??= join(dir, "bin");
   const marker = join(dir, "lfs.ran");
-  executable(join(bin, "git-lfs"), `#!/bin/sh\nprintf '%s\\n' "$1" >> "${marker}"\ncat\n`);
+  const skipMarker = join(dir, "lfs-skip");
+  executable(join(bin, "git-lfs"), `#!/bin/sh\nprintf '%s\\n' "$1" >> "${marker}"\nprintf '%s\\n' "$GIT_LFS_SKIP_SMUDGE" >> "${skipMarker}"\ncat\n`);
   // Hosts with git-lfs installed add a global filter.lfs.process, which the stub does not speak:
   // read neither global nor system git configuration while the stub is on PATH.
   const previous = { PATH: process.env.PATH, HOME: process.env.HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL };
@@ -428,7 +429,7 @@ function lfsStub(t, bin) {
       else process.env[key] = value;
     }
   });
-  return { bin, marker };
+  return { bin, marker, skipMarker };
 }
 
 function configureLfs(root) {
@@ -459,6 +460,7 @@ test("standard LFS clean and smudge filters stage, commit and restore content", 
   const invocations = readFileSync(stub.marker, "utf8").trim().split("\n");
   assert.ok(invocations.includes("clean"));
   assert.ok(invocations.includes("smudge"));
+  assert.ok(readFileSync(stub.skipMarker, "utf8").trim().split("\n").every(value => value === "1"));
 
   // Inspect the pinned process command without making the identity stub speak its protocol.
   git(ex.root, "config", "filter.lfs.process", "git-lfs filter-process");
@@ -633,4 +635,27 @@ test("a repository without drivers keeps normal status, add, diff and commit beh
   await G.runGit(repo, ["add", "f.txt"]);
   await G.runGit(repo, ["commit", "-qm", "ordinary change"]);
   assert.equal((await G.runGit(repo, ["status", "--porcelain"])).stdout, "");
+});
+
+test("host git resolves absolute PATH entries from a task worktree", async t => {
+  const ex = makeRepo();
+  const originalPath = process.env.PATH;
+  const originalCwd = process.cwd();
+  t.after(() => {
+    process.env.PATH = originalPath;
+    process.chdir(originalCwd);
+    rmSync(ex.root, { recursive: true, force: true });
+  });
+  const marker = join(ex.root, "selected-git");
+  const script = `#!${process.execPath}\nimport { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'ran'); process.exit(77);\n`;
+  executable(join(ex.root, "git"), script);
+  executable(join(ex.root, "bin", "git"), script);
+  process.chdir(ex.root);
+  for (const entry of ["", ".", "bin", "./bin"]) {
+    process.env.PATH = [entry, originalPath].join(delimiter);
+    const repo = await G.openRepo(ex.root);
+    const result = await G.runGit(repo, ["status", "--porcelain"]);
+    assert.equal(result.exit, 0);
+    assert.equal(existsSync(marker), false);
+  }
 });

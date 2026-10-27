@@ -1,15 +1,15 @@
 // Shared Chrome lifecycle and DevTools pipe transport. No debugging port is opened.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { CHROME_PATH_OVERRIDE } from "../config.js";
 import { findExecutable, isExecutableFile } from "../executables.js";
 import { childEnv } from "../security/child-env.js";
 
 function detectChrome(override: string): string | null {
-  if (override && isExecutableFile(override)) return override;
-  if (override) console.error(`[Prototype] ROUNDTABLE_CHROME_PATH does not point to an executable; auto-detecting instead.`);
+  if (override && isAbsolute(override) && isExecutableFile(override)) return override;
+  if (override) console.error(`[Prototype] ROUNDTABLE_CHROME_PATH must be an absolute path to a regular executable; auto-detecting instead.`);
   const candidates: string[] = [];
   if (process.platform === "darwin") {
     candidates.push(

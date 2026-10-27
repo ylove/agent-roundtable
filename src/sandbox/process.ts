@@ -7,6 +7,8 @@
 // ============================================================================
 
 import { spawn } from "node:child_process";
+import { resolveExecutable } from "../executables.js";
+import { scrub } from "../security/secrets.js";
 import { OutputCapture } from "./common.js";
 
 const POSIX = process.platform !== "win32";
@@ -134,11 +136,13 @@ export function spawnCaptured(file: string, args: string[], o: CaptureOptions): 
   const track = o.track !== false;
   if (track && shuttingDown) return Promise.resolve(failed(started, "sandbox is shutting down"));
   if (o.signal?.aborted) return Promise.resolve(failed(started, "aborted before start", true));
+  const binary = resolveExecutable(file, o.env.PATH);
+  if (!binary) return Promise.resolve(failed(started, scrub(`could not start ${o.label}: executable not found`)));
   return new Promise((resolve) => {
     const out = new OutputCapture(o.maxOutputBytes);
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(file, args, {
+      child = spawn(binary, args, {
         env: o.env,
         cwd: o.cwd,
         stdio: ["ignore", "pipe", "pipe"],

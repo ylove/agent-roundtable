@@ -14,6 +14,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { escapeHtml, SecureServer, type RouteContext } from "../http/secure-server.js";
 import { childEnv } from "../security/child-env.js";
+import { findExecutable } from "../executables.js";
 import { createBrowserRedirect } from "../http/browser-redirect.js";
 import { diagramFile, mermaidSourceOf, validatePath } from "./parse.js";
 import type { PrototypeFile, PrototypeRecord } from "./types.js";
@@ -508,12 +509,14 @@ export function openInBrowser(url: string): void {
       ? { SystemRoot: process.env.SystemRoot, ComSpec: process.env.ComSpec }
       : {});
     const opts = { detached: true, stdio: "ignore" as const, windowsHide: true, env };
+    const opener = findExecutable(process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open", env.PATH);
+    if (!opener) return;
     const child =
       process.platform === "darwin"
-        ? spawn("open", [file], opts)
+        ? spawn(opener, [file], opts)
         : process.platform === "win32"
-          ? spawn("cmd", ["/c", "start", '""', `"${file}"`], { ...opts, windowsVerbatimArguments: true })
-          : spawn("xdg-open", [file], opts);
+          ? spawn(opener, ["/c", "start", '""', `"${file}"`], { ...opts, windowsVerbatimArguments: true })
+          : spawn(opener, [file], opts);
     child.on("error", () => {});
     child.unref();
   } catch {

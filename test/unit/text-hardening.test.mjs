@@ -95,3 +95,35 @@ test("webhook header examples include the header name", () => {
     assert.match(readFileSync(new URL(file, import.meta.url), "utf8"), /Authorization: Bearer abc123/);
   }
 });
+
+test("credential patterns cover provider tokens and named unprefixed credentials", () => {
+  const tokens = [
+    "tgp_v1_" + "a9".repeat(20), "hf_" + "b8".repeat(20),
+    "gsk_" + "c7".repeat(24), "glpat-" + "d6".repeat(12),
+    "GOCSPX-" + "e5_".repeat(10), "ya29." + "f4_".repeat(20),
+  ];
+  const assignments = [
+    ['AWS_SECRET_ACCESS_KEY', 'aB9/+'.repeat(8)],
+    ['awsSecretAccessKey', 'cD8/+'.repeat(8)],
+    ['TOGETHER_API_KEY', 'a9'.repeat(32)],
+    ['MISTRAL_API_KEY', 'z8'.repeat(16)],
+    ['HMAC_SECRET', 'b7'.repeat(32)],
+  ];
+  for (const scrub of [scrubSecrets, scrubArtifactSecrets]) {
+    for (const token of tokens) {
+      const result = scrub(`before ${token} after`, {});
+      assert.equal(result.text, 'before [redacted:api_key] after');
+      assert.equal(result.redactions, 1);
+    }
+    for (const [name, value] of assignments) {
+      for (const assignment of [`${name}=${value}`, `"${name}": "${value}"`, `${name} = '${value}'`]) {
+        const result = scrub(assignment, {});
+        assert.ok(!result.text.includes(value));
+        assert.equal(result.redactions, 1);
+      }
+    }
+    const ordinary = 'Together with Hugging Face, Groq and GitLab. hf_words gsk_words glpat-example GOCSPX-example ya29.example ' + 'a9'.repeat(32) + ' ' + 'b7'.repeat(20);
+    assert.equal(scrub(ordinary, {}).text, ordinary);
+    quickly(() => scrub('AWS_SECRET_ACCESS_KEY=' + 'a'.repeat(200_000), {}));
+  }
+});

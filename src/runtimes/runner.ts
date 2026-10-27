@@ -6,7 +6,7 @@ import { resolveExecutable } from "../executables.js";
 import { childEnv } from "../security/child-env.js";
 import { scrubSecrets } from "../security/secrets.js";
 import { signalGroup } from "../workers/process.js";
-import { RUNTIME_MODEL, runtimePath, validateRuntimeSpec, type RuntimeSpec, type UsagePath } from "./spec.js";
+import { argvPrompt, RUNTIME_MODEL, runtimePath, validateRuntimeSpec, type RuntimeSpec, type UsagePath } from "./spec.js";
 
 export interface RuntimeResult {
   text: string;
@@ -50,7 +50,7 @@ async function execute(spec: RuntimeSpec, prompt: string, opts: RuntimeRunOption
   const clean = (s: string) => scrubSecrets(s, source).text;
   const binary = resolveExecutable(spec.argv[0], source.PATH);
   if (!binary) throw new Error(`Runtime binary not found: ${clean(spec.argv[0])}`);
-  const args = probe ? [...(spec.versionArgv ?? [])] : spec.argv.slice(1).map(v => v === "{prompt}" ? prompt : v);
+  const args = probe ? [...(spec.versionArgv ?? [])] : spec.argv.slice(1).map(v => v === "{prompt}" ? argvPrompt(prompt) : v);
   if (!probe && opts.model && spec.modelFlag) {
     // Keep option/value pairs intact; stdin's positional marker stays last.
     args.splice(args.at(-1) === "-" && !spec.argv.includes("{prompt}") ? args.length - 1 : args.length, 0, spec.modelFlag, opts.model);

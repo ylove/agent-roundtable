@@ -14,6 +14,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { escapeHtml, SecureServer, type RouteContext } from "../http/secure-server.js";
 import { childEnv } from "../security/child-env.js";
+import { createBrowserRedirect } from "../http/browser-redirect.js";
 import { diagramFile, mermaidSourceOf, validatePath } from "./parse.js";
 import type { PrototypeFile, PrototypeRecord } from "./types.js";
 
@@ -502,16 +503,17 @@ function serveStatic(c: RouteContext): void {
 export function openInBrowser(url: string): void {
   if (!/^http:\/\/127\.0\.0\.1:\d{1,5}\/[A-Za-z0-9_-]{8,64}\/$/.test(url)) return;
   try {
+    const file = createBrowserRedirect(url);
     const env = childEnv("open", process.platform === "win32"
       ? { SystemRoot: process.env.SystemRoot, ComSpec: process.env.ComSpec }
       : {});
     const opts = { detached: true, stdio: "ignore" as const, windowsHide: true, env };
     const child =
       process.platform === "darwin"
-        ? spawn("open", [url], opts)
+        ? spawn("open", [file], opts)
         : process.platform === "win32"
-          ? spawn("cmd", ["/c", "start", '""', url], { ...opts, windowsVerbatimArguments: true })
-          : spawn("xdg-open", [url], opts);
+          ? spawn("cmd", ["/c", "start", '""', `"${file}"`], { ...opts, windowsVerbatimArguments: true })
+          : spawn("xdg-open", [file], opts);
     child.on("error", () => {});
     child.unref();
   } catch {

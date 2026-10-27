@@ -104,7 +104,7 @@ async function main() {
   const gifFilter = "fps=12,scale=960:-1:flags=lanczos,tpad=stop_mode=clone:stop_duration=2.5,split[a][b];[a]palettegen=stats_mode=diff:max_colors=256[p];[b][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle";
   run("-filter_complex", gifFilter, "-loop", "0", gifPath);
   for (const [name, w, h] of [["live-duel-1280.mp4", 1280, 720], ["live-duel-1080.mp4", 1920, 1080]]) {
-    run("-vf", `fps=30,scale=${w}:${h}:flags=lanczos,format=yuv420p`, "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", join(resolve(outDir), name));
+    run("-vf", `fps=30,scale=${w}:${h}:flags=lanczos:in_range=full:out_range=limited,format=yuv420p`, "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-pix_fmt", "yuv420p", "-color_range", "tv", "-movflags", "+faststart", "-an", join(resolve(outDir), name));
   }
   if (args.includes("--keep-frames")) console.log(`frames kept in ${join(work, "frames")}`);
   console.log(`GIF ${gifPath} (${((await stat(gifPath)).size / 1024 / 1024).toFixed(2)} MB)`);

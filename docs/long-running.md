@@ -72,6 +72,8 @@ Messages have a one-line title and a short scrubbed body (at most about 300 char
 
 Each channel attempts at most one push every 10 seconds. Updates arriving during that interval coalesce into an “N more updates” check-in. Queues persist across restarts; requests have a 15-second timeout and at most three attempts, retrying only network errors, HTTP 429 or 5xx. Sender failures do not stop supervision. Delivery is best effort: a crash after the receiver accepts a push but before local acknowledgement can repeat it; deduplicate webhook deliveries. `notify test` reports success or a scrubbed error for every configured channel.
 
+Both ntfy and webhook check-ins use the pinned npm undici fetch and the shared URL guard. Each send checks every DNS answer, pins the approved addresses for that connection, and keeps TLS hostname verification. HTTPS private LAN receivers and loopback development endpoints remain supported; cloud metadata destinations are refused. Redirects are handled manually and reported as delivery failures. URL-policy refusals are not retried; temporary DNS resolution errors may be retried. Per-send dispatchers close after response handling.
+
 ## Your own devices over a private tailnet
 
 ```sh
@@ -79,6 +81,8 @@ roundtable serve --bind tailnet
 ```
 
 The index binds only to an address assigned to a local interface in `100.64.0.0/10` or `fd7a:115c:a1e0::/48`. Without one it refuses to start. `--bind loopback` is the default. Wildcard binds, public addresses and arbitrary bind values are refused. The HTTP Host header must exactly match the bound address and port (brackets around IPv6); capability checks, strict CSP and read-only routes still apply.
+
+Local HTTP servers allow 128 connections in total by default. A connection must send its first byte within 10 seconds; headers have a 15-second deadline, requests a 30-second deadline, and keep-alive connections a 5-second idle deadline. On tailnet binds, each remote address gets at most 16 concurrent connections. Browser opening hands the opener a 0600 redirect file inside a 0700 temporary directory, keeping the capability URL off its arguments; the file is removed after one minute, with a keyless detached cleanup helper covering CLI exit.
 
 Anyone on your tailnet **with the URL** can read the index. Use tailnet access controls to restrict access to your devices, keep the capability URL private, and avoid sharing it through browser sync or screenshots. This is HTTP over your private tailnet; the tailnet must provide the network confidentiality you need. Interface-range validation does not authenticate a particular VPN product. The service does not install or invoke a tunnel, public relay, or tailnet publishing command.
 

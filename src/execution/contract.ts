@@ -250,7 +250,8 @@ class Checker {
       this.err(path, "contains a NUL byte");
       return undefined;
     }
-    if (opts.max !== undefined && v.length > opts.max) this.err(path, `is longer than ${opts.max} characters`);
+    const max = opts.max ?? 4000;
+    if (v.length > max) this.err(path, `is longer than ${max} characters`);
     return v.trim();
   }
   text(v: unknown, path: string, fallback = ""): string {
@@ -259,6 +260,7 @@ class Checker {
       this.err(path, "must be a string");
       return fallback;
     }
+    if (v.length > 4000) this.err(path, "is longer than 4000 characters");
     return v;
   }
   strs(v: unknown, path: string): string[] {
@@ -326,6 +328,7 @@ function artifacts(ck: Checker, v: unknown, path: string): ArtifactRef[] {
 function globs(ck: Checker, v: unknown, path: string): string[] {
   const out: string[] = [];
   for (const [i, raw] of ck.arr(v, path, CONTRACT_LIMITS.globs).entries()) {
+    if (typeof raw === "string" && raw.length > 4000) ck.err(`${path}[${i}]`, "is longer than 4000 characters");
     const r = normalizeGlob(raw);
     if ("error" in r) ck.err(`${path}[${i}]`, `${q(raw)} ${r.error}`);
     else if (!out.includes(r.glob)) out.push(r.glob);
@@ -365,6 +368,7 @@ function commandSpec(ck: Checker, v: unknown, path: string, backend: string | un
   const argv = argvOf(ck, o.argv, `${path}.argv`, backend);
   let cwd: string | undefined;
   if (o.cwd !== undefined && o.cwd !== null) {
+    if (typeof o.cwd === "string" && o.cwd.length > 4000) ck.err(`${path}.cwd`, "is longer than 4000 characters");
     try {
       cwd = typeof o.cwd === "string" ? resolveCwd(o.cwd) || undefined : (ck.err(`${path}.cwd`, "must be a string"), undefined);
     } catch (e) {
@@ -380,6 +384,7 @@ function commandSpec(ck: Checker, v: unknown, path: string, backend: string | un
     env = {};
     for (const [k, val] of Object.entries(envObj)) {
       if (!ENV_KEY_RE.test(k)) ck.err(`${path}.env`, `name ${q(k)} is not a valid variable name`);
+      else if (k.length > 4000) ck.err(`${path}.env`, `name ${q(k)} is longer than 4000 characters`);
       else if (CONTRACT_SECRET_ENV_RE.test(k)) ck.err(`${path}.env.${k}`, "looks like a credential: secrets never go in a contract or the sandbox");
       else if (typeof val !== "string") ck.err(`${path}.env.${k}`, "must be a string");
       else if (val.includes("\0")) ck.err(`${path}.env.${k}`, "contains a NUL byte");
@@ -446,12 +451,13 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   const g = ck.obj(c.goal, "goal", true) ?? {};
   ck.known(g, ["ultimate", "original_prompt", "artifacts", "source_session"], "goal");
   const goal: Contract["goal"] = {
-    ultimate: ck.str(g.ultimate, "goal.ultimate", { required: true }) ?? "",
+    ultimate: ck.str(g.ultimate, "goal.ultimate", { required: true, max: 2000 }) ?? "",
     original_prompt: typeof g.original_prompt === "string" && g.original_prompt.trim()
       ? g.original_prompt
       : (ck.err("goal.original_prompt", "is required: the human's request, verbatim"), ""),
     artifacts: artifacts(ck, g.artifacts, "goal.artifacts"),
   };
+  if (goal.original_prompt.length > 64_000) ck.err("goal.original_prompt", "is longer than 64000 characters");
   const source = ck.str(g.source_session, "goal.source_session");
   if (source !== undefined) goal.source_session = source;
 
@@ -613,6 +619,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
       const page = ck.obj(predicate.page_loads, `${at}.page_loads`, true);
       if (!page) continue;
       ck.known(page, ["path"], `${at}.page_loads`);
+      if (typeof page.path === "string" && page.path.length > 4000) ck.err(`${at}.page_loads.path`, "is longer than 4000 characters");
       const path = typeof page.path === "string" ? normalizeRelPath(page.path) : null;
       if (!path || /[*?]/.test(path)) ck.err(`${at}.page_loads.path`, "must be a repository-relative file path");
       else verify.push({ page_loads: { path } });
@@ -679,6 +686,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     if (owner && !taskIds.has(owner)) ck.err(`${p}.owner`, `must be a task id (got ${q(owner)})`);
     let path: string | undefined;
     if (o.path !== undefined && o.path !== null) {
+      if (typeof o.path === "string" && o.path.length > 4000) ck.err(`${p}.path`, "is longer than 4000 characters");
       path = typeof o.path === "string" ? normalizeRelPath(o.path) ?? undefined : undefined;
       if (path === undefined) ck.err(`${p}.path`, "must be a repository-relative path (no absolute path, '..' or NUL)");
     }

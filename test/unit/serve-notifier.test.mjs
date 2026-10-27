@@ -10,7 +10,7 @@ import { buildCheckIn, checkInKind } from "../../dist/serve/messages.js";
 import { Notifier, planCheckIns, enqueue, readyPush, readNotifyState } from "../../dist/serve/notifier.js";
 import { configuredChannels, configuredSenders } from "../../dist/serve/senders.js";
 import { emit, frozenRun } from "../fixtures/execution/run.mjs";
-import { stubFetch } from "./helpers.mjs";
+import { stubDns, stubFetch } from "./helpers.mjs";
 
 const temps = [];
 after(() => { for (const path of temps) rmSync(path, { recursive: true, force: true }); });
@@ -89,6 +89,7 @@ test("serve notifier persists cursor and queue across restarts, dedupes ids and 
 });
 
 test("serve notifier preserves queued and later check-ins through startup credential failure and recovery", async t => {
+  stubDns(t);
   const path = join(temporary("serve-secret-recovery-"), "notify-state.json");
   const secretName = "WS28_NOTIFY_RECOVERY_SECRET";
   const saved = new Map([secretName, "ROUNDTABLE_NOTIFY_WEBHOOK_SECRET"].map(name => [name, process.env[name]]));

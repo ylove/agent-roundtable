@@ -16,7 +16,7 @@ On a terminal, a first run asks four short questions, each skippable with Enter:
 
 Then it runs the doctor, starts `roundtable serve --detach` if it is not already running (skip with `--no-serve`), prints the index URL to your terminal only (`--open` opens it), and prints the next steps: `roundtable duel --dry-run`, and the `claude mcp add` command that registers the server with Claude Code. It prints that command and never runs it. Running `up` again re-checks and reports; `up --setup` repeats the questions for anything still unset.
 
-`roundtable doctor` runs just the checks, one line each: Node against the supported range, git, which provider keys are available (names only, never values), `claude` and the other runtimes, a running Docker daemon (the default sandbox) and Chrome (page checks). Add `--check-keys` to send one cheap request per available provider, and `--json` for machine output. It exits 0 when Node, git and at least one provider key pass; missing optional items never fail it.
+`roundtable doctor` runs just the checks, one line each: Node against the supported range, git, whether the first `roundtable` on PATH belongs to this package, which provider keys are available (names only, never values), `claude` and the other runtimes, a running Docker daemon (the default sandbox) and Chrome (page checks). Add `--check-keys` to send one cheap request per available provider, and `--json` for machine output. It exits 0 when Node, git and at least one provider key pass; missing optional items never fail it.
 
 `roundtable --version` (also `-v` and `version`) prints the version.
 
@@ -55,7 +55,7 @@ claude mcp add --scope user roundtable \
 
 Scope: `--scope user` registers it for you in every project; `--scope project` writes a shared `.mcp.json`; the default (`local`) is just you, in the current project.
 
-**(b) Without the bin on PATH:** replace the last line with `-- npx -y agent-roundtable`, or, from a source checkout, `-- node /absolute/path/to/agent-mcp/dist/index.js`.
+**(b) Without the bin on PATH:** replace the last line with `-- npx -y agent-roundtable@2.0.0`, or, from a source checkout, `-- node /absolute/path/to/agent-mcp/dist/index.js`.
 
 **(c) `claude mcp add-json`:**
 

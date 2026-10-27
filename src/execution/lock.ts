@@ -22,6 +22,7 @@ import { linkSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statS
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { pidAlive } from "../prototypes/sandbox.js";
+import { absoluteSearchPath, findExecutable } from "../executables.js";
 
 export interface LockOptions {
   /**
@@ -105,11 +106,14 @@ export function readLockOwner(lockDir: string): LockOwner | null {
 /** A process's start time from `ps` (UTC, second resolution), or null when it is unknown. */
 export function processStart(pid: number): string | null {
   try {
-    const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    const env = { PATH: absoluteSearchPath(process.env.PATH || "/usr/bin:/bin"), TZ: "UTC", LC_ALL: "C" };
+    const ps = findExecutable("ps", env.PATH);
+    if (!ps) return null;
+    const r = spawnSync(ps, ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
       timeout: 2000,
       stdio: ["ignore", "pipe", "ignore"],
-      env: { PATH: process.env.PATH || "/usr/bin:/bin", TZ: "UTC", LC_ALL: "C" },
+      env,
     });
     const out = r.status === 0 && typeof r.stdout === "string" ? r.stdout.trim().replace(/\s+/g, " ") : "";
     return out || null;

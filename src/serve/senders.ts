@@ -8,6 +8,7 @@ import { resolveSecret } from "../secrets/broker.js";
 import { registerSecretLiteral } from "../security/secrets.js";
 import { childEnv } from "../security/child-env.js";
 import { findExecutable } from "../executables.js";
+import { guardedDispatcher, UrlGuardError } from "../security/url-guard.js";
 import { headerValue } from "../publishers/ntfy.js";
 import { failFromStatus, parseRetryAfter, REQUEST_TIMEOUT_MS } from "../publishers/shared.js";
 import type { SendResult } from "../publishers/types.js";
@@ -17,14 +18,19 @@ import { privateText, type CheckIn } from "./messages.js";
 export interface CheckInSender { name: string; send(message: CheckIn): Promise<SendResult> }
 
 export async function postCheckIn(url: string, body: string, headers: Record<string, string>): Promise<SendResult> {
+  let dispatcher;
   try {
-    const res = await fetch(url, { method: "POST", body, headers, redirect: "manual", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    dispatcher = await guardedDispatcher(url, { label: "Check-in URL", allowPrivate: true });
+    const res = await globalThis.fetch(url, { ...(dispatcher && { dispatcher }), method: "POST", body, headers, redirect: "manual", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     await res.body?.cancel().catch(() => {});
     if (res.ok) return { ok: true };
     const result = failFromStatus(res.status, "", parseRetryAfter(res.headers.get("Retry-After")));
     if (!result.ok) result.retryable = res.status === 429 || (res.status >= 500 && res.status < 600);
     return result;
-  } catch { return { ok: false, retryable: true, error: "check-in network error" }; }
+  } catch (error) {
+    if (error instanceof UrlGuardError) return { ok: false, retryable: error.retryable, error: privateText(error.message) };
+    return { ok: false, retryable: true, error: "check-in network error" };
+  } finally { await dispatcher?.close(); }
 }
 
 export function ntfySender(options: { url: string; topic: string; token?: string; user?: string; password?: string }): CheckInSender {

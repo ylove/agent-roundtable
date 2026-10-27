@@ -211,3 +211,15 @@ test("a secret word inside a generated id is not a secret key; named keys still 
     assert.match(scrub(line), /\[redacted:secret\]$/, line);
   }
 });
+
+test("scrubbing stays linear on long dotted and hyphenated runs, and URL credentials are still redacted", async () => {
+  const { scrub } = await import("../../dist/security/secrets.js");
+  for (const unit of ["a.", "a-", "a+", "ab.c-"]) {
+    const input = unit.repeat(Math.ceil(200_000 / unit.length));
+    const started = performance.now();
+    scrub(input);
+    assert.ok(performance.now() - started < 1500, `${unit} run took too long`);
+  }
+  assert.equal(scrub("https://user:hunter2pass@example.com/x"), "https://[redacted:url_credentials]@example.com/x");
+  assert.equal(scrub("git+ssh://bob:s3cretpw@host/repo"), "git+ssh://[redacted:url_credentials]@host/repo");
+});

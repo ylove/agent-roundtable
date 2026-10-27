@@ -30,11 +30,11 @@ An omitted model uses the CLI's own default. A model override is a separate flag
 
 | Runtime | Invocation | Output |
 | --- | --- | --- |
-| `hermes` | `hermes chat -q {prompt}` | Plain text with decoration stripped. |
-| `openclaw` | `openclaw agent --message {prompt}` | Plain text; requires its local gateway on `127.0.0.1:18789`. |
-| `gemini` | `gemini -p {prompt} --output-format json` | JSON `response`; defensive usage extraction from `stats`. |
-| Google Antigravity (`agy`) | `agy -p {prompt} --output-format json --mode plan --disable-slash-commands` | JSON `response`; requires `status: "SUCCESS"`; usage from `usage.input_tokens` and `usage.output_tokens`. |
-| `codex` | `codex exec --json --skip-git-repo-check … -` | Last completed agent/assistant message in JSONL; usage from turn completion. |
+| `hermes` | `hermes chat -q {prompt}` | Plain text with decoration stripped; dash-leading argv prompts get a leading newline. |
+| `openclaw` | `openclaw agent --message {prompt}` | Plain text; dash-leading argv prompts get a leading newline. Requires its local gateway on `127.0.0.1:18789`. |
+| `gemini` | `gemini -p {prompt} --output-format json` | JSON `response`; defensive usage extraction from `stats`; dash-leading argv prompts get a leading newline. |
+| Google Antigravity (`agy`) | `agy -p {prompt} --output-format json --mode plan --disable-slash-commands` | JSON `response`; requires `status: "SUCCESS"`; usage from `usage.input_tokens` and `usage.output_tokens`; dash-leading argv prompts get a leading newline. |
+| `codex` | `codex exec --json --skip-git-repo-check … -` | Prompt on stdin; last completed agent/assistant message in JSONL; usage from turn completion. |
 
 All profiles support an explicit model via `--model`, or `-m` for `codex`. They use the CLI's installed configuration and login where supported. The codex profile ignores user configuration and rules, uses a read-only sandbox, sets approval policy to `never` and inherits only the core shell environment, following the heads-down driver's safety flags. It gets `CODEX_HOME` when set. The runtime seat does not use the heads-down worker protocol.
 
@@ -91,7 +91,7 @@ Add `runtimes` to `~/.agent-roundtable/config.json` (or the configured `ROUNDTAB
       "output": { "mode": "text" }
     },
     "my-agent": {
-      "argv": ["my-agent", "--plain", "-"],
+      "argv": ["/absolute/path/to/my-agent", "--plain", "-"],
       "modelFlag": "--model",
       "output": { "mode": "json", "path": "a.b.0.c" },
       "usage": {
@@ -108,7 +108,7 @@ Add `runtimes` to `~/.agent-roundtable/config.json` (or the configured `ROUNDTAB
 
 Names match `^[a-z][a-z0-9_-]{0,31}$`, cannot shadow a provider, and are limited to 64 configured entries. New profiles require `argv` and `output`. Built-in overrides may replace `argv`, `output`, `timeoutMs`, `stdoutMaxBytes`, `stderrMaxBytes` and `env`; they cannot introduce execution modes or change the other built-in fields. Unknown spec fields are rejected, including `shell`.
 
-`argv` is an array of at most 64 nonempty strings, each at most 4096 characters without control characters. The first is an absolute executable path or bare command name, resolved without a shell through PATH. Relative paths and shell command strings are rejected. Shell interpreters cannot be configured as the executable. Arguments are literal; no interpolation, expansion or shell quoting occurs. A single whole argument `{prompt}` is replaced by the full prompt. Without it, the prompt is written to stdin and stdin is closed. `modelFlag` names one option; its value is always a separate argument. `versionArgv` contains only probe arguments, excluding the binary.
+`argv` is an array of at most 64 nonempty strings, each at most 4096 characters without control characters. The first must be an absolute path to a regular executable file. Built-in profiles without an argv override resolve their command names through absolute PATH directories. Relative paths and shell command strings are rejected. Shell interpreters cannot be configured as the executable. Arguments are literal; no interpolation, expansion or shell quoting occurs. A single whole argument `{prompt}` is replaced by the full prompt, with a leading newline added when it begins with `-`. This guard applies to configured profiles, seats and worker wrappers, keeping prompt flags and their values together. Without it, the prompt is written to stdin and stdin is closed. `modelFlag` names one option; its value is always a separate argument. `versionArgv` contains only probe arguments, excluding the binary.
 
 After prompt substitution, each argument is limited to 100 KiB and the full argument list to 128 KiB. Larger requests fail before spawning; use a stdin-capable profile or override `argv` to send the prompt on stdin.
 

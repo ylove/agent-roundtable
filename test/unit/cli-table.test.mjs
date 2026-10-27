@@ -56,7 +56,7 @@ test('duel resolves seats and fans identical NDJSON events into the room, then c
   assert.equal(code, 0, streams.error.read());
   const events = streams.output.read().trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.map(e => e.type), ['start', 'end']); assert.deepEqual(state.roomEvents, events);
-  assert.deepEqual(state.roomOptions, { open: true }); assert.equal(state.closed, 1);
+  assert.equal(state.roomOptions.open, true); assert.equal(typeof state.roomOptions.controls.send, "function"); assert.equal(state.closed, 1);
   assert.equal(state.options.seats.designer.agent, 'designer');
   assert.notEqual(state.options.seats.designer.provider, state.options.seats.marketer.provider);
   assert.ok(state.signal instanceof AbortSignal);

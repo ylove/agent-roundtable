@@ -36,18 +36,18 @@ const isWeb = (kind: unknown): boolean => kind === undefined || kind === "web";
 /** Web, text and diagram artifacts are exactly one file. */
 const isSingle = (kind: unknown): boolean => isWeb(kind) || kind === "text" || kind === "diagram";
 const team = (value: unknown): boolean => value === "A" || value === "B";
-function seat(value: Seat): boolean {
+export function validSeat(value: Seat): boolean {
   return !!value && text(value.id) && text(value.name) && text(value.provider) && text(value.model) &&
     (value.role === undefined || text(value.role)) && (value.team === undefined || team(value.team) || value.team === "judge");
 }
-function validCheck(check: import("../prototypes/page-check.js").PageCheck | undefined): boolean {
+export function validCheck(check: import("../prototypes/page-check.js").PageCheck | undefined): boolean {
   return check === undefined || (!!check && typeof check.loaded === "boolean" && count(check.failedRequests) &&
     [check.consoleErrors, check.exceptions].every(xs => Array.isArray(xs) && xs.length <= 10 && xs.every(x => text(x) && x.length <= 300)) &&
     (check.reason === undefined || (text(check.reason) && check.reason.length <= 300)));
 }
 const positive = (value: unknown): value is number => Number.isInteger(value) && (value as number) > 0;
 const stageIndex = (value: unknown): value is number => positive(value) && value <= 4;
-function validMetrics(value: Record<"A" | "B", TeamMetrics> | undefined): boolean {
+export function validMetrics(value: Record<"A" | "B", TeamMetrics> | undefined): boolean {
   return value === undefined || (!!value && [value.A, value.B].every(m => m &&
     [m.elapsedMs, m.costUsd].every(count) && stageIndex(m.stagesTotal) &&
     [m.stagesDone, m.inputTokens, m.outputTokens, m.unpricedTokens, m.turns, m.failedTurns, m.versions,
@@ -74,16 +74,16 @@ function validEvent(event: TableEvent): boolean {
       (event.criteria === undefined || (Array.isArray(event.criteria) && event.criteria.every(text))) &&
       (event.teams === undefined || (!!event.teams && Array.isArray(event.teams.A) && Array.isArray(event.teams.B) && [...event.teams.A, ...event.teams.B].every(text))) &&
       text(event.id) && text(event.topic) && event.mode === "duel" && date(event.startedAt) &&
-      Array.isArray(event.seats) && event.seats.every(seat);
-    case "turn": return seat(event.seat) && text(event.round) && text(event.text) && date(event.ts);
-    case "prototype": return (event.stage === undefined || stageIndex(event.stage)) && validCheck(event.check) && (event.version === undefined || (Number.isInteger(event.version) && event.version > 0)) && team(event.team) && seat(event.seat) && typeof event.ok === "boolean" &&
+      Array.isArray(event.seats) && event.seats.every(validSeat);
+    case "turn": return validSeat(event.seat) && text(event.round) && text(event.text) && date(event.ts);
+    case "prototype": return (event.stage === undefined || stageIndex(event.stage)) && validCheck(event.check) && (event.version === undefined || (Number.isInteger(event.version) && event.version > 0)) && team(event.team) && validSeat(event.seat) && typeof event.ok === "boolean" &&
       (event.title === undefined || text(event.title)) && (event.error === undefined || text(event.error)) &&
       (event.kind === undefined || PROTOTYPE_KINDS.includes(event.kind)) &&
       Array.isArray(event.files) && (event.ok ? isSingle(event.kind) ? event.files.length === 1 : event.files.length >= 1 && event.files.length <= MAX_FILES : event.files.length === 0) &&
       event.files.every(file => file && (isWeb(event.kind) ? file.path === "index.html" : !validatePath(file.path)) && count(file.bytes) && file.bytes <= MAX_TOTAL_BYTES);
-    case "assessment": return (event.version === undefined || (Number.isInteger(event.version) && event.version > 0)) && seat(event.judge) && team(event.team) &&
+    case "assessment": return (event.version === undefined || (Number.isInteger(event.version) && event.version > 0)) && validSeat(event.judge) && team(event.team) &&
       ["APPROVE", "REVISE", "REJECT", "UNCLEAR"].includes(event.verdict) && text(event.reason);
-    case "dissent": return seat(event.seat) && text(event.text) && (event.team === undefined || team(event.team));
+    case "dissent": return validSeat(event.seat) && text(event.text) && (event.team === undefined || team(event.team));
     case "usage": return count(event.totalCostUsd) && Array.isArray(event.perSeat) && event.perSeat.every(item =>
       item && text(item.seatId) && count(item.inputTokens) && count(item.outputTokens) && count(item.costUsd) &&
       (item.unpricedTokens === undefined || count(item.unpricedTokens)) && (item.estimated === undefined || typeof item.estimated === "boolean"));
@@ -96,12 +96,12 @@ function validEvent(event: TableEvent): boolean {
   }
 }
 
-function validateArchive(value: unknown): DuelArchive {
+export function validateArchive(value: unknown, unfinished = false): DuelArchive {
   const archive = value as DuelArchive;
   if (!archive || (archive.version !== 1 && archive.version !== 2) || !Array.isArray(archive.events) || !Array.isArray(archive.prototypes)) {
     throw new Error("Unsupported duel archive.");
   }
-  if (archive.events[0]?.type !== "start" || archive.events.at(-1)?.type !== "end" ||
+  if (archive.events[0]?.type !== "start" || (!unfinished && archive.events.at(-1)?.type !== "end") || (unfinished && archive.events.some(e => e?.type === "end")) ||
       archive.events.some(e => !validEvent(e)) ||
       archive.events.slice(1, -1).some(e => e.type === "end" || (e.type === "start" &&
         (archive.version === 1 || e.resumed !== true || e.id !== (archive.events[0] as Extract<TableEvent, { type: "start" }>).id)))) throw new Error("Invalid duel event sequence.");

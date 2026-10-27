@@ -104,6 +104,12 @@ export function sessionSignal(session: string): AbortSignal {
   return c.signal;
 }
 
+/** Resume uses a fresh signal; abandoned calls keep their original, aborted signal. */
+export function resetSessionSignal(session: string): void {
+  controllers.set(session, new AbortController());
+  stoppedSessions.delete(session);
+}
+
 /** Cut the session's provider calls in flight. A later turn of the same session starts aborted too. */
 export function abortSession(session: string, reason: string): void {
   sessionSignal(session);

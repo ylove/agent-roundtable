@@ -239,13 +239,14 @@ test("per-call timeouts settle turns and still archive", async t => {
   assert.equal(events.at(-1).type, "end");
 });
 
-test("an already aborted duel archives an aborted outcome with no calls", async t => {
+test("an already aborted duel checkpoints without an end event or calls", async t => {
   const controller = new AbortController(); controller.abort();
   const { calls, result, events } = await run(t, {}, {}, controller.signal);
   assert.equal(calls.length, 0);
   assert.equal(result.aborted, true);
-  assert.equal(events.at(-1).aborted, true);
-  assert.ok(result.archivePath);
+  assert.equal(result.resumable, true);
+  assert.ok(!events.some(e => e.type === "end"));
+  assert.equal(events.at(-1).action, "stopped");
 });
 
 test("session-level aborts cancel the duel through the shared meter", async t => {
@@ -258,7 +259,8 @@ test("session-level aborts cancel the duel through the shared meter", async t =>
   assert.equal(calls.length, 0);
   assert.equal(result.aborted, true);
   assert.equal(result.winner, "none");
-  assert.equal(events.at(-1).aborted, true);
+  assert.equal(result.resumable, true);
+  assert.ok(!events.some(e => e.type === "end"));
 });
 
 test("verdict parser fails closed for missing, quoted, fenced, or ambiguous verdicts", () => {

@@ -335,7 +335,9 @@ test("start_duel validates, runs, and returns a compact result with no source", 
   assert.equal(result.dissents.length, 1);
   assert.equal(result.archive, `duels/${result.duel_id}.json`);
   assert.ok(result.usage.per_persona.some(p => p.persona === "tp-judge" && p.input_tokens > 0));
-  assert.ok(!text.includes("class Queue") && !text.includes("src/queue.py") && !text.includes(ROUNDTABLE_HOME));
+  assert.ok(!text.includes("class Queue") && !text.includes(ROUNDTABLE_HOME));
+  assert.deepEqual(result.chosen.files, ["src/queue.py", "README.txt"]);
+  assert.equal(result.metrics.A.stagesDone, 1);
   assert.ok(calls.length > 0);
   for (const bad of [{ ...args, team_a: ["tp-lead", "tp-lead"] }, { ...args, team_b: ["tp-lead"] }, { ...args, kind: "audio" }, { ...args, judges: [] }, { ...args, team_a: ["a", "b", "c", "d", "e"] }, { ...args, rounds: 3 }]) {
     const before = calls.length;

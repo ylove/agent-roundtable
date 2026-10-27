@@ -10,7 +10,7 @@
 // paths and flags through the same setters as `roundtable config set`; it never stores a secret value.
 // ============================================================================
 
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -60,6 +60,20 @@ export function nodeMeets(version: string, engines: string): boolean {
 }
 
 /** Describe the first roundtable on PATH without printing its path. */
+/** Up to `max` bytes of a regular file, read through one descriptor; "" when it is larger or unreadable. */
+function readSmallFile(path: string, max: number): string {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > max) return "";
+    const buffer = Buffer.alloc(max + 1);
+    const length = readSync(fd, buffer, 0, buffer.length, 0);
+    return length > max ? "" : buffer.subarray(0, length).toString("utf8");
+  } catch { return ""; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
+
 /** A small shell wrapper (`#!` script) that runs this package's entry point by its path counts as this package. */
 export function wrapperRunsEntry(script: string, entries: readonly string[]): boolean {
   if (script.length > 4096 || !script.startsWith("#!")) return false;
@@ -260,7 +274,7 @@ async function defaultProbes(): Promise<Probes> {
         const real = realpathSync(path);
         const entry = fileURLToPath(new URL("./index.js", import.meta.url));
         if (real === realpathSync(entry)) return { path, ours: true };
-        if (statSync(real).size <= 4096 && wrapperRunsEntry(readFileSync(real, "utf8"), [entry, realpathSync(entry)])) return { path, ours: true };
+        if (wrapperRunsEntry(readSmallFile(real, 4096), [entry, realpathSync(entry)])) return { path, ours: true };
         for (let dir = dirname(real); ; dir = dirname(dir)) {
           const manifest = join(dir, "package.json");
           if (existsSync(manifest)) {

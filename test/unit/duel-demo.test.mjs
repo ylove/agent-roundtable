@@ -13,7 +13,7 @@ const archive = JSON.parse(await readFile(fixture, 'utf8'));
 // A small DOM harness exercises the bundled games without a browser or listener.
 function game(html) {
   const elements = new Map();
-  const element = attrs => ({ ...attrs, textContent: '', setAttribute(key, value) { this[key] = value; }, removeAttribute(key) { delete this[key]; } });
+  const element = attrs => ({ ...attrs, style: {}, textContent: '', setAttribute(key, value) { this[key] = value; }, removeAttribute(key) { delete this[key]; } });
   for (const [, id] of html.matchAll(/\bid="([^"]+)"/g)) elements.set(id, element({ id }));
   const screens = ['welcome', 'play', 'results'].map(id => elements.get(id));
   const links = [...html.matchAll(/href="(#[^"]+)"/g)].map(([, hash]) => element({ hash }));
@@ -82,6 +82,26 @@ test('the promotional fixture has eight valid, small versions that truly grow fr
   }
 });
 
+test('the two teams build clearly different products for the same brief', () => {
+  const html = (team, version) => archive.prototypes.find(p => p.team === team && archive.events[p.eventIndex].version === version).files[0].content;
+  for (const version of [3, 4]) {
+    const a = html('A', version), b = html('B', version);
+    assert.match(a, /<title>Coin Quest<\/title>/);
+    assert.match(b, /<title>Pocket Planner<\/title>/);
+    assert.ok(a.includes('id="fill"') && !b.includes('id="fill"'), 'the game fills a jar');
+    assert.ok(b.includes('id="bn"') && !a.includes('id="bn"'), 'the planner draws a bar chart');
+    const colors = text => new Set(text.match(/#[0-9a-f]{6}\b/gi));
+    const shared = [...colors(a)].filter(c => colors(b).has(c));
+    assert.ok(shared.length <= 2, `palettes overlap on ${shared}`);
+  }
+  // The skeletons are grey wireframes; the polished pages bring colour and an inline illustration.
+  for (const team of ['A', 'B']) {
+    assert.ok(!/<svg/.test(html(team, 1)) && !/<svg/.test(html(team, 2).replace(/<aside>[\s\S]*<\/aside>/, '')));
+    assert.match(html(team, 4), /<svg[^>]*role="img"/);
+    assert.match(html(team, 4), /<linearGradient|clip-path|@keyframes/);
+  }
+});
+
 test('the demo working and polished versions run purchases, errors, results, restart, and the full 60 second timer', () => {
   for (const p of archive.prototypes) {
     if (archive.events[p.eventIndex].version < 3) continue;
@@ -99,7 +119,7 @@ test('the demo working and polished versions run purchases, errors, results, res
     byId('finish').onclick();
     assert.equal(dom.intervals.size, 0);
     assert.equal(dom.location.hash, '#results');
-    assert.match(byId('summary').textContent, /Great plan!.*saved 5 of 10/);
+    assert.match(byId('summary').textContent, p.team === 'A' ? /Great plan!.*saved 5 of 10/ : /Balanced budget!.*saved 5 of 10/);
     byId('again').onclick();
     assert.equal(byId('balance').textContent, 10);
     const tick = [...dom.intervals.values()][0];
@@ -132,7 +152,7 @@ test('demo timing and metrics show A finishing sooner and cheaper, B rewriting o
   for (const team of ['A', 'B']) {
     assert.equal(result.metrics[team].stagesDone, 4);
     assert.equal(result.metrics[team].versions, 4);
-    const usage = archive.events.find(e => e.type === 'usage').perSeat.filter(s => archive.events[0].seats.find(seat => seat.id === s.seatId)?.team === team);
+    const usage = archive.events.findLast(e => e.type === 'usage').perSeat.filter(s => archive.events[0].seats.find(seat => seat.id === s.seatId)?.team === team);
     assert.equal(result.metrics[team].inputTokens, usage.reduce((n, s) => n + s.inputTokens, 0));
     assert.equal(result.metrics[team].outputTokens, usage.reduce((n, s) => n + s.outputTokens, 0));
   }
@@ -140,6 +160,12 @@ test('demo timing and metrics show A finishing sooner and cheaper, B rewriting o
   assert.equal(b.filter(e => e.check.consoleErrors.length).length, 1);
   assert.equal(b[1].check.consoleErrors.length, 1);
   assert.equal(b[2].check.consoleErrors.length, 0);
+  const usages = archive.events.filter(e => e.type === 'usage');
+  assert.equal(usages.length, archive.events.filter(e => e.type === 'turn').length, 'every turn reports usage');
+  usages.reduce((previous, usage) => {
+    assert.ok(usage.totalCostUsd > previous, 'spend climbs with every turn');
+    return usage.totalCostUsd;
+  }, 0);
   assert.equal(result.winner, 'A');
   assert.equal(result.decidedBy, 'judges');
   assert.ok(archive.events.some(e => e.type === 'assessment'));

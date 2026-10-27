@@ -50,6 +50,16 @@ for (const m of prompt.matchAll(/FIXTURE (\S+)(?: (\S+))?/g)) {
     summary = `Used ghp_${"Z".repeat(30)} to finish.`;
   }
 }
-if (name === "gemini") {
+if (name === "agy") {
+  const failed = prompt.includes("FAIL_ME");
+  const deniedText = prompt.includes("DENY_TEXT");
+  const denied = prompt.includes("DENY_ME") || deniedText;
+  console.log(JSON.stringify({
+    status: failed ? "ERROR" : "SUCCESS", response: failed || (denied && !deniedText) ? "" : deniedText ? "I could not write the file; the write was denied." : summary,
+    ...(failed && { error: "boom" }),
+    ...(denied && { denied_actions: [{ action: "write_file" }] }),
+    usage: { input_tokens: 7709, output_tokens: 1, thinking_tokens: 20 },
+  }));
+} else if (name === "gemini") {
   console.log(JSON.stringify({ response: summary, stats: { tokens: { input: 120, output: 30 }, cost: 0.004 } }, null, 2));
 } else console.log(`Hermes Agent fixture banner\n${summary}`);

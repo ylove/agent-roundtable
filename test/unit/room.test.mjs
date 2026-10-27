@@ -103,6 +103,8 @@ test("live frames render as a scaled desktop preview with classes only, and the 
   assert.match(ROOM_CSS, /@media\(min-width:1266px\) and \(max-width:1495px\)\{\.live\.scaled\{--s:\.6\}\}/);
   assert.match(ROOM_JS, /classList\.toggle\("scaled", web && !selections\.has\(team\)\)/);
   assert.ok(!/\.style\b|setAttribute\("style"/.test(ROOM_JS), "the room script sets no inline styles");
+  assert.match(ROOM_JS, /plural\(m\.versions, "version"\), plural\(m\.rewrites, "rewrite"\)/);
+  assert.match(ROOM_JS, /n \+ " " \+ word \+ \(n === 1 \? "" : "s"\)/);
   assert.match(ROOM_JS, /Math\.max\(state\.usage\.totalCostUsd \|\| 0, teamSpend\)/);
   assert.match(ROOM_JS, /frame\.setAttribute\("sandbox", "allow-scripts allow-forms allow-modals"\)/);
 });

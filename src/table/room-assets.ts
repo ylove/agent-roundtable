@@ -54,6 +54,7 @@ function frameFor(team, item) {
 function valid(item) { return item && item.ok && item.files.length && (SOURCE_KINDS.includes(item.kind) || item.files.some(f => f.path === "index.html")); }
 function stageName(state, item) { return state.stages.find(s => s.index === item.stage)?.name || "Build"; }
 function checkText(item) { const c = item.check; return !c || ["no browser", "disabled", "page check unavailable"].includes(c.reason) ? "not checked" : c.loaded && !c.reason && !c.exceptions.length && !c.consoleErrors.length && !c.failedRequests ? "loaded" : "errors"; }
+function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
 function createCard(team) {
   const card = node("article", undefined, "team"), title = node("h2", "Team " + team), seats = node("div", undefined, "team-seats"), progress = node("div", undefined, "progress"), status = node("p", "Waiting for the first build", "status"), ticker = node("p", "From the table · Waiting for a concept", "ticker"), live = node("div", undefined, "live"), badge = node("span", undefined, "build-badge"), metrics = node("div", undefined, "metrics"), versions = node("div", undefined, "versions"), tools = node("div", undefined, "tools"), diff = node("div"), approval = node("div", undefined, "approval"), transcript = node("div", undefined, "transcript");
   live.append(node("p", "Waiting for the first build", "placeholder")); badge.setAttribute("role", "status");
@@ -105,7 +106,7 @@ function renderTeam(state, team, web) {
   const turns = state.turns.filter(t => teamOf(state, t.seat) === team && !/closing|dissent/i.test(t.round));
   const note = (latest ? turns.filter(t => /build|stage|revision/i.test(t.round)).at(-1) : turns.at(-1)) || turns.at(-1);
   setText(c.ticker, (latest ? "Build note · " : "From the table · ") + (note ? line(note.text) : latest?.title || "Waiting for a concept"));
-  c.metrics.replaceChildren(...(m ? [short(m.inputTokens + m.outputTokens) + " tok" + (m.estimated ? " ≈" : ""), spendText(m.costUsd, m.unpricedTokens, false), duration(m.elapsedMs), m.versions + " versions", m.rewrites + " rewrites", (m.failedTurns + m.validationFailures + m.pageErrors) + " errors"] : ["No metrics yet"]).map(t => node("span", t)));
+  c.metrics.replaceChildren(...(m ? [short(m.inputTokens + m.outputTokens) + " tok" + (m.estimated ? " ≈" : ""), spendText(m.costUsd, m.unpricedTokens, false), duration(m.elapsedMs), plural(m.versions, "version"), plural(m.rewrites, "rewrite"), plural(m.failedTurns + m.validationFailures + m.pageErrors, "error")] : ["No metrics yet"]).map(t => node("span", t)));
   c.versions.replaceChildren(button("Live", () => { selections.delete(team); render(current); }, selections.has(team) ? "" : "active"), ...history.map(item => {
     const b = button("v" + item.version + " · " + stageName(state, item), () => { selections.set(team, item.version); render(current); }, selected?.version === item.version ? "active" : ""); b.title = checkText(item); b.setAttribute("aria-pressed", String(selected?.version === item.version)); return b;
   }));

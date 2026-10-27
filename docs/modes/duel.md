@@ -1,5 +1,7 @@
 # Duel
 
+See [the live duel room and terminal layouts](duel-room.md) for Apps, Harness, versions and human controls.
+
 A duel puts two teams at the table to build competing artifacts for the same brief. Judges assess both against a rubric, in a live local room, and the losing side files dissents. It works for any brief: a web page, a module, a diagram or a written document.
 
 Three dissimilar briefs:

@@ -1,9 +1,10 @@
-import { SecureServer, type Route } from "../http/secure-server.js";
+import { newCapabilityToken, sameOriginProblem, tokenMatches, SecureServer, type Route } from "../http/secure-server.js";
 import { sanitizeSessionId } from "../prototypes/sandbox.js";
 import { livePreviews, previewLabel, previewOrigins, withFrameSrc } from "../previews/embed.js";
 import { APP_CSP, openInBrowser } from "../prototypes/board.js";
 import { MAX_FILES, MAX_TOTAL_BYTES, validatePath, type PrototypeFile } from "../prototypes/parse.js";
-import type { Seat, TableEvent, TableObserver } from "./events.js";
+import { scrubDeep } from "../execution/blobs.js";
+import type { DuelCommand, DuelKind, TeamMetrics, Seat, TableEvent, TableObserver } from "./events.js";
 import { getPrototypeFiles, getPrototypeScreenshot } from "./replay.js";
 import { ROOM_CSP, ROOM_CSS, ROOM_HTML, ROOM_JS } from "./room-assets.js";
 
@@ -12,6 +13,16 @@ export interface RoomState {
   id?: string;
   topic: string;
   seats: Seat[];
+  kind: DuelKind;
+  stages: { index: number; name: string }[];
+  teams: Record<"A" | "B", string[]>;
+  humanJudge: boolean;
+  progress: Partial<Record<"A" | "B", Pick<EventOf<"stage">, "stage" | "of" | "name" | "status">>>;
+  metrics: Partial<Record<"A" | "B", TeamMetrics>>;
+  stopped?: { by: EventOf<"control">["by"]; at: string };
+  decision?: { status: "awaiting" | "made"; winner?: "A" | "B"; at: string };
+  controls: { stop: boolean; resume: boolean; choose: boolean };
+  transcript: TableEvent[];
   prototypes: (EventOf<"prototype"> & { version: number })[];
   history: (EventOf<"prototype"> & { version: number })[];
   browser?: { team: "A" | "B"; version: number };
@@ -30,7 +41,7 @@ export function duelPreviewsOf<T extends { source: { duel?: string } }>(duelId: 
 }
 
 export function createRoomState(): RoomState {
-  return { topic: "", seats: [], prototypes: [], history: [], assessments: [], dissents: [], turns: [], usage: { type: "usage", perSeat: [], totalCostUsd: 0 } };
+  return { topic: "", seats: [], kind: "web", stages: [], teams: { A: [], B: [] }, humanJudge: false, progress: {}, metrics: {}, controls: { stop: false, resume: false, choose: false }, transcript: [], prototypes: [], history: [], assessments: [], dissents: [], turns: [], usage: { type: "usage", perSeat: [], totalCostUsd: 0 } };
 }
 
 export interface RoomOptions {
@@ -50,7 +61,8 @@ export interface DuelRoom {
 }
 
 /** Loopback capability room. No URL is ever used as a filesystem path. */
-export async function startRoom({ state = createRoomState(), open = false, hold = true }: RoomOptions = {}): Promise<DuelRoom> {
+export async function startRoom({ state = createRoomState(), open = false, hold = true, controls }: RoomOptions = {}): Promise<DuelRoom> {
+  const nonce = newCapabilityToken();
   const files = new Map<"A" | "B", Map<string, string>>();
   const versions = new Map<string, Map<string, string>>();
   const shots = new Map<string, Buffer>();
@@ -71,11 +83,45 @@ export async function startRoom({ state = createRoomState(), open = false, hold 
   };
   const duelPreviews = () => duelPreviewsOf(state.id, livePreviews());
   const routes: Route[] = [
-    { path: "/", handler: ctx => ctx.html(200, ROOM_HTML, withFrameSrc(ROOM_CSP, previewOrigins(duelPreviews()))) },
+    { path: "/", handler: ctx => ctx.html(200, ROOM_HTML.replace("<!-- action nonce -->", `<meta name="roundtable-action" content="${nonce}">`), withFrameSrc(ROOM_CSP, previewOrigins(duelPreviews()))) },
     { path: "/previews.json", handler: ctx => ctx.json(200, duelPreviews().map(r => ({ id: r.id, origin: r.origin, label: previewLabel(r) }))) },
     { path: "/room.js", handler: ctx => ctx.send(200, ROOM_JS, "text/javascript; charset=utf-8") },
     { path: "/room.css", handler: ctx => ctx.send(200, ROOM_CSS, "text/css; charset=utf-8") },
-    { path: "/state.json", handler: ctx => ctx.json(200, state) },
+    { path: "/state.json", handler: ctx => {
+      state.controls = controls?.available() ?? { stop: false, resume: false, choose: false };
+      ctx.json(200, scrubDeep(state));
+    } },
+    { path: "/control", methods: ["POST"], handler: async ctx => {
+      if (!controls) return ctx.notFound();
+      const origin = new URL(server.url).origin;
+      const problem = sameOriginProblem(ctx.req, [origin, origin.replace("127.0.0.1", "localhost")]);
+      if (problem) return ctx.json(403, { error: problem });
+      const sent = ctx.req.headers["x-roundtable-action"];
+      if (typeof sent !== "string" || !tokenMatches(sent, nonce)) return ctx.json(403, { error: "Reload the room and try again." });
+      if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(ctx.req.headers["content-type"] ?? "")) return ctx.json(400, { error: "Expected application/json." });
+      const invalid = () => ctx.json(400, { error: "Invalid command (maximum 1 KiB)." });
+      if (Number(ctx.req.headers["content-length"]) > 1024) return invalid();
+      let size = 0;
+      const chunks: Buffer[] = [];
+      let body: unknown;
+      try {
+        for await (const chunk of ctx.req.iterator({ destroyOnReturn: false })) {
+          const bytes = Buffer.from(chunk);
+          size += bytes.length;
+          if (size > 1024) { ctx.req.resume(); return invalid(); }
+          chunks.push(bytes);
+        }
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch { return invalid(); }
+      if (!body || typeof body !== "object" || Array.isArray(body)) return invalid();
+      const command = body as Record<string, unknown>;
+      if (command.action !== "stop" && command.action !== "resume" && command.action !== "choose") return invalid();
+      const choosing = command.action === "choose";
+      if (Object.keys(command).some(key => key !== "action" && !(choosing && key === "team")) ||
+          (choosing && command.team !== "A" && command.team !== "B")) return invalid();
+      if (!controls.available()[command.action] || !controls.send(command as DuelCommand, "room")) return ctx.json(409, { error: "Command unavailable." });
+      ctx.json(202, { ok: true });
+    } },
     { path: /^\/shot\/([AB])\/(\d+)\.png$/, handler: ctx => {
       const key = `${ctx.match![1]}/${ctx.match![2]}`;
       const shot = shots.get(key);
@@ -139,25 +185,58 @@ export async function startRoom({ state = createRoomState(), open = false, hold 
       case "start":
         if (keeper) { clearInterval(keeper); keeper = undefined; }
         process.removeListener("SIGINT", onInterrupt);
-        Object.assign(state, createRoomState(), { id: event.id, topic: event.topic, seats: event.seats });
+        if (event.resumed) {
+          state.seats = event.seats;
+          if (event.teams) state.teams = event.teams;
+          delete state.stopped;
+          delete state.end;
+          break;
+        }
+        delete state.stopped;
+        delete state.decision;
+        Object.assign(state, createRoomState(), {
+          id: event.id, topic: event.topic, seats: event.seats, kind: event.kind ?? "web",
+          stages: event.stages ?? [], humanJudge: event.humanJudge ?? false,
+          teams: event.teams ?? { A: event.seats.filter(s => s.team === "A").map(s => s.id), B: event.seats.filter(s => s.team === "B").map(s => s.id) },
+        });
         delete state.end;
         files.clear(); versions.clear(); shots.clear();
         delete state.browser;
         break;
+      case "stage":
+        state.progress[event.team] = { stage: event.stage, of: event.of, name: event.name, status: event.status };
+        state.transcript.push(event);
+        break;
+      case "metrics": state.metrics = event.teams; break;
+      case "control":
+        if (event.action === "resumed") { delete state.stopped; delete state.end; }
+        else state.stopped = { by: event.by, at: event.ts };
+        break;
+      case "decision":
+        state.decision = { status: event.status, at: event.ts, ...(event.status === "made" && { winner: event.winner }) };
+        break;
       case "turn":
+        state.transcript.push(event);
         state.turns.push(event);
         break;
       case "prototype": {
+        state.transcript.push(event);
         const content = getPrototypeFiles(event);
-        if (content.length) setPrototypeFiles(event.team, content);
-        if (!event.ok) files.delete(event.team);
+        if (event.ok && content.length) setPrototypeFiles(event.team, content);
+        if (!event.ok) {
+          const previous = state.prototypes.find(p => p.team === event.team && p.ok);
+          const retained = previous && versions.get(`${event.team}/${previous.version}`);
+          if (retained) files.set(event.team, new Map(retained));
+          else files.delete(event.team);
+        }
+
         const version = event.version ?? state.history.filter(p => p.team === event.team).length + 1;
         const prototype = { ...event, version };
         state.history.push(prototype);
         if (event.ok && files.has(event.team)) versions.set(`${event.team}/${version}`, new Map(files.get(event.team)!));
         const shot = getPrototypeScreenshot(event);
         if (shot) { shots.set(`${event.team}/${version}`, shot); state.browser = { team: event.team, version }; }
-        state.prototypes = [...state.prototypes.filter(p => p.team !== event.team), prototype];
+        if (event.ok || !state.prototypes.some(p => p.team === event.team && p.ok)) state.prototypes = [...state.prototypes.filter(p => p.team !== event.team), prototype];
         break;
       }
       case "assessment": {
@@ -170,6 +249,7 @@ export async function startRoom({ state = createRoomState(), open = false, hold 
       case "usage": state.usage = event; break;
       case "end":
         state.end = event;
+        if (event.metrics) state.metrics = event.metrics;
         if (hold && !keeper) {
           keeper = setInterval(() => {}, 60_000);
           process.once("SIGINT", onInterrupt);

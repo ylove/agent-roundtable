@@ -54,7 +54,7 @@ export const USAGE = [
   "  roundtable --version | -v | version",
   "  roundtable serve [--detach] [--no-keep-runners] [--bind loopback|tailnet] | serve status|stop",
   "  roundtable serve --print-service launchd|systemd",
-  "  roundtable preview start <exe> <task> | --prototype <dir> [--script dev|start|preview] [--port <n>]",
+  "  roundtable preview start <exe> <task> | --prototype <dir> [--script dev|start|preview] [--port <n>] [--display live|click|screenshot]",
   "  roundtable preview list [--json] | preview stop <id>",
   "  roundtable notify init ntfy | notify test",
   "  roundtable config set notify.<key> <value>",

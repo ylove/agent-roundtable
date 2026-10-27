@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { openExecutionStore } from "../execution/store.js";
 import { EVENT_TYPES, type AnyEvent, type BlackboardState, type EventType, type ExecutionStore } from "../execution/types.js";
 import { hasBody, newCapabilityToken, sameOriginProblem, SecureServer, tokenMatches, type ResponseStream, type RouteContext } from "../http/secure-server.js";
-import { livePreviews, previewOrigins, withFrameSrc } from "../previews/embed.js";
+import { livePreviews, previewOrigins, previewScreenshotRoute, withFrameSrc } from "../previews/embed.js";
 import type { PreviewRecord } from "../previews/store.js";
 import { collectUsage } from "../usage/model.js";
 import { requestAgentStop, StopRefusal, stopper } from "../usage/stop.js";
@@ -148,12 +148,13 @@ class DashboardServer {
     this.server = await SecureServer.start({
       name: "Dashboard",
       routes: [
+        previewScreenshotRoute(() => livePreviews(r => r.source.execution === this.store.id)),
         { path: "/", handler: page(async () => renderOverview({ ...(await this.context()), usage: await this.usage() })) },
         { path: "/tasks", handler: page(async () => renderTasks(await this.context())) },
         { path: "/usage", handler: page(() => this.usagePage()) },
         { path: /^\/agents\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/stop$/, methods: ["POST"], handler: (c) => this.stopAgent(c) },
         { path: /^\/tasks\/([a-z0-9][a-z0-9._-]{0,63})$/, handler: async (c) => {
-          // Running previews of this task are framed; only their origins are added to the CSP.
+          // Only live and click previews add frame origins to the CSP.
           const id = c.match![1];
           const previews = livePreviews((r) => r.source.execution === this.store.id && r.source.task === id, true);
           const html = await this.taskPage(id, previews);

@@ -13,13 +13,14 @@ import { runnerLiveness, type RunnerLiveness } from "../execution/runner-launch.
 import { renderOverview, renderEscalations, t, type RunnerHealth } from "../dashboard/render.js";
 import { DASHBOARD_CSS } from "../dashboard/assets.js";
 import { SecureServer, escapeHtml, type Route } from "../http/secure-server.js";
-import { livePreviews, previewFramesHtml, previewOrigins, withFrameSrc } from "../previews/embed.js";
+import { livePreviews, previewFramesHtml, previewOrigins, previewScreenshotRoute, withFrameSrc } from "../previews/embed.js";
+import { PREVIEW_JS } from "../previews/assets.js";
 import type { PreviewRecord } from "../previews/store.js";
 import { persistedLiveDuels, type LiveDuel } from "../table/live-duels.js";
 
 export const INDEX_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 // A page with a live preview does not reload: that would restart the previewed app every 15 seconds.
-const POLL_JS = 'setInterval(() => { if (!document.hidden && !document.querySelector("iframe.preview")) location.reload(); }, 15000);';
+const POLL_JS = PREVIEW_JS + '\ninitPreviewCards();\nsetInterval(() => { if (!document.hidden && !document.querySelector("iframe.preview")) location.reload(); }, 15000);';
 export interface IndexRun { report: ExecutionStatusReport; lastEvent?: string }
 export interface ArchiveSummary { id: string; topic: string; winner: string }
 
@@ -37,7 +38,7 @@ export function renderIndex(base: string, runs: IndexRun[], duels: ArchiveSummar
   const body = `<h1>Roundtable</h1><p>Read-only. Refreshes every 15 seconds.</p><h2>Executions</h2><table><thead><tr><th>Run</th><th>State</th><th>Complete</th><th>Spend / budget</th><th>Awaiting you</th><th>Runner</th><th>Last event</th></tr></thead><tbody>${rows.join("")}</tbody></table>` +
     `<h2>Live duels and casting</h2><ul>${live.map(d => `<li>${t(d.id)} · ${t(d.kind ?? "duel")} · ${t(d.agents.join(", "))} · ${t(d.started)} · ${t(d.host)}${d.maxUsd !== undefined ? ` · spent $${(d.spentUsd ?? 0).toFixed(4)} of $${d.maxUsd} cap` : ""}</li>`).join("")}</ul>` +
     `<h2>Archived duels</h2><ul>${duels.filter(d => ID_RE.test(d.id)).map(d => `<li><a href="${escapeHtml(base)}duels/${d.id}">${t(d.id)}</a> · ${t(d.topic)} · winner ${t(d.winner)}</li>`).join("")}</ul>` +
-    previewFramesHtml(previews) +
+    previewFramesHtml(previews, base) +
     `<h2>Latest casting report</h2>${casting ? `<a href="${escapeHtml(base)}casting">Read report</a><pre>${t(casting)}</pre>` : "<p>No casting report yet.</p>"}`;
   return indexFrame(base, "Roundtable", body);
 }
@@ -62,6 +63,7 @@ export function indexRunnerHealth(live: RunnerLiveness): RunnerHealth {
 
 export function indexRoutes(): Route[] {
   return [
+    previewScreenshotRoute(livePreviews),
     { path: "/static/dashboard.css", handler: c => c.send(200, DASHBOARD_CSS, "text/css; charset=utf-8") },
     { path: "/static/dashboard.js", handler: c => c.send(200, POLL_JS, "text/javascript; charset=utf-8") },
     { path: "/", async handler(c) {

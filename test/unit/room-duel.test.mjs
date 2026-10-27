@@ -6,6 +6,9 @@ import { SecureServer } from "../../dist/http/secure-server.js";
 import { createRoomState, startRoom } from "../../dist/table/room.js";
 import { ROOM_HTML, ROOM_JS, ROOM_CSS } from "../../dist/table/room-assets.js";
 import { attachPrototypeFiles } from "../../dist/table/replay.js";
+import { PREVIEW_JS } from "../../dist/previews/assets.js";
+import { DASHBOARD_JS } from "../../dist/dashboard/assets.js";
+import { indexRoutes } from "../../dist/serve/index.js";
 
 const ts = "2026-10-26T12:00:00Z";
 const seats = ["A", "B"].map(team => ({ id: team, name: "Builder " + team, team, provider: "fixture", model: "model" }));
@@ -145,13 +148,78 @@ class Element {
   addEventListener(name, fn) { this.events[name] = fn; }
   click() { if (!this.disabled) return this.events.click?.(); }
 }
-function domHarness(state) {
+function domHarness(state, previewList = [], origins = previewList.filter(p => p.display !== "screenshot").map(p => p.origin)) {
   const elements = new Map([...ROOM_HTML.matchAll(/id="([^"]+)"/g)].map(m => [m[1], new Element()]));
   const requests = [], location = { hash: "" }, timers = [];
-  const context = vm.createContext({ document: { getElementById: id => elements.get(id), createElement: tag => new Element(tag), querySelector: () => ({ content: "test-nonce" }) }, location, window: { addEventListener() {} }, setTimeout: fn => timers.push(fn), fetch: async (url, opts) => { requests.push({ url, opts }); return { ok: true, json: async () => url === "previews.json" ? [] : state, text: async () => "<script>inert source</script>" }; } });
+  const context = vm.createContext({ document: { getElementById: id => elements.get(id), createElement: tag => new Element(tag), querySelector: selector => ({ content: selector.includes("preview-origins") ? origins.join(" ") : "test-nonce" }) }, location, window: { addEventListener() {} }, setTimeout: fn => timers.push(fn), fetch: async (url, opts) => { requests.push({ url, opts }); return { ok: true, json: async () => url === "previews.json" ? previewList : state, text: async () => "<script>inert source</script>" }; } });
   vm.runInContext(ROOM_JS.replace(/poll\(\);\s*$/, ""), context);
-  return { elements, requests, location, render(next = state) { context.state = next; vm.runInContext("render(state)", context); }, card(team = "A") { return vm.runInContext('cards.get("' + team + '")', context); } };
+  return { elements, requests, location, previews(next = previewList) { previewList = next; return vm.runInContext("previews()", context); }, render(next = state) { context.state = next; vm.runInContext("render(state)", context); }, card(team = "A") { return vm.runInContext('cards.get("' + team + '")', context); } };
 }
+
+test("preview display: live frames immediately, click loads once per page, screenshot never frames", async () => {
+  const list = ["live", "click", "screenshot"].map((display, i) => ({ id: `prv-0000000${i}`, label: "<script>literal label</script>", origin: `http://127.0.0.1:${4010 + i}`, display }));
+  list[2].screenshot = "preview-shots/prv-00000002.png";
+  const ui = domHarness(createRoomState(), list);
+  await ui.previews();
+  const holder = ui.elements.get("preview-frames");
+  assert.equal(holder.children.length, 3);
+  const [live, click, shot] = holder.children;
+  assert.equal(live.children.filter(c => c.tagName === "iframe").length, 1);
+  assert.equal(click.children.filter(c => c.tagName === "iframe").length, 0);
+  assert.equal(click.children[0].textContent.includes("<script>literal label</script>"), true);
+  const load = click.children.find(c => c.tagName === "button");
+  assert.equal(load.textContent, "Load preview");
+  load.click(); load.click();
+  const frame = click.children.find(c => c.tagName === "iframe");
+  assert.equal(frame.src, list[1].origin + "/");
+  assert.equal(frame.getAttribute("sandbox"), "allow-scripts allow-forms");
+  assert.equal(frame.referrerPolicy, "no-referrer");
+  await ui.previews();
+  assert.equal(holder.children[1], click);
+  assert.deepEqual(click.children.filter(c => c.tagName === "iframe"), [frame]);
+  assert.equal(shot.children.some(c => c.tagName === "iframe" || c.tagName === "button"), false);
+  assert.equal(shot.children.find(c => c.tagName === "img").src, list[2].screenshot);
+  const link = shot.children.find(c => c.tagName === "a");
+  assert.equal(link.textContent, "Open in a new tab");
+  assert.equal(link.href, list[2].origin + "/");
+  assert.equal(link.target, "_blank"); assert.equal(link.rel, "noopener noreferrer");
+  const reloaded = domHarness(createRoomState(), list);
+  await reloaded.previews();
+  assert.equal(reloaded.elements.get("preview-frames").children[1].children.some(c => c.tagName === "iframe"), false);
+  await ui.previews([list[2]]);
+  assert.deepEqual(holder.children, [shot], "stopped previews are removed");
+});
+
+test("room uses the page's CSP origins for frames, and can add screenshot cards without a reload", async () => {
+  const ui = domHarness(createRoomState(), [], []);
+  const click = { id: "prv-00000000", display: "click", label: "task app", origin: "http://127.0.0.1:4010" };
+  const screenshot = { ...click, id: "prv-00000001", display: "screenshot" };
+  await ui.previews([click, screenshot]);
+  const holder = ui.elements.get("preview-frames");
+  assert.equal(holder.children.length, 1);
+  assert.equal(holder.children[0].dataset.id, screenshot.id);
+  assert.match(holder.children[0].textContent, /No page-check screenshot yet/);
+  assert.match(ui.elements.get("preview-note").textContent, /reload/);
+  await ui.previews([{ ...screenshot, screenshot: "preview-shots/prv-00000001.png" }]);
+  assert.equal(holder.children[0].children.some(c => c.tagName === "img"), true);
+  await ui.previews([{ ...screenshot, display: "click" }]);
+  assert.equal(holder.children.length, 0, "a screenshot origin was never admitted to frame-src");
+});
+
+test("dashboard and index click buttons use the shared external script", () => {
+  const card = new Element("figure"), load = new Element("button");
+  load.dataset = { previewOrigin: "http://127.0.0.1:4010", previewId: "prv-00000000" }; card.append(load);
+  const context = vm.createContext({ document: { createElement: tag => new Element(tag), querySelectorAll: () => [load] } });
+  vm.runInContext(PREVIEW_JS + "\ninitPreviewCards();", context);
+  assert.equal(card.children.some(c => c.tagName === "iframe"), false);
+  load.click();
+  assert.deepEqual(card.children.map(c => c.tagName), ["iframe"]);
+  assert.ok(DASHBOARD_JS.includes(PREVIEW_JS + "\ninitPreviewCards();"));
+  let script;
+  indexRoutes().find(r => r.path === "/static/dashboard.js").handler({ send(_status, body) { script = body; } });
+  assert.ok(script.includes(PREVIEW_JS + "\ninitPreviewCards();"));
+  assert.doesNotMatch(script, /innerHTML|outerHTML|insertAdjacentHTML|\.on\w+\s*=|localStorage|sessionStorage/);
+});
 
 test("Apps swaps loaded frames, keeps pinned versions, and renders progress, efficiency and human choice", async () => {
   const state = { ...createRoomState(), ...start, transcript: [], turns: [], history: [prototype(1)], controls: { stop: true, resume: false, choose: false } };

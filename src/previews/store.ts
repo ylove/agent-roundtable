@@ -34,6 +34,7 @@ export interface PreviewCheckRecord {
 
 export interface PreviewRecord {
   id: string;
+  display: PreviewDisplay;
   container: string;
   /** http://127.0.0.1:<host port> */
   origin: string;
@@ -49,9 +50,26 @@ export interface PreviewRecord {
 }
 
 export const ORIGIN_RE = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/;
+export const PREVIEW_DISPLAYS = ["live", "click", "screenshot"] as const;
+export type PreviewDisplay = typeof PREVIEW_DISPLAYS[number];
+export const isPreviewDisplay = (value: unknown): value is PreviewDisplay => PREVIEW_DISPLAYS.some(mode => mode === value);
 
 export const previewsDir = (): string => join(ROUNDTABLE_HOME, "previews");
 const recordPath = (id: string): string => join(previewsDir(), `${id}.json`);
+const screenshotPath = (id: string): string => join(previewsDir(), `${id}.png`);
+
+/** Page-check PNGs stay beside the record, outside event logs and archives. */
+export function writePreviewScreenshot(id: string, bytes: Buffer): void {
+  if (!PREVIEW_ID_RE.test(id)) throw new Error("Invalid preview id");
+  ensureStateHome(ROUNDTABLE_HOME);
+  mkdirPrivate(previewsDir());
+  writeFileAtomic(screenshotPath(id), bytes);
+}
+
+export function readPreviewScreenshot(id: string): Buffer | undefined {
+  if (!PREVIEW_ID_RE.test(id)) return undefined;
+  try { return readFileSync(screenshotPath(id)); } catch { return undefined; }
+}
 
 /** The record when `value` has exactly the shape startPreview writes, else undefined. */
 export function parseRecord(value: unknown): PreviewRecord | undefined {
@@ -59,6 +77,7 @@ export function parseRecord(value: unknown): PreviewRecord | undefined {
   const r = value as Partial<PreviewRecord>;
   const originPort = typeof r.origin === "string" ? Number(ORIGIN_RE.exec(r.origin)?.[1]) : NaN;
   const ok =
+    (r.display === undefined || isPreviewDisplay(r.display)) &&
     typeof r.id === "string" && PREVIEW_ID_RE.test(r.id) &&
     typeof r.container === "string" && /^rt-preview-[a-z0-9]{8}$/.test(r.container) &&
     originPort >= 1 && originPort <= 65_535 && r.host_port === originPort &&
@@ -67,7 +86,8 @@ export function parseRecord(value: unknown): PreviewRecord | undefined {
     (r.source.duel === undefined || (typeof r.source.duel === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(r.source.duel))) &&
     typeof r.started_at === "string" && typeof r.last_seen === "string" && Number.isFinite(Date.parse(r.last_seen)) &&
     Number.isFinite(r.ttl_ms) && typeof r.host === "string";
-  return ok ? (r as PreviewRecord) : undefined;
+  // Records created before display modes retain their existing live behaviour.
+  return ok ? { ...r, display: r.display ?? "live" } as PreviewRecord : undefined;
 }
 
 export function writeRecord(record: PreviewRecord): void {
@@ -77,7 +97,10 @@ export function writeRecord(record: PreviewRecord): void {
 }
 
 export function removeRecord(id: string): void {
-  if (PREVIEW_ID_RE.test(id)) rmSync(recordPath(id), { force: true });
+  if (PREVIEW_ID_RE.test(id)) {
+    rmSync(recordPath(id), { force: true });
+    rmSync(screenshotPath(id), { force: true });
+  }
 }
 
 /** Every valid record on this host (a malformed or foreign file is ignored). Never throws. */

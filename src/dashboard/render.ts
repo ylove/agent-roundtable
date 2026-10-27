@@ -384,7 +384,7 @@ export function renderTaskDetail(c: PageContext, id: string, d: TaskDetail): str
     (rt.last_commit ? `<dt>Last commit</dt><dd><code>${t(rt.last_commit)}</code></dd>` : "") +
     `<dt>Blockers</dt><dd>${blockers(c, rt) || "none"}</dd>` +
     `<dt>Last note</dt><dd>${rt.last_note ? t(rt.last_note) : "none"}</dd></dl>` +
-    previewFramesHtml(d.previews ?? []) +
+    previewFramesHtml(d.previews ?? [], c.base) +
     `<h2>Acceptance</h2>${list(spec.acceptance)}` +
     `<h2>Checks</h2>` +
     (checks.length

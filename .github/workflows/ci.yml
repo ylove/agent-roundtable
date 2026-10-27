@@ -38,6 +38,9 @@ jobs:
       - name: Hygiene
         run: "! grep -riE 'v[o]uch|/U[s]ers/' --exclude-dir=node_modules --exclude-dir=.git --exclude=.git --exclude-dir=dist ."
 
+      - name: No merge conflict markers
+        run: "! git grep -nE '^(<{7}|>{7}) ' -- ."
+
   sbom:
     runs-on: ubuntu-latest
     steps:

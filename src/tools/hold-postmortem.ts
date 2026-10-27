@@ -60,7 +60,7 @@ export const holdPostmortemTools: ToolDefinition[] = [
         rounds: { type: "integer", minimum: LIMITS.rounds.min, maximum: LIMITS.rounds.max, description: "hold: rounds (default 2)." },
         memory_target: { type: "string", enum: ["claude"], description: "hold: with \"claude\", accepted memory artifacts are also appended to <repo>/.claude/agent-memory/<agent>/MEMORY.md (refused through symlinks)." },
         pm: { type: "string", pattern: PM_PATTERN, description: "conclude: the postmortem (pm-…) hold returned." },
-        orchestrator: { type: "string", maxLength: 200, "x-nonblank": true, description: "conclude: human-supplied sign-off identity for persisted kinds; must match the frozen contract’s orchestrator for a run. Also required for dissent_score as for score_dissent." },
+        orchestrator: { type: "string", maxLength: 200, "x-nonblank": true, description: "conclude: human-supplied sign-off identity for persisted kinds; must match the frozen contract’s orchestrator for a run. Also required for dissent score as for score_dissent." },
         closing: { type: "string", maxLength: LIMITS.closing, description: "conclude: your closing statement, the last turn of the record." },
         accept: { type: "array", maxItems: LIMITS.artifacts, items: { type: "string", maxLength: 16 }, description: "conclude: ids of the artifacts to apply (a1, a2, …)." },
         reject: {

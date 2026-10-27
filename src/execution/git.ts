@@ -40,6 +40,7 @@ import { findExecutable } from "../executables.js";
 import { WORKTREES_DIR } from "../config.js";
 import { spawn } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { readRegularFile, RegularFileError } from "../security/fs-safe.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { executionTag, EXECUTION_ID_RE } from "../ids.js";
 import { canonicalWorkdir } from "../sandbox/common.js";
@@ -199,9 +200,14 @@ const real = (p: string): string => {
 /** Where a .git file points (resolved and canonical); throws when it is not a plain gitfile. */
 function readGitfile(workTree: string): string {
   const p = join(workTree, ".git");
-  const st = lstatSync(p);
-  if (!st.isFile() || st.size > 4096) throw new GitSafetyError(`${p} is not a gitfile`);
-  const m = /^gitdir: (.+?)\r?\n?$/.exec(readFileSync(p, "utf8"));
+  let text: string;
+  try {
+    text = readRegularFile(p, { noFollow: true, maxBytes: 4096 }).data.toString("utf8");
+  } catch (e) {
+    if (e instanceof RegularFileError) throw new GitSafetyError(`${p} is not a gitfile`);
+    throw e;
+  }
+  const m = /^gitdir: (.+?)\r?\n?$/.exec(text);
   if (!m) throw new GitSafetyError(`${p} is not a gitfile`);
   return real(resolve(workTree, m[1]));
 }

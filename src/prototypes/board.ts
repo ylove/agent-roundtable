@@ -10,7 +10,8 @@
 // other target, and every CONNECT or upgrade, is answered 403.
 import { pageCheckSummary } from "./page-check.js";
 import { spawn } from "node:child_process";
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { escapeHtml, SecureServer, type RouteContext } from "../http/secure-server.js";
 import { childEnv } from "../security/child-env.js";
@@ -327,9 +328,14 @@ export class PrototypeBoard {
     if (!rel || rel.startsWith("..") || isAbsolute(rel)) return fail(404, "Not found");
     let bytes: Buffer;
     try {
-      const st = await lstat(target);
-      if (!st.isFile()) return fail(404, "Not found");
-      bytes = await readFile(target);
+      // One descriptor: the type checked is the type of the bytes served.
+      const handle = await open(target, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+      try {
+        if (!(await handle.stat()).isFile()) return fail(404, "Not found");
+        bytes = await handle.readFile();
+      } finally {
+        await handle.close();
+      }
     } catch {
       return fail(410, "Destroyed after assessment");
     }

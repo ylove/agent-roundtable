@@ -28,7 +28,7 @@ import { livePreviews, previewOrigins, withFrameSrc } from "../previews/embed.js
 import type { PreviewRecord } from "../previews/store.js";
 import { collectUsage } from "../usage/model.js";
 import { requestAgentStop, StopRefusal, stopper } from "../usage/stop.js";
-import { writeFileAtomic } from "../security/fs-safe.js";
+import { readRegularFile, writeFileAtomic } from "../security/fs-safe.js";
 import { STATIC_ASSETS } from "./assets.js";
 import { renderDagSvg } from "./dag-svg.js";
 import { renderUsage, usageSpendSeries, type SpendSeries } from "./usage-page.js";
@@ -349,9 +349,7 @@ class DashboardServer {
     if (!/^[a-z0-9][a-z0-9._-]{0,80}$/.test(ctr) || ctr.includes("..")) return undefined;
     const path = join(this.store.dir, "contracts", ctr, "CONTRACT.md");
     try {
-      const st = lstatSync(path);
-      if (!st.isFile() || st.size > 1024 * 1024) return undefined;
-      return readFileSync(path, "utf8");
+      return readRegularFile(path, { noFollow: true, maxBytes: 1024 * 1024 }).data.toString("utf8");
     } catch {
       return undefined;
     }

@@ -415,7 +415,7 @@ test("conclude applies only the accepted artifacts, with a backup, audit entries
   assert.equal(loadLessons(held.project).length, lessonsBefore, "a refused conclude changes nothing");
 
   const done = await ok("hold_postmortem", {
-    action: "conclude", pm: held.pm, closing: "Agreed. We state numbers from now on.",
+    action: "conclude", orchestrator: "main", pm: held.pm, closing: "Agreed. We state numbers from now on.",
     accept: ["a1", "a2", "a4", "a6"], reject: [{ id: "a3", why: "the tester already does this" }],
   });
   assert.equal(done.status, "concluded");
@@ -482,7 +482,7 @@ test("a persona seated by path gets its addendum in that file, and a persona add
   const copies = () => readdirSync(AGENTS_DIR).filter((n) => n.startsWith("builder.md.bak-")).length;
   const copiesBefore = copies();
   writeFileSync(builder, "---\ndescription:\n   indented: [unclosed\n---\nBody");
-  const done = await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "ok", accept: ["a1", "a2"] });
+  const done = await ok("hold_postmortem", { action: "conclude", orchestrator: "main", pm: held.pm, closing: "ok", accept: ["a1", "a2"] });
   writeFileSync(builder, good);
   assert.match(readFileSync(scout, "utf8"), /## Postmortem addenda\n\n- Say what you skipped \(postmortem pm-/);
   assert.equal(done.warnings.length, 1);
@@ -503,7 +503,7 @@ test("a responsible agent that is seated by path (outside the agents directory) 
   const held = await ok("hold_postmortem", { project: repo.root, work, opening: "x", participants: [ranger, "tester"], rounds: 1, ...LLM });
   assert.equal(held.format, "waffle-house");
   assert.match(requests[0].system, /PERSONA-RANGER/, "the defender was loaded from its path");
-  await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "ok", accept: ["a1"] });
+  await ok("hold_postmortem", { action: "conclude", orchestrator: "main", pm: held.pm, closing: "ok", accept: ["a1"] });
   assert.match(readFileSync(ranger, "utf8"), /Check the trail twice/);
 });
 
@@ -520,12 +520,12 @@ test("a damaged lessons.json fails conclude before any file is written; a differ
   const audits = auditCount();
   mkdirSync(join(lessonsPath(held.project), ".."), { recursive: true });
   writeFileSync(lessonsPath(held.project), "{ not json");
-  assert.match(await fails("hold_postmortem", { action: "conclude", pm: held.pm, closing: "ok", accept: ["a1", "a2"] }), /damaged/);
+  assert.match(await fails("hold_postmortem", { action: "conclude", orchestrator: "main", pm: held.pm, closing: "ok", accept: ["a1", "a2"] }), /damaged/);
   assert.equal(readFileSync(join(AGENTS_DIR, "builder.md"), "utf8"), before, "no persona was written");
   assert.equal(auditCount(), audits);
   assert.equal(loadRecord(held.project, held.pm).status, "held");
   writeFileSync(lessonsPath(held.project), JSON.stringify({ v: 1, lessons: [] }));
-  const done = await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "ok", accept: ["a1", "a2"] });
+  const done = await ok("hold_postmortem", { action: "conclude", orchestrator: "main", pm: held.pm, closing: "ok", accept: ["a1", "a2"] });
   assert.equal(done.applied.length, 2);
   assert.equal(auditCount() - audits, 2, "each applied artifact is audited once");
 });
@@ -544,7 +544,7 @@ test("memory artifacts go to the project's memory, and with memory_target claude
   const { repo, ids, work } = await atTheTable(t);
   provider(t, { total: 3, block: `Artifact: memory | builder | ${ids[0]} | The nav bar lives in src/components/nav\nArtifact: memory | tester | ${ids[0]} | Resize the window` });
   const held = await ok("hold_postmortem", { project: repo.root, work, opening: "x", participants: ["tester"], rounds: 1, memory_target: "claude", ...LLM });
-  const done = await ok("hold_postmortem", { action: "conclude", pm: held.pm, closing: "ok", accept: ["a1", "a2"] });
+  const done = await ok("hold_postmortem", { action: "conclude", orchestrator: "main", pm: held.pm, closing: "ok", accept: ["a1", "a2"] });
   const mem = join(projectDir(held.project), "memory", "builder.md");
   assert.match(readFileSync(mem, "utf8"), /The nav bar lives in src\/components\/nav \(postmortem pm-/);
   assert.equal(statSync(mem).mode & 0o777, 0o600);
@@ -561,7 +561,7 @@ test("memory artifacts go to the project's memory, and with memory_target claude
   await ok("postmortem", { action: "fix", project: repo2.root, work: "linked", finding_id: r.recorded, fix: { status: "fixed" } });
   provider(t, { total: 3, block: `Artifact: memory | builder | ${r.recorded} | linked note` });
   const held2 = await ok("hold_postmortem", { project: repo2.root, work: "linked", opening: "x", participants: ["tester"], rounds: 1, memory_target: "claude", ...LLM });
-  const done2 = await ok("hold_postmortem", { action: "conclude", pm: held2.pm, closing: "ok", accept: ["a1"] });
+  const done2 = await ok("hold_postmortem", { action: "conclude", orchestrator: "main", pm: held2.pm, closing: "ok", accept: ["a1"] });
   assert.match(done2.warnings[0], /symbolic link/);
   assert.equal(readdirSync(outside).length, 0, "nothing was written through the link");
   assert.deepEqual(done2.accepted, ["a1"]);
@@ -754,7 +754,7 @@ test("secret-scanner persona refs survive persistence and route an accepted adde
   const before = loadRecord(held.project, held.pm);
   assert.equal(before.refs["secret-scanner"], reviewer);
   const result = await ok("hold_postmortem", {
-    action: "conclude", pm: held.pm, closing: "Keep the credential checks", accept: ["a1"],
+    action: "conclude", orchestrator: "main", pm: held.pm, closing: "Keep the credential checks", accept: ["a1"],
   });
   assert.deepEqual(result.warnings, []);
   assert.equal(result.applied[0].path, reviewer);

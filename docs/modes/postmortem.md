@@ -46,7 +46,7 @@ Artifact: <kind> | <target> | <finding ids> | <text>
 
 Lines are read from that turn's own lines only (not inside a blockquote or a code fence); lines that cannot be used are reported back as `rejected_lines`. At most 20 artifacts of 600 characters each; targets name a seat, `project`, a fix path/task, or a reviewed dissent, and finding ids must exist.
 
-| Kind | Target | Effect when accepted |
+| Kind | Target | Effect when accepted (persisted kinds also need sign-off) |
 | --- | --- | --- |
 | `dissent_score` | a dissent id in the reviewed run | Records an evidence-backed advisory outcome through the existing dissent scoring tool’s shared path. |
 | `fix` | a path or task id | Recorded as a follow-up; nothing changes by itself. |
@@ -56,7 +56,30 @@ Lines are read from that turn's own lines only (not inside a blockquote or a cod
 | `contract_rule` | `project` | A rule every future contract for this project must state. |
 | `memory` | an agent | Appended to `projects/<key>/memory/<agent>.md`; with `memory_target: "claude"` also to `<repo>/.claude/agent-memory/<agent>/MEMORY.md`, refused if `.claude` or a parent along the way is a symlink or leaves the repository. |
 
-The orchestrator then closes the meeting with `hold_postmortem(action: "conclude", pm, closing, accept[], reject[{id, why}])`. Its closing statement is the last turn of the record, and only accepted artifacts take effect; each is audited as `postmortem.applied` with its target and hash. The result carries a summary and the record path for the orchestrator to relay to you.
+The orchestrator then closes the meeting with `hold_postmortem(action: "conclude", pm, closing, accept[], reject[{id, why}])`. Its closing statement is the last turn of the record, persisted artifacts also need a person’s sign-off before they take effect. Each application is audited as `postmortem.applied` with its target and hash. The result carries a summary and the record path for the orchestrator to relay to you.
+
+## Signing off persisted lessons
+
+Persisted lessons need a person's sign-off. This covers `rule`, `agent_rule`, `contract_rule`, `persona_addendum` and `memory`. Supply `orchestrator` (the human-supplied identity, non-blank after scrubbing and at most 200 characters) and an explicit `accept` list when concluding. For an execution, the identity must equal the frozen contract's `scope.orchestrator`; at the table, any non-blank identity is accepted and recorded. `fix` and `dissent_score` keep their existing checks.
+
+Without that identity, the listed persisted artifacts stay **pending sign-off** in the concluded record. Their full text and hash remain visible under **Pending sign-off**, including on the dashboard. They write no lesson, persona addendum or memory file and never enter plan, contract, card or ultraplan prompts. Flags still record findings; their clearer wording comes only from signed-off artifacts.
+
+Review with `postmortem(action: "pending", project)` and `postmortem(action: "read", pm)`, then apply exactly the pending ids the person accepts:
+
+```json
+{ "action": "signoff", "pm": "pm-00000001", "orchestrator": "main", "accept": ["a1", "a3"] }
+```
+
+The CLI provides the same review:
+
+```sh
+roundtable postmortem pending --project /path/to/repo
+roundtable postmortem signoff pm-00000001 --by main a1 a3
+```
+
+Both commands support `--json`; pending defaults to the current project. Unlisted ids stay pending. Empty lists, unknown ids and ids that are not pending are refused before applying any item. Already signed-off ids are reported without reapplying them. The record and each new lesson carry `signoff: {by, at}`; audit details carry `signed_off_by`, `signed_off_at` and the artifact hash. Secret scrubbing and the 600-character artifact cap still apply.
+
+**Migration:** lessons accepted by older versions **keep flowing into prompts** to preserve the project's established lessons. They are marked **accepted before sign-off** (`accepted_before_signoff: true` in the lessons action), and older record entries have the same label. `doctor` and `up` show an informational review notice for projects with these lessons or pending items, suggesting `roundtable postmortem pending` and `postmortem(action: "lessons")`. The notice does not change exit status. Flags do not require sign-off.
 
 ## Reviewing dissents
 
@@ -84,7 +107,7 @@ The project must still have postmortem mode on. Rejected or omitted artifacts do
 
 ## Reading lessons back
 
-`lessons.json` holds every accepted rule, agent rule and contract rule and every flag, newest first; a lesson that restates an active one supersedes it (the old one stays with `superseded_by`). They are read whether or not the mode is on now:
+`lessons.json` holds every signed-off (or legacy) rule, agent rule and contract rule and every flag, newest first; a lesson that restates an active one supersedes it (the old one stays with `superseded_by`). They are read whether or not the mode is on now:
 
 - `propose_contract` adds a `postmortem_lessons` section to its result and each active contract rule as a `decisions` entry (`by: "postmortem:<pm>"`), and each flag as a warning ("Earlier work misread X; state it explicitly"). It never refuses a proposal for them.
 - `start_ultraplan` takes `repo_dir` and appends a bounded "Lessons from past postmortems" section to the agents' context, flags first.

@@ -5,7 +5,7 @@
 // when one agent is responsible for every finding) on a bounded context, with public: false and
 // origin postmortem:<pm>; the orchestrator's opening is turn 0. It returns the transcript and the
 // proposed artifacts. hold_postmortem(conclude) records the orchestrator's closing statement and
-// applies the accepted artifacts only. No provider call runs inside a lock or transact.
+// applies persisted artifacts only with a person’s sign-off. No provider call runs inside a lock or transact.
 // ============================================================================
 
 import { agentKey, isPathLikeRef, loadAgent } from "../agents.js";
@@ -29,7 +29,7 @@ import { requireEnabled, type ProjectRef } from "./project.js";
 import { renderRecord, summaryParagraph } from "./record.js";
 import { POSTMORTEM_ORIGIN_PREFIX, registerPostmortemSession } from "./sessions.js";
 import { findRecord, loadLessons, readProject, recordPath, removeDraft, saveRecord, withProjectLock } from "./store.js";
-import { FLAG_CATEGORIES, LIMITS, type AppliedArtifact, type Artifact, type FlagRecord, type PostmortemRecord, type PostmortemScope, type Turn } from "./types.js";
+import { PERSISTED_KINDS, FLAG_CATEGORIES, LIMITS, type AppliedArtifact, type Artifact, type FlagRecord, type PostmortemRecord, type PostmortemScope, type Signoff, type Turn } from "./types.js";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const clean = (s: string, max: number) => {
@@ -259,7 +259,7 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
     rejected_lines: rejected, warnings, record: recordPath(i.project.key, view.pm, "md"),
     next:
       `Read the transcript, then close the meeting with your own words: hold_postmortem { "action": "conclude", "pm": "${view.pm}", "closing": "…", "accept": [artifact ids], "reject": [{ "id", "why" }] }. ` +
-      "When accepting dissent_score, also pass orchestrator (the contract’s orchestrator identity). Only accepted artifacts take effect. Tell the human the meeting happened; they can read every turn with postmortem(action: \"read\").",
+      "Persisted kinds need a person’s sign-off: pass orchestrator (the human-supplied identity) and explicit accept ids, otherwise they stay pending. For dissent_score, pass the contract’s orchestrator identity. Only signed-off persisted artifacts take effect. Tell the human the meeting happened; they can read every turn with postmortem(action: \"read\").",
   };
 }
 
@@ -269,7 +269,7 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
 
 export interface ConcludeInput {
   pm: string;
-  /** Required when accepting dissent_score artifacts, as for score_dissent. */
+  /** Human-supplied identity for persisted artifacts; contract identity for dissent_score. */
   orchestrator?: string;
   closing: string;
   accept?: string[];
@@ -283,6 +283,7 @@ export interface ConcludeResult {
   record: string;
   summary: string;
   accepted: string[];
+  pending: string[];
   rejected: Array<{ id: string; why: string }>;
   not_accepted: string[];
   applied: AppliedArtifact[];
@@ -297,16 +298,90 @@ function resultOf(r: PostmortemRecord, warnings: string[], lessonsAdded: number,
   const accepted = r.accepted ?? [];
   return {
     status: "concluded", pm: r.pm, ...(already && { already_concluded: true as const }), record: recordPath(r.project, r.pm, "md"),
-    summary: r.summary ?? summaryParagraph(r), accepted, rejected: r.rejected ?? [],
+    summary: r.summary ?? summaryParagraph(r), accepted, pending: r.pending ?? [], rejected: r.rejected ?? [],
     not_accepted: r.proposed.map((a) => a.id).filter((id) => !accepted.includes(id) && !(r.rejected ?? []).some((x) => x.id === id)),
     applied: r.applied ?? [],
     follow_ups: r.proposed.filter((a) => a.kind === "fix" && accepted.includes(a.id)).map((a) => ({ id: a.id, target: a.target, text: a.text })),
     flagged: r.flagged ?? [], lessons_added: lessonsAdded, warnings,
-    tell_the_human: `${r.summary ?? summaryParagraph(r)} The record is at ${recordPath(r.project, r.pm, "md")}; show it verbatim if they want to read it.${r.applied?.some((a) => a.audit_pending) ? " A scoring audit is still pending; repeat conclude to finish it." : ""}`,
+    tell_the_human: `${r.summary ?? summaryParagraph(r)} The record is at ${recordPath(r.project, r.pm, "md")}; show it verbatim if they want to read it.${r.pending?.length ? " Persisted artifacts await a person’s sign-off; review with postmortem(action: \"pending\") and apply explicit ids with postmortem(action: \"signoff\", pm, orchestrator, accept)." : ""}${r.applied?.some((a) => a.audit_pending) ? " An application audit is still pending; repeat conclude to finish it." : ""}`,
   };
 }
 
 const LESSON_KIND: Partial<Record<PostmortemArtifactKind, NewLesson["kind"]>> = { rule: "rule", agent_rule: "agent_rule", contract_rule: "contract_rule" };
+
+async function validateSignoff(rec: PostmortemRecord, proj: ProjectRef, identity: string): Promise<string> {
+  if (typeof identity !== "string") throw new Error("orchestrator is required for sign-off");
+  const by = scrub(identity).trim();
+  if (!by || by.length > 200) throw new Error("orchestrator must be non-blank and at most 200 characters after scrubbing");
+  if (rec.scope.execution_id !== undefined) {
+    let expected = rec.contract_orchestrator;
+    if (expected === undefined) {
+      const state = await (await executionOf(proj, rec.scope)).state();
+      expected = state.contract?.scope.orchestrator;
+    }
+    if (expected !== undefined && by !== expected) throw new Error("orchestrator must equal the reviewed contract’s orchestrator identity");
+  }
+  return by;
+}
+
+/** Shared persisted-kind application; caller holds the project lock and has validated identity. */
+async function applySignedArtifact(rec: PostmortemRecord, proj: ProjectRef, a: Artifact, signoff: Signoff, warnings: string[]): Promise<AppliedArtifact> {
+  let done: AppliedArtifact;
+  if (a.kind === "persona_addendum") done = await applyPersonaAddendum(a, rec.pm, new Date(signoff.at), rec.refs?.[a.target]);
+  else if (a.kind === "memory") done = applyMemory(a, rec.pm, proj, rec.memory_target === "claude");
+  else {
+    addLessons(rec.project, [{ kind: LESSON_KIND[a.kind]!, target: a.kind === "agent_rule" ? a.target : "project", text: a.text, pm: rec.pm, findings: a.findings, signoff }], signoff.at);
+    done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: "lessons.json", note: "added to the project's lessons" };
+  }
+  done.signoff = signoff;
+  try { await auditApplied(rec, done); }
+  catch (e) {
+    done.audit_pending = true;
+    warnings.push(`${a.id} was applied but its audit is pending: ${errText(e)}. Repeat conclude to retry the audit.`);
+  }
+  return done;
+}
+
+export interface SignoffInput { pm: string; orchestrator: string; accept: string[] }
+
+/** Sign off exactly the pending ids a person selected; already signed-off ids are reported without reapplying. */
+export async function signOffPostmortem(i: SignoffInput): Promise<ConcludeResult & { already_signed_off: string[] }> {
+  const found = findRecord(i.pm);
+  if (!found || found.status !== "concluded") throw new Error(`No concluded postmortem ${i.pm}`);
+  if (!Array.isArray(i.accept) || !i.accept.length) throw new Error("accept must list at least one pending artifact id");
+  const accept = [...new Set(i.accept)];
+  const warnings: string[] = [];
+  const already: string[] = [];
+  let record = found;
+  let added = 0;
+  await withProjectLock(found.project, async () => {
+    const rec = findRecord(i.pm)!;
+    const project = readProject(rec.project);
+    if (!project) throw new Error(`project ${rec.project} is gone from the postmortem store`);
+    const proj = { key: rec.project, root: project.repo_root };
+    const by = await validateSignoff(rec, proj, i.orchestrator);
+    const invalid = accept.filter((id) => !rec.pending?.includes(id) && !rec.applied?.some((a) => a.id === id && a.signoff));
+    if (invalid.length) throw new Error(`unknown or not-pending artifact ids: ${invalid.join(", ")}`);
+    loadLessons(rec.project);
+    const signoff = { by, at: new Date().toISOString() };
+    for (const id of accept) {
+      if (rec.applied?.some((a) => a.id === id && a.signoff)) { already.push(id); continue; }
+      const a = rec.proposed.find((a) => a.id === id)!;
+      try {
+        const done = await applySignedArtifact(rec, proj, a, signoff, warnings);
+        rec.applied = [...(rec.applied ?? []).filter((x) => x.id !== id), done];
+        rec.pending = rec.pending!.filter((x) => x !== id);
+        if (LESSON_KIND[a.kind]) added++;
+        // Persist each completed effect so retries do not reapply earlier ids.
+        saveRecord(rec, renderRecord(rec));
+      } catch (e) { warnings.push(`${id} (${a.kind} → ${a.target}) was not applied: ${errText(e)}`); }
+    }
+    rec.summary = summaryParagraph(rec);
+    saveRecord(rec, renderRecord(rec));
+    record = rec;
+  });
+  return { ...await finishConclusion(record, warnings, added, true), already_signed_off: already };
+}
 
 export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResult> {
   const found = findRecord(i.pm);
@@ -327,9 +402,11 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
   const assessments = found.proposed.filter((a) => a.kind === "dissent_score" && accept.includes(a.id));
   if (assessments.length) requireEnabled(proj);
   const protectedTexts: string[] = [];
+  let contractOrchestrator: string | undefined;
   const store = found.scope.execution_id !== undefined ? await executionOf(proj, found.scope).catch(() => undefined) : undefined;
   if (store) {
     const s = await store.state();
+    contractOrchestrator = s.contract?.scope.orchestrator;
     if (s.goal?.original_prompt) protectedTexts.push(s.goal.original_prompt);
     for (const e of await store.events({ types: ["execution.started"], limit: 1 })) if (e.type === "execution.started") protectedTexts.push(e.payload.confirmation);
   }
@@ -352,6 +429,9 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
       record = rec ?? found;
       return;
     }
+    const signedKinds = rec.proposed.some((a) => accept.includes(a.id) && PERSISTED_KINDS.includes(a.kind));
+    const by = signedKinds && i.orchestrator !== undefined ? await validateSignoff(rec, proj, i.orchestrator) : undefined;
+    const pending: string[] = [];
     // A damaged lessons.json fails here, before any persona or memory file is written.
     loadLessons(rec.project);
     const applied: AppliedArtifact[] = [];
@@ -359,6 +439,21 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
     const now = new Date();
     const audit = (done: AppliedArtifact) => auditApplied(rec, done);
     for (const a of rec.proposed.filter((x) => accept.includes(x.id))) {
+      if (PERSISTED_KINDS.includes(a.kind)) {
+        if (by === undefined) {
+          pending.push(a.id);
+          applied.push({ id: a.id, kind: a.kind, target: a.target, hash: a.hash, note: "pending sign-off" });
+        } else {
+          try {
+            applied.push(await applySignedArtifact(rec, proj, a, { by, at: now.toISOString() }, warnings));
+            if (LESSON_KIND[a.kind]) lessonsAdded++;
+          } catch (e) {
+            warnings.push(`${a.id} (${a.kind} → ${a.target}) was accepted but not applied: ${errText(e)}`);
+            applied.push({ id: a.id, kind: a.kind, target: a.target, hash: a.hash, note: `failed: ${errText(e)}` });
+          }
+        }
+        continue;
+      }
       try {
         let done: AppliedArtifact;
         if (a.kind === "dissent_score") {
@@ -371,41 +466,36 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
             reviewed: rec.dissents?.[a.target] ?? {},
           });
           done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: store.dir, note: `advisory assessment: ${a.outcome}` };
-        } else if (a.kind === "persona_addendum") done = await applyPersonaAddendum(a, rec.pm, now, rec.refs?.[a.target]);
-        else if (a.kind === "memory") done = applyMemory(a, rec.pm, { key: rec.project, root: proj.root }, rec.memory_target === "claude");
-        else if (a.kind === "fix") done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, note: "recorded as a follow-up; nothing was changed" };
-        else {
-          lessons.push({ kind: LESSON_KIND[a.kind]!, target: a.kind === "agent_rule" ? a.target : "project", text: a.text, pm: rec.pm, findings: a.findings });
-          done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, path: "lessons.json", note: "added to the project's lessons" };
-        }
-        // File and scoring writes are audited immediately; lesson writes are audited after persistence.
+        } else done = { id: a.id, kind: a.kind, target: a.target, hash: a.hash, note: "recorded as a follow-up; nothing was changed" };
+        // Scoring writes are audited immediately; follow-ups are audited after collection.
         if (a.kind === "dissent_score") {
           try { await audit(done); }
           catch (e) {
             done.audit_pending = true;
             warnings.push(`${a.id} was applied but its audit is pending: ${errText(e)}. Repeat conclude to retry the audit.`);
           }
-        } else if (a.kind === "persona_addendum" || a.kind === "memory") await audit(done);
+        }
         applied.push(done);
       } catch (e) {
         warnings.push(`${a.id} (${a.kind} → ${a.target}) was accepted but not applied: ${errText(e)}`);
         applied.push({ id: a.id, kind: a.kind, target: a.target, hash: a.hash, note: `failed: ${errText(e)}` });
       }
     }
-    const ok = new Set(applied.filter((a) => !a.note?.startsWith("failed")).map((a) => a.id));
+    const ok = new Set(applied.filter((a) => !a.note?.startsWith("failed") && !pending.includes(a.id)).map((a) => a.id));
     // Flags: a finding that misread the prompt, the project or the contract is recorded as such, with the clearer wording accepted for it.
     const flagged: FlagRecord[] = rec.findings.filter((f) => FLAG_CATEGORIES.includes(f.category)).map((f) => {
-      const clearer = rec.proposed.filter((a) => ok.has(a.id) && a.findings.includes(f.id) && a.kind !== "memory" && a.kind !== "dissent_score").map((a) => a.text).join(" ");
+      const clearer = rec.proposed.filter((a) => ok.has(a.id) && applied.some((done) => done.id === a.id && done.signoff) && a.findings.includes(f.id) && a.kind !== "memory" && a.kind !== "dissent_score").map((a) => a.text).join(" ");
       return { finding: f.id, category: f.category, misread: f.summary, ...(clearer && { clearer: clearer.slice(0, 600) }) };
     });
     for (const f of flagged) {
       lessons.push({ kind: "flag", target: "project", flag: true, text: `${f.misread}${f.clearer ? ` Clearer: ${f.clearer}` : ""}`.slice(0, 1200), pm: rec.pm, findings: [f.finding] });
     }
-    lessonsAdded = lessons.length ? addLessons(rec.project, lessons, now.toISOString()).length : 0;
-    for (const a of rec.proposed.filter((x) => ok.has(x.id) && x.kind !== "persona_addendum" && x.kind !== "memory" && x.kind !== "dissent_score")) await audit(applied.find((x) => x.id === a.id)!);
+    lessonsAdded += lessons.length ? addLessons(rec.project, lessons, now.toISOString()).length : 0;
+    for (const a of rec.proposed.filter((x) => ok.has(x.id) && x.kind === "fix")) await audit(applied.find((x) => x.id === a.id)!);
     const concluded: PostmortemRecord = {
       ...rec, status: "concluded", concluded_at: now.toISOString(), closing,
-      accepted: accept, rejected: reject, applied, flagged,
+      accepted: accept, pending, rejected: reject, applied, flagged,
+      ...(contractOrchestrator !== undefined && { contract_orchestrator: contractOrchestrator }),
     };
     concluded.summary = summaryParagraph({ ...concluded, applied: applied.filter((a) => ok.has(a.id)), accepted: accept.filter((id) => ok.has(id)) });
     saveRecord(concluded, renderRecord(concluded));
@@ -433,18 +523,18 @@ async function finishConclusion(record: PostmortemRecord, warnings: string[], le
         }
       }
     }
-    // Do not publish a completed record until every successful scoring write is audited.
+    // Publish only after every successful application is audited.
     if (current.applied?.some((a) => a.audit_pending)) return;
     if (current.scope.execution_id === undefined) return;
     try {
       const project = readProject(current.project);
       if (!project) throw new Error(`project ${current.project} is gone from the postmortem store`);
       const store = await executionOf({ key: current.project, root: project.repo_root }, current.scope);
-      const ok = (current.applied ?? []).filter((a) => !a.note?.startsWith("failed"));
+      const ok = (current.applied ?? []).filter((a) => !a.note?.startsWith("failed") && !current.pending?.includes(a.id));
       await store.transact(async ({ state }) => {
-        const published = (await store.events({ types: ["postmortem.concluded"] })).some((e) => e.type === "postmortem.concluded" && e.payload.id === current.pm);
-        if (published) return { events: [] };
+        const published = (await store.events({ types: ["postmortem.concluded"] })).filter((e) => e.type === "postmortem.concluded" && e.payload.id === current.pm).at(-1);
         const blob = await store.putBlob(renderRecord(current));
+        if (published?.type === "postmortem.concluded" && published.payload.record === blob) return { events: [] };
         return { events: [{
           type: "postmortem.concluded", source: orchestratorSource(state.contract?.scope.orchestrator ?? "orchestrator"),
           payload: { id: current.pm, artifacts: artifactCounts(ok), flagged: current.flagged?.length ?? 0, record: blob },
@@ -458,5 +548,5 @@ async function finishConclusion(record: PostmortemRecord, warnings: string[], le
 }
 
 function auditApplied(rec: PostmortemRecord, done: AppliedArtifact): Promise<unknown> {
-  return appendAudit({ actor: "orchestrator", action: "postmortem.applied", target: rec.pm, details: { artifact: done.id, kind: done.kind, target: done.target, path: done.path, hash: done.hash, project: rec.project } });
+  return appendAudit({ actor: "orchestrator", action: "postmortem.applied", target: rec.pm, details: { artifact: done.id, kind: done.kind, target: done.target, path: done.path, hash: done.hash, project: rec.project, ...(done.signoff && { signed_off_by: done.signoff.by, signed_off_at: done.signoff.at }) } });
 }

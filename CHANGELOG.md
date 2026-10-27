@@ -4,6 +4,8 @@
 
 - **Live duel GIF (#229).** A recorded promotional GIF of the room at the top of the README, made by the reproducible `scripts/record-duel.mjs` from a redesigned demo fixture (a coin game against a pocket planner, with per-turn usage). The room now shows each app as a scaled desktop preview, and its footer spend never reads below the pane metrics. See [recording the duel GIF](docs/demo.md#recording-the-duel-gif).
 - **Connector metadata controls (#245).** Bound and scrub seat connector metadata, mark descriptions as untrusted text, pin raw tool lists per configuration, and add `roundtable connectors trust <name>` for renewed acceptance.
+- Persisted lessons need a person’s sign-off, with pending review in the postmortem tool, CLI and dashboard record, signer/time audit and lineage, and informational review notices for legacy lessons (#243).
+
 - **Live duel room (#228).** Side-by-side staged apps, Harness transcripts, live version swaps, metrics, stop/resume and human judging controls, plus split and stack terminal layouts. See [the duel room](docs/modes/duel-room.md).
 - Add Google Antigravity (`agy`) as an explicit seat runtime and opt-in heads-down worker, with JSON status checks, reported token usage and driver-side submission (#230, WS33).
 - **Live duel engine (#227).** Independent staged builds, live process metrics, private stop/resume checkpoints, optional human judging, and a saved chosen artifact (`--out` to export). Adds `--stages`, `--resume`, `--human-judge`, and `--layout`, MCP stages/metrics/artifact metadata, and a staged promotional demo with backward-compatible replay. See [duel](docs/modes/duel.md).

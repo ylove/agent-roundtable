@@ -82,7 +82,7 @@ The draft file is the source of truth for at-the-table scopes; for an execution 
 
 **The main orchestrator's seat.** The orchestrator is the host chat agent; the server cannot run it as a persona. It takes part through its own words:
 - `opening` (required): the orchestrator's account of what happened, including its own part. It is turn 0 of the meeting.
-- After the meeting's rounds, the tool returns the transcript and the proposed artifacts; the orchestrator closes with `hold_postmortem(action: "conclude", pm, closing, accept[], reject[{id, why}])`. Its closing statement is the final turn of the record, and only accepted artifacts take effect.
+- After the meeting's rounds, the tool returns the transcript and the proposed artifacts; the orchestrator closes with `hold_postmortem(action: "conclude", pm, closing, accept[], reject[{id, why}])`. Its closing statement is the final turn of the record, and persisted kinds also require a person’s sign-off before they take effect.
 
 **Format.**
 - **waffle-house** when exactly one agent is responsible for every finding (and that agent is not the orchestrator): the responsible agent is the defender; the other seats are the challengers; the orchestrator's opening is the charge. The defender must answer each finding with what it misunderstood or skipped and what rule would have stopped it.
@@ -103,7 +103,7 @@ The meeting ends with an artifact block. Each line is parsed from the own lines 
 Artifact: <kind> | <target> | <finding ids> | <text>
 ```
 
-| Kind | Target | Effect when accepted |
+| Kind | Target | Effect when accepted (persisted kinds also need sign-off) |
 |---|---|---|
 | `dissent_score` | a dissent id in the reviewed run | An accepted evidence-backed assessment emits `dissent.scored` through the same scorer as `score_dissent`. |
 | `fix` | a path or task id | Recorded as a follow-up; nothing is changed automatically. |
@@ -113,7 +113,7 @@ Artifact: <kind> | <target> | <finding ids> | <text>
 | `contract_rule` | `project` | Added to the lessons as a rule every future contract for this project must state; `propose_contract` turns it into a contract `decisions` entry (§7). |
 | `memory` | an agent name | Appended to `projects/<key>/memory/<agent>.md`. With `memory_target: "claude"` the same text is also appended to `<repo>/.claude/agent-memory/<agent>/MEMORY.md`, refused if `.claude` or any parent along the way is a symlink or resolves outside the repository. |
 
-Limits: at most 20 artifacts per postmortem, 600 characters each, targets must name a seat, `project`, a fix path/task, or a reviewed dissent for `dissent_score`, and finding ids must exist. Malformed lines are reported back to the orchestrator as `rejected_lines`, never silently dropped. Persona addenda and memory writes happen only on conclude, only for accepted artifacts, and are audited (`postmortem.applied`, with the target path and the artifact hash).
+Limits: at most 20 artifacts per postmortem, 600 characters each, targets must name a seat, `project`, a fix path/task, or a reviewed dissent for `dissent_score`, and finding ids must exist. Malformed lines are reported back to the orchestrator as `rejected_lines`, never silently dropped. Persona addenda and memory writes happen only for explicitly accepted artifacts with a person’s sign-off, on conclude or a later signoff action, and are audited (`postmortem.applied`, with the signer, time, target path and artifact hash).
 
 **Dissent assessments.** Findings may support a proposed assessment in this form:
 
@@ -125,11 +125,11 @@ The final field is required evidence, at most 600 characters, scrubbed like othe
 
 `vindicated` requires evidence supporting the prediction, `refuted` requires contrary evidence, and `untested` means the run established neither. Firing does not establish vindication, and not firing does not establish refutation. Without an accepted assessment there is no new scoring event. Scores remain advisory and display-only: they never weight votes, alter consent thresholds, or change routing. These artifacts stay in the record and never become planning lessons or clearer-wording flags.
 
-**Flags.** A finding with category `prompt_misread`, `project_misread` or `contract_ambiguity` is **flagged**: the postmortem records which contract field, task text or prompt phrase was misread and the clearer wording the meeting proposed. Flags are lessons with `flag: true` (§7).
+**Flags.** A finding with category `prompt_misread`, `project_misread` or `contract_ambiguity` is **flagged**: the postmortem records which contract field, task text or prompt phrase was misread and clearer wording from signed-off artifacts. Flags are lessons with `flag: true` (§7).
 
 ## 7. Reuse before the next plan
 
-`lessons.json` holds every accepted `rule`, `agent_rule`, `contract_rule` and flag, newest first, each with its postmortem id, finding ids and date. Superseded lessons stay with `superseded_by`.
+`lessons.json` holds every signed-off (or legacy) `rule`, `agent_rule`, `contract_rule` and flag, newest first, each with its postmortem id, finding ids and date. Superseded lessons stay with `superseded_by`.
 
 Before a new work plan for a project:
 - `propose_contract` (when `repo_dir` resolves to a project with lessons) adds a `postmortem_lessons` section to its result and the draft contract: every active `contract_rule` becomes a `decisions` entry (`by: "postmortem:<pm>"`), and every flag becomes a warning "Earlier work misread X; state it explicitly" listed in the result's `warnings`. It does not refuse the proposal.
@@ -154,8 +154,8 @@ Two new orchestrator tools (worker servers unchanged), with `additionalPropertie
 
 | Tool | Arguments |
 |---|---|
-| `postmortem` | action\* (enable, disable, record, fix, draft, lessons, list, read), project, execution_id, work, reason, finding{summary\*, detected_by\*, responsible[]\*, category\*, task, evidence[]}, finding_id, fix{by, status, ref}, pm |
-| `hold_postmortem` | action (hold, the default, or conclude); hold: project\*, execution_id or work, opening\*, participants[], format, rounds, provider, model, base_url, memory_target; conclude: pm\*, closing\*, accept[], reject[{id, why}], orchestrator (required for accepted dissent scores) |
+| `postmortem` | action\* (enable, disable, record, fix, draft, lessons, list, read, pending, signoff), project, execution_id, work, reason, finding{summary\*, detected_by\*, responsible[]\*, category\*, task, evidence[]}, finding_id, fix{by, status, ref}, pm; signoff: pm*, orchestrator*, accept[]* |
+| `hold_postmortem` | action (hold, the default, or conclude); hold: project\*, execution_id or work, opening\*, participants[], format, rounds, provider, model, base_url, memory_target; conclude: pm\*, closing\*, accept[], reject[{id, why}], orchestrator (human-supplied sign-off for persisted kinds; required for accepted dissent scores) |
 
 `hold_postmortem(action: "conclude")` is the closing step of §5; it is one tool with an `action` so the count stays small. README tool table, `docs/tools.md`, and a new `docs/modes/postmortem.md` guide are updated; the README entry stays one table row.
 
@@ -178,9 +178,9 @@ Unit tests for: project keying and refusal of non-repos; draft record/fix/rebuil
 - **Automatic findings.** A finding's id is derived from the task, the check ids and their signatures, so a repeat has the same id and carries `repeats`. Each finding's envelope names the event that caused it (`causation`), which keeps the runner's pass idempotent across restarts. A failure at integration scope has no `task` (the merged task is already accepted); its fix is settled when the same integration check passes again. A rejection that only asks a worker to resolve a merge conflict is not a finding.
 - **Meeting.** At least two agents besides the orchestrator are needed for the engine; the host passes `participants` otherwise. `postmortem.started` is written after the meeting has run, so a meeting that fails leaves the draft unchanged and can be held again. Before saving, the project lock guards a final check: an overlapping hold loses with a clear error if that postmortem already has a held or concluded record; it cannot overwrite closing statements or application history. In a run the meeting's provider usage is recorded per speaking persona on the budget ledger (source `postmortem`) but not enforced, since the human opted in and the run is usually over. The directive of §5 is part of the context every turn carries.
 - **Human's words.** Task cards in the context are built without the original request; the orchestrator's opening and closing have any verbatim stretch of the contract's `original_prompt` or the run's `confirmation` replaced by a marker before they are used.
-- **Artifacts.** Only the last turn is read. Flags (§6) are recorded automatically when the meeting concludes, one per flagged finding, with the clearer wording taken from the accepted artifacts that name it. An accepted artifact that fails to apply (a missing persona, a symlinked memory path) is reported with its reason and does not stop the others.
+- **Artifacts.** Only the last turn is read. Flags (§6) are recorded automatically when the meeting concludes, one per flagged finding, with the clearer wording taken from signed-off artifacts that name it. An accepted artifact that fails to apply (a missing persona, a symlinked memory path) is reported with its reason and does not stop the others.
 - **Lessons.** A lesson restates an active one when kind, target and wording (ignoring case and whitespace) match; the older one gets `superseded_by`. `start_ultraplan` gains the optional `repo_dir`. `execution_status` reports the draft (`postmortem`) once a run has findings or meetings.
-- **Telling the human.** The dashboard page, the watcher wake and the GitHub comment need the run's runner (and, for GitHub, its sync) to be alive, so they appear when a meeting concludes before the run ends. The record is always available through `postmortem(action: "read")`. `postmortem.concluded.record` is the blob ref of the record's markdown, which the dashboard renders. A repeat conclude retries failed blob/event publication for the saved record without changing its closing or reapplying artifacts; `postmortem.concluded` is deduplicated by postmortem id under the execution transaction.
+- **Telling the human.** The dashboard page, the watcher wake and the GitHub comment need the run's runner (and, for GitHub, its sync) to be alive, so they appear when a meeting concludes before the run ends. The record is always available through `postmortem(action: "read")`. `postmortem.concluded.record` is the blob ref of the record's markdown, which the dashboard renders. A repeat conclude retries failed blob/event publication for the saved record without changing its closing or reapplying artifacts; `postmortem.concluded` is deduplicated by postmortem id and record blob under the execution transaction; sign-off publishes an updated blob for the existing meeting.
 - **Opt-in is the project's alone.** `propose_contract` and `amend_contract` set `postmortem.enabled` from the project's state: an explicit `true` while the project is off is dropped with a warning pointing to `postmortem(action: "enable")`; an explicit `false` is kept off. `hold_postmortem` is refused while the project's mode is off.
 - **Recurrences.** A failure that repeats an open finding (no meeting yet, fix pending) raises its `repeats` and adds any new responsible agent. A failure whose finding is already fixed, abandoned or covered by a meeting starts a new finding (its id carries an epoch), so a red integration check reopens the question and keeps the draft from its meeting.
 - **Seats by path.** A participant ref (such as a path outside the agents directory) replaces the bare key a finding gave the same agent, so the persona loads from where it lives.
@@ -188,3 +188,11 @@ Unit tests for: project keying and refusal of non-repos; draft record/fix/rebuil
 - **Retention.** Drafts that were never held are removed with the session retention sweep at server start (`src/postmortem/retention.ts`).
 
 - **Dissent integration (#133).** The scoring event payload and reducer semantics are unchanged; WS14 used `REDUCER_VERSION` 9; the combined reducer is version 10. `postmortem.concluded.artifacts` now accepts a `dissent_score` count. Its reducer, watcher, dashboard and sync consumers iterate artifact counts without an exhaustive kind list. The watchdog never reads scores; worker attestation reads worker startup tools and is unaffected by scoring. The session archive preserves scrubbed dialogue (including proposed artifact lines) and does not interpret execution scores. The readable postmortem record/blob preserves the dissent snapshot and each proposal’s outcome, evidence and application status.
+
+### Persisted lesson sign-off (#243)
+
+Persisted kinds are `rule`, `agent_rule`, `contract_rule`, `persona_addendum` and `memory`. Conclude requires a human-supplied `orchestrator` identity plus explicit `accept` ids to apply them. The scrubbed identity must be non-blank and at most 200 characters, and must match the frozen contract's orchestrator for an execution. Otherwise the accepted persisted kinds remain in `record.pending`, with visible text and hashes under **Pending sign-off**, and write no prompt lesson, persona or memory file. Flags remain finding records; clearer wording comes only from signed-off artifacts. `fix` and `dissent_score` keep their existing behavior.
+
+`postmortem(action: "pending", project)` lists pending artifacts across concluded records. `postmortem(action: "signoff", pm, orchestrator, accept[])` validates the full nonempty list under the project lock, applies exactly those pending ids through the same helper as conclude, and re-renders the record. Unknown or not-pending ids are refused; already signed-off ids are reported without reapplying. Sign-off lineage is `{by, at}` on applied entries and new lessons, and `signed_off_by` / `signed_off_at` in each hash audit. An updated record blob is published through `postmortem.concluded` only when the markdown changes, so the dashboard shows current pending items and signers.
+
+Legacy lessons keep flowing into prompts, marked **accepted before sign-off** (`accepted_before_signoff: true` in lesson views). Flags need no sign-off. `doctor` and `up` show informational review notices; see [the user guide](../modes/postmortem.md#signing-off-persisted-lessons) for tool and CLI review commands.

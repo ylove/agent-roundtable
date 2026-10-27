@@ -12,6 +12,7 @@
 //   usage [--json] [--watch]                                            who is using what, on which platform
 //   stop <agent> [--execution <exe> | --session <id>] [--reason <text>] stop one agent (heads-down or at the table)
 //   preview start|list|stop                                             Docker dev-server previews on 127.0.0.1
+//   connectors trust <name>                                             accept a connector's tools on its next start
 //   up / doctor                                                         set up, check and start the local service
 //   --version | -v | version                                            print the version
 //   help                                                                this text
@@ -60,6 +61,7 @@ export const USAGE = [
   "  roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>",
   "  roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value]",
   "  roundtable config unset connector <name> | secrets check",
+  "  roundtable connectors trust <name>",
   "  agent-roundtable help                           this text",
 ].join("\n");
 
@@ -332,6 +334,7 @@ export async function runCli(argv: string[]): Promise<void> {
     case "waffle":
     case "meeting":
     case "secrets":
+    case "connectors":
     case "config": {
       const { runTableCli } = await import("./cli-table.js");
       process.exitCode = await runTableCli(command, rest);

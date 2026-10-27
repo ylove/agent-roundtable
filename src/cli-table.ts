@@ -6,6 +6,7 @@ import { resolveSecret } from "./secrets/broker.js";
 import { secretReason } from "./secrets/backends.js";
 import { parseSecretRef } from "./secrets/ref.js";
 import { ENV_NAME } from "./connectors/config.js";
+import { trustConnector } from "./connectors/pin.js";
 import { assertSeatConnectors, parseSeatConnectorsFlag, type SeatConnectorMap } from "./table/seat-connectors.js";
 import { createDuelControls } from "./table/controls.js";
 import { readCheckpoint } from "./table/checkpoint.js";
@@ -44,6 +45,7 @@ roundtable config show | config set env-file|agents-dir <absolute-path>
 roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>
 roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=secret://ref] [--tool name]
 roundtable config unset connector <name> | secrets check
+roundtable connectors trust <name>
 `;
 class UsageError extends Error { readonly exitCode = 2; }
 /** A turn or session deadline passed: reported as a timeout, never as a person stopping the session. */
@@ -228,6 +230,12 @@ export async function runTableCli(command: string, args: string[], io: CliIO = {
   try {
     if (args.includes("--help") || args.includes("-h")) { output.write(HELP); return 0; }
     if (command === "config") return configCommand(args, output);
+    if (command === "connectors") {
+      if (args.length !== 2 || args[0] !== "trust") throw new UsageError("Use connectors trust <name>.");
+      trustConnector(args[1]);
+      output.write(scrubAndCap(`Connector ${args[1]}: acceptance reset; the next start records its tools.\n`, 200));
+      return 0;
+    }
     if (command === "secrets") {
       if (args.length !== 1 || args[0] !== "check") throw new UsageError("Use secrets check.");
       const config = readUserConfig();

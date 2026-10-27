@@ -54,7 +54,7 @@ test("bundled undici update notices follow GHSA-xjj6-f33q-929c version boundarie
 test("doctor's bundled HTTP update notice is informational and scrubbed", async () => {
   const result = await runDoctor({
     nodeVersion: "24.15.0", engines: ">=22", bundledUndiciVersion: "7.24.4\x1b[31m",
-    providers: () => ["ollama"], keyNames: {}, findExecutable: () => "/bin/fixture",
+    providers: () => ["ollama"], keyNames: {}, findExecutable: () => "/bin/fixture", roundtableBin: () => ({ path: "/bin/roundtable", ours: true }),
     runtimes: [], docker: async () => ({ ok: true }), chrome: () => "/bin/fixture",
   });
   const check = result.checks.find(c => c.id === "bundled-undici");

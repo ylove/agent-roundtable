@@ -652,7 +652,7 @@ function inline(s: string): string {
     .map((part, i) => {
       if (i % 2 === 1) return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
       return escapeHtml(part)
-        .replace(/!?\[([^\]]+)\]\(([^)\s]+)\)/g, "$1 ($2)")
+        .replace(/!?\[([^\[\]]+)\]\(([^)\s\[\]]+)\)/g, "$1 ($2)")
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
         .replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=$|[\s).,;:!?])/g, "$1<em>$2</em>")
         .replace(/(^|[\s(])_([^_\s][^_]*?)_(?=$|[\s).,;:!?])/g, "$1<em>$2</em>");
@@ -662,10 +662,38 @@ function inline(s: string): string {
 
 function tableHtml(rows: string[]): string {
   const cells = (row: string) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((x) => x.trim());
-  const sep = rows.length > 1 && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(rows[1]);
+  const sep = rows.length > 1 && cells(rows[1]).every(cell => /^:?-{3,}:?$/.test(cell));
   const head = sep ? `<thead><tr>${cells(rows[0]).map((x) => `<th>${inline(x)}</th>`).join("")}</tr></thead>` : "";
   const body = (sep ? rows.slice(2) : rows).map((r) => `<tr>${cells(r).map((x) => `<td>${inline(x)}</td>`).join("")}</tr>`).join("");
   return `<table>${head}<tbody>${body}</tbody></table>`;
+}
+
+export const MARKDOWN_LINE_LIMIT = 4000;
+const LINE_TRUNCATED = " … [truncated]";
+
+/** Bound each source line before running Markdown rules, including fenced code. */
+export function capMarkdownLine(line: string): string {
+  return line.length <= MARKDOWN_LINE_LIMIT ? line : line.slice(0, MARKDOWN_LINE_LIMIT - LINE_TRUNCATED.length) + LINE_TRUNCATED;
+}
+
+/** Heading suffixes are trimmed with a single backwards pass. */
+function headingText(text: string): string {
+  let end = text.length;
+  while (end && /\s/.test(text[end - 1])) end--;
+  while (end && text[end - 1] === "#") end--;
+  while (end && /\s/.test(text[end - 1])) end--;
+  return text.slice(0, end);
+}
+
+function isRule(line: string): boolean {
+  const text = line.trim();
+  if (!/^[-*_]/.test(text)) return false;
+  let count = 0;
+  for (const ch of text) {
+    if (ch === text[0]) count++;
+    else if (!/\s/.test(ch)) return false;
+  }
+  return count >= 3;
 }
 
 /**
@@ -673,7 +701,7 @@ function tableHtml(rows: string[]): string {
  * tables, rules, and inline code, bold and italics. Raw HTML is escaped like any other text.
  */
 export function markdownToHtml(md: string): string {
-  const lines = md.replace(/\r\n?/g, "\n").split("\n");
+  const lines = md.replace(/\r\n?/g, "\n").split("\n").map(capMarkdownLine);
   const out: string[] = [];
   let para: string[] = [];
   let items: string[] = [];
@@ -705,15 +733,15 @@ export function markdownToHtml(md: string): string {
       flush();
       continue;
     }
-    const h = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    const h = /^\s{0,3}(#{1,6})\s+/.exec(line);
     if (h) {
       flush();
       // One level down: the page's own <h1> is the page title.
       const n = Math.min(6, h[1].length + 1);
-      out.push(`<h${n}>${inline(h[2])}</h${n}>`);
+      out.push(`<h${n}>${inline(headingText(line.slice(h[0].length)))}</h${n}>`);
       continue;
     }
-    if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+    if (/^\s{0,3}[-*_]/.test(line) && isRule(line)) {
       flush();
       out.push("<hr>");
       continue;

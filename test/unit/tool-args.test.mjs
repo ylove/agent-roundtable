@@ -41,7 +41,7 @@ const fields = {
     resolution: ["action"], format: ["format"], array: ["participants"], object: ["amendment"],
   },
   postmortem: {
-    string: ["project", "work", "reason", "finding_id"], exe: ["execution_id"], pmAction: ["action"], pmId: ["pm"],
+    string: ["project", "work", "reason", "finding_id", "orchestrator"], array: ["accept"], exe: ["execution_id"], pmAction: ["action"], pmId: ["pm"],
     pmFinding: ["finding"], pmFix: ["fix"],
   },
   hold_postmortem: {

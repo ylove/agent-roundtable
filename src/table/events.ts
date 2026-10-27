@@ -20,6 +20,49 @@ export interface Seat {
   model: string;
 }
 
+/** How a team is doing, recomputed as the duel runs: the process record judges and people weigh with the result. */
+export interface TeamMetrics {
+  /** Active wall-clock time from the team's first turn to its last finished stage, or to now while it works. Time spent stopped is excluded. */
+  elapsedMs: number;
+  /** When the team's last stage finished (ISO 8601); absent while it is still building. */
+  finishedAt?: string;
+  stagesDone: number;
+  stagesTotal: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** Cost of the priced calls only, as in the usage event. */
+  costUsd: number;
+  unpricedTokens: number;
+  estimated?: boolean;
+  /** Model turns that completed, and turns that timed out or failed. */
+  turns: number;
+  failedTurns: number;
+  /** Valid prototype versions the team produced. */
+  versions: number;
+  /** Build attempts that had to be redone: retries after a failed validation or page check, and revision rounds. */
+  rewrites: number;
+  /** Artifacts rejected by validation (format, size, external references). */
+  validationFailures: number;
+  /** Console errors and uncaught exceptions the page checks found, summed over the team's versions. */
+  pageErrors: number;
+  /** Connector tool calls made by the team's seats. */
+  toolCalls: number;
+}
+
+/** What a person may do to a running duel: stop it, resume it from where it stopped, or choose the winner when they judge. */
+export type DuelCommand = { action: "stop" } | { action: "resume" } | { action: "choose"; team: "A" | "B" };
+/** Where a command came from. */
+export type DuelCommandSource = "room" | "terminal" | "tool";
+/**
+ * The only input a person has during a duel. The CLI creates one, passes it to the runner (which acts on it) and to
+ * the room (which offers only the commands available now). Replays and dry runs have none, so the room shows no controls.
+ */
+export interface DuelControls {
+  available(): { stop: boolean; resume: boolean; choose: boolean };
+  /** False when the command is not available now; otherwise it is acted on asynchronously. */
+  send(command: DuelCommand, by: DuelCommandSource): boolean;
+}
+
 /** Events shared by duel runners, terminal renderers, and local web rooms. */
 export type TableEvent =
   /** A duel begins; startedAt is an ISO 8601 timestamp. */
@@ -36,7 +79,22 @@ export type TableEvent =
       criteria?: string[];
       /** Seat ids per team, in speaking order (concept first, builder last). */
       teams?: { A: string[]; B: string[] };
+      /** Build stages per team (absent in older archives: one build). */
+      stages?: { index: number; name: string }[];
+      /** A person chooses the winner in the room; judges, if any, advise. */
+      humanJudge?: boolean;
+      /** Set when this run continues a stopped duel: the id is unchanged and earlier events are not repeated. */
+      resumed?: boolean;
     }
+  /** A team's build stage starts, finishes, fails (the previous version stands) or is skipped at the deadline. */
+  | { type: "stage"; team: "A" | "B"; stage: number; of: number; name: string; status: "started" | "done" | "failed" | "skipped"; ts: string; version?: number }
+  /** Each team's process record, sent whenever it changes. */
+  | { type: "metrics"; teams: Record<"A" | "B", TeamMetrics>; ts: string }
+  /** The duel stopped (in-flight turns are abandoned and a checkpoint is written) or resumed from that checkpoint. */
+  | { type: "control"; action: "stopped" | "resumed"; by: DuelCommandSource | "deadline"; ts: string }
+  /** With a human judge: the duel waits for the choice, then records it. */
+  | { type: "decision"; status: "awaiting"; ts: string }
+  | { type: "decision"; status: "made"; by: "human"; winner: "A" | "B"; version?: number; ts: string }
   /** A participant speaks; ts is an ISO 8601 timestamp. */
   | { type: "turn"; round: string; seat: Seat; text: string; ts: string }
   /** A team submits prototype files or reports a failed attempt. */
@@ -50,6 +108,8 @@ export type TableEvent =
       ok: boolean;
       error?: string;
       version?: number;
+      /** The build stage that produced this version (1-based); absent for a single build. */
+      stage?: number;
       check?: import("../prototypes/page-check.js").PageCheck;
     }
   /** A judge assesses a team's submission. */
@@ -89,7 +149,17 @@ export type TableEvent =
       tally: { A: number; B: number };
       aborted?: boolean;
       archivePath?: string;
+      /** Who decided: the judges' tally, or a person in the room. */
+      decidedBy?: "judges" | "human";
+      /** The winning artifact, saved for further use (the path is relative to ROUNDTABLE_HOME). */
+      chosen?: ChosenArtifact;
+      /** Stopped rather than finished: `roundtable duel --resume <id>` continues it. */
+      resumable?: boolean;
+      metrics?: Record<"A" | "B", TeamMetrics>;
     };
+
+/** The artifact a duel settles on: the winner's judged version, copied out of the sandbox before it is removed. */
+export interface ChosenArtifact { team: "A" | "B"; version: number; dir: string; files: string[] }
 
 /** A consumer of table events; asynchronous consumers may finish before the next event. */
 export interface TableObserver {
@@ -145,6 +215,12 @@ export interface DuelOptions {
   teamB: string[];
   judges: string[];
   rounds?: 1 | 2;
+  /** Build stages per team, 1 to 4; default 4 for web and 1 for the other kinds. */
+  stages?: number;
+  /** A person chooses the winner in the room. Judges become optional and advisory. */
+  humanJudge?: boolean;
+  /** Continue a stopped duel from its checkpoint (a duel id). Every other option comes from the checkpoint. */
+  resume?: string;
   pageCheck?: boolean;
   /** Artifact kind both teams build; default web. */
   kind?: DuelKind;
@@ -168,6 +244,11 @@ export interface DuelResult {
   tally: { A: number; B: number };
   archivePath?: string;
   aborted: boolean;
+  decidedBy?: "judges" | "human";
+  chosen?: ChosenArtifact;
+  /** Stopped with a checkpoint; resume with `resume: <id>`. */
+  resumable?: boolean;
+  metrics?: Record<"A" | "B", TeamMetrics>;
 }
 
 /** A cancellable duel runner that streams its progress to an observer. */

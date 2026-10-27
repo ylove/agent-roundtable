@@ -11,7 +11,8 @@
 // Partner platforms (Bedrock, Vertex AI) price separately; override the table for them.
 // ============================================================================
 
-import { readFileSync, statSync } from "node:fs";
+import { closeSync } from "node:fs";
+import { openRegularFile, readDescriptor, RegularFileError } from "../security/fs-safe.js";
 import type { TokenUsage } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -148,19 +149,26 @@ let cache: { key: string; table: PricingTable } | undefined;
 export function loadPricing(env: NodeJS.ProcessEnv = process.env): PricingTable {
   const file = env[PRICING_FILE_ENV]?.trim();
   if (!file) return BUILTIN_PRICING;
-  let st;
+  // One descriptor: the type, size and contents checked are those of the same open file.
+  let opened;
   try {
-    st = statSync(file);
+    opened = openRegularFile(file, { maxBytes: MAX_PRICING_FILE_BYTES });
   } catch (err) {
+    if (err instanceof RegularFileError) {
+      throw new Error(`${PRICING_FILE_ENV} ${file}: ${err.code === "ENOTREG" ? "not a regular file" : "larger than 1 MB"}`);
+    }
     throw new Error(`${PRICING_FILE_ENV} ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
   }
-  if (!st.isFile()) throw new Error(`${PRICING_FILE_ENV} ${file}: not a regular file`);
-  if (st.size > MAX_PRICING_FILE_BYTES) throw new Error(`${PRICING_FILE_ENV} ${file}: larger than 1 MB`);
-  const key = `${file}\0${st.mtimeMs}\0${st.size}`;
-  if (cache?.key === key) return cache.table;
-  const table = Object.freeze({ ...BUILTIN_PRICING, ...parsePricing(readFileSync(file, "utf8"), `${PRICING_FILE_ENV} ${file}`) });
-  cache = { key, table };
-  return table;
+  try {
+    const { fd, stat: st } = opened;
+    const key = `${file}\0${st.mtimeMs}\0${st.size}`;
+    if (cache?.key === key) return cache.table;
+    const table = Object.freeze({ ...BUILTIN_PRICING, ...parsePricing(readDescriptor(fd, MAX_PRICING_FILE_BYTES).toString("utf8"), `${PRICING_FILE_ENV} ${file}`) });
+    cache = { key, table };
+    return table;
+  } finally {
+    closeSync(opened.fd);
+  }
 }
 
 // ---------------------------------------------------------------------------

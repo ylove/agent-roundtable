@@ -9,6 +9,7 @@ import { inspect, isDeepStrictEqual } from "node:util";
 import { stringify } from "yaml";
 import { agentKey, allowedAgentRoots, assertReadableFrontmatter, listAgents, parseAgentFrontmatter, projectSkillsDir, readFrontmatter, skillSearchDirs } from "./agents.js";
 import { AGENTS_DIR, SKILLS_DIR, WORKSPACE_DIR } from "./config.js";
+import { readRegularFile } from "./security/fs-safe.js";
 
 export const MODEL_CHOICES = ["opus", "sonnet", "haiku", "inherit"] as const;
 export const TOOL_ALLOWLIST = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"] as const;
@@ -795,10 +796,11 @@ function withAddendum(content: string, bodyStart: number, bullet: string): strin
  */
 export function appendPersonaAddendum(agentPath: string, bullet: string, opts: { timestamp: string }): AddendumResult {
   if (!/\.md$/i.test(agentPath)) throw new Error(`Postmortem addenda go into .md persona files; ${agentPath} is not one`);
-  const raw = fs.readFileSync(agentPath, "utf8");
+  const first = readRegularFile(agentPath);
+  const raw = first.data.toString("utf8");
   const meta = parseAgentFrontmatter(raw);
   assertReadableFrontmatter(meta, agentPath);
-  const mode = fs.statSync(agentPath).mode;
+  const mode = first.stat.mode;
   const next = withAddendum(raw, meta.hasFrontmatter ? meta.blockEnd : 0, bullet);
   if (next === undefined) return { agentPath, changed: false };
   inside(path.dirname(agentPath), agentPath);
@@ -813,7 +815,7 @@ export function appendPersonaAddendum(agentPath: string, bullet: string, opts: {
       backupPath = backupName(agentPath, opts.timestamp);
     }
   }
-  if (fs.readFileSync(agentPath, "utf8") !== raw) throw new Error(`${agentPath} changed while the addendum was being prepared; nothing was written (the copy is at ${backupPath})`);
+  if (readRegularFile(agentPath).data.toString("utf8") !== raw) throw new Error(`${agentPath} changed while the addendum was being prepared; nothing was written (the copy is at ${backupPath})`);
   atomicReplace(agentPath, next, mode);
   return { agentPath, backupPath, changed: true };
 }

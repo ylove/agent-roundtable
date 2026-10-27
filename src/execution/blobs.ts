@@ -7,7 +7,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fsyncDir, mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
+import { fsyncDir, mkdirPrivate, readRegularFile, writeFileAtomic } from "../security/fs-safe.js";
 import { redactSecretTokens } from "../security/redaction-rules.js";
 import { scrub, scrubConfiguredSecrets } from "../security/secrets.js";
 import { canonicalJSON, sha256Hex } from "./chain.js";
@@ -63,7 +63,7 @@ export function putBlob(blobsDir: string, content: string | Buffer, opts: { reda
   const path = blobPath(blobsDir, ref);
   try {
     // Already stored, unless a damaged copy sits there: same size is not enough, the hash must match.
-    if (statSync(path).size === buf.length && sha256Hex(readFileSync(path)) === blobHex(ref)) return ref;
+    if (sha256Hex(readRegularFile(path, { maxBytes: buf.length }).data) === blobHex(ref)) return ref;
   } catch {
     /* not stored yet */
   }

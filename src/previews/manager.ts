@@ -27,7 +27,7 @@ import { checkPage, pageCheckRecord, pageChecksOff, type PageCheck } from "../pr
 import { containerUser, DEFAULT_DOCKER_LIMITS, dockerLimitsFromEnv, defaultSandboxImage, DockerBackend, type DockerLimits } from "../sandbox/docker.js";
 import { ensureEgressNetwork, type EgressNetwork } from "../sandbox/egress-proxy.js";
 import { childEnv } from "../security/child-env.js";
-import { isContained, mkdirPrivate } from "../security/fs-safe.js";
+import { isContained, mkdirPrivate, readRegularFile, RegularFileError } from "../security/fs-safe.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { buildForwarderCreateArgs, buildForwarderNetworkCreateArgs, buildInstallRunArgs, buildNetworkCreateArgs, buildPreviewRunArgs, forwarderName, forwarderNetworkName, installContainerName, PREVIEW_HOST_LABEL, PREVIEW_ID_RE, PREVIEW_LABEL, PREVIEW_NET_LABEL, previewContainerName, previewNetworkName } from "./args.js";
 import { realDocker, type PreviewDocker } from "./docker-io.js";
@@ -135,10 +135,14 @@ function plainDirectory(path: string, what: string): string {
 
 function readPackage(dir: string): PackageLike {
   const path = join(dir, "package.json");
-  let st;
-  try { st = lstatSync(path); } catch { throw new PreviewError("the source has no package.json"); }
-  if (!st.isFile() || st.size > 1024 * 1024) throw new PreviewError("package.json is not a plain file of at most 1 MB");
-  return parsePackageJson(readFileSync(path, "utf8"));
+  let text: string;
+  try {
+    text = readRegularFile(path, { noFollow: true, maxBytes: 1024 * 1024 }).data.toString("utf8");
+  } catch (e) {
+    if (e instanceof RegularFileError) throw new PreviewError("package.json is not a plain file of at most 1 MB");
+    throw new PreviewError("the source has no package.json");
+  }
+  return parsePackageJson(text);
 }
 
 /** True when the source already holds an installed node_modules directory (not a symlink, not empty). */

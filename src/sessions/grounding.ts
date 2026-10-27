@@ -36,8 +36,7 @@ function capped(text: string, max: number): string {
 export function readHead(path: string, maxBytes = 64 * 1024): { text: string; truncated: boolean } | undefined {
   let fd: number | undefined;
   try {
-    if (!fs.statSync(path).isFile()) return undefined;
-    fd = fs.openSync(path, "r");
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
     if (!fs.fstatSync(fd).isFile()) return undefined;
     const buffer = Buffer.alloc(maxBytes + 1);
     let count = 0;

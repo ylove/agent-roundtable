@@ -75,7 +75,10 @@ test('NDJSON escapes C1 controls and line separators', async () => {
   assert.equal(JSON.parse(raw).text, text);
 });
 
-test('terminal strips Unicode formatting controls and NDJSON escapes them', () => {
+test('terminal strips Unicode formatting controls but keeps joiners, and NDJSON escapes them', () => {
+  const joined = sink();
+  createTerminalObserver({ output: joined }).onEvent(turn('Builder 👩\u200d💻 ready'));
+  assert.match(joined.read(), /👩\u200d💻/);
   const codes = [0x061c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2060, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff];
   const text = 'Visible café 中文 ' + String.fromCharCode(...codes) + ' text';
   const terminal = sink(), ndjson = sink();
@@ -83,7 +86,8 @@ test('terminal strips Unicode formatting controls and NDJSON escapes them', () =
   createNdjsonObserver(ndjson).onEvent(turn(text));
   for (const code of codes) {
     const character = String.fromCharCode(code);
-    assert.ok(!terminal.read().includes(character));
+    // The terminal keeps the joiners (U+200C, U+200D) that scripts and emoji sequences need; NDJSON escapes them all.
+    if (code !== 0x200c && code !== 0x200d) assert.ok(!terminal.read().includes(character));
     assert.ok(!ndjson.read().includes(character));
     assert.ok(ndjson.read().includes('\\u' + code.toString(16).padStart(4, '0')));
   }

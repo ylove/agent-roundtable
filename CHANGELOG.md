@@ -3,6 +3,7 @@
 ## 2.1.0 (unreleased)
 
 - Add Google Antigravity (`agy`) as an explicit seat runtime and opt-in heads-down worker, with JSON status checks, reported token usage and driver-side submission (#230, WS33).
+- **Live duel engine (#227).** Independent staged builds, live process metrics, private stop/resume checkpoints, optional human judging, and a saved chosen artifact (`--out` to export). Adds `--stages`, `--resume`, `--human-judge`, and `--layout`, MCP stages/metrics/artifact metadata, and a staged promotional demo with backward-compatible replay. See [duel](docs/modes/duel.md).
 
 ## 2.0.0 (not yet published to npm)
 

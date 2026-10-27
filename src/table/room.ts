@@ -33,7 +33,13 @@ export function createRoomState(): RoomState {
   return { topic: "", seats: [], prototypes: [], history: [], assessments: [], dissents: [], turns: [], usage: { type: "usage", perSeat: [], totalCostUsd: 0 } };
 }
 
-export interface RoomOptions { state?: RoomState; open?: boolean; hold?: boolean }
+export interface RoomOptions {
+  state?: RoomState;
+  open?: boolean;
+  hold?: boolean;
+  /** A live duel's controls: the room offers stop, resume and the human judge's choice through them. None for replays. */
+  controls?: import("./events.js").DuelControls;
+}
 export interface DuelRoom {
   observer: TableObserver;
   url: string;

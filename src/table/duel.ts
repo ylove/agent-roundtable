@@ -4,12 +4,12 @@ import { startRoom } from "./room.js";
 import { prepareSeats, resolveSeats } from "./seats.js";
 import { PROVIDER_MAX_TOKENS } from "../providers/limits.js";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { agentKey, listAgents, loadAgent, readFrontmatter } from "../agents.js";
 import { PARALLEL_TURNS, ROUNDTABLE_HOME } from "../config.js";
 import { callSeat } from "./dispatch.js";
-import { activeUsageSink, withAbortSignal, withUsageSink } from "../providers/usage.js";
+import { activeUsageSink, withAbortSignal, withUsageSink, type UsageSink } from "../providers/usage.js";
 import { parsePrototypeBlock, type PrototypeFile } from "../prototypes/parse.js";
 import { createSessionDir, ensurePrototypeRoot, materializeFiles, releaseSessionDir, removeDirSync, sweepStaleSessionDirs } from "../prototypes/sandbox.js";
 import { scrub, scrubAndCap, scrubArtifact } from "../security/secrets.js";
@@ -17,15 +17,21 @@ import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
 import { parseDissentBlocks } from "../sessions/dissents.js";
 import { mapLimit } from "../sessions/workshop.js";
 import { registerDuel, unregisterDuel } from "./live-duels.js";
-import { abortSession, lineFor, metered, sessionSignal } from "../usage/session-scope.js";
-import type { DuelKind, DuelOptions, DuelResult, RunDuel, Seat, TableEvent, TableObserver } from "./events.js";
+import { abortSession, lineFor, metered, sessionSignal, resetSessionSignal } from "../usage/session-scope.js";
+import type { DuelKind, DuelOptions, DuelResult, RunDuel, Seat, TableEvent, TableObserver, TeamMetrics, DuelControls, DuelCommandSource } from "./events.js";
 import { validateDuelOptions } from "./duel-options.js";
 import { activeSeatConnectors, checkSeatConnectorArgs, startSeatConnectors, withSeatConnectors } from "./seat-connectors.js";
-import { buildPrompt, closingPrompt, conceptPrompt, critiquePrompt, DEFAULT_CRITERIA, DUEL_MAX_BYTES, duelSystem, judgePrompt, normalizeCriteria } from "./prompts.js";
+import { stageBuildPrompt, stagePlan, type BuildStage, closingPrompt, conceptPrompt, critiquePrompt, DEFAULT_CRITERIA, DUEL_MAX_BYTES, duelSystem, judgePrompt, normalizeCriteria } from "./prompts.js";
+import { createDuelControls, duelControlRunner } from "./controls.js";
+import { readCheckpoint, writeCheckpoint, checkpointPath, type DuelCheckpoint, type DuelProgress, type DuelUsage } from "./checkpoint.js";
+import { saveChosenArtifact } from "./artifacts.js";
 import { attachPrototypeFiles, getPrototypeFiles, attachPrototypeScreenshot, getPrototypeScreenshot, type DuelArchive } from "./replay.js";
 
 export interface ResolvedDuelSeat extends Seat { prompt?: string }
 export interface DuelDependencies {
+  controls?: DuelControls;
+  replayHistory?: boolean;
+  resumeBy?: DuelCommandSource;
   checkPage?: typeof checkPage;
   startRoom?: typeof startRoom;
   resolveSeats?: (opts: DuelOptions) => Promise<ResolvedDuelSeat[]> | ResolvedDuelSeat[];
@@ -82,7 +88,7 @@ export { MAX_JUDGES, MAX_TEAM_SIZE, validateDuelOptions } from "./duel-options.j
 const WEB_EXTERNAL = /\b(?:src|href|action|poster|formaction)\s*=\s*["']?\s*(?:https?:|\/\/)|\burl\s*\(\s*["']?\s*(?:https?:|\/\/)|@import\b|<\s*(?:iframe|object|embed|link|base)\b|<script\b[^>]*\bsrc\s*=/i;
 const WEB_CALLS = /\b(?:fetch|importScripts|WebSocket|EventSource|Worker|SharedWorker|XMLHttpRequest|sendBeacon)\s*\(|\bnew\s+(?:WebSocket|EventSource|Worker|SharedWorker|XMLHttpRequest)\b|\bimport\s*(?:\(|["'{*])/;
 
-function validatedFiles(text: string, kind: DuelKind = "web"): { title: string; files: PrototypeFile[] } {
+export function validatedFiles(text: string, kind: DuelKind = "web"): { title: string; files: PrototypeFile[] } {
   const parsed = parsePrototypeBlock(text);
   if (!parsed.found) throw new ValidationError("Missing prototype block.");
   if (!parsed.ok) throw new ValidationError(parsed.error);
@@ -175,36 +181,90 @@ function failureReason(error: unknown): string {
   return `provider error: ${scrubAndCap(message.replace(/\s+/g, " "), 100)}`;
 }
 
-type DuelRunner = (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps?: DuelDependencies) => Promise<DuelResult>;
+/** All team progress lives here so an interrupted pipeline can later be checkpointed. */
+export interface TeamProgress {
+  concept: string;
+  conceptDone: boolean;
+  critiques: string;
+  completedCritics: string[];
+  criticNotes: Record<string, string>;
+  stages: { index: number; status: "started" | "done" | "failed" | "skipped" }[];
+  stageReached: number;
+  submission?: { title: string; files: PrototypeFile[] };
+  version: number;
+  judgedVersion: number;
+  check?: PageCheck;
+  feedback: string;
+  startedAt?: number;
+  metrics: TeamMetrics;
+}
+
+function teamProgress(stagesTotal: number): TeamProgress {
+  return { concept: "", conceptDone: false, critiques: "", completedCritics: [], criticNotes: Object.create(null), stages: [], stageReached: 0,
+    version: 0, judgedVersion: 0, feedback: "", metrics: {
+      elapsedMs: 0, stagesDone: 0, stagesTotal, inputTokens: 0, outputTokens: 0, costUsd: 0,
+      unpricedTokens: 0, turns: 0, failedTurns: 0, versions: 0, rewrites: 0,
+      validationFailures: 0, pageErrors: 0, toolCalls: 0,
+    } };
+}
+
+/** Include every reported problem, not just the first exception in the short UI summary. */
+function checkFeedback(check?: PageCheck): string {
+  return check ? [pageCheckSummary(check), ...check.consoleErrors, ...check.exceptions].join("\n") : "";
+}
+
+export type DuelInput = (Omit<DuelOptions, "judges"> & { judges?: string[] }) | { resume: string };
+type DuelRunner = (opts: DuelInput, obs: TableObserver, signal: AbortSignal, deps?: DuelDependencies) => Promise<DuelResult>;
 /** Start the requested seat connectors (an unknown one fails here, before any provider call) and close them when the duel ends. */
-export const runDuel: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
+export const runDuel: RunDuel & DuelRunner = async (input: DuelInput, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
+  let restored: DuelCheckpoint | undefined;
+  if (input.resume !== undefined) {
+    if (Object.keys(input).some(k => k !== "resume")) throw new Error("Resume takes only a duel id; options come from the checkpoint.");
+    restored = readCheckpoint(input.resume);
+  }
+  const opts: DuelOptions = restored?.options ?? { ...input, judges: ("judges" in input ? input.judges : undefined) ?? [] } as DuelOptions;
   validateDuelOptions(opts);
-  if (!opts.connectors?.length) return runDuelBody(opts, obs, signal, deps);
+  if (opts.humanJudge && !deps.controls) throw new Error("humanJudge requires duel controls from createDuelControls().");
+  if (!opts.connectors?.length) return runDuelBody(opts, obs, signal, deps, restored);
   const checked = checkSeatConnectorArgs(opts.connectors, opts.seatConnectors, [...opts.teamA, ...opts.teamB, ...opts.judges]);
   const connectors = await startSeatConnectors(checked.names, { signal, seatConnectors: checked.seatConnectors });
-  try { return await withSeatConnectors(connectors, () => runDuelBody(opts, obs, signal, deps)); }
+  try { return await withSeatConnectors(connectors, () => runDuelBody(opts, obs, signal, deps, restored)); }
   finally { await connectors.close(); }
 };
 
-const runDuelBody: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies = {}) => {
+async function runDuelBody(opts: DuelOptions, obs: TableObserver, signal: AbortSignal, deps: DuelDependencies, restored?: DuelCheckpoint): Promise<DuelResult> {
   validateDuelOptions(opts);
   const kind: DuelKind = opts.kind ?? "web";
+  const plan = stagePlan(kind, opts.stages ?? (kind === "web" ? 4 : 1));
   // Every extra critique turn needs time, so the default deadline grows with the larger team.
-  const limitSeconds = opts.maxSeconds ?? Math.min(3600, 600 + 120 * Math.max(0, Math.max(opts.teamA.length, opts.teamB.length) - 2));
-  const nonce = randomBytes(6).toString("hex");
+  const limitSeconds = opts.maxSeconds ?? Math.min(3600, 600 + 150 * (plan.length - 1) + 120 * Math.max(0, Math.max(opts.teamA.length, opts.teamB.length) - 2));
+  const nonce = restored?.nonce ?? randomBytes(6).toString("hex");
   const criteria = normalizeCriteria(opts.criteria);
   if ((opts.rounds !== undefined && opts.rounds !== 1 && opts.rounds !== 2) ||
       !Number.isFinite(limitSeconds) || limitSeconds < 0 || limitSeconds > 3600 ||
       !Number.isFinite(opts.turnTimeoutMs ?? 90_000) || (opts.turnTimeoutMs ?? 90_000) <= 0 || (opts.turnTimeoutMs ?? 90_000) > 3_600_000) throw new Error("Invalid duel limits.");
-  const resolved = deps.resolveSeats ? await deps.resolveSeats(opts) : await resolveSeatsLocal(opts, await prepareSeats(opts));
+  const loaded = deps.resolveSeats ? await deps.resolveSeats(opts) : await resolveSeatsLocal(opts, restored ?
+    new Map(restored.seats.map(s => [s.id.replace(/^(?:A|B|judge):/, ""), s])) : await prepareSeats(opts));
+  const resolved = restored ? restored.seats.map(saved => {
+    const persona = loaded.find(s => s.id === saved.id);
+    if (!persona) throw new Error("Checkpoint seats no longer match the loaded personas.");
+    return { ...saved, prompt: persona.prompt };
+  }) : loaded;
   const seats: Seat[] = resolved.map(({ prompt: _prompt, ...seat }) => seat);
   const teams = { A: resolved.filter(s => s.team === "A"), B: resolved.filter(s => s.team === "B") };
   const judges = resolved.filter(s => s.team === "judge");
-  if (!teams.A.length || !teams.B.length || !judges.length || new Set(seats.map(s => s.id)).size !== seats.length) throw new Error("Resolved seats must include distinct seats for both teams and judges.");
-  const id = `duel-${randomUUID()}`;
-  const archive: DuelArchive = { version: 1, events: [], prototypes: [] };
+  if (!teams.A.length || !teams.B.length || (!opts.humanJudge && !judges.length) || new Set(seats.map(s => s.id)).size !== seats.length) throw new Error("Resolved seats must include distinct seats for both teams and judges.");
+  const id = restored?.id ?? `duel-${randomUUID()}`;
+  const archive: DuelArchive = restored?.archive ?? { version: 2, events: [], prototypes: [] };
   const archivePath = join(ROUNDTABLE_HOME, "duels", `${id}.json`);
-  const usage = new Map(seats.map(s => [s.id, { seatId: s.id, inputTokens: 0, outputTokens: 0, costUsd: 0, unpricedTokens: 0, estimated: false }]));
+  const usage = new Map<string, DuelUsage>(seats.map(s => [s.id, { seatId: s.id, inputTokens: 0, outputTokens: 0, costUsd: 0, unpricedTokens: 0, estimated: false }]));
+  for (const total of restored?.usage ?? []) usage.set(total.seatId, { ...total });
+  const control = duelControlRunner(deps.controls ?? createDuelControls());
+  let stopBy: DuelCommandSource = "tool";
+  let acceptingUsage = true;
+  const abandoners = new Set<() => void>();
+  const localStop = new AbortController();
+  const stopped = AbortSignal.any([signal, localStop.signal]);
   const emit = async (raw: TableEvent) => {
     // Persisted and displayed content is scrubbed at the source.
     const event: TableEvent = raw.type === "turn" || raw.type === "dissent" ? { ...raw, text: scrub(raw.text) }
@@ -226,49 +286,84 @@ const runDuelBody: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableOb
     return emit({ type: "usage", perSeat, totalCostUsd: perSeat.reduce((n, seat) => n + seat.costUsd, 0),
       totalUnpricedTokens: perSeat.reduce((n, seat) => n + seat.unpricedTokens, 0) });
   };
-  const stop = () => abortSession(id, "Duel stopped.");
+  if (restored) resetSessionSignal(id);
   const sessionStop = sessionSignal(id);
+  const stop = () => { abortSession(id, "Duel stopped."); };
+  control.clear();
+  control.onStop(by => { stopBy = by; localStop.abort(new Error("Duel stopped.")); stop(); });
+  control.setAvailable({ stop: true });
   registerDuel({ id, agents: [...new Set(seats.map(s => agentKey(s.id.replace(/^(?:A|B|judge):/, ""))))], started: new Date().toISOString() });
-  const cancelled = () => signal.aborted || sessionStop.aborted;
-  signal.addEventListener("abort", stop, { once: true });
-  if (signal.aborted) stop();
+  const cancelled = () => stopped.aborted || sessionStop.aborted;
+  stopped.addEventListener("abort", stop, { once: true });
+  if (stopped.aborted) stop();
   const phase = new AbortController();
-  const deadline = setTimeout(() => phase.abort(new Error("Duel deadline reached.")), limitSeconds * 1000);
-  if (opts.maxSeconds === 0) phase.abort();
-  const ended = Date.now() + limitSeconds * 1000;
-  const expired = () => phase.signal.aborted || Date.now() >= ended;
-  const submissions: Partial<Record<"A" | "B", { title: string; files: PrototypeFile[] }>> = {};
-  const concepts = { A: "", B: "" };
-  const critiques = { A: "", B: "" };
-  const assessments: Extract<TableEvent, { type: "assessment" }>[] = [];
-  const preferences = { A: 0, B: 0 };
+  const remainingMs = restored ? Math.max(60_000, limitSeconds * 1000 - restored.activeMs) : limitSeconds * 1000;
+  const deadline = setTimeout(() => phase.abort(new Error("Duel deadline reached.")), remainingMs);
+  if (!restored && opts.maxSeconds === 0) phase.abort();
+  const ended = Date.now() + remainingMs;
+  const runStarted = Date.now();
+  let activeMs = restored?.activeMs ?? 0;
+  let clockRunning = true;
+  let deadlineReached = false;
+  const freezeClock = () => { if (clockRunning) { deadlineReached = phase.signal.aborted || Date.now() >= ended; activeMs += Math.max(0, Date.now() - runStarted); clockRunning = false; } };
+  const expired = () => phase.signal.aborted || (clockRunning ? Date.now() >= ended : deadlineReached);
+  const state: DuelProgress = restored?.progress ?? { phase: "build", teams: { A: teamProgress(plan.length), B: teamProgress(plan.length) },
+    assessments: [], preferences: { A: 0, B: 0 }, completedJudges: [], judgeReplies: Object.create(null), completedRevisions: [], completedClosings: [] };
+  const progress = state.teams, assessments = state.assessments, preferences = state.preferences;
+  if (restored) for (const team of ["A", "B"] as const) {
+    const t = progress[team];
+    if (t.startedAt !== undefined) t.startedAt = Date.now() - t.metrics.elapsedMs;
+  }
+  if (state.phase === "decide" || state.phase === "close") { clearTimeout(deadline); freezeClock(); }
   let sandbox: string | undefined;
-  let version = 0;
-  const teamVersions = { A: 0, B: 0 };
-  const checks: Partial<Record<"A" | "B", PageCheck>> = {};
-  /** The version the judges see: the latest valid submission, unless a revision's page failed its check. */
-  const judged = { A: 0, B: 0 };
+  let version = archive.prototypes.length + 10;
+  const metricsSnapshot = (): Record<"A" | "B", TeamMetrics> => {
+    for (const team of ["A", "B"] as const) {
+      const state = progress[team], m = state.metrics;
+      if (state.startedAt !== undefined && !m.finishedAt) m.elapsedMs = Math.max(0, Date.now() - state.startedAt);
+      const totals = teams[team].map(seat => usage.get(seat.id)!);
+      for (const key of ["inputTokens", "outputTokens", "costUsd", "unpricedTokens"] as const) m[key] = totals.reduce((n, total) => n + total[key], 0);
+      if (totals.some(total => total.estimated)) m.estimated = true;
+    }
+    return { A: { ...progress.A.metrics }, B: { ...progress.B.metrics } };
+  };
+  const emitMetrics = () => emit({ type: "metrics", teams: metricsSnapshot(), ts: new Date().toISOString() });
+  const finishTeam = async (team: "A" | "B") => {
+    const state = progress[team];
+    if (state.startedAt !== undefined) state.metrics.elapsedMs = Math.max(0, Date.now() - state.startedAt);
+    state.metrics.finishedAt = new Date().toISOString();
+    await emitMetrics();
+  };
   const chrome = new ChromeProcesses();
   const killBrowsers = () => chrome.killAll();
-  for (const stop of [signal, sessionStop, phase.signal]) stop.addEventListener("abort", killBrowsers, { once: true });
+  for (const stop of [stopped, sessionStop, phase.signal]) stop.addEventListener("abort", killBrowsers, { once: true });
   let internalFailure = false;
   const publicSeat = (seat: Seat): Seat => seats.find(s => s.id === seat.id)!;
   // Each connector call and notice appears in the transcript as a short note, never as the tool's payload.
   activeSeatConnectors()?.onNote(use => {
+    if (!acceptingUsage) return;
     const seat = resolved.find(s => s.id.replace(/^(?:A|B|judge):/, "") === use.seat) ?? resolved[0];
+    if (use.tool && (seat.team === "A" || seat.team === "B")) progress[seat.team].metrics.toolCalls++;
     void emit({ type: "turn", seat: publicSeat(seat), round: "tool", text: use.note, ts: new Date().toISOString() });
+    if (use.tool) void emitMetrics();
   });
 
   async function turn(seat: ResolvedDuelSeat, round: string, prompt: string, closing = false, show: (text: string) => string = text => text): Promise<string | undefined> {
     if (cancelled() || (!closing && expired())) return;
+    const state = seat.team === "A" || seat.team === "B" ? progress[seat.team] : undefined;
+    if (state && state.startedAt === undefined) state.startedAt = Date.now();
     // The ledger attributes spend to the persona, not the team-prefixed seat id.
     const scope = { session: id, kind: "duel", agent: seat.id.replace(/^(?:A|B|judge):/, "") };
-    const callStop = AbortSignal.any([signal, sessionStop, AbortSignal.timeout(round === "R1b" || round === "R3" ? Math.max(opts.turnTimeoutMs ?? 90_000, 240_000) : opts.turnTimeoutMs ?? 90_000), ...(!closing ? [phase.signal] : [])]);
+    const callStop = AbortSignal.any([stopped, sessionStop, AbortSignal.timeout(round === "R1b" || round === "R3" ? Math.max(opts.turnTimeoutMs ?? 90_000, 240_000) : opts.turnTimeoutMs ?? 90_000), ...(!closing ? [phase.signal] : [])]);
     try {
       const build = round === "R1b" || round === "R3";
       const call = (tokens: number) => metered(scope, () => {
         const ledger = activeUsageSink();
-        return withUsageSink(report => {
+        let reports = 0, finalized = false;
+        const record: UsageSink = report => {
+          if (finalized) return;
+          reports++;
+          if (!acceptingUsage) { ledger?.(report); return; }
           const line = lineFor(scope, report, "duel");
           const total = usage.get(seat.id)!;
           const input = (line.tokens?.input ?? 0) + (line.tokens?.cache_read ?? 0) + (line.tokens?.cache_write ?? 0);
@@ -281,7 +376,13 @@ const runDuelBody: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableOb
           if (usd === undefined) total.unpricedTokens += input + output;
           if (line.tokens_prov === "estimated") total.estimated = true;
           ledger?.(report);
-        }, () => withAbortSignal(callStop, () => callSeat(
+        };
+        const abandon = () => {
+          if (!reports) record({ provider: seat.provider, model: seat.model, chars: { input: duelSystem(kind).length + (seat.prompt?.length ?? 0) + prompt.length, output: 0 } });
+          finalized = true;
+        };
+        abandoners.add(abandon);
+        return withUsageSink(record, () => withAbortSignal(callStop, () => callSeat(
           `${duelSystem(kind)}\n\n${seat.prompt ?? `Your role is ${seat.role ?? seat.name}.`}`,
           [{ role: "user", content: prompt }],
           { provider: seat.provider, model: seat.model, maxTokens: Math.min(tokens, seat.maxOutputTokens ?? Infinity), estimateUsageOnFailure: true },
@@ -290,15 +391,20 @@ const runDuelBody: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableOb
             const shown = seats.find(s => s.id === seat.id);
             if (shown) shown.model = model;
           } },
-        )));
+        ))).finally(() => abandoners.delete(abandon));
       });
       // A deadline also settles a misbehaving provider stub that ignores its AbortSignal.
-      const text = await cancellable(call(turnTokens(seat.provider, round)), callStop).catch(async e => {
+      const attempt = async (tokens: number): Promise<string> => {
+        if (state) state.metrics.turns++;
+        try { return await cancellable(call(tokens), callStop); }
+        catch (error) { if (state) state.metrics.failedTurns++; throw error; }
+      };
+      const text = await attempt(turnTokens(seat.provider, round)).catch(async e => {
         // Reasoning models can spend the whole ceiling thinking: retry a non-build turn once at double.
         if (build || !NO_TEXT_LENGTH.test(e instanceof Error ? e.message : "")) throw e;
         const larger = clampTokens(seat.provider, turnTokens(seat.provider, round) * 2);
         if (larger <= turnTokens(seat.provider, round)) throw e;
-        return cancellable(call(larger), callStop);
+        return attempt(larger);
       });
       await emit({ type: "turn", seat: publicSeat(seat), round, text: show(text), ts: new Date().toISOString() });
       await emitUsage();
@@ -309,17 +415,23 @@ const runDuelBody: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableOb
         await emitUsage();
       }
       return undefined;
-    }
+    } finally { if (state) await emitMetrics(); }
   }
 
-  async function build(team: "A" | "B", revision = false): Promise<void> {
+  async function build(team: "A" | "B", stage: BuildStage, revision = false): Promise<boolean> {
+    const state = progress[team];
     const seat = teams[team].at(-1)!;
-    let feedback = revision ? `R3 REVISION. Previous source:\n${submissions[team] ? listing(submissions[team].files, nonce) : "No valid artifact."}\nJudges' feedback:\n${assessments.filter(a => a.team === team).map(a => `${a.verdict}: ${a.reason}`).join("\n")}` : "";
+    if (revision) {
+      state.metrics.rewrites++;
+      delete state.metrics.finishedAt;
+    }
+    let feedback = [state.feedback, checkFeedback(state.check), revision ? `R3 REVISION. Previous source:\n${state.submission ? listing(state.submission.files, nonce) : "No valid artifact."}\nJudges' feedback:\n${assessments.filter(a => a.team === team).map(a => `${a.verdict}: ${a.reason}`).join("\n")}` : ""].filter(Boolean).join("\n");
     let error = "No valid artifact. None was submitted before the deadline.";
-    const kept = submissions[team] && !pageCheckFailed(checks[team]) ? { submission: submissions[team], check: checks[team], version: judged[team] } : undefined;
-    let failedCheck = false;
     for (let attempt = 0; attempt < 2 && !cancelled() && !expired(); attempt++) {
-      const text = await turn(seat, revision ? "R3" : "R1b", buildPrompt(opts.topic, team, concepts[team] + critiques[team], feedback, kind), false, source => {
+      if (attempt > 0) { state.metrics.rewrites++; await emitMetrics(); }
+      const prompt = stageBuildPrompt(opts.topic, team, state.concept + state.critiques, feedback, kind, stage, plan.length,
+        state.submission ? listing(state.submission.files, nonce) : "", nonce);
+      const text = await turn(seat, revision ? "R3" : "R1b", prompt, false, source => {
         // Source code belongs in prototype files, not in the transcript.
         try {
           const { files } = validatedFiles(source, kind);
@@ -329,144 +441,276 @@ const runDuelBody: RunDuel & DuelRunner = async (opts: DuelOptions, obs: TableOb
       });
       if (text === undefined && (cancelled() || expired())) break;
       try {
-        const prototype = validatedFiles(text ?? "", kind);
+        // A failed provider turn is counted separately from artifact validation failures.
+        if (text === undefined) { error = "The build turn did not complete."; throw new Error(error); }
+        const prototype = validatedFiles(text, kind);
         if (!sandbox) throw new Error("Prototype sandbox unavailable.");
         const dir = join(sandbox, `submission-${++version}`);
         await mkdir(dir, { mode: 0o700 });
         prototype.files = await materializeFiles(dir, prototype.files.map(f => ({ ...f, content: scrubArtifact(f.content) })), { redactContent: false });
-        submissions[team] = prototype;
-        failedCheck = false;
-        judged[team] = teamVersions[team] + 1;
-        const event: TableEvent = { type: "prototype", team, version: ++teamVersions[team], seat: publicSeat(seat), title: prototype.title, kind, ok: true,
-          files: prototype.files.map(f => ({ path: f.path, bytes: Buffer.byteLength(f.content) })) };
+        const event: Extract<TableEvent, { type: "prototype" }> = { type: "prototype", team, version: state.version + 1, seat: publicSeat(seat), title: prototype.title, kind, ok: true,
+          ...(!revision && { stage: stage.index }), files: prototype.files.map(f => ({ path: f.path, bytes: Buffer.byteLength(f.content) })) };
         attachPrototypeFiles(event, prototype.files);
         if (kind === "web") {
-          let check: import("../prototypes/page-check.js").PageCheckResult | undefined;
           if (opts.pageCheck === false || (!deps.checkPage && pageChecksOff())) event.check = { loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "disabled" };
           else if (deps.checkPage || findChrome()) {
             let room: Awaited<ReturnType<typeof startRoom>> | undefined;
             try {
               room = await (deps.startRoom ?? startRoom)({ hold: false });
               await room.observer.onEvent(event);
-              check = await (deps.checkPage ?? checkPage)(`${room.url}p/${team}/index.html`, { processes: chrome });
+              const check = await cancellable((deps.checkPage ?? checkPage)(`${room.url}p/${team}/index.html`, { processes: chrome }), AbortSignal.any([stopped, sessionStop, phase.signal]));
               event.check = pageCheckRecord(check);
               attachPrototypeScreenshot(event, check.screenshot);
             } catch { event.check = { loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "page check unavailable" }; }
             finally { await room?.close(); }
           } else event.check = { loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "no browser" };
-          checks[team] = event.check;
+          state.metrics.pageErrors += (event.check?.consoleErrors.length ?? 0) + (event.check?.exceptions.length ?? 0);
         }
-        archive.prototypes.push({ eventIndex: archive.events.length, team, files: prototype.files });
-        await emit(event);
-        const check = event.check;
-        if (pageCheckFailed(check)) {
-          failedCheck = true;
-          error = pageCheckSummary(check);
-          feedback = `The previous attempt failed validation: ${error}\nReturn a complete corrected prototype.`;
+        if (cancelled() || expired()) { await emitMetrics(); break; }
+        const failed = pageCheckFailed(event.check);
+        // Preserve single-build archives' checked attempts; staged rooms receive only valid versions.
+        if (!failed || plan.length === 1) {
+          event.version = ++state.version;
+          archive.prototypes.push({ eventIndex: archive.events.length, team, files: prototype.files });
+          if (!failed) {
+            state.submission = prototype;
+            state.check = event.check;
+            state.judgedVersion = state.version;
+            state.metrics.versions++;
+          }
+          await emit(event);
+          await emitMetrics();
+        }
+        if (failed) {
+          error = checkFeedback(event.check);
+          feedback = [feedback, `The previous attempt failed its page check: ${error}\nFix these; return a complete corrected prototype.`].filter(Boolean).join("\n");
+          await emitMetrics();
           continue;
         }
-        return;
+        state.feedback = "";
+        return true;
       } catch (e) {
-        error = e instanceof ValidationError ? e.message : "No valid artifact. It could not be saved.";
-        feedback = `The previous attempt failed validation: ${error}\nReturn a complete corrected prototype.`;
+        if (e instanceof ValidationError) state.metrics.validationFailures++;
+        error = e instanceof ValidationError ? e.message : text === undefined ? "The build turn did not complete." : "No valid artifact. It could not be saved.";
+        feedback = [feedback, `The previous attempt failed validation: ${error}\nReturn a complete corrected prototype.`].filter(Boolean).join("\n");
+        await emitMetrics();
       }
     }
-    // A revision whose page still fails gives way to the last version that worked; the room keeps both.
-    if (failedCheck && kept) {
-      submissions[team] = kept.submission;
-      checks[team] = kept.check;
-      judged[team] = kept.version;
-    }
-    // A failed revision keeps the previous valid submission available.
-    if (!submissions[team]) await emit({ type: "prototype", team, seat: publicSeat(seat), kind, ok: false, files: [], error });
+    state.feedback = scrub(feedback || error);
+    if (plan.length === 1 && !state.submission) await emit({ type: "prototype", team, seat: publicSeat(seat), kind, ok: false, files: [], error });
+    return false;
   }
 
-  await emit({ type: "start", id, topic: opts.topic, mode: "duel", seats, startedAt: new Date().toISOString(), kind,
-    criteria: criteria.length ? criteria : [...DEFAULT_CRITERIA], teams: { A: teams.A.map(s => s.id), B: teams.B.map(s => s.id) } });
-  try {
-    if (!cancelled() && !expired()) {
-      const root = await ensurePrototypeRoot();
-      await sweepStaleSessionDirs(root);
-      sandbox = await createSessionDir(root, id);
-      keepSandboxUntilExit(sandbox);
-      await mapLimit(["A", "B"] as ("A" | "B")[], PARALLEL_TURNS, async team => {
-        concepts[team] = (await turn(teams[team][0], "R1", conceptPrompt(opts.topic, team, kind)))?.split(/\s+/).slice(0, 150).join(" ") ?? "";
-        // Members between the first and the last critique the concept; the builder receives every critique.
-        const critics = teams[team].slice(1, -1);
-        if (concepts[team] && critics.length) {
-          const notes = await mapLimit(critics, PARALLEL_TURNS, async critic => {
-            const note = (await turn(critic, "R1c", critiquePrompt(opts.topic, team, concepts[team], kind)))?.split(/\s+/).slice(0, 100).join(" ");
-            return note ? `- ${critic.name}: ${note}` : "";
-          });
-          const kept = notes.filter(Boolean);
-          if (kept.length) critiques[team] = `\nCritiques of the concept from teammates:\n${kept.join("\n")}\n`;
-        }
-      });
-      await mapLimit(["A", "B"] as ("A" | "B")[], PARALLEL_TURNS, team => build(team));
-    }
-    // Every failed team gets a placeholder, even if the deadline arrived before construction.
-    for (const team of ["A", "B"] as const) if (!submissions[team] && !archive.events.some(e => e.type === "prototype" && e.team === team)) {
-      await emit({ type: "prototype", team, seat: publicSeat(teams[team].at(-1)!), ok: false, files: [], kind, error: cancelled() ? "Duel stopped." : "No valid artifact before the deadline." });
-    }
-    await mapLimit(judges, PARALLEL_TURNS, async judge => {
-      const source = (team: "A" | "B") => submissions[team] ? `Version v${judged[team]}\n${kind === "web" ? pageCheckSummary(checks[team]) + "\n" : ""}${listing(submissions[team].files, nonce)}` : "No valid submission. Automatic REJECT.";
-      const judging = { kind, criteria, nonce };
-      let text = await turn(judge, "R2", judgePrompt(opts.topic, { A: source("A"), B: source("B") }, judging));
-      let verdicts = text === undefined ? undefined : parseDuelVerdicts(text);
-      if (text !== undefined && verdicts!.A.verdict === "UNCLEAR" && verdicts!.B.verdict === "UNCLEAR") {
-        // One retry when the reply was readable text but no verdict line could be recognized.
-        text = await turn(judge, "R2", judgePrompt(opts.topic, { A: source("A"), B: source("B") }, judging) + "\nYour previous reply had no recognizable VERDICT lines. Follow the format exactly.") ?? text;
-        verdicts = parseDuelVerdicts(text);
+  async function runStages(team: "A" | "B"): Promise<void> {
+    const state = progress[team];
+    for (const stage of plan) {
+      const prior = state.stages.find(s => s.index === stage.index);
+      if (prior && prior.status !== "started") continue;
+      if (cancelled()) break;
+      if (prior) state.stages.splice(state.stages.indexOf(prior), 1);
+      if (expired()) {
+        state.stages.push({ index: stage.index, status: "skipped" });
+        await emit({ type: "stage", team, stage: stage.index, of: plan.length, name: stage.name, status: "skipped", ts: new Date().toISOString() });
+        await emitMetrics();
+        continue;
       }
-      const preference = text === undefined ? undefined : parsePreference(text);
-      if (preference) preferences[preference]++;
-      for (const team of ["A", "B"] as const) {
-        if (!verdicts && submissions[team]) continue; // A failed judge casts no verdict.
-        const assessment: Extract<TableEvent, { type: "assessment" }> = { type: "assessment", judge: publicSeat(judge), team, ...(judged[team] && { version: judged[team] }),
-          ...(submissions[team] ? verdicts![team] : { verdict: "REJECT", reason: "No valid artifact." }) };
-        assessments.push(assessment);
-        await emit(assessment);
-      }
-    });
-    if (opts.rounds === 2 && !cancelled() && !expired()) {
-      await mapLimit((["A", "B"] as const).filter(team => assessments.some(a => a.team === team && (a.verdict === "REVISE" || a.verdict === "REJECT"))), PARALLEL_TURNS, team => build(team, true));
+      state.stageReached = stage.index;
+      const step: TeamProgress["stages"][number] = { index: stage.index, status: "started" };
+      state.stages.push(step);
+      await emit({ type: "stage", team, stage: stage.index, of: plan.length, name: stage.name, status: "started", ts: new Date().toISOString() });
+      await emitMetrics();
+      const ok = await build(team, stage);
+      if (cancelled() && !ok) break;
+      step.status = ok ? "done" : "failed";
+      if (ok) state.metrics.stagesDone++;
+      await emit({ type: "stage", team, stage: stage.index, of: plan.length, name: stage.name, status: step.status,
+        ...(ok && { version: state.judgedVersion }), ts: new Date().toISOString() });
+      await emitMetrics();
     }
-  } catch {
-    internalFailure = true;
+    if (!cancelled()) await finishTeam(team);
   }
-  clearTimeout(deadline);
-  const tally = { A: 0, B: 0 };
-  const count = (team: "A" | "B", verdict: string) => assessments.filter(a => a.team === team && a.verdict === verdict).length;
-  for (const a of assessments) tally[a.team] += a.verdict === "APPROVE" ? 1 : a.verdict === "REJECT" ? -1 : 0;
-  const aborted = cancelled() || internalFailure;
-  const decided = assessments.some(a => a.verdict !== "UNCLEAR");
-  // Ties fall through: fewer REJECTs, fewer REVISEs, then the judges' stated preference.
-  const order = (): number => tally.A !== tally.B ? tally.A - tally.B
-    : count("B", "REJECT") !== count("A", "REJECT") ? count("B", "REJECT") - count("A", "REJECT")
-    : count("B", "REVISE") !== count("A", "REVISE") ? count("B", "REVISE") - count("A", "REVISE")
-    : preferences.A - preferences.B;
-  const winner: DuelResult["winner"] = aborted || (!submissions.A && !submissions.B) || !decided ? "none" : order() === 0 ? "tie" : order() > 0 ? "A" : "B";
-  try {
-    // With nothing built there is nothing to close on.
-    if (!cancelled() && (submissions.A || submissions.B)) await mapLimit(["A", "B"] as ("A" | "B")[], PARALLEL_TURNS, async team => {
-      const seat = teams[team][0];
-      const text = await turn(seat, "R4", closingPrompt(opts.topic, team, `${winner}; A ${tally.A}, B ${tally.B}${expired() ? "; time limit reached" : ""}`, winner !== "tie" && winner !== "none" && winner !== team), true);
-      for (const dissent of parseDissentBlocks(text ?? "")) await emit({ type: "dissent", seat: publicSeat(seat), team, text: `${dissent.claim}\nPredicted failure: ${dissent.predicted_failure}` });
-    });
+
+  const processRecord = () => {
+    const metrics = metricsSnapshot();
+    return (["A", "B"] as const).map(team => {
+      const m = metrics[team];
+      return `Team ${team}: stages done ${m.stagesDone} of ${m.stagesTotal}${expired() ? `; stopped at stage ${progress[team].stageReached} of ${m.stagesTotal}` : ""}; elapsed ${m.elapsedMs} ms; tokens ${m.inputTokens} input + ${m.outputTokens} output; cost $${m.costUsd.toFixed(6)}; unpriced tokens ${m.unpricedTokens}${m.estimated ? " (estimated)" : ""}; versions ${m.versions}; rewrites ${m.rewrites}; validation failures ${m.validationFailures}; page errors ${m.pageErrors}; tool calls ${m.toolCalls}; turns ${m.turns}; failed turns ${m.failedTurns}.`;
+    }).join("\n");
+  };
+
+  const startEvent = (): Extract<TableEvent, { type: "start" }> => ({ type: "start", id, topic: opts.topic, mode: "duel", seats,
+    startedAt: new Date().toISOString(), kind, criteria: criteria.length ? criteria : [...DEFAULT_CRITERIA],
+    teams: { A: teams.A.map(s => s.id), B: teams.B.map(s => s.id) }, stages: plan.map(({ index, name }) => ({ index, name })),
+    ...(opts.humanJudge && { humanJudge: true }), ...(restored && { resumed: true }) });
+  const tally = (): { A: number; B: number } => {
+    const tally = { A: 0, B: 0 };
+    for (const a of assessments) tally[a.team] += a.verdict === "APPROVE" ? 1 : a.verdict === "REJECT" ? -1 : 0;
+    return tally;
+  };
+  const judgeWinner = (): DuelResult["winner"] => {
+    const t = tally();
+    const count = (team: "A" | "B", verdict: string) => assessments.filter(a => a.team === team && a.verdict === verdict).length;
+    const order = t.A - t.B || count("B", "REJECT") - count("A", "REJECT") || count("B", "REVISE") - count("A", "REVISE") || preferences.A - preferences.B;
+    return (!progress.A.submission && !progress.B.submission) || !assessments.some(a => a.verdict !== "UNCLEAR") ? "none" : order === 0 ? "tie" : order > 0 ? "A" : "B";
+  };
+  async function checkpoint(): Promise<DuelResult> {
+    clearTimeout(deadline);
+    freezeClock();
+    // Providers normally report failure usage on abort. A non-cooperating call is abandoned and estimated.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    for (const abandon of abandoners) abandon();
+    await emitMetrics();
     await emitUsage();
-    const result: DuelResult = { id, winner: cancelled() ? "none" as const : winner, tally, aborted: aborted || cancelled(), archivePath };
-    await emit({ type: "end", winner: result.winner, tally, aborted: result.aborted, archivePath });
-    try { mkdirPrivate(join(ROUNDTABLE_HOME, "duels")); writeFileAtomic(archivePath, JSON.stringify(archive)); }
-    catch { result.archivePath = undefined; }
+    // Freeze the picture before observers can react to the stopped event.
+    acceptingUsage = false;
+    await emit({ type: "control", action: "stopped", by: stopBy, ts: new Date().toISOString() });
+    const options: DuelOptions = { topic: scrub(opts.topic), teamA: opts.teamA, teamB: opts.teamB, judges: opts.judges,
+      kind, criteria: criteria.map(c => scrub(c)), stages: plan.length, rounds: opts.rounds ?? 1,
+      maxSeconds: limitSeconds, turnTimeoutMs: opts.turnTimeoutMs ?? 90_000,
+      ...(opts.humanJudge !== undefined && { humanJudge: opts.humanJudge }), ...(opts.pageCheck !== undefined && { pageCheck: opts.pageCheck }),
+      ...(opts.agentsDir && { agentsDir: opts.agentsDir }), ...(opts.connectors && { connectors: opts.connectors }),
+      ...(opts.seatConnectors && { seatConnectors: opts.seatConnectors }) };
+    writeCheckpoint({ version: 1, id, nonce, options, seats, archive, progress: state, usage: [...usage.values()], activeMs });
+    control.clear();
+    control.setAvailable({ resume: true });
+    return { id, winner: "none", tally: tally(), aborted: true, resumable: true, metrics: metricsSnapshot() };
+  }
+  try {
+    if (restored) {
+      for (const p of archive.prototypes) {
+        // Revalidate source using the same offline artifact rules as a new build.
+        const e = archive.events[p.eventIndex] as Extract<TableEvent, { type: "prototype" }>;
+        validatedFiles(`<prototype kind="${e.kind ?? "web"}" title="saved">${p.files.map(f => `<file path="${f.path}">${f.content}</file>`).join("\n")}</prototype>`, e.kind ?? "web");
+        attachPrototypeFiles(e, p.files);
+      }
+      if (deps.replayHistory !== false) for (const e of archive.events) { try { await obs.onEvent(e); } catch { /* observer */ } }
+    }
+    await emit(startEvent());
+    if (restored) await emit({ type: "control", action: "resumed", by: deps.resumeBy ?? "tool", ts: new Date().toISOString() });
+    try {
+      if (state.phase === "build") {
+        if (!cancelled() && !expired()) {
+          const root = await ensurePrototypeRoot();
+          await sweepStaleSessionDirs(root);
+          sandbox = await createSessionDir(root, id);
+          keepSandboxUntilExit(sandbox);
+        }
+        await mapLimit(["A", "B"] as ("A" | "B")[], PARALLEL_TURNS, async team => {
+          const t = progress[team];
+          if (!t.conceptDone) {
+            const text = await turn(teams[team][0], "R1", conceptPrompt(opts.topic, team, kind));
+            if (text !== undefined || !cancelled()) { t.concept = scrub(text?.split(/\s+/).slice(0, 150).join(" ") ?? ""); t.conceptDone = true; }
+          }
+          const critics = teams[team].slice(1, -1);
+          if (t.concept) await mapLimit(critics.filter(c => !t.completedCritics.includes(c.id)), PARALLEL_TURNS, async critic => {
+            const text = await turn(critic, "R1c", critiquePrompt(opts.topic, team, t.concept, kind));
+            if (text !== undefined || !cancelled()) {
+              t.completedCritics.push(critic.id);
+              t.criticNotes[critic.id] = scrub(text?.split(/\s+/).slice(0, 100).join(" ") ?? "");
+            }
+          });
+          const notes = critics.flatMap(c => t.criticNotes[c.id] ? [`- ${c.name}: ${t.criticNotes[c.id]}`] : []);
+          t.critiques = notes.length ? `\nCritiques of the concept from teammates:\n${notes.join("\n")}\n` : "";
+          await runStages(team);
+        });
+        if (!cancelled()) {
+          for (const team of ["A", "B"] as const) if (!progress[team].submission && !archive.events.some(e => e.type === "prototype" && e.team === team)) {
+            await emit({ type: "prototype", team, seat: publicSeat(teams[team].at(-1)!), ok: false, files: [], kind, error: "No valid artifact before the deadline." });
+          }
+          state.phase = "judge";
+        }
+      }
+      if (state.phase === "judge" && !cancelled()) {
+        await mapLimit(judges.filter(j => !state.completedJudges.includes(j.id)), PARALLEL_TURNS, async judge => {
+          const source = (team: "A" | "B") => progress[team].submission ? `Version v${progress[team].judgedVersion}\n${kind === "web" ? pageCheckSummary(progress[team].check) + "\n" : ""}${listing(progress[team].submission.files, nonce)}` : "No valid submission. Automatic REJECT.";
+          const prompt = judgePrompt(opts.topic, { A: source("A"), B: source("B") }, { kind, criteria, nonce, processRecord: processRecord() });
+          let reply = state.judgeReplies[judge.id];
+          if (!reply && (progress.A.submission || progress.B.submission)) {
+            const text = await turn(judge, "R2", prompt, true);
+            if (text !== undefined) reply = state.judgeReplies[judge.id] = { text: scrub(text), attempts: 1 };
+            else if (cancelled()) return;
+          }
+          let verdicts = reply ? parseDuelVerdicts(reply.text) : undefined;
+          if (reply && reply.attempts < 2 && verdicts!.A.verdict === "UNCLEAR" && verdicts!.B.verdict === "UNCLEAR") {
+            if (cancelled()) return;
+            const text = await turn(judge, "R2", prompt + "\nYour previous reply had no recognizable VERDICT lines. Follow the format exactly.", true);
+            if (text === undefined && cancelled()) return;
+            reply = state.judgeReplies[judge.id] = { text: scrub(text ?? reply.text), attempts: 2 };
+            verdicts = parseDuelVerdicts(reply.text);
+          }
+          const preference = reply && parsePreference(reply.text);
+          if (preference) preferences[preference]++;
+          for (const team of ["A", "B"] as const) {
+            if (!verdicts && progress[team].submission) continue;
+            const assessment: Extract<TableEvent, { type: "assessment" }> = { type: "assessment", judge: publicSeat(judge), team,
+              ...(progress[team].judgedVersion && { version: progress[team].judgedVersion }),
+              ...(progress[team].submission ? { ...verdicts![team], reason: scrub(verdicts![team].reason) } : { verdict: "REJECT", reason: "No valid artifact." }) };
+            assessments.push(assessment); await emit(assessment);
+          }
+          state.completedJudges.push(judge.id);
+        });
+        if (!cancelled()) state.phase = "revise";
+      }
+      if (state.phase === "revise" && !cancelled()) {
+        if (opts.rounds === 2 && !expired()) {
+          if (!sandbox) { const root = await ensurePrototypeRoot(); sandbox = await createSessionDir(root, id); keepSandboxUntilExit(sandbox); }
+          await mapLimit((["A", "B"] as const).filter(team => !state.completedRevisions.includes(team) && assessments.some(a => a.team === team && (a.verdict === "REVISE" || a.verdict === "REJECT"))), PARALLEL_TURNS, async team => {
+            const ok = await build(team, plan.at(-1)!, true);
+            if (ok || !cancelled()) { state.completedRevisions.push(team); await finishTeam(team); }
+          });
+        }
+        if (!cancelled()) state.phase = opts.humanJudge ? "decide" : "close";
+      }
+      if (state.phase === "decide" && !cancelled()) {
+        clearTimeout(deadline); freezeClock();
+        if (!state.decision) {
+          control.setAvailable({ stop: true, choose: (["A", "B"] as const).filter(t => !!progress[t].submission) });
+          await emit({ type: "decision", status: "awaiting", ts: new Date().toISOString() });
+          const message = await control.wait(AbortSignal.any([stopped, sessionStop]));
+          if (message.command.action === "choose") {
+            state.decision = message.command.team;
+            await emit({ type: "decision", status: "made", by: "human", winner: state.decision, version: progress[state.decision].judgedVersion, ts: new Date().toISOString() });
+          }
+        }
+        if (!cancelled()) state.phase = "close";
+      }
+    } catch (error) {
+      if (!cancelled()) internalFailure = true;
+    }
+    if (cancelled()) return await checkpoint();
+    clearTimeout(deadline); freezeClock();
+    const winner = internalFailure ? "none" : state.decision ?? judgeWinner();
+    const decidedBy = opts.humanJudge ? "human" as const : "judges" as const;
+    if (progress.A.submission || progress.B.submission) await mapLimit((["A", "B"] as const).filter(t => !state.completedClosings.includes(t)), PARALLEL_TURNS, async team => {
+      const seat = teams[team][0];
+      const text = await turn(seat, "R4", closingPrompt(opts.topic, team, `${winner}; A ${tally().A}, B ${tally().B}${expired() ? "; time limit reached" : ""}`, winner !== "tie" && winner !== "none" && winner !== team), true);
+      if (text !== undefined || !cancelled()) {
+        for (const dissent of parseDissentBlocks(text ?? "")) await emit({ type: "dissent", seat: publicSeat(seat), team, text: `${dissent.claim}\nPredicted failure: ${dissent.predicted_failure}` });
+        state.completedClosings.push(team);
+      }
+    });
+    if (cancelled()) return await checkpoint();
+    const chosen = (winner === "A" || winner === "B") && progress[winner].submission
+      ? saveChosenArtifact(id, winner, progress[winner].judgedVersion, progress[winner].submission!.files) : undefined;
+    await emitMetrics(); await emitUsage();
+    const result: DuelResult = { id, winner, tally: tally(), aborted: internalFailure, archivePath, decidedBy, metrics: metricsSnapshot(), ...(chosen && { chosen }) };
+    await emit({ type: "end", winner, tally: result.tally, aborted: result.aborted, archivePath, decidedBy, metrics: result.metrics, ...(chosen && { chosen }) });
+    mkdirPrivate(join(ROUNDTABLE_HOME, "duels")); writeFileAtomic(archivePath, JSON.stringify(archive));
+    await rm(checkpointPath(id), { force: true });
+    control.clear(); control.setAvailable({});
     return result;
   } finally {
+    clearTimeout(deadline);
+    acceptingUsage = false;
+    control.onStop(undefined);
     chrome.killAll();
-    for (const stop of [signal, sessionStop, phase.signal]) stop.removeEventListener("abort", killBrowsers);
-    signal.removeEventListener("abort", stop);
+    activeSeatConnectors()?.onNote(undefined);
+    for (const stop of [stopped, sessionStop, phase.signal]) stop.removeEventListener("abort", killBrowsers);
+    stopped.removeEventListener("abort", stop);
     unregisterDuel(id);
     if (sandbox) { removeDirSync(sandbox); releaseSessionDir(sandbox); ownedSandboxes.delete(sandbox); }
   }
-};
+}
 
 function cancellable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {

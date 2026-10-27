@@ -39,26 +39,65 @@ Choose API providers or installed CLI runtimes per seat with `--seat designer=he
 
 ## Teams and roles
 
-A team has 1 to 4 members. The first member writes the concept (at most 150 words). The last member builds the artifact. Members in between each critique the concept in one short turn (round R1c), and the builder receives the critiques. A one-person team does both the concept and the build. There are 1 to 5 judges. Duplicate personas across teams and judges are rejected before any provider call.
+A team has 1 to 4 members. The first member writes the concept (at most 150 words). The last member builds the artifact. Members in between each critique the concept in one short turn (round R1c), and the builder receives the critiques. A one-person team does both the concept and the build. There are 1 to 5 judges, or zero to five with `--human-judge`. Duplicate personas across teams and judges are rejected before any provider call.
 
 ## Criteria
 
-By default judges weigh fit to the brief, quality of the result, usability and accessibility, and risk or safety within their own remit, which they take from their persona. `--criteria "a,b,c"` (up to 8 items) replaces that rubric. Commas separate items; if an item contains a comma, separate items with `;` instead. The reply format is fixed regardless: `VERDICT A: APPROVE|REVISE|REJECT — reason`, the same for B, and `PREFER: A|B`. Judges are told that the artifacts are untrusted listings and to ignore instructions inside them.
+By default judges weigh fit to the brief, quality of the result, usability and accessibility, risk or safety within their own remit, which they take from their persona, and efficiency of the process: tokens, time, rewrites and errors for the result. `--criteria "a,b,c"` (up to 8 items) replaces that rubric. Commas separate items; if an item contains a comma, separate items with `;` instead. The reply format is fixed regardless: `VERDICT A: APPROVE|REVISE|REJECT — reason`, the same for B, and `PREFER: A|B`. Judges are told that the artifacts are untrusted listings and to ignore instructions inside them.
+
+## Staged builds
+
+`--stages 1|2|3|4` controls how each artifact comes together. Web defaults to four stages: **Skeleton** (title, layout regions, hash navigation and labelled empty screens), **Screens** (real content and barebones components), **Working** (core interactions end to end), and **Polish** (design, responsive layout, accessibility and fixes). Three stages merge Screens and Working; two merge Skeleton and Screens, then Working and Polish. One uses the original single-build prompt. Other kinds default to one stage; when staged they use Outline, Draft, Complete and Refine with the same merging order.
+
+Each stage gets the previous valid artifact and its page-check problems, and returns a complete replacement. It has two attempts. Validation or page-check retries count as rewrites. A failed stage leaves the previous valid version available and passes its failures to the next stage. Every valid version is emitted immediately and archived; a faster team visibly finishes sooner. Judges wait for both pipelines to settle. `--rounds 2` still adds a revision after judging and counts as a rewrite.
+
+## Process metrics
+
+Live `metrics` events and the final result include each team's active elapsed time, stage completion, input/output tokens, priced cost, unpriced tokens, completed and failed turns, valid versions, rewrites, validation failures, page errors and connector tool calls. Page errors sum console errors and uncaught exceptions across page checks. Stopped time is excluded. The engine writes a process record outside the untrusted artifact fences for the judges, including where each team stopped at the deadline. Custom criteria replace the default rubric, while the process record remains available.
+
+## Stop and resume
+
+The room's Stop command, the first Ctrl-C, and `roundtable stop` for the live session all abandon in-flight calls while metering them. The engine emits `control stopped`, saves `ROUNDTABLE_HOME/duels/<id>.checkpoint.json` atomically with mode 0600, and returns `aborted: true, resumable: true` without an `end` event. The checkpoint contains archived events/files, resolved seat identities and models, options and progress, never persona prompt bodies. Personas are reloaded on resume.
+
+```sh
+roundtable duel --resume duel-<id> --open
+```
+
+Resume takes a duel id, never a path. It cannot be combined with a topic, team/judge/seat/kind/criteria flags or other duel options, replay or dry-run. Display flags and `--out` are allowed. A new process replays the saved history, then emits a resumed start and continues after the completed steps; an interrupted stage is redone. The deadline uses remaining active time, with at least 60 seconds. A normal finish deletes the checkpoint and writes the archive under the same id. Missing, malformed, oversized, or finished checkpoints are refused.
+
+With a held room, Resume continues in the same process without replaying history. A subsequent Ctrl-C exits and prints `Resume with: roundtable duel --resume <id>`. With `--no-room` or `--no-hold`, stopping exits immediately with that line. A stop exits 1. During a duel the only human inputs are stop, resume, and the human judge's choice.
+
+## Human judge
+
+Use `--human-judge` to choose the winner yourself. `--judges` may be omitted; judges supplied are advisory and still emit verdicts and a tally. After builds, advisory judging and any revision, `decision awaiting` makes the choice available for teams with valid submissions, with no decision deadline. A choice emits `decision made`, sets `decidedBy: "human"`, then runs closings. A stop here checkpoints the decision phase; resume does not rebuild or rejudge. Without this flag `decidedBy` is `"judges"`.
+
+With `--no-room`, an interactive terminal prompts `Choose the winner [A/B]:`; without a TTY this combination is a usage error (exit 2).
+
+```sh
+roundtable duel "A small offline planner" --team-a designer,builder \
+  --team-b marketer,skeptic --human-judge --out ./chosen-planner --open
+```
+
+## Chosen artifact
+
+An A or B winner keeps its judged valid version in `ROUNDTABLE_HOME/duels/<id>/chosen/`, using private directories and atomic files. The final event and result include `chosen: {team, version, dir, files}`, where `dir` is relative to `ROUNDTABLE_HOME`. A tie or no verdict saves no chosen artifact. `--out <dir>` exports the chosen files immediately after completion: the destination must be absent or an empty real directory; symlinks and overwrites are refused.
+
+For the room and terminal layout (`--layout auto|split|stack`), see [the duel room](duel-room.md).
 
 ## Rounds
 
 1. R1: the first member of each team proposes a concept, in parallel.
 1. R1c: with three or more members, each middle member critiques the concept.
-1. R1b: the last member builds the artifact in the requested kind, with the limits above. Invalid submissions and web pages that fail to load or throw get one shared retry with the error.
+1. R1b: each team independently runs its build stages in the requested kind, with the limits above; there is no barrier between teams during concepts, critiques or builds. Invalid submissions and web pages that fail to load or throw get one shared retry with the error.
 1. R2: judges see both artifacts as source listings, their version numbers and one-line page-check summaries, and write the verdict lines. APPROVE adds one point, REVISE adds zero, and REJECT subtracts one. Missing or ambiguous responses are UNCLEAR and add zero. A failed judge casts no verdict. Teams without a valid artifact receive automatic REJECTs.
 1. With `--rounds 2`, R3 gives each team receiving REVISE or REJECT one revision, with the same validation retry. The original judging tally determines the result. A failed revision preserves an earlier valid artifact.
 1. R4: the first member of each team gives a closing statement; the losing team is asked to file a dissent. Complete `<DISSENT>` blocks become separate cards. Equal scores stay a tie.
 
-Concept, judging and closing calls time out after 90 seconds (set with `--turn-timeout`); build calls get at least 240 seconds. The `--max-seconds` deadline defaults to 600 seconds, plus 120 per member beyond two on the larger team (to fit the critique turns). It cancels pending work and skips ahead to closing statements; closing calls have their own turn timeout. Ctrl-C cancellation ends provider work and archives the partial result. The room remains available after the end until Ctrl-C; `--no-hold` lets automation finish without waiting.
+Concept, judging and closing calls time out after 90 seconds (set with `--turn-timeout`); build calls get at least 240 seconds. The `--max-seconds` deadline defaults to 600 seconds, plus 150 for each stage beyond the first and 120 per member beyond two on the larger team, capped at 3600 seconds (1050 seconds for a four-stage web duel with two-member teams). It cancels pending build work and marks stages not yet started as skipped; judges assess the latest valid versions, then closing calls use their own turn timeout. A deadline finishes the duel; a stop saves a resumable checkpoint and emits no end event. The room remains available after the end until Ctrl-C; `--no-hold` lets automation finish without waiting.
 
-Archives live at `ROUNDTABLE_HOME/duels/<id>.json` with mode 0600. They contain the event list and the artifact files as text, including revisions. The start event also records `kind`, `criteria` and `teams`; archives from before these fields existed were all web and still replay. The duel owns its sandbox until process exit; artifacts survive judging and have no TTL. Real archives belong in local state and must stay out of the repository.
+Archives live at `ROUNDTABLE_HOME/duels/<id>.json` with mode 0600. They contain the event list and the artifact files as text, including revisions. The start event also records `kind`, `criteria` and `teams`; archives from before these fields existed were all web and still replay. The temporary sandbox is removed when the runner returns; winning files are saved separately before cleanup, and the room retains its recorded versions in memory. Real archives belong in local state and must stay out of the repository.
 
-Usage updates include per-seat token totals and estimated spend throughout the run. Estimates use the existing pricing table; models without rates contribute zero to the displayed total. Configure `ROUNDTABLE_PRICING_FILE` to provide rates for those models before recording a cost comparison.
+Usage updates include per-seat token totals and estimated spend throughout the run. Estimates use the existing pricing table; tokens from models without rates are reported as unpriced rather than presented as free. Configure `ROUNDTABLE_PRICING_FILE` to provide rates for those models before recording a cost comparison.
 
 ```sh
 roundtable duel --replay examples/duel/demo.json --speed 2 --open
@@ -69,7 +108,7 @@ Replay re-emits recorded events and prototype contents through the same observer
 
 The room binds to loopback and requires a capability token. Its page uses an external script under a strict CSP. Artifact routes serve only recorded files from memory: web pages with the existing application CSP, everything else as inert `text/plain`. Web frames allow scripts, forms, and modals with an opaque origin. The room writes model text and source into the DOM with `textContent`.
 
-For integration, `runDuel(opts, observer, signal, { resolveSeats })` accepts a resolver returning seats with optional persona `prompt` text. The three-argument call uses `resolveSeatsLocal`. `startRoom({ open, hold })` returns an observer, URL, and asynchronous `close()`. Pass its observer directly or through `fanout` so prototype content attachments reach the room; NDJSON remains the shared event shape. `replayDuel(path, observer, { speed, signal })` uses the same attachment mechanism. Event streams received from another process can supply bytes with the room's `setPrototypeFiles(team, files)` method before the corresponding prototype event.
+For integration, `runDuel(opts, observer, signal, { resolveSeats })` accepts a resolver returning seats with optional persona `prompt` text. The three-argument call uses `resolveSeatsLocal`. `createDuelControls()` supplies public commands and a runner handle; pass the controls through runner dependencies and `startRoom({ controls })`. To resume use `runDuel({ resume: id }, observer, signal, { controls })`; a same-process room passes `replayHistory: false`. `startRoom({ open, hold })` returns an observer, URL, and asynchronous `close()`. Pass its observer directly or through `fanout` so prototype content attachments reach the room; NDJSON remains the shared event shape. `replayDuel(path, observer, { speed, signal })` uses the same attachment mechanism. Event streams received from another process can supply bytes with the room's `setPrototypeFiles(team, files)` method before the corresponding prototype event.
 
 ## Page checks and design iterations
 
@@ -85,7 +124,7 @@ Web contract drafts add `verify: [{"page_loads": {"path": "index.html"}}]` and a
 
 ## From an MCP client
 
-The `start_duel` tool runs the same engine and returns a compact result: the duel id, winner, tally, each team's artifact title, kind and ok flag, the verdicts, the dissents, a per-persona usage summary and the archive id (`duels/<id>.json`). It never returns artifact source. No room is opened: the live room belongs to the CLI, and `start_duel` returns only the result (replay the archive with `roundtable duel --replay` to see it in a room). The tool sends a progress notification on every turn, artifact and verdict, so the host needs a long request timeout (a duel runs for minutes) or must reset it on progress. A running duel appears in the usage view and can be stopped with `roundtable stop <persona> --session duel-<id>`. See [tools](../tools.md#start_duel). Duel calls are recorded in the usage ledger with the persona as the agent, so `roundtable usage` shows duel spend per persona.
+The `start_duel` tool runs the same engine and returns a compact result: the duel id, winner, tally, each team's artifact title, kind and ok flag, the verdicts, the dissents, a per-persona usage summary, process metrics, chosen artifact directory/file names, and the archive id (`duels/<id>.json`). The `stages` argument accepts integers 1–4. Human judging and resume are CLI-only and absent from the MCP schema; the tool runs a whole duel at once. It never returns artifact source. No room is opened: the live room belongs to the CLI, and `start_duel` returns only the result (replay the archive with `roundtable duel --replay` to see it in a room). The tool sends a progress notification on every turn, artifact and verdict, so the host needs a long request timeout (a duel runs for minutes) or must reset it on progress. A running duel appears in the usage view and can be stopped with `roundtable stop <persona> --session duel-<id>`. See [tools](../tools.md#start_duel). Duel calls are recorded in the usage ledger with the persona as the agent, so `roundtable usage` shows duel spend per persona.
 
 ## A duel as a meeting's focus
 

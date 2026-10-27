@@ -20,7 +20,7 @@ const SECRET = "sk-ant-api03-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
 const ID = "duel-focus-fixture";
 
 function writeDuel(id, edit = (a) => a) {
-  const demo = JSON.parse(readFileSync(new URL("../../examples/duel/demo.json", import.meta.url), "utf8"));
+  const demo = JSON.parse(readFileSync(new URL("../fixtures/duel-v1.json", import.meta.url), "utf8"));
   mkdirSync(join(ROUNDTABLE_HOME, "duels"), { recursive: true });
   const archive = edit(demo);
   writeFileSync(join(ROUNDTABLE_HOME, "duels", `${id}.json`), JSON.stringify(archive));

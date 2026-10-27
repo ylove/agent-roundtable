@@ -74,6 +74,14 @@ function redactVendorTokens(rep: Replace): void {
   rep(/(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])/g, "api_key");
   rep(/(?<![A-Za-z0-9])xox[abprs]-[A-Za-z0-9-]{10,}/g, "api_key");
   rep(/(?<![A-Za-z0-9])r8_[A-Za-z0-9]{20,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])tgp_v1_[A-Za-z0-9_-]{20,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])(?:hf_|gsk_)[A-Za-z0-9]{20,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}/g, "api_key");
+  rep(/(?<![A-Za-z0-9])ya29\.[A-Za-z0-9._-]{20,}/g, "api_key");
+  // Unprefixed credentials use explicit assignment names; ordinary hashes stay visible.
+  rep(/\b((?:aws_secret_access_key|awsSecretAccessKey)["']?\s*[:=]\s*["']?)[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])/gi, "api_key", (_m, p) => p + mark("api_key"));
+  rep(/\b((?:together[_-]?(?:api[_-]?)?key|mistral[_-]?(?:api[_-]?)?key|hmac[_-]?secret)["']?\s*[:=]\s*["']?)[A-Za-z0-9_-]{32,128}(?![A-Za-z0-9_-])/gi, "api_key", (_m, p) => p + mark("api_key"));
   rep(/(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}/g, "api_key");
   rep(/(?<![A-Za-z0-9])(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}/g, "api_key");
   rep(/(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36}/g, "api_key");

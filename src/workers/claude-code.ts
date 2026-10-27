@@ -14,7 +14,7 @@
 import { reportUsage } from "../providers/usage.js";
 import { execFile, spawn } from "node:child_process";
 import { ROUNDTABLE_HOME } from "../config.js";
-import { findExecutable } from "../executables.js";
+import { findExecutable, isExecutableFile } from "../executables.js";
 import { preview } from "../execution/events.js";
 import type {
   RunAccumulator,
@@ -396,6 +396,7 @@ export class ClaudeCodeDriver implements WorkerDriver {
   }
 
   private cli(): string {
+    if (this.cliOverride !== undefined && !isExecutableFile(this.cliOverride)) throw new Error("The claude CLI override must be an absolute path to a regular executable.");
     const cli = this.cliOverride ?? findExecutable("claude");
     if (!cli) throw new Error("The claude CLI is not on PATH");
     return cli;

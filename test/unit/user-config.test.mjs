@@ -13,7 +13,7 @@ function fixture(t) {
   writeFileSync(file, '', { mode: 0o600 });
   return { home, file };
 }
-test('shell > package > pointed file; only allowed pointed keys are copied', t => {
+test('shell > package > pointed file; both files copy only allowed keys', t => {
   const { home, file } = fixture(t);
   const packageEnvFile = join(home, 'package.env');
   writeFileSync(packageEnvFile, 'OPENAI_API_KEY=package\nPACKAGE_SETTING=enabled\n');
@@ -28,7 +28,7 @@ test('shell > package > pointed file; only allowed pointed keys are copied', t =
   assert.equal(env.OPENAI_COMPATIBLE_API_KEY, 'external');
   assert.equal(env.ROUNDTABLE_ANTHROPIC_MODEL, 'sonnet');
   assert.equal(env.ROUNDTABLE_EXECUTION_MODEL, 'custom');
-  assert.equal(env.PACKAGE_SETTING, 'enabled');
+  assert.equal(env.PACKAGE_SETTING, undefined);
   for (const key of ['DATABASE_PASSWORD', 'PATH', 'ROUNDTABLE_HOME', 'ROUNDTABLE_AGENTS_DIR']) assert.equal(env[key], undefined);
   assert.deepEqual(warnings, []);
   assert.equal(allowedEnvKey('ROUNDTABLE_MODEL'), false);
@@ -106,7 +106,7 @@ test('package loader and pointed loader compose in a fresh isolated package', t 
   assert.equal(child.status, 0, child.stderr);
   assert.deepEqual(JSON.parse(child.stdout), ['shell', 'shell-openai']);
 });
-test('the OpenAI-compatible endpoint and key are imported together, only when the shell set neither', t => {
+test('env files supply compatible credentials only when the shell set neither endpoint nor key', t => {
   const { home, file } = fixture(t);
   writeFileSync(file, 'OPENAI_COMPATIBLE_BASE_URL=http://127.0.0.1:1234/v1\nOPENAI_COMPATIBLE_API_KEY=file-key\n', { mode: 0o600 });
   const mixed = { ROUNDTABLE_ENV_FILE: file, OPENAI_COMPATIBLE_API_KEY: 'shell-key' };
@@ -115,7 +115,7 @@ test('the OpenAI-compatible endpoint and key are imported together, only when th
   assert.equal(mixed.OPENAI_COMPATIBLE_BASE_URL, undefined);
   const clean = { ROUNDTABLE_ENV_FILE: file };
   loadUserEnvironment({ home, env: clean, warn: () => {} });
-  assert.equal(clean.OPENAI_COMPATIBLE_BASE_URL, 'http://127.0.0.1:1234/v1');
+  assert.equal(clean.OPENAI_COMPATIBLE_BASE_URL, undefined);
   assert.equal(clean.OPENAI_COMPATIBLE_API_KEY, 'file-key');
 });
 test('an env file or config.json that others can modify is refused without naming a path', t => {
@@ -141,5 +141,31 @@ test('the package .env cannot complete an endpoint and key pair the shell starte
   assert.equal(env.OPENAI_COMPATIBLE_API_KEY, undefined);
   const fresh = {};
   loadUserEnvironment({ home, env: fresh, packageEnvFile, warn: () => {} });
-  assert.deepEqual([fresh.OPENAI_COMPATIBLE_BASE_URL, fresh.OPENAI_COMPATIBLE_API_KEY], ['https://package.example/v1', 'package-key']);
+  assert.deepEqual([fresh.OPENAI_COMPATIBLE_BASE_URL, fresh.OPENAI_COMPATIBLE_API_KEY], [undefined, 'package-key']);
+});
+
+test('package and pointed env files share the credential and model allowlist', t => {
+  const { home, file } = fixture(t);
+  const data = [
+    'NODE_TLS_REJECT_UNAUTHORIZED=0', 'NODE_EXTRA_CA_CERTS=/private/certs',
+    'HTTPS_PROXY=https://proxy.example', 'ALL_PROXY=https://proxy.example',
+    'ROUNDTABLE_CHROME_PATH=./x', 'ROUNDTABLE_WORKER_AUTH=api_key',
+    'ROUNDTABLE_ALLOW_LOCAL_SANDBOX=1', 'ROUNDTABLE_SANDBOX_IMAGE=custom',
+    'ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS=https://provider.example',
+    'OPENAI_COMPATIBLE_BASE_URL=https://provider.example', 'OPENAI_COMPATIBLE_PROXY=x',
+    'ROUNDTABLE_EXECUTION_BASE_URL=https://provider.example', 'OLLAMA_URL=https://provider.example',
+    'ANTHROPIC_API_KEY=fixture-provider-value', 'ROUNDTABLE_ANTHROPIC_MODEL=fixture-model',
+  ];
+  writeFileSync(file, data.join('\n'));
+  for (const options of [{ packageEnvFile: file }, { env: { ROUNDTABLE_ENV_FILE: file } }]) {
+    const env = options.env ?? {};
+    loadUserEnvironment({ home, env, ...options, warn: () => {} });
+    assert.equal(env.ANTHROPIC_API_KEY, 'fixture-provider-value');
+    assert.equal(env.ROUNDTABLE_ANTHROPIC_MODEL, 'fixture-model');
+    for (const row of data.slice(0, -2)) assert.equal(env[row.split('=')[0]], undefined);
+  }
+  chmodSync(file, 0o666);
+  const env = {};
+  loadUserEnvironment({ home, env, packageEnvFile: file, warn: () => {} });
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
 });

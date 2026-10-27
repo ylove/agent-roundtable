@@ -5,6 +5,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, createWriteStream, openSync } from "node:fs";
 import { childEnv } from "../security/child-env.js";
+import { findExecutable, isExecutableFile } from "../executables.js";
 import { scrubAndCap } from "../security/secrets.js";
 import { killTree, runQuiet } from "../sandbox/process.js";
 
@@ -44,7 +45,8 @@ function spawnDocker(docker: string, args: string[], stdinFile: string, stdout: 
   }
 }
 
-export function realDocker(docker = "docker"): PreviewDocker {
+export function realDocker(override?: string): PreviewDocker {
+  const docker = override === undefined ? findExecutable("docker") ?? "" : isExecutableFile(override) ? override : "";
   return {
     async info() {
       const r = await runQuiet(docker, ["info", "--format", "{{.ServerVersion}}"], childEnv("docker"), 8_000);

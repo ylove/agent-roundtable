@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { VERSION } from "../config.js";
 import { pidAlive } from "../prototypes/sandbox.js";
 import { childEnv } from "../security/child-env.js";
+import { isExecutableFile } from "../executables.js";
 import { readUserConfig } from "../user-config.js";
 import { parseSecretRef } from "../secrets/ref.js";
 import { registerSecretLiteral } from "../security/secrets.js";
@@ -115,6 +116,8 @@ const defaultCli = (): string => fileURLToPath(new URL("../index.js", import.met
  * process group. Returns its pid; the runner itself takes runner.lock (a second one refuses).
  */
 export function launchRunner(exe: string, opts: LaunchRunnerOptions = {}): { pid: number; log: string } {
+  const binary = opts.execPath ?? process.execPath;
+  if (!isExecutableFile(binary)) throw new Error("The runner executable must be an absolute path to a regular executable.");
   const dir = executionDir(exe);
   let repoRoot: string;
   try {
@@ -137,7 +140,7 @@ export function launchRunner(exe: string, opts: LaunchRunnerOptions = {}): { pid
   const fd = openSync(log, "a", 0o600);
   try {
     fchmodSync(fd, 0o600);
-    const child = spawn(opts.execPath ?? process.execPath, [opts.cliPath ?? defaultCli(), "run", exe], {
+    const child = spawn(binary, [opts.cliPath ?? defaultCli(), "run", exe], {
       detached: true,
       stdio: ["ignore", fd, fd],
       cwd: repoRoot,

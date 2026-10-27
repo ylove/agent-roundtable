@@ -74,3 +74,19 @@ test('NDJSON escapes C1 controls and line separators', async () => {
   assert.doesNotMatch(raw, new RegExp('[\\u007f-\\u009f\\u2028\\u2029]'));
   assert.equal(JSON.parse(raw).text, text);
 });
+
+test('terminal strips Unicode formatting controls and NDJSON escapes them', () => {
+  const codes = [0x061c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2060, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff];
+  const text = 'Visible café 中文 ' + String.fromCharCode(...codes) + ' text';
+  const terminal = sink(), ndjson = sink();
+  createTerminalObserver({ output: terminal }).onEvent(turn(text));
+  createNdjsonObserver(ndjson).onEvent(turn(text));
+  for (const code of codes) {
+    const character = String.fromCharCode(code);
+    assert.ok(!terminal.read().includes(character));
+    assert.ok(!ndjson.read().includes(character));
+    assert.ok(ndjson.read().includes('\\u' + code.toString(16).padStart(4, '0')));
+  }
+  assert.match(terminal.read(), /Visible café 中文/);
+  assert.equal(JSON.parse(ndjson.read()).text, text);
+});

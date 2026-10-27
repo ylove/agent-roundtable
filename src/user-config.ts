@@ -4,13 +4,15 @@
 
 import { closeSync, fstatSync, openSync, readFileSync, statSync, constants, mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { parse } from "dotenv";
 import { PROVIDER_IDS, type LLMProvider } from "./provider-ids.js";
 
 import { validateRuntimeConfig, type RuntimeSpec } from "./runtimes/spec.js";
 import { validateConnectors, ENV_NAME, type ConnectorSpec } from "./connectors/config.js";
-import { isExecutableFile } from "./executables.js";
+import { findExecutable, isExecutableFile } from "./executables.js";
+import { childEnv } from "./security/child-env.js";
 import { parseSecretRef } from "./secrets/ref.js";
 import { resolveSecretSync } from "./secrets/broker.js";
 import { secretReason } from "./secrets/backends.js";
@@ -46,7 +48,7 @@ export interface UserConfig {
 type Environment = Record<string, string | undefined>;
 const allowedKeys = new Set(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY", "REPLICATE_API_TOKEN"]);
 export function allowedEnvKey(key: string): boolean {
-  return allowedKeys.has(key) || /^OPENAI_COMPATIBLE_\w+$/.test(key) || /^ROUNDTABLE_\w+_MODEL$/.test(key);
+  return allowedKeys.has(key) || key === "OPENAI_COMPATIBLE_API_KEY" || key === "OPENAI_COMPATIBLE_MODEL" || /^ROUNDTABLE_(?:ANTHROPIC|OPENAI|TOGETHER|REPLICATE|OLLAMA|EXECUTION)_MODEL$/.test(key);
 }
 export function userConfigHome(env: Environment = process.env): string {
   return env.ROUNDTABLE_HOME || join(homedir(), ".agent-roundtable");
@@ -149,7 +151,24 @@ export function unsetConfigEntry(kind: "secrets" | "connectors", name: string, h
   saveUserConfig({ ...config, [kind]: entries }, home);
 }
 
-/** Preserve shell values; the package file and allowed pointed keys fill gaps. */
+let warnedTrackedPackageEnv = false;
+
+/** Report tracked package credentials once, without naming the file. */
+function warnTrackedPackageEnv(file: string, source: Environment, warn: (message: string) => void): void {
+  if (warnedTrackedPackageEnv) return;
+  const env = childEnv("git", {}, source);
+  const git = findExecutable("git", env.PATH);
+  if (!git) return;
+  try {
+    execFileSync(git, ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "ls-files", "--error-unmatch", "--", basename(file)], {
+      cwd: dirname(file), env, timeout: 2000, maxBuffer: 4096, stdio: "ignore",
+    });
+  } catch { return; }
+  warnedTrackedPackageEnv = true;
+  warn("The package env file is tracked by git; keep credentials in an untracked private file.");
+}
+
+/** Preserve shell values; both env files fill only allowed keys. */
 export function loadUserEnvironment(options: {
   env?: Environment; home?: string; packageEnvFile?: string; warn?: (message: string) => void;
 } = {}): void {
@@ -158,18 +177,19 @@ export function loadUserEnvironment(options: {
   const referenced = new Set<string>();
   const warn = options.warn ?? ((message: string) => console.error(message));
   const enabled = (env.ROUNDTABLE_DOTENV ?? "").trim().toLowerCase() !== "off";
-  const apply = (data: Record<string, string>, filtered: boolean) => {
-    // The endpoint and its key travel together, and only when the shell set neither.
-    const pair = ["OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_API_KEY"];
-    const pairFree = pair.every(key => shell[key] === undefined && (env[key] === undefined || referenced.has(key)));
+  const apply = (data: Record<string, string>) => {
     for (const [key, value] of Object.entries(data)) {
-      if (filtered && referenced.has(key)) continue;
-      if (pair.includes(key)) { if (pairFree && (!filtered || allowedEnvKey(key))) env[key] = value; continue; }
-      if ((!filtered || allowedEnvKey(key)) && env[key] === undefined) env[key] = value;
+      if (!allowedEnvKey(key) || referenced.has(key)) continue;
+      // Launcher-selected endpoints use launcher-selected credentials.
+      if (key === "OPENAI_COMPATIBLE_API_KEY" && shell.OPENAI_COMPATIBLE_BASE_URL !== undefined) continue;
+      if (env[key] === undefined) env[key] = value;
     }
   };
   if (enabled && options.packageEnvFile) {
-    try { apply(parse(readRegular(options.packageEnvFile).text), false); }
+    try {
+      warnTrackedPackageEnv(options.packageEnvFile, env, warn);
+      apply(parse(readRegular(options.packageEnvFile, true).text));
+    }
     catch { /* The package .env is optional. */ }
   }
   let config: UserConfig = {};
@@ -193,7 +213,7 @@ export function loadUserEnvironment(options: {
     try {
       const file = readRegular(envFile, true);
       if (file.mode & 0o044) warn("The configured env file allows group or world read; restrict its permissions to 0600.");
-      apply(parse(file.text), true);
+      apply(parse(file.text));
     } catch { warn("Unable to load the configured env file; it must be an absolute path to a regular file that you own and that others cannot modify."); }
   }
 }

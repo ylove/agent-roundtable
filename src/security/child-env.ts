@@ -6,6 +6,7 @@
 // ============================================================================
 
 import { configuredSecretLiterals, SCRUB_LITERALS_ENV } from "./secrets.js";
+import { absoluteSearchPath } from "../executables.js";
 export { SECRET_NAME_RE } from "./secrets.js";
 
 export type ChildEnvProfile =
@@ -167,6 +168,8 @@ export function childEnv(
     else env[k] = v;
   }
   delete env[SCRUB_LITERALS_ENV];
+  // Apply after extras so every child and grandchild uses absolute PATH directories.
+  env.PATH = absoluteSearchPath(env.PATH ?? "");
   if (profile === "runner" || profile === "serve") {
     const literals = configuredSecretLiterals({ ...source, ...extra });
     if (literals.length) env[SCRUB_LITERALS_ENV] = JSON.stringify(literals);

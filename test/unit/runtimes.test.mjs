@@ -36,7 +36,7 @@ test('stdin prompts, one-element argv prompts, separate model values and fresh r
   const prompt = '--foo; rm -rf / $(x)';
   const spec = { argv: ['argv-echo', '-p', '{prompt}'], modelFlag: '--model', output: { mode: 'text' } };
   const echo = JSON.parse((await runRuntime(spec, prompt, { env, model: 'safe-model:1' })).text);
-  assert.deepEqual(echo.args, ['-p', prompt, '--model', 'safe-model:1']);
+  assert.deepEqual(echo.args, ['-p', '\n' + prompt, '--model', 'safe-model:1']);
   assert.equal(echo.stdin, ''); assert.notEqual(echo.cwd, process.cwd()); assert.equal(existsSync(echo.cwd), false);
   const stdin = JSON.parse((await runRuntime(text('argv-echo'), prompt, { env })).text);
   assert.equal(stdin.stdin, prompt); assert.deepEqual(stdin.args, []);
@@ -179,8 +179,8 @@ test('JSON paths include arrays; missing, invalid and nonnumeric usage stays def
 });
 
 test('strict config validation, overrides, extension and provider collision rejection', t => {
-  const custom = { argv: ['argv-echo'], output: { mode: 'text' }, modelFlag: '--model' };
-  const registry = runtimeRegistry({ custom, hermes: { timeoutMs: 1000, argv: ['hermes', '{prompt}'] } });
+  const custom = { argv: [join(fixtures, 'argv-echo')], output: { mode: 'text' }, modelFlag: '--model' };
+  const registry = runtimeRegistry({ custom, hermes: { timeoutMs: 1000, argv: [join(fixtures, 'hermes'), '{prompt}'] } });
   assert.equal(registry.hermes.timeoutMs, 1000); assert.equal(registry.hermes.output.stripDecoration, true);
   assert.deepEqual(registry.custom, custom);
   for (const config of [{ openai: custom }, { 'Upper': custom }, { ['a'.repeat(33)]: custom }, { custom: { ...custom, shell: true } }, { custom: { ...custom, argv: 'echo bad' } }, { custom: { ...custom, argv: ['echo bad'] } }, { custom: { ...custom, argv: ['../binary'] } }, { custom: { ...custom, argv: ['sh', '-c', 'echo bad'] } }, { custom: { ...custom, argv: ['x', 'prefix{prompt}'] } }, { custom: { ...custom, env: ['BAD=VALUE'] } }, { custom: { ...custom, timeoutMs: Infinity } }, { custom: { ...custom, cwd: 'relative' } }, { custom: { ...custom, output: { mode: 'json', path: '__proto__.x' } } }, { custom: {} }, { hermes: { cwd: fixtures } }]) assert.throws(() => validateRuntimeConfig(config));
@@ -233,7 +233,7 @@ test('seat dispatch persists estimated and reported runtime usage/cost in the ta
 });
 
 test('runtimes command lists profile detections in JSON', () => {
-  const profiles = JSON.parse(execFileSync(process.execPath, ['dist/index.js', 'runtimes', '--json'], { env: { ...process.env, PATH: env.PATH }, encoding: 'utf8' }));
+  const profiles = JSON.parse(execFileSync(process.execPath, ['dist/index.js', 'runtimes', '--json'], { env: { ...process.env, PATH: env.PATH, ROUNDTABLE_DOTENV: 'off' }, encoding: 'utf8' }));
   assert.deepEqual(profiles.map(p => p.name), ['hermes', 'openclaw', 'gemini', 'codex']);
   assert.ok(profiles.every(p => p.found && p.path.startsWith(fixtures) && p.version.includes('fixture')));
 });
@@ -260,7 +260,7 @@ test('duel uses configured runtime dispatch for turns, artifacts, judging and le
   const home = mkdtempSync(join(tmpdir(), 'runtime-duel-'));
   process.env.ROUNDTABLE_HOME = home; process.env.PATH = env.PATH;
   t.after(() => { process.env.ROUNDTABLE_HOME = previous.home; process.env.PATH = previous.path; rmSync(home, { recursive: true, force: true }); setLedgerHome(undefined); });
-  writeFileSync(join(home, 'config.json'), JSON.stringify({ runtimes: { constructor: { argv: ['duel-runtime'], output: { mode: 'text' } } } }), { mode: 0o600 });
+  writeFileSync(join(home, 'config.json'), JSON.stringify({ runtimes: { constructor: { argv: [join(fixtures, 'duel-runtime')], output: { mode: 'text' } } } }), { mode: 0o600 });
   setLedgerHome(home);
   const { assertSeatCredentials } = await import('../../dist/table/seats.js');
   assert.doesNotThrow(() => assertSeatCredentials([{ id: 'designer', provider: 'constructor' }], {}));

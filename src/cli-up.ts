@@ -10,7 +10,7 @@
 // paths and flags through the same setters as `roundtable config set`; it never stores a secret value.
 // ============================================================================
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -60,6 +60,12 @@ export function nodeMeets(version: string, engines: string): boolean {
 }
 
 /** Describe the first roundtable on PATH without printing its path. */
+/** A small shell wrapper (`#!` script) that runs this package's entry point by its path counts as this package. */
+export function wrapperRunsEntry(script: string, entries: readonly string[]): boolean {
+  if (script.length > 4096 || !script.startsWith("#!")) return false;
+  return entries.some(entry => entry && script.split(/\r?\n/).some(line => !/^\s*#/.test(line) && line.split(/[\s"';]+/).includes(entry)));
+}
+
 export function checkRoundtableBin(bin: { path: string | null; ours: boolean }): Check {
   return {
     id: "bin", label: "roundtable on PATH", essential: false, ok: bin.path === null || bin.ours,
@@ -252,7 +258,9 @@ async function defaultProbes(): Promise<Probes> {
       if (!path) return { path: null, ours: false };
       try {
         const real = realpathSync(path);
-        if (real === realpathSync(fileURLToPath(new URL("./index.js", import.meta.url)))) return { path, ours: true };
+        const entry = fileURLToPath(new URL("./index.js", import.meta.url));
+        if (real === realpathSync(entry)) return { path, ours: true };
+        if (statSync(real).size <= 4096 && wrapperRunsEntry(readFileSync(real, "utf8"), [entry, realpathSync(entry)])) return { path, ours: true };
         for (let dir = dirname(real); ; dir = dirname(dir)) {
           const manifest = join(dir, "package.json");
           if (existsSync(manifest)) {

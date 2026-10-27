@@ -38,6 +38,7 @@ function withEnv(t, key, value) {
 
 test("runtimeDriverProblem: known, unknown, codex, malformed and gated off", () => {
   assert.equal(worker.runtimeDriverProblem("runtime:gemini", ON), undefined);
+  assert.equal(worker.runtimeDriverProblem("runtime:agy", ON), undefined);
   assert.equal(worker.runtimeDriverProblem("runtime:hermes", ON), undefined);
   assert.match(worker.runtimeDriverProblem("runtime:nonesuch", ON), /unknown runtime "nonesuch".*roundtable runtimes/);
   assert.match(worker.runtimeDriverProblem("runtime:codex", ON), /use the codex driver/);
@@ -87,14 +88,23 @@ test("buildRuntimeWorkerArgv: per-profile flags, the prompt placeholder kept, mo
     "gemini", "--approval-mode", "auto_edit", "--sandbox", "--allowed-mcp-server-names", "roundtable",
     "-p", "{prompt}", "--output-format", "json", "--model", "gemini-x",
   ]);
+  assert.deepEqual(argv("agy", "gemini-3.8-flash-medium"), [
+    "agy", "--mode", "accept-edits", "--sandbox", "-p", "{prompt}", "--output-format", "json",
+    "--disable-slash-commands", "--model", "gemini-3.8-flash-medium",
+  ]);
+  const overridden = { ...getRuntime("agy"), argv: ["agy", "--mode=auto", "-p", "{prompt}", "--mode", "plan", "--disable-slash-commands"] };
+  assert.deepEqual(worker.buildRuntimeWorkerArgv(overridden, worker.workerProfile("agy")), [
+    "agy", "--mode", "accept-edits", "--sandbox", "-p", "{prompt}", "--disable-slash-commands",
+  ]);
+  assert.deepEqual(worker.workerProfile("agy").apiKeyEnv, []);
   assert.throws(() => argv("hermes", "-bad"), /Invalid runtime model/);
   // A configured runtime that reads stdin keeps "-" last.
   const custom = { argv: ["my-agent", "run", "-"], output: { mode: "text" }, modelFlag: "--model" };
   assert.deepEqual(worker.buildRuntimeWorkerArgv(custom, worker.workerProfile("my-agent"), "m"), ["my-agent", "run", "--model", "m", "-"]);
   assert.throws(() => worker.buildRuntimeWorkerArgv({ argv: ["x"], output: { mode: "text" } }, worker.workerProfile("x"), "m"), /does not support a model/);
-  // Only gemini has MCP support and a sandbox flag; a configured runtime has neither.
-  assert.deepEqual(["hermes", "openclaw", "gemini", "other"].map((n) => [worker.workerProfile(n).mcp, worker.workerProfile(n).sandboxed]),
-    [[false, false], [false, false], [true, true], [false, false]]);
+  // agy has a sandbox but no per-run MCP wiring; a configured runtime has neither.
+  assert.deepEqual(["hermes", "openclaw", "gemini", "agy", "other"].map((n) => [worker.workerProfile(n).mcp, worker.workerProfile(n).sandboxed]),
+    [[false, false], [false, false], [true, true], [false, true], [false, false]]);
 });
 
 test("the worker protocol: tools for an MCP profile, driver-side submit for the others", () => {
@@ -263,6 +273,48 @@ test("hermes: an edit outside the leases is rejected at submit and nothing outsi
   const acc = { done: false, lines: 0 };
   for (const line of logOf(s.launch).split("\n").filter(Boolean)) s.driver.parse(line, acc);
   assert.equal(acc.isError, true);
+});
+
+test("agy: sandboxed driver-side submit, reported tokens, sign-in auth and no injected MCP settings", async (t) => {
+  const s = await setup(t, {
+    driverId: "runtime:agy", prompt: "FIXTURE write src/api/agy.js",
+    env: { ROUNDTABLE_WORKER_AUTH: "api_key", GEMINI_API_KEY: "gem-key", GOOGLE_API_KEY: "goog-key" },
+  });
+  const h = await s.driver.launch({ ...s.launch, model: "gemini-3.8-flash-medium" });
+  assert.equal((await workerExit(h.pid)).code, 0, logOf(s.launch));
+  const report = reportOf(s.launch);
+  assert.deepEqual(report.argv, [
+    "--mode", "accept-edits", "--sandbox", "-p", "<prompt>", "--output-format", "json",
+    "--disable-slash-commands", "--model", "gemini-3.8-flash-medium",
+  ]);
+  assert.equal(realpathSync(report.cwd), realpathSync(s.wt.path));
+  assert.equal(report.settings, undefined);
+  assert.ok(!report.envNames.some(n => /API_KEY|TOKEN|^ROUNDTABLE_/.test(n)));
+  assert.equal(existsSync(join(s.files.dir, "token")), false);
+  assert.equal(existsSync(join(s.files.dir, "runtime-settings.json")), false);
+  const submitted = await events(s.store, "task.submitted");
+  assert.equal(submitted.length, 1);
+  assert.deepEqual(submitted[0].payload.files, ["src/api/agy.js"]);
+  const result = resultOf(s.launch);
+  assert.equal(result.ok, true);
+  assert.equal(result.submitted, true);
+  assert.equal(result.usage_estimated, false);
+  assert.deepEqual(result.usage, { inputTokens: 7709, outputTokens: 1 });
+  assert.equal(result.cost_usd, undefined);
+  assert.match(workerProtocol("api", "runtime:agy"), /You have no roundtable tools/);
+  assert.match(confinementNote("agy", worker.workerProfile("agy")), /agy's own sandbox flag/);
+});
+
+test("agy exit-0 ERROR and empty SUCCESS fail the worker without submitting edits", async (t) => {
+  for (const marker of ["FAIL_ME", "DENY_ME"]) {
+    const s = await setup(t, { driverId: "runtime:agy", prompt: `FIXTURE write src/api/partial.js\n${marker}` });
+    const h = await s.driver.launch(s.launch);
+    assert.equal((await workerExit(h.pid)).code, 1, logOf(s.launch));
+    assert.equal((await events(s.store, "task.submitted")).length, 0);
+    const result = resultOf(s.launch);
+    assert.equal(result.ok, false);
+    assert.match(result.text, marker === "FAIL_ME" ? /failure status: ERROR: boom/ : /no final text/);
+  }
 });
 
 test("a non-zero exit fails the attempt: nothing is submitted, the failure is relayed", async (t) => {

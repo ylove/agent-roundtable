@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.1.0 (unreleased)
+
+- Add Google Antigravity (`agy`) as an explicit seat runtime and opt-in heads-down worker, with JSON status checks, reported token usage and driver-side submission (#230, WS33).
+
 ## 2.0.0 (not yet published to npm)
 
 2.0 runs the table from a terminal as well as over MCP, and keeps heads-down runs going on their own. Headlines: the duel mode and the `roundtable` CLI with per-seat models and provider judgment; CLI runtimes (Hermes, OpenClaw, Gemini CLI, Codex) as seats and as heads-down workers; the agents library and Casting Call; a credentials broker with MCP connectors for workers and seats; page checks and Docker dev-server previews; swarms; `roundtable serve` with private check-ins; `roundtable up` and `doctor`; a Docker image, a Claude Code plugin and an MCP registry listing; and the move to the Apache License 2.0. 1.1.0 was never published and ships with this release.

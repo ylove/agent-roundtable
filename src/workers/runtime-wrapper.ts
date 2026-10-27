@@ -154,7 +154,11 @@ async function main(): Promise<void> {
     const parsed = parseRuntimeOutput(spec, raw);
     ({ text, usage } = parsed);
     costUsd = parsed.costUsd;
-  } catch {
+  } catch (error) {
+    // Profiles with a result status must not submit a failed/empty result even when the CLI exits 0.
+    if (config.output.mode === "json" && config.output.status) {
+      return finish(failure(error instanceof Error ? error.message : "Runtime returned invalid output", estimatedUsage("")), 1);
+    }
     /* no parseable final text: the run still ended cleanly */
   }
   const result: Omit<RuntimeResultLine, "type"> = {

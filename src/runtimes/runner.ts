@@ -185,6 +185,15 @@ export function parseRuntimeOutput(spec: RuntimeSpec, stdout: string, env: NodeJ
     try { events = output.mode === "json" ? [JSON.parse(stdout)] : stdout.split(/\r?\n/).filter(v => v.trim()).map(v => JSON.parse(v)); }
     catch { throw new Error("Runtime returned invalid JSON output."); }
     for (const event of events) {
+      if (output.mode === "json" && output.status) {
+        const status = runtimePath(event, output.status.path);
+        if (status !== output.status.success) {
+          const error = output.status.errorPath ? runtimePath(event, output.status.errorPath) : undefined;
+          const reason = [typeof status === "string" ? status : "missing or invalid status", typeof error === "string" ? error : ""].filter(Boolean).join(": ");
+          // Scrub decoded strings before capping, so truncation cannot expose a partial secret.
+          throw new Error(`Runtime returned failure status: ${scrubSecrets(reason, env).text.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 500)}`);
+        }
+      }
       extract(event);
       if (output.mode === "json" || Object.entries(output.filter).every(([path, expected]) => {
         const actual = runtimePath(event, path);

@@ -10,7 +10,7 @@ import { readTableLines } from "../../dist/usage/table.js";
 import { abortSession } from "../../dist/usage/session-scope.js";
 import { json, stubFetch } from "./helpers.mjs";
 
-const options = { topic: "60-second budgeting game", teamA: ["designer", "builder"], teamB: ["marketer", "skeptic"], judges: ["cfo", "safety-reviewer"] };
+const options = { stages: 1, topic: "60-second budgeting game", teamA: ["designer", "builder"], teamB: ["marketer", "skeptic"], judges: ["cfo", "safety-reviewer"] };
 const seats = [
   ["designer", "A", "designer"], ["builder", "A", "builder"],
   ["marketer", "B", "designer"], ["skeptic", "B", "builder"],
@@ -395,6 +395,6 @@ test("--no-page-check and MCP page_check opt out; old archives still replay with
     { resolveSeats: () => seats, checkPage: async () => { throw new Error("checker must not run"); }, startRoom: async () => { throw new Error("room must not start"); } });
   assert.ok(events.filter(e => e.type === "prototype").every(e => e.check.reason === "disabled"));
   const replayed = [];
-  await replayDuel(new URL("../../examples/duel/demo.json", import.meta.url).pathname, { onEvent(e) { replayed.push(e); } }, { speed: 100000 });
+  await replayDuel(new URL("../fixtures/duel-v1.json", import.meta.url).pathname, { onEvent(e) { replayed.push(e); } }, { speed: 100000 });
   assert.ok(replayed.filter(e => e.type === "prototype").every(e => e.check === undefined));
 });

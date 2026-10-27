@@ -16,6 +16,7 @@ export function validateDuelOptions(opts: DuelOptions): void {
   const dup = keys.find((key, i) => keys.indexOf(key) !== i);
   if (dup) throw new Error(`Persona "${dup}" appears more than once; each persona holds one seat across both teams and the judges.`);
   if (opts.kind !== undefined && !DUEL_KINDS.includes(opts.kind)) throw new Error(`kind must be one of ${DUEL_KINDS.join(", ")}.`);
+  if (opts.stages !== undefined && (!Number.isInteger(opts.stages) || opts.stages < 1 || opts.stages > 4)) throw new Error("stages must be an integer from 1 to 4.");
   if (opts.connectors !== undefined && (!Array.isArray(opts.connectors) || opts.connectors.some(c => typeof c !== "string"))) throw new Error("connectors must be a list of connector names.");
   if (opts.seatConnectors !== undefined && (typeof opts.seatConnectors !== "object" || opts.seatConnectors === null || Array.isArray(opts.seatConnectors))) throw new Error("seat_connectors must map seat names to connector names.");
   if (opts.criteria !== undefined) {

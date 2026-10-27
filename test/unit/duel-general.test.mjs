@@ -16,7 +16,7 @@ import { json, stubFetch } from "./helpers.mjs";
 // fetch is stubbed for the providers, so the room is read over a plain socket.
 const get = url => new Promise((resolve, reject) => http.get(url, res => { let text = ""; res.setEncoding("utf8"); res.on("data", c => { text += c; }); res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, text })); }).on("error", reject));
 const mkSeats = names => names.map(([name, team, role]) => ({ id: name, name, team, role, provider: "openai_compatible", model: "claude-sonnet-5-5", prompt: `You are the ${name}.` }));
-const base = { teamA: ["designer", "builder"], teamB: ["marketer", "skeptic"], judges: ["cfo"] };
+const base = { stages: 1, teamA: ["designer", "builder"], teamB: ["marketer", "skeptic"], judges: ["cfo"] };
 const seats2 = mkSeats([["designer", "A"], ["builder", "A"], ["marketer", "B"], ["skeptic", "B"], ["cfo", "judge"]]);
 
 const artifacts = {
@@ -288,10 +288,10 @@ test("the archive stays backward compatible: the demo replays, and a general arc
   const demo = new URL("../../examples/duel/demo.json", import.meta.url);
   const replayed = await replayDuel(demo, { onEvent(e) { events.push(e); } }, { speed: 100000 });
   assert.equal(replayed.winner, "A");
-  assert.equal(events.filter(e => e.type === "prototype" && e.ok).length, 2);
+  assert.equal(events.filter(e => e.type === "prototype" && e.ok).length, 8);
   const { result } = await run(t, { kind: "code" });
   const archive = JSON.parse(await readFile(result.archivePath, "utf8"));
-  assert.equal(archive.version, 1);
+  assert.equal(archive.version, 2);
   assert.equal(archive.events[0].kind, "code");
   assert.ok(Array.isArray(archive.events[0].criteria) && archive.events[0].teams.A.length === 2);
   assert.equal(archive.prototypes[0].files.length, 2);

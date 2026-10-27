@@ -1,10 +1,10 @@
 import { open } from "node:fs/promises";
 import type { PrototypeFile } from "../prototypes/parse.js";
 import { MAX_FILES, MAX_TOTAL_BYTES, PROTOTYPE_KINDS, validatePath } from "../prototypes/parse.js";
-import type { DuelResult, Seat, TableEvent, TableObserver } from "./events.js";
+import type { DuelResult, Seat, TableEvent, TableObserver, TeamMetrics } from "./events.js";
 
 export interface DuelArchive {
-  version: 1;
+  version: 1 | 2;
   events: TableEvent[];
   /** Contents indexed by submission event, preserving revisions during replay. */
   prototypes: { eventIndex: number; team: "A" | "B"; files: PrototypeFile[] }[];
@@ -45,16 +45,38 @@ function validCheck(check: import("../prototypes/page-check.js").PageCheck | und
     [check.consoleErrors, check.exceptions].every(xs => Array.isArray(xs) && xs.length <= 10 && xs.every(x => text(x) && x.length <= 300)) &&
     (check.reason === undefined || (text(check.reason) && check.reason.length <= 300)));
 }
+const positive = (value: unknown): value is number => Number.isInteger(value) && (value as number) > 0;
+const stageIndex = (value: unknown): value is number => positive(value) && value <= 4;
+function validMetrics(value: Record<"A" | "B", TeamMetrics> | undefined): boolean {
+  return value === undefined || (!!value && [value.A, value.B].every(m => m &&
+    [m.elapsedMs, m.costUsd].every(count) && stageIndex(m.stagesTotal) &&
+    [m.stagesDone, m.inputTokens, m.outputTokens, m.unpricedTokens, m.turns, m.failedTurns, m.versions,
+      m.rewrites, m.validationFailures, m.pageErrors, m.toolCalls].every(n => count(n) && Number.isInteger(n)) &&
+    m.stagesDone <= m.stagesTotal && m.failedTurns <= m.turns &&
+    (m.finishedAt === undefined || date(m.finishedAt)) && (m.estimated === undefined || typeof m.estimated === "boolean")));
+}
+function validChosen(chosen: Extract<TableEvent, { type: "end" }>["chosen"]): boolean {
+  return chosen === undefined || (!!chosen && team(chosen.team) && positive(chosen.version) &&
+    text(chosen.dir) && !validatePath(chosen.dir) && Array.isArray(chosen.files) && chosen.files.length > 0 &&
+    chosen.files.length <= MAX_FILES && chosen.files.every(path => text(path) && !validatePath(path)));
+}
 function validEvent(event: TableEvent): boolean {
   if (!event) return false;
   switch (event.type) {
-    case "start": return (event.kind === undefined || PROTOTYPE_KINDS.includes(event.kind)) &&
+    case "stage": return team(event.team) && stageIndex(event.stage) && stageIndex(event.of) && event.stage <= event.of &&
+      text(event.name) && ["started", "done", "failed", "skipped"].includes(event.status) && date(event.ts) &&
+      (event.version === undefined || positive(event.version));
+    case "metrics": return !!event.teams && validMetrics(event.teams) && date(event.ts);
+    case "control": return ["stopped", "resumed"].includes(event.action) && ["room", "terminal", "tool", "deadline"].includes(event.by) && date(event.ts);
+    case "decision": return date(event.ts) && (event.status === "awaiting" || (event.status === "made" && event.by === "human" && team(event.winner) && (event.version === undefined || positive(event.version))));
+    case "start": return (event.stages === undefined || (Array.isArray(event.stages) && event.stages.length >= 1 && event.stages.length <= 4 && event.stages.every((stage, i) => stage && stage.index === i + 1 && text(stage.name)))) &&
+      (event.humanJudge === undefined || typeof event.humanJudge === "boolean") && (event.resumed === undefined || typeof event.resumed === "boolean") && (event.kind === undefined || PROTOTYPE_KINDS.includes(event.kind)) &&
       (event.criteria === undefined || (Array.isArray(event.criteria) && event.criteria.every(text))) &&
       (event.teams === undefined || (!!event.teams && Array.isArray(event.teams.A) && Array.isArray(event.teams.B) && [...event.teams.A, ...event.teams.B].every(text))) &&
       text(event.id) && text(event.topic) && event.mode === "duel" && date(event.startedAt) &&
       Array.isArray(event.seats) && event.seats.every(seat);
     case "turn": return seat(event.seat) && text(event.round) && text(event.text) && date(event.ts);
-    case "prototype": return validCheck(event.check) && (event.version === undefined || (Number.isInteger(event.version) && event.version > 0)) && team(event.team) && seat(event.seat) && typeof event.ok === "boolean" &&
+    case "prototype": return (event.stage === undefined || stageIndex(event.stage)) && validCheck(event.check) && (event.version === undefined || (Number.isInteger(event.version) && event.version > 0)) && team(event.team) && seat(event.seat) && typeof event.ok === "boolean" &&
       (event.title === undefined || text(event.title)) && (event.error === undefined || text(event.error)) &&
       (event.kind === undefined || PROTOTYPE_KINDS.includes(event.kind)) &&
       Array.isArray(event.files) && (event.ok ? isSingle(event.kind) ? event.files.length === 1 : event.files.length >= 1 && event.files.length <= MAX_FILES : event.files.length === 0) &&
@@ -65,7 +87,9 @@ function validEvent(event: TableEvent): boolean {
     case "usage": return count(event.totalCostUsd) && Array.isArray(event.perSeat) && event.perSeat.every(item =>
       item && text(item.seatId) && count(item.inputTokens) && count(item.outputTokens) && count(item.costUsd) &&
       (item.unpricedTokens === undefined || count(item.unpricedTokens)) && (item.estimated === undefined || typeof item.estimated === "boolean"));
-    case "end": return ["A", "B", "tie", "none"].includes(event.winner) && !!event.tally &&
+    case "end": return validMetrics(event.metrics) && validChosen(event.chosen) &&
+      (event.decidedBy === undefined || ["judges", "human"].includes(event.decidedBy)) &&
+      (event.resumable === undefined || typeof event.resumable === "boolean") && ["A", "B", "tie", "none"].includes(event.winner) && !!event.tally &&
       Number.isInteger(event.tally.A) && Number.isInteger(event.tally.B) &&
       (event.aborted === undefined || typeof event.aborted === "boolean") && (event.archivePath === undefined || text(event.archivePath));
     default: return false;
@@ -74,12 +98,13 @@ function validEvent(event: TableEvent): boolean {
 
 function validateArchive(value: unknown): DuelArchive {
   const archive = value as DuelArchive;
-  if (!archive || archive.version !== 1 || !Array.isArray(archive.events) || !Array.isArray(archive.prototypes)) {
+  if (!archive || (archive.version !== 1 && archive.version !== 2) || !Array.isArray(archive.events) || !Array.isArray(archive.prototypes)) {
     throw new Error("Unsupported duel archive.");
   }
   if (archive.events[0]?.type !== "start" || archive.events.at(-1)?.type !== "end" ||
       archive.events.some(e => !validEvent(e)) ||
-      archive.events.slice(1, -1).some(e => e.type === "start" || e.type === "end")) throw new Error("Invalid duel event sequence.");
+      archive.events.slice(1, -1).some(e => e.type === "end" || (e.type === "start" &&
+        (archive.version === 1 || e.resumed !== true || e.id !== (archive.events[0] as Extract<TableEvent, { type: "start" }>).id)))) throw new Error("Invalid duel event sequence.");
   const seen = new Set<number>();
   for (const submission of archive.prototypes) {
     if (!submission) throw new Error("Invalid archived prototype.");
@@ -140,7 +165,7 @@ export async function replayDuel(
   let previousTime: number | undefined;
   for (const [index, event] of archive.events.entries()) {
     signal?.throwIfAborted();
-    const timestamp = event.type === "start" ? event.startedAt : event.type === "turn" ? event.ts : undefined;
+    const timestamp = event.type === "start" ? event.startedAt : "ts" in event ? event.ts : undefined;
     const time = timestamp ? Date.parse(timestamp) : NaN;
     if (Number.isFinite(time)) {
       if (previousTime !== undefined) await delay(Math.max(0, time - previousTime) / speed, signal);
@@ -152,5 +177,7 @@ export async function replayDuel(
   }
   const start = archive.events[0] as Extract<TableEvent, { type: "start" }>;
   const end = archive.events.at(-1) as Extract<TableEvent, { type: "end" }>;
-  return { id: start.id, winner: end.winner, tally: end.tally, aborted: end.aborted ?? false, archivePath };
+  return { id: start.id, winner: end.winner, tally: end.tally, aborted: end.aborted ?? false, archivePath,
+    ...(end.metrics && { metrics: end.metrics }), ...(end.chosen && { chosen: end.chosen }),
+    ...(end.decidedBy && { decidedBy: end.decidedBy }), ...(end.resumable !== undefined && { resumable: end.resumable }) };
 }

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "events": [
     {
       "type": "start",
@@ -56,7 +56,43 @@
           "model": "claude-sonnet-5-5"
         }
       ],
-      "startedAt": "2026-01-01T12:00:00.000Z"
+      "startedAt": "2026-01-01T12:00:00.000Z",
+      "kind": "web",
+      "criteria": [
+        "fit to the brief",
+        "quality of the result",
+        "usability and accessibility",
+        "risk or safety, within your own remit as this judge (take the remit from your persona)",
+        "efficiency of the process: tokens, time, rewrites and errors for the result"
+      ],
+      "teams": {
+        "A": [
+          "designer",
+          "builder"
+        ],
+        "B": [
+          "marketer",
+          "skeptic"
+        ]
+      },
+      "stages": [
+        {
+          "index": 1,
+          "name": "Skeleton"
+        },
+        {
+          "index": 2,
+          "name": "Screens"
+        },
+        {
+          "index": 3,
+          "name": "Working"
+        },
+        {
+          "index": 4,
+          "name": "Polish"
+        }
+      ]
     },
     {
       "type": "turn",
@@ -69,8 +105,93 @@
         "provider": "anthropic",
         "model": "claude-sonnet-5-5"
       },
-      "text": "Choose needs and wants with ten coins. Keep enough for the bus and lunch.",
+      "text": "Ten coins, three screens: welcome, choices, and a clear budget result. Needs before wants.",
       "ts": "2026-01-01T12:00:01.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 1000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 300,
+          "outputTokens": 90,
+          "costUsd": 0.00225,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 1000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "costUsd": 0,
+          "unpricedTokens": 0,
+          "turns": 0,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:01.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "A",
+      "stage": 1,
+      "of": 4,
+      "name": "Skeleton",
+      "status": "started",
+      "ts": "2026-01-01T12:00:02.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 2000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 300,
+          "outputTokens": 90,
+          "costUsd": 0.00225,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 2000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "costUsd": 0,
+          "unpricedTokens": 0,
+          "turns": 0,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:02.000Z"
     },
     {
       "type": "turn",
@@ -83,8 +204,93 @@
         "provider": "together",
         "model": "zai-org/GLM-5.3"
       },
-      "text": "Save toward a goal while paying for daily needs. Finish after five choices.",
-      "ts": "2026-01-01T12:00:01.000Z"
+      "text": "A pocket planner with a 60-second round. Cover bus and lunch, choose a treat, then review savings.",
+      "ts": "2026-01-01T12:00:03.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 3000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 300,
+          "outputTokens": 90,
+          "costUsd": 0.00225,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 3000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 500,
+          "outputTokens": 140,
+          "costUsd": 0.0036,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:03.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "B",
+      "stage": 1,
+      "of": 4,
+      "name": "Skeleton",
+      "status": "started",
+      "ts": "2026-01-01T12:00:04.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 4000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 300,
+          "outputTokens": 90,
+          "costUsd": 0.00225,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 4000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 500,
+          "outputTokens": 140,
+          "costUsd": 0.0036,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:04.000Z"
     },
     {
       "type": "turn",
@@ -97,8 +303,46 @@
         "provider": "openai",
         "model": "gpt-5.6-luna"
       },
-      "text": "One self-contained playable game is ready.",
-      "ts": "2026-01-01T12:00:02.000Z"
+      "text": "Skeleton ready: labelled empty screens and hash navigation.",
+      "ts": "2026-01-01T12:00:07.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 7000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 1200,
+          "outputTokens": 390,
+          "costUsd": 0.00945,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 7000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 500,
+          "outputTokens": 140,
+          "costUsd": 0.0036,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:07.000Z"
     },
     {
       "type": "prototype",
@@ -111,14 +355,156 @@
         "provider": "openai",
         "model": "gpt-5.6-luna"
       },
-      "title": "Ten Coins",
+      "title": "Coin Quest",
+      "kind": "web",
       "files": [
         {
           "path": "index.html",
-          "bytes": 1434
+          "bytes": 1508
         }
       ],
-      "ok": true
+      "ok": true,
+      "version": 1,
+      "stage": 1,
+      "check": {
+        "loaded": true,
+        "consoleErrors": [],
+        "exceptions": [],
+        "failedRequests": 0
+      }
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 7000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 1200,
+          "outputTokens": 390,
+          "costUsd": 0.00945,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 7000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 500,
+          "outputTokens": 140,
+          "costUsd": 0.0036,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:07.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "A",
+      "stage": 1,
+      "of": 4,
+      "name": "Skeleton",
+      "status": "done",
+      "ts": "2026-01-01T12:00:07.000Z",
+      "version": 1
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 7000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1200,
+          "outputTokens": 390,
+          "costUsd": 0.00945,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 7000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 500,
+          "outputTokens": 140,
+          "costUsd": 0.0036,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:07.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "A",
+      "stage": 2,
+      "of": 4,
+      "name": "Screens",
+      "status": "started",
+      "ts": "2026-01-01T12:00:07.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 7000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1200,
+          "outputTokens": 390,
+          "costUsd": 0.00945,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 7000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 500,
+          "outputTokens": 140,
+          "costUsd": 0.0036,
+          "unpricedTokens": 0,
+          "turns": 1,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:07.000Z"
     },
     {
       "type": "turn",
@@ -131,8 +517,46 @@
         "provider": "anthropic",
         "model": "claude-sonnet-5-5"
       },
-      "text": "One self-contained playable game is ready.",
-      "ts": "2026-01-01T12:00:02.000Z"
+      "text": "Skeleton ready: labelled empty screens and hash navigation.",
+      "ts": "2026-01-01T12:00:12.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 12000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1200,
+          "outputTokens": 390,
+          "costUsd": 0.00945,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 12000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 1700,
+          "outputTokens": 540,
+          "costUsd": 0.0132,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 0,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:12.000Z"
     },
     {
       "type": "prototype",
@@ -145,14 +569,1447 @@
         "provider": "anthropic",
         "model": "claude-sonnet-5-5"
       },
-      "title": "Goal Jar",
+      "title": "Pocket Planner",
+      "kind": "web",
       "files": [
         {
           "path": "index.html",
-          "bytes": 1201
+          "bytes": 1516
         }
       ],
-      "ok": true
+      "ok": true,
+      "version": 1,
+      "stage": 1,
+      "check": {
+        "loaded": true,
+        "consoleErrors": [],
+        "exceptions": [],
+        "failedRequests": 0
+      }
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 12000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1200,
+          "outputTokens": 390,
+          "costUsd": 0.00945,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 12000,
+          "stagesDone": 0,
+          "stagesTotal": 4,
+          "inputTokens": 1700,
+          "outputTokens": 540,
+          "costUsd": 0.0132,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:12.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "B",
+      "stage": 1,
+      "of": 4,
+      "name": "Skeleton",
+      "status": "done",
+      "ts": "2026-01-01T12:00:12.000Z",
+      "version": 1
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 12000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1200,
+          "outputTokens": 390,
+          "costUsd": 0.00945,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 12000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1700,
+          "outputTokens": 540,
+          "costUsd": 0.0132,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:12.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "B",
+      "stage": 2,
+      "of": 4,
+      "name": "Screens",
+      "status": "started",
+      "ts": "2026-01-01T12:00:12.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 12000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1200,
+          "outputTokens": 390,
+          "costUsd": 0.00945,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 12000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1700,
+          "outputTokens": 540,
+          "costUsd": 0.0132,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:12.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1b",
+      "seat": {
+        "id": "builder",
+        "name": "builder",
+        "team": "A",
+        "role": "builder",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "text": "Screens ready: all screens with real content and barebones components.",
+      "ts": "2026-01-01T12:00:13.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 13000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 2800,
+          "outputTokens": 1090,
+          "costUsd": 0.02475,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 13000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1700,
+          "outputTokens": 540,
+          "costUsd": 0.0132,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:13.000Z"
+    },
+    {
+      "type": "prototype",
+      "team": "A",
+      "seat": {
+        "id": "builder",
+        "name": "builder",
+        "team": "A",
+        "role": "builder",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "title": "Coin Quest",
+      "kind": "web",
+      "files": [
+        {
+          "path": "index.html",
+          "bytes": 2437
+        }
+      ],
+      "ok": true,
+      "version": 2,
+      "stage": 2,
+      "check": {
+        "loaded": true,
+        "consoleErrors": [],
+        "exceptions": [],
+        "failedRequests": 0
+      }
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 13000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 2800,
+          "outputTokens": 1090,
+          "costUsd": 0.02475,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 13000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1700,
+          "outputTokens": 540,
+          "costUsd": 0.0132,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:13.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "A",
+      "stage": 2,
+      "of": 4,
+      "name": "Screens",
+      "status": "done",
+      "ts": "2026-01-01T12:00:13.000Z",
+      "version": 2
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 13000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 2800,
+          "outputTokens": 1090,
+          "costUsd": 0.02475,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 13000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1700,
+          "outputTokens": 540,
+          "costUsd": 0.0132,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:13.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "A",
+      "stage": 3,
+      "of": 4,
+      "name": "Working",
+      "status": "started",
+      "ts": "2026-01-01T12:00:13.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 13000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 2800,
+          "outputTokens": 1090,
+          "costUsd": 0.02475,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 13000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 1700,
+          "outputTokens": 540,
+          "costUsd": 0.0132,
+          "unpricedTokens": 0,
+          "turns": 2,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:13.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1b",
+      "seat": {
+        "id": "skeptic",
+        "name": "skeptic",
+        "team": "B",
+        "role": "builder",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "text": "Build failed: Missing prototype block. Retrying the Screens stage.",
+      "ts": "2026-01-01T12:00:18.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 18000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 2800,
+          "outputTokens": 1090,
+          "costUsd": 0.02475,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 18000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 3600,
+          "outputTokens": 1290,
+          "costUsd": 0.03015,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:18.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 18000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 2800,
+          "outputTokens": 1090,
+          "costUsd": 0.02475,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 18000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 3600,
+          "outputTokens": 1290,
+          "costUsd": 0.03015,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:18.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1b",
+      "seat": {
+        "id": "builder",
+        "name": "builder",
+        "team": "A",
+        "role": "builder",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "text": "Working ready: the timer, purchases, savings and results work.",
+      "ts": "2026-01-01T12:00:20.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 20000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 5200,
+          "outputTokens": 2090,
+          "costUsd": 0.046950000000000006,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 20000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 3600,
+          "outputTokens": 1290,
+          "costUsd": 0.03015,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:20.000Z"
+    },
+    {
+      "type": "prototype",
+      "team": "A",
+      "seat": {
+        "id": "builder",
+        "name": "builder",
+        "team": "A",
+        "role": "builder",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "title": "Coin Quest",
+      "kind": "web",
+      "files": [
+        {
+          "path": "index.html",
+          "bytes": 4021
+        }
+      ],
+      "ok": true,
+      "version": 3,
+      "stage": 3,
+      "check": {
+        "loaded": true,
+        "consoleErrors": [],
+        "exceptions": [],
+        "failedRequests": 0
+      }
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 20000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 5200,
+          "outputTokens": 2090,
+          "costUsd": 0.046950000000000006,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 20000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 3600,
+          "outputTokens": 1290,
+          "costUsd": 0.03015,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:20.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "A",
+      "stage": 3,
+      "of": 4,
+      "name": "Working",
+      "status": "done",
+      "ts": "2026-01-01T12:00:20.000Z",
+      "version": 3
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 20000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 5200,
+          "outputTokens": 2090,
+          "costUsd": 0.046950000000000006,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 20000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 3600,
+          "outputTokens": 1290,
+          "costUsd": 0.03015,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:20.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "A",
+      "stage": 4,
+      "of": 4,
+      "name": "Polish",
+      "status": "started",
+      "ts": "2026-01-01T12:00:20.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 20000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 5200,
+          "outputTokens": 2090,
+          "costUsd": 0.046950000000000006,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 20000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 3600,
+          "outputTokens": 1290,
+          "costUsd": 0.03015,
+          "unpricedTokens": 0,
+          "turns": 3,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:20.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1b",
+      "seat": {
+        "id": "skeptic",
+        "name": "skeptic",
+        "team": "B",
+        "role": "builder",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "text": "Screens ready: all screens with real content and barebones components.",
+      "ts": "2026-01-01T12:00:24.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 24000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 5200,
+          "outputTokens": 2090,
+          "costUsd": 0.046950000000000006,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 24000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 5900,
+          "outputTokens": 2240,
+          "costUsd": 0.0513,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 1,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 0,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:24.000Z"
+    },
+    {
+      "type": "prototype",
+      "team": "B",
+      "seat": {
+        "id": "skeptic",
+        "name": "skeptic",
+        "team": "B",
+        "role": "builder",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "title": "Pocket Planner",
+      "kind": "web",
+      "files": [
+        {
+          "path": "index.html",
+          "bytes": 2500
+        }
+      ],
+      "ok": true,
+      "version": 2,
+      "stage": 2,
+      "check": {
+        "loaded": true,
+        "consoleErrors": [
+          "Summary feedback is not connected yet"
+        ],
+        "exceptions": [],
+        "failedRequests": 0
+      }
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 24000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 5200,
+          "outputTokens": 2090,
+          "costUsd": 0.046950000000000006,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 24000,
+          "stagesDone": 1,
+          "stagesTotal": 4,
+          "inputTokens": 5900,
+          "outputTokens": 2240,
+          "costUsd": 0.0513,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:24.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "B",
+      "stage": 2,
+      "of": 4,
+      "name": "Screens",
+      "status": "done",
+      "ts": "2026-01-01T12:00:24.000Z",
+      "version": 2
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 24000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 5200,
+          "outputTokens": 2090,
+          "costUsd": 0.046950000000000006,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 24000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 5900,
+          "outputTokens": 2240,
+          "costUsd": 0.0513,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:24.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "B",
+      "stage": 3,
+      "of": 4,
+      "name": "Working",
+      "status": "started",
+      "ts": "2026-01-01T12:00:24.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 24000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 5200,
+          "outputTokens": 2090,
+          "costUsd": 0.046950000000000006,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 24000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 5900,
+          "outputTokens": 2240,
+          "costUsd": 0.0513,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:24.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1b",
+      "seat": {
+        "id": "builder",
+        "name": "builder",
+        "team": "A",
+        "role": "builder",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "text": "Polish ready: responsive design, keyboard focus and clear empty and error states.",
+      "ts": "2026-01-01T12:00:27.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 27000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 5900,
+          "outputTokens": 2240,
+          "costUsd": 0.0513,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:27.000Z"
+    },
+    {
+      "type": "prototype",
+      "team": "A",
+      "seat": {
+        "id": "builder",
+        "name": "builder",
+        "team": "A",
+        "role": "builder",
+        "provider": "openai",
+        "model": "gpt-5.6-luna"
+      },
+      "title": "Coin Quest",
+      "kind": "web",
+      "files": [
+        {
+          "path": "index.html",
+          "bytes": 5397
+        }
+      ],
+      "ok": true,
+      "version": 4,
+      "stage": 4,
+      "check": {
+        "loaded": true,
+        "consoleErrors": [],
+        "exceptions": [],
+        "failedRequests": 0
+      }
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0
+        },
+        "B": {
+          "elapsedMs": 27000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 5900,
+          "outputTokens": 2240,
+          "costUsd": 0.0513,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:27.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "A",
+      "stage": 4,
+      "of": 4,
+      "name": "Polish",
+      "status": "done",
+      "ts": "2026-01-01T12:00:27.000Z",
+      "version": 4
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 27000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 5900,
+          "outputTokens": 2240,
+          "costUsd": 0.0513,
+          "unpricedTokens": 0,
+          "turns": 4,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:27.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1b",
+      "seat": {
+        "id": "skeptic",
+        "name": "skeptic",
+        "team": "B",
+        "role": "builder",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "text": "Working ready: the timer, purchases, savings and results work.",
+      "ts": "2026-01-01T12:00:34.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 34000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 9700,
+          "outputTokens": 3740,
+          "costUsd": 0.0852,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 2,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:34.000Z"
+    },
+    {
+      "type": "prototype",
+      "team": "B",
+      "seat": {
+        "id": "skeptic",
+        "name": "skeptic",
+        "team": "B",
+        "role": "builder",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "title": "Pocket Planner",
+      "kind": "web",
+      "files": [
+        {
+          "path": "index.html",
+          "bytes": 4029
+        }
+      ],
+      "ok": true,
+      "version": 3,
+      "stage": 3,
+      "check": {
+        "loaded": true,
+        "consoleErrors": [],
+        "exceptions": [],
+        "failedRequests": 0
+      }
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 34000,
+          "stagesDone": 2,
+          "stagesTotal": 4,
+          "inputTokens": 9700,
+          "outputTokens": 3740,
+          "costUsd": 0.0852,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:34.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "B",
+      "stage": 3,
+      "of": 4,
+      "name": "Working",
+      "status": "done",
+      "ts": "2026-01-01T12:00:34.000Z",
+      "version": 3
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 34000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 9700,
+          "outputTokens": 3740,
+          "costUsd": 0.0852,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:34.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "B",
+      "stage": 4,
+      "of": 4,
+      "name": "Polish",
+      "status": "started",
+      "ts": "2026-01-01T12:00:34.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 34000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 9700,
+          "outputTokens": 3740,
+          "costUsd": 0.0852,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:34.000Z"
+    },
+    {
+      "type": "turn",
+      "round": "R1b",
+      "seat": {
+        "id": "skeptic",
+        "name": "skeptic",
+        "team": "B",
+        "role": "builder",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "text": "Polish ready: responsive design, keyboard focus and clear empty and error states.",
+      "ts": "2026-01-01T12:00:43.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 43000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 14800,
+          "outputTokens": 5690,
+          "costUsd": 0.12975,
+          "unpricedTokens": 0,
+          "turns": 6,
+          "failedTurns": 0,
+          "versions": 3,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:43.000Z"
+    },
+    {
+      "type": "prototype",
+      "team": "B",
+      "seat": {
+        "id": "skeptic",
+        "name": "skeptic",
+        "team": "B",
+        "role": "builder",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5"
+      },
+      "title": "Pocket Planner",
+      "kind": "web",
+      "files": [
+        {
+          "path": "index.html",
+          "bytes": 5405
+        }
+      ],
+      "ok": true,
+      "version": 4,
+      "stage": 4,
+      "check": {
+        "loaded": true,
+        "consoleErrors": [],
+        "exceptions": [],
+        "failedRequests": 0
+      }
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 43000,
+          "stagesDone": 3,
+          "stagesTotal": 4,
+          "inputTokens": 14800,
+          "outputTokens": 5690,
+          "costUsd": 0.12975,
+          "unpricedTokens": 0,
+          "turns": 6,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0
+        }
+      },
+      "ts": "2026-01-01T12:00:43.000Z"
+    },
+    {
+      "type": "stage",
+      "team": "B",
+      "stage": 4,
+      "of": 4,
+      "name": "Polish",
+      "status": "done",
+      "ts": "2026-01-01T12:00:43.000Z",
+      "version": 4
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 43000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 14800,
+          "outputTokens": 5690,
+          "costUsd": 0.12975,
+          "unpricedTokens": 0,
+          "turns": 6,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:43.000Z"
+        }
+      },
+      "ts": "2026-01-01T12:00:43.000Z"
     },
     {
       "type": "turn",
@@ -165,8 +2022,48 @@
         "provider": "openai",
         "model": "gpt-5.6-luna"
       },
-      "text": "VERDICT A: APPROVE \u2014 Covers needs and tradeoffs\nVERDICT B: REVISE \u2014 Add unavoidable expenses",
-      "ts": "2026-01-01T12:00:03.000Z"
+      "text": "VERDICT A: APPROVE — A complete lesson delivered sooner with fewer tokens and no rewrites.\nVERDICT B: APPROVE — Works after a rewrite and a repaired page error.\nPREFER: A",
+      "ts": "2026-01-01T12:00:45.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 43000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 14800,
+          "outputTokens": 5690,
+          "costUsd": 0.12975,
+          "unpricedTokens": 0,
+          "turns": 6,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:43.000Z"
+        }
+      },
+      "ts": "2026-01-01T12:00:45.000Z"
     },
     {
       "type": "assessment",
@@ -180,7 +2077,8 @@
       },
       "team": "A",
       "verdict": "APPROVE",
-      "reason": "Covers needs and tradeoffs."
+      "reason": "Clear tradeoffs, faster finish and lower token use.",
+      "version": 4
     },
     {
       "type": "assessment",
@@ -193,8 +2091,9 @@
         "model": "gpt-5.6-luna"
       },
       "team": "B",
-      "verdict": "REVISE",
-      "reason": "Add unavoidable expenses so saving is not always best."
+      "verdict": "APPROVE",
+      "reason": "Working final version; more tokens and one rewrite.",
+      "version": 4
     },
     {
       "type": "turn",
@@ -207,8 +2106,48 @@
         "provider": "anthropic",
         "model": "claude-sonnet-5-5"
       },
-      "text": "VERDICT A: APPROVE \u2014 Covers needs and tradeoffs\nVERDICT B: REVISE \u2014 Add unavoidable expenses",
-      "ts": "2026-01-01T12:00:03.000Z"
+      "text": "VERDICT A: APPROVE — Needs, wants, savings and errors are explained clearly.\nVERDICT B: REVISE — The repaired flow works, but the lesson needs a clearer explanation.\nPREFER: A",
+      "ts": "2026-01-01T12:00:46.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 8400,
+          "outputTokens": 3490,
+          "costUsd": 0.07755000000000001,
+          "unpricedTokens": 0,
+          "turns": 5,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 43000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 14800,
+          "outputTokens": 5690,
+          "costUsd": 0.12975,
+          "unpricedTokens": 0,
+          "turns": 6,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:43.000Z"
+        }
+      },
+      "ts": "2026-01-01T12:00:46.000Z"
     },
     {
       "type": "assessment",
@@ -222,7 +2161,8 @@
       },
       "team": "A",
       "verdict": "APPROVE",
-      "reason": "Covers needs and tradeoffs."
+      "reason": "Accessible labels and constructive feedback.",
+      "version": 4
     },
     {
       "type": "assessment",
@@ -236,7 +2176,8 @@
       },
       "team": "B",
       "verdict": "REVISE",
-      "reason": "Add unavoidable expenses so saving is not always best."
+      "reason": "Explain why needs come before wants more clearly.",
+      "version": 4
     },
     {
       "type": "turn",
@@ -249,8 +2190,48 @@
         "provider": "anthropic",
         "model": "claude-sonnet-5-5"
       },
-      "text": "Players learn to cover needs before optional spending.",
-      "ts": "2026-01-01T12:00:04.000Z"
+      "text": "A small scope kept all four stages focused. Test the lesson with children next.",
+      "ts": "2026-01-01T12:00:48.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 9300,
+          "outputTokens": 3545,
+          "costUsd": 0.08107500000000001,
+          "unpricedTokens": 0,
+          "turns": 6,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 43000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 14800,
+          "outputTokens": 5690,
+          "costUsd": 0.12975,
+          "unpricedTokens": 0,
+          "turns": 6,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:43.000Z"
+        }
+      },
+      "ts": "2026-01-01T12:00:48.000Z"
     },
     {
       "type": "turn",
@@ -263,8 +2244,48 @@
         "provider": "together",
         "model": "zai-org/GLM-5.3"
       },
-      "text": "The goal jar is approachable, but daily needs need a stronger role.",
-      "ts": "2026-01-01T12:00:04.000Z"
+      "text": "The final planner works, but saving alone is not the whole lesson.",
+      "ts": "2026-01-01T12:00:49.000Z"
+    },
+    {
+      "type": "metrics",
+      "teams": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 9300,
+          "outputTokens": 3545,
+          "costUsd": 0.08107500000000001,
+          "unpricedTokens": 0,
+          "turns": 6,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 43000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 15900,
+          "outputTokens": 5770,
+          "costUsd": 0.13425,
+          "unpricedTokens": 0,
+          "turns": 7,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:43.000Z"
+        }
+      },
+      "ts": "2026-01-01T12:00:49.000Z"
     },
     {
       "type": "dissent",
@@ -277,78 +2298,182 @@
         "model": "zai-org/GLM-5.3"
       },
       "team": "B",
-      "text": "A single winning strategy may hide different family budgets.\nPredicted failure: Players may assume every household has coins left to save."
+      "text": "The lesson needs a real tradeoff test.\nPredicted failure: Players may save coins without explaining why bus and lunch come first."
     },
     {
       "type": "usage",
       "perSeat": [
         {
           "seatId": "designer",
-          "inputTokens": 1000,
-          "outputTokens": 300,
-          "costUsd": 0.01
+          "inputTokens": 1200,
+          "outputTokens": 145,
+          "costUsd": 0.005775,
+          "unpricedTokens": 0
         },
         {
           "seatId": "builder",
-          "inputTokens": 1000,
-          "outputTokens": 300,
-          "costUsd": 0.01
+          "inputTokens": 8100,
+          "outputTokens": 3400,
+          "costUsd": 0.0753,
+          "unpricedTokens": 0
         },
         {
           "seatId": "marketer",
-          "inputTokens": 1000,
-          "outputTokens": 300,
-          "costUsd": 0.01
+          "inputTokens": 1600,
+          "outputTokens": 220,
+          "costUsd": 0.0081,
+          "unpricedTokens": 0
         },
         {
           "seatId": "skeptic",
-          "inputTokens": 1000,
-          "outputTokens": 300,
-          "costUsd": 0.01
+          "inputTokens": 14300,
+          "outputTokens": 5550,
+          "costUsd": 0.12614999999999998,
+          "unpricedTokens": 0
         },
         {
           "seatId": "cfo",
-          "inputTokens": 1000,
-          "outputTokens": 300,
-          "costUsd": 0.01
+          "inputTokens": 10800,
+          "outputTokens": 160,
+          "costUsd": 0.0348,
+          "unpricedTokens": 0
         },
         {
           "seatId": "safety-reviewer",
-          "inputTokens": 1000,
-          "outputTokens": 300,
-          "costUsd": 0.01
+          "inputTokens": 10900,
+          "outputTokens": 180,
+          "costUsd": 0.0354,
+          "unpricedTokens": 0
         }
       ],
-      "totalCostUsd": 0.06
+      "totalCostUsd": 0.285525,
+      "totalUnpricedTokens": 0
     },
     {
       "type": "end",
       "winner": "A",
       "tally": {
         "A": 2,
-        "B": 0
+        "B": 1
       },
-      "aborted": false
+      "aborted": false,
+      "decidedBy": "judges",
+      "metrics": {
+        "A": {
+          "elapsedMs": 27000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 9300,
+          "outputTokens": 3545,
+          "costUsd": 0.08107500000000001,
+          "unpricedTokens": 0,
+          "turns": 6,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 0,
+          "validationFailures": 0,
+          "pageErrors": 0,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:27.000Z"
+        },
+        "B": {
+          "elapsedMs": 43000,
+          "stagesDone": 4,
+          "stagesTotal": 4,
+          "inputTokens": 15900,
+          "outputTokens": 5770,
+          "costUsd": 0.13425,
+          "unpricedTokens": 0,
+          "turns": 7,
+          "failedTurns": 0,
+          "versions": 4,
+          "rewrites": 1,
+          "validationFailures": 1,
+          "pageErrors": 1,
+          "toolCalls": 0,
+          "finishedAt": "2026-01-01T12:00:43.000Z"
+        }
+      }
     }
   ],
   "prototypes": [
     {
-      "eventIndex": 4,
+      "eventIndex": 11,
       "team": "A",
       "files": [
         {
           "path": "index.html",
-          "content": "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Ten Coins</title><style>body{font:20px system-ui;padding:20px;background:#f1fff7;color:#153b29}button{font:inherit;margin:8px;padding:12px}output{display:block}</style><h1>Ten Coins</h1><p>You have 10 coins. Buy lunch (3) and a bus ride (2). Decide whether a toy (6) fits. Finish in 60 seconds.</p><output id=\"status\" aria-live=\"polite\"></output><button id=\"lunch\">Lunch: 3</button><button id=\"bus\">Bus: 2</button><button id=\"toy\">Toy: 6</button><button id=\"restart\">Restart</button><script>let coins,needs,over,timer;const status=document.getElementById('status');function show(message=''){status.textContent=message+' Coins left: '+coins;}function reset(){clearTimeout(timer);coins=10;needs=new Set();over=false;show('Choose your needs first.');timer=setTimeout(()=>{over=true;show('Time! Try again.');},60000);}for(const [id,cost] of [['lunch',3],['bus',2],['toy',6]])document.getElementById(id).onclick=()=>{if(over)return;if(needs.has(id))return show('Already bought.');if(cost>coins)return show('Too expensive. Save for needs.');coins-=cost;needs.add(id);if(needs.has('lunch')&&needs.has('bus')){over=true;clearTimeout(timer);show('You covered your needs and saved '+coins+'!');}else show('Good choice? Remember both needs.');};document.getElementById('restart').onclick=reset;reset();</script></html>"
+          "content": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Coin Quest</title><style>body{font:18px system-ui,sans-serif;max-width:840px;margin:32px auto;padding:20px;color:#24352e;background:#f6f8f5}nav{display:flex;gap:20px;margin:24px 0}a{color:#236344}section{padding:24px;border:1px solid #c5cec8;min-height:260px}section[hidden]{display:none}button{font:inherit;padding:12px;margin:6px}header p{color:#46584d}section{border:2px dashed #aebbb1;background:#eef1ec;color:#59685e}</style></head><body><header><div><p>TEAM A · SKELETON</p><h1>Coin Quest</h1></div></header><nav aria-label=\"Game screens\"><a href=\"#welcome\">Welcome</a><a href=\"#play\">Play</a><a href=\"#results\">Results</a></nav><main><section id=\"welcome\" aria-label=\"Welcome\"><h2>Welcome</h2><p>Empty placeholder</p></section><section id=\"play\" aria-label=\"Play\" hidden><h2>Play</h2><p>Empty placeholder</p></section><section id=\"results\" aria-label=\"Results\" hidden><h2>Results</h2><p>Empty placeholder</p></section></main><script>const screens=[...document.querySelectorAll('main section')];function route(){const id=['welcome','play','results'].includes(location.hash.slice(1))?location.hash.slice(1):'welcome';screens.forEach(s=>s.hidden=s.id!==id);document.querySelectorAll('nav a').forEach(a=>{if(a.hash==='#'+id)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')})}addEventListener('hashchange',route);route();</script></body></html>"
         }
       ]
     },
     {
-      "eventIndex": 6,
+      "eventIndex": 19,
       "team": "B",
       "files": [
         {
           "path": "index.html",
-          "content": "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Goal Jar</title><style>body{font:20px system-ui;padding:20px;background:#fff7e7;color:#423015}button{font:inherit;margin:8px;padding:12px}output{display:block}</style><h1>Goal Jar</h1><p>Five days, two coins a day. Save 5 for a book. Will you save or buy a snack? Finish in 60 seconds.</p><output id=\"status\" aria-live=\"polite\"></output><button id=\"save\">Save 2</button><button id=\"snack\">Snack: save 1</button><button id=\"restart\">Restart</button><script>let day,coins,over,timer;const status=document.getElementById('status');function show(){status.textContent='Day '+day+'/5. Jar: '+coins+' coins.'+(over?(coins>=5?' Book goal reached!':' Try saving more.'):'');}function choose(amount){if(over)return;coins+=amount;day++;over=day===5;if(over)clearTimeout(timer);show();}function reset(){clearTimeout(timer);day=0;coins=0;over=false;show();timer=setTimeout(()=>{over=true;show();},60000);}document.getElementById('save').onclick=()=>choose(2);document.getElementById('snack').onclick=()=>choose(1);document.getElementById('restart').onclick=reset;reset();</script></html>"
+          "content": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Pocket Planner</title><style>body{font:18px system-ui,sans-serif;max-width:840px;margin:32px auto;padding:20px;color:#24352e;background:#f6f8f5}nav{display:flex;gap:20px;margin:24px 0}a{color:#6840a0}section{padding:24px;border:1px solid #c5cec8;min-height:260px}section[hidden]{display:none}button{font:inherit;padding:12px;margin:6px}header p{color:#46584d}section{border:2px dashed #aebbb1;background:#eef1ec;color:#59685e}</style></head><body><header><div><p>TEAM B · SKELETON</p><h1>Pocket Planner</h1></div></header><nav aria-label=\"Game screens\"><a href=\"#welcome\">Welcome</a><a href=\"#play\">Play</a><a href=\"#results\">Results</a></nav><main><section id=\"welcome\" aria-label=\"Welcome\"><h2>Welcome</h2><p>Empty placeholder</p></section><section id=\"play\" aria-label=\"Play\" hidden><h2>Play</h2><p>Empty placeholder</p></section><section id=\"results\" aria-label=\"Results\" hidden><h2>Results</h2><p>Empty placeholder</p></section></main><script>const screens=[...document.querySelectorAll('main section')];function route(){const id=['welcome','play','results'].includes(location.hash.slice(1))?location.hash.slice(1):'welcome';screens.forEach(s=>s.hidden=s.id!==id);document.querySelectorAll('nav a').forEach(a=>{if(a.hash==='#'+id)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')})}addEventListener('hashchange',route);route();</script></body></html>"
+        }
+      ]
+    },
+    {
+      "eventIndex": 27,
+      "team": "A",
+      "files": [
+        {
+          "path": "index.html",
+          "content": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Coin Quest</title><style>body{font:18px system-ui,sans-serif;max-width:840px;margin:32px auto;padding:20px;color:#24352e;background:#f6f8f5}nav{display:flex;gap:20px;margin:24px 0}a{color:#236344}section{padding:24px;border:1px solid #c5cec8;min-height:260px}section[hidden]{display:none}button{font:inherit;padding:12px;margin:6px}header p{color:#46584d}</style></head><body><header><div><p>TEAM A · SCREENS</p><h1>Coin Quest</h1></div></header><nav aria-label=\"Game screens\"><a href=\"#welcome\">Welcome</a><a href=\"#play\">Play</a><a href=\"#results\">Results</a></nav><main><section id=\"welcome\" aria-label=\"Welcome\"><h2>Big choices. Small budget.</h2><p>You have 10 coins and 60 seconds. Cover your needs, pick a treat if you can, and save at least 2 coins.</p><ul><li>Bus ride: 2 coins</li><li>Lunch: 3 coins</li><li>Sticker: 2 coins</li><li>Toy: 5 coins</li></ul><button id=\"start\" disabled>Start the challenge</button></section><section id=\"play\" aria-label=\"Play\" hidden><h2>Spend with a plan</h2><p class=\"score\">Coins left: <output id=\"balance\">10</output> · Time: <output id=\"timer\">60</output>s</p><div class=\"choices\"><button data-cost=\"2\" data-item=\"bus\" aria-pressed=\"false\" disabled>Bus · need · 2 coins</button><button data-cost=\"3\" data-item=\"lunch\" aria-pressed=\"false\" disabled>Lunch · need · 3 coins</button><button data-cost=\"2\" data-item=\"sticker\" aria-pressed=\"false\" disabled>Sticker · want · 2 coins</button><button data-cost=\"5\" data-item=\"toy\" aria-pressed=\"false\" disabled>Toy · want · 5 coins</button></div><p id=\"feedback\" role=\"status\">Choose what to buy.</p><button id=\"finish\" disabled>Check my budget</button></section><section id=\"results\" aria-label=\"Results\" hidden><h2>Your money story</h2><p id=\"summary\" role=\"status\">Your result will appear here.</p><button id=\"again\" disabled>Play again</button></section></main><script>const screens=[...document.querySelectorAll('main section')];function route(){const id=['welcome','play','results'].includes(location.hash.slice(1))?location.hash.slice(1):'welcome';screens.forEach(s=>s.hidden=s.id!==id);document.querySelectorAll('nav a').forEach(a=>{if(a.hash==='#'+id)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')})}addEventListener('hashchange',route);route();</script></body></html>"
+        }
+      ]
+    },
+    {
+      "eventIndex": 38,
+      "team": "A",
+      "files": [
+        {
+          "path": "index.html",
+          "content": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Coin Quest</title><style>body{font:18px system-ui,sans-serif;max-width:840px;margin:32px auto;padding:20px;color:#24352e;background:#f6f8f5}nav{display:flex;gap:20px;margin:24px 0}a{color:#236344}section{padding:24px;border:1px solid #c5cec8;min-height:260px}section[hidden]{display:none}button{font:inherit;padding:12px;margin:6px}header p{color:#46584d}</style></head><body><header><div><p>TEAM A · WORKING</p><h1>Coin Quest</h1></div></header><nav aria-label=\"Game screens\"><a href=\"#welcome\">Welcome</a><a href=\"#play\">Play</a><a href=\"#results\">Results</a></nav><main><section id=\"welcome\" aria-label=\"Welcome\"><h2>Big choices. Small budget.</h2><p>You have 10 coins and 60 seconds. Cover your needs, pick a treat if you can, and save at least 2 coins.</p><ul><li>Bus ride: 2 coins</li><li>Lunch: 3 coins</li><li>Sticker: 2 coins</li><li>Toy: 5 coins</li></ul><button id=\"start\">Start the challenge</button></section><section id=\"play\" aria-label=\"Play\" hidden><h2>Spend with a plan</h2><p class=\"score\">Coins left: <output id=\"balance\">10</output> · Time: <output id=\"timer\">60</output>s</p><div class=\"choices\"><button data-cost=\"2\" data-item=\"bus\" aria-pressed=\"false\">Bus · need · 2 coins</button><button data-cost=\"3\" data-item=\"lunch\" aria-pressed=\"false\">Lunch · need · 3 coins</button><button data-cost=\"2\" data-item=\"sticker\" aria-pressed=\"false\">Sticker · want · 2 coins</button><button data-cost=\"5\" data-item=\"toy\" aria-pressed=\"false\">Toy · want · 5 coins</button></div><p id=\"feedback\" role=\"status\">Choose what to buy.</p><button id=\"finish\">Check my budget</button></section><section id=\"results\" aria-label=\"Results\" hidden><h2>Your money story</h2><p id=\"summary\" role=\"status\">Your result will appear here.</p><button id=\"again\">Play again</button></section></main><script>const screens=[...document.querySelectorAll('main section')];function route(){const id=['welcome','play','results'].includes(location.hash.slice(1))?location.hash.slice(1):'welcome';screens.forEach(s=>s.hidden=s.id!==id);document.querySelectorAll('nav a').forEach(a=>{if(a.hash==='#'+id)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')})}addEventListener('hashchange',route);route();const byId=id=>document.getElementById(id);const choices=[...document.querySelectorAll('[data-cost]')];let coins=10,selected=new Set(),clock,remaining=60,active=false;function update(){byId('balance').textContent=coins;choices.forEach(b=>{b.setAttribute('aria-pressed',String(selected.has(b.dataset.item)));b.disabled=!active})}function finish(){if(!active){byId('feedback').textContent='Start a challenge first.';return}active=false;clearInterval(clock);const needs=selected.has('bus')&&selected.has('lunch');byId('summary').textContent=(needs&&coins>=2?'Great plan! Needs covered and savings protected.':needs?'Needs covered. Try saving 2 coins next time.':'Cover bus and lunch before buying wants.')+' You saved '+coins+' of 10 coins.';update();location.hash='results'}function start(){clearInterval(clock);coins=10;selected.clear();remaining=60;active=true;byId('timer').textContent=remaining;byId('feedback').textContent='Cover bus and lunch, then decide what to save.';update();location.hash='play';clock=setInterval(()=>{byId('timer').textContent=--remaining;if(remaining<=0)finish()},1000)}choices.forEach(b=>b.onclick=()=>{if(!active){byId('feedback').textContent='Start a challenge first.';return}const cost=Number(b.dataset.cost),item=b.dataset.item;if(selected.has(item)){selected.delete(item);coins+=cost}else if(cost<=coins){selected.add(item);coins-=cost}else{byId('feedback').textContent='Not enough coins. Put back a want and try again.';return}byId('feedback').textContent=coins+' coins left. Keep at least 2 for savings.';update()});byId('start').onclick=start;byId('again').onclick=start;byId('finish').onclick=finish;update();</script></body></html>"
+        }
+      ]
+    },
+    {
+      "eventIndex": 46,
+      "team": "B",
+      "files": [
+        {
+          "path": "index.html",
+          "content": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Pocket Planner</title><style>body{font:18px system-ui,sans-serif;max-width:840px;margin:32px auto;padding:20px;color:#24352e;background:#f6f8f5}nav{display:flex;gap:20px;margin:24px 0}a{color:#6840a0}section{padding:24px;border:1px solid #c5cec8;min-height:260px}section[hidden]{display:none}button{font:inherit;padding:12px;margin:6px}header p{color:#46584d}</style></head><body><header><div><p>TEAM B · SCREENS</p><h1>Pocket Planner</h1></div></header><nav aria-label=\"Game screens\"><a href=\"#welcome\">Welcome</a><a href=\"#play\">Play</a><a href=\"#results\">Results</a></nav><main><section id=\"welcome\" aria-label=\"Welcome\"><h2>Big choices. Small budget.</h2><p>You have 10 coins and 60 seconds. Cover your needs, pick a treat if you can, and save at least 2 coins.</p><ul><li>Bus ride: 2 coins</li><li>Lunch: 3 coins</li><li>Sticker: 2 coins</li><li>Toy: 5 coins</li></ul><button id=\"start\" disabled>Start the challenge</button></section><section id=\"play\" aria-label=\"Play\" hidden><h2>Spend with a plan</h2><p class=\"score\">Coins left: <output id=\"balance\">10</output> · Time: <output id=\"timer\">60</output>s</p><div class=\"choices\"><button data-cost=\"2\" data-item=\"bus\" aria-pressed=\"false\" disabled>Bus · need · 2 coins</button><button data-cost=\"3\" data-item=\"lunch\" aria-pressed=\"false\" disabled>Lunch · need · 3 coins</button><button data-cost=\"2\" data-item=\"sticker\" aria-pressed=\"false\" disabled>Sticker · want · 2 coins</button><button data-cost=\"5\" data-item=\"toy\" aria-pressed=\"false\" disabled>Toy · want · 5 coins</button></div><p id=\"feedback\" role=\"status\">Choose what to buy.</p><button id=\"finish\" disabled>Check my budget</button></section><section id=\"results\" aria-label=\"Results\" hidden><h2>Your money story</h2><p id=\"summary\" role=\"status\">Your result will appear here.</p><button id=\"again\" disabled>Play again</button></section></main><script>const screens=[...document.querySelectorAll('main section')];function route(){const id=['welcome','play','results'].includes(location.hash.slice(1))?location.hash.slice(1):'welcome';screens.forEach(s=>s.hidden=s.id!==id);document.querySelectorAll('nav a').forEach(a=>{if(a.hash==='#'+id)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')})}addEventListener('hashchange',route);route();console.error('Summary feedback is not connected yet');</script></body></html>"
+        }
+      ]
+    },
+    {
+      "eventIndex": 54,
+      "team": "A",
+      "files": [
+        {
+          "path": "index.html",
+          "content": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Coin Quest</title><style>body{font:18px system-ui,sans-serif;max-width:840px;margin:32px auto;padding:20px;color:#24352e;background:#f6f8f5}nav{display:flex;gap:20px;margin:24px 0}a{color:#236344}section{padding:24px;border:1px solid #c5cec8;min-height:260px}section[hidden]{display:none}button{font:inherit;padding:12px;margin:6px}header p{color:#46584d}*{box-sizing:border-box}body{background:#edf4eb}header{display:flex;align-items:center;justify-content:space-between;gap:16px}.badge{background:#236344;color:white;border-radius:30px;padding:10px 16px;font-size:14px;font-weight:700}h1{font-size:42px;margin:8px 0}section{background:white;border:0;border-radius:24px;box-shadow:0 12px 40px #19382812}nav a{padding:10px 18px;border-radius:24px;text-decoration:none;font-weight:700}nav a[aria-current=page]{background:#236344;color:white}button{background:#236344;color:white;border:2px solid #236344;border-radius:14px;cursor:pointer}button[aria-pressed=true]{background:#fff2be;color:#342b0d;border-color:#715500}button:disabled{background:#e3e6e0;color:#536050;border-color:#b7c2b6;cursor:default}:focus-visible{outline:3px solid #995c00;outline-offset:4px}.choices{display:grid;grid-template-columns:1fr 1fr;gap:10px}.score{font-weight:750;color:#236344}#feedback{min-height:2em}footer{margin-top:24px;font-size:14px;color:#46584d}@media(max-width:600px){body{margin:0;padding:16px}header{align-items:start}h1{font-size:30px}nav{gap:4px}nav a{padding:10px}.choices{grid-template-columns:1fr}section{padding:18px}.badge{font-size:12px}}</style></head><body><header><div><p>TEAM A · POLISH</p><h1>Coin Quest</h1></div><span class=\"badge\">10 coins · 60 seconds</span></header><nav aria-label=\"Game screens\"><a href=\"#welcome\">Welcome</a><a href=\"#play\">Play</a><a href=\"#results\">Results</a></nav><main><section id=\"welcome\" aria-label=\"Welcome\"><h2>Big choices. Small budget.</h2><p>You have 10 coins and 60 seconds. Cover your needs, pick a treat if you can, and save at least 2 coins.</p><ul><li>Bus ride: 2 coins</li><li>Lunch: 3 coins</li><li>Sticker: 2 coins</li><li>Toy: 5 coins</li></ul><button id=\"start\">Start the challenge</button></section><section id=\"play\" aria-label=\"Play\" hidden><h2>Spend with a plan</h2><p class=\"score\">Coins left: <output id=\"balance\">10</output> · Time: <output id=\"timer\">60</output>s</p><div class=\"choices\"><button data-cost=\"2\" data-item=\"bus\" aria-pressed=\"false\">Bus · need · 2 coins</button><button data-cost=\"3\" data-item=\"lunch\" aria-pressed=\"false\">Lunch · need · 3 coins</button><button data-cost=\"2\" data-item=\"sticker\" aria-pressed=\"false\">Sticker · want · 2 coins</button><button data-cost=\"5\" data-item=\"toy\" aria-pressed=\"false\">Toy · want · 5 coins</button></div><p id=\"feedback\" role=\"status\">Choose your needs first. Tap a choice again to put it back.</p><button id=\"finish\">Check my budget</button></section><section id=\"results\" aria-label=\"Results\" hidden><h2>Your money story</h2><p id=\"summary\" role=\"status\">No round played yet. Start a challenge to see what you saved.</p><button id=\"again\">Play again</button></section></main><footer>Needs first. Wants next. A little saved for tomorrow.</footer><script>const screens=[...document.querySelectorAll('main section')];function route(){const id=['welcome','play','results'].includes(location.hash.slice(1))?location.hash.slice(1):'welcome';screens.forEach(s=>s.hidden=s.id!==id);document.querySelectorAll('nav a').forEach(a=>{if(a.hash==='#'+id)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')})}addEventListener('hashchange',route);route();const byId=id=>document.getElementById(id);const choices=[...document.querySelectorAll('[data-cost]')];let coins=10,selected=new Set(),clock,remaining=60,active=false;function update(){byId('balance').textContent=coins;choices.forEach(b=>{b.setAttribute('aria-pressed',String(selected.has(b.dataset.item)));b.disabled=!active})}function finish(){if(!active){byId('feedback').textContent='Start a challenge first.';return}active=false;clearInterval(clock);const needs=selected.has('bus')&&selected.has('lunch');byId('summary').textContent=(needs&&coins>=2?'Great plan! Needs covered and savings protected.':needs?'Needs covered. Try saving 2 coins next time.':'Cover bus and lunch before buying wants.')+' You saved '+coins+' of 10 coins.';update();location.hash='results'}function start(){clearInterval(clock);coins=10;selected.clear();remaining=60;active=true;byId('timer').textContent=remaining;byId('feedback').textContent='Cover bus and lunch, then decide what to save.';update();location.hash='play';clock=setInterval(()=>{byId('timer').textContent=--remaining;if(remaining<=0)finish()},1000)}choices.forEach(b=>b.onclick=()=>{if(!active){byId('feedback').textContent='Start a challenge first.';return}const cost=Number(b.dataset.cost),item=b.dataset.item;if(selected.has(item)){selected.delete(item);coins+=cost}else if(cost<=coins){selected.add(item);coins-=cost}else{byId('feedback').textContent='Not enough coins. Put back a want and try again.';return}byId('feedback').textContent=coins+' coins left. Keep at least 2 for savings.';update()});byId('start').onclick=start;byId('again').onclick=start;byId('finish').onclick=finish;update();</script></body></html>"
+        }
+      ]
+    },
+    {
+      "eventIndex": 60,
+      "team": "B",
+      "files": [
+        {
+          "path": "index.html",
+          "content": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Pocket Planner</title><style>body{font:18px system-ui,sans-serif;max-width:840px;margin:32px auto;padding:20px;color:#24352e;background:#f6f8f5}nav{display:flex;gap:20px;margin:24px 0}a{color:#6840a0}section{padding:24px;border:1px solid #c5cec8;min-height:260px}section[hidden]{display:none}button{font:inherit;padding:12px;margin:6px}header p{color:#46584d}</style></head><body><header><div><p>TEAM B · WORKING</p><h1>Pocket Planner</h1></div></header><nav aria-label=\"Game screens\"><a href=\"#welcome\">Welcome</a><a href=\"#play\">Play</a><a href=\"#results\">Results</a></nav><main><section id=\"welcome\" aria-label=\"Welcome\"><h2>Big choices. Small budget.</h2><p>You have 10 coins and 60 seconds. Cover your needs, pick a treat if you can, and save at least 2 coins.</p><ul><li>Bus ride: 2 coins</li><li>Lunch: 3 coins</li><li>Sticker: 2 coins</li><li>Toy: 5 coins</li></ul><button id=\"start\">Start the challenge</button></section><section id=\"play\" aria-label=\"Play\" hidden><h2>Spend with a plan</h2><p class=\"score\">Coins left: <output id=\"balance\">10</output> · Time: <output id=\"timer\">60</output>s</p><div class=\"choices\"><button data-cost=\"2\" data-item=\"bus\" aria-pressed=\"false\">Bus · need · 2 coins</button><button data-cost=\"3\" data-item=\"lunch\" aria-pressed=\"false\">Lunch · need · 3 coins</button><button data-cost=\"2\" data-item=\"sticker\" aria-pressed=\"false\">Sticker · want · 2 coins</button><button data-cost=\"5\" data-item=\"toy\" aria-pressed=\"false\">Toy · want · 5 coins</button></div><p id=\"feedback\" role=\"status\">Choose what to buy.</p><button id=\"finish\">Check my budget</button></section><section id=\"results\" aria-label=\"Results\" hidden><h2>Your money story</h2><p id=\"summary\" role=\"status\">Your result will appear here.</p><button id=\"again\">Play again</button></section></main><script>const screens=[...document.querySelectorAll('main section')];function route(){const id=['welcome','play','results'].includes(location.hash.slice(1))?location.hash.slice(1):'welcome';screens.forEach(s=>s.hidden=s.id!==id);document.querySelectorAll('nav a').forEach(a=>{if(a.hash==='#'+id)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')})}addEventListener('hashchange',route);route();const byId=id=>document.getElementById(id);const choices=[...document.querySelectorAll('[data-cost]')];let coins=10,selected=new Set(),clock,remaining=60,active=false;function update(){byId('balance').textContent=coins;choices.forEach(b=>{b.setAttribute('aria-pressed',String(selected.has(b.dataset.item)));b.disabled=!active})}function finish(){if(!active){byId('feedback').textContent='Start a challenge first.';return}active=false;clearInterval(clock);const needs=selected.has('bus')&&selected.has('lunch');byId('summary').textContent=(needs&&coins>=2?'Great plan! Needs covered and savings protected.':needs?'Needs covered. Try saving 2 coins next time.':'Cover bus and lunch before buying wants.')+' You saved '+coins+' of 10 coins.';update();location.hash='results'}function start(){clearInterval(clock);coins=10;selected.clear();remaining=60;active=true;byId('timer').textContent=remaining;byId('feedback').textContent='Cover bus and lunch, then decide what to save.';update();location.hash='play';clock=setInterval(()=>{byId('timer').textContent=--remaining;if(remaining<=0)finish()},1000)}choices.forEach(b=>b.onclick=()=>{if(!active){byId('feedback').textContent='Start a challenge first.';return}const cost=Number(b.dataset.cost),item=b.dataset.item;if(selected.has(item)){selected.delete(item);coins+=cost}else if(cost<=coins){selected.add(item);coins-=cost}else{byId('feedback').textContent='Not enough coins. Put back a want and try again.';return}byId('feedback').textContent=coins+' coins left. Keep at least 2 for savings.';update()});byId('start').onclick=start;byId('again').onclick=start;byId('finish').onclick=finish;update();</script></body></html>"
+        }
+      ]
+    },
+    {
+      "eventIndex": 68,
+      "team": "B",
+      "files": [
+        {
+          "path": "index.html",
+          "content": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Pocket Planner</title><style>body{font:18px system-ui,sans-serif;max-width:840px;margin:32px auto;padding:20px;color:#24352e;background:#f6f8f5}nav{display:flex;gap:20px;margin:24px 0}a{color:#6840a0}section{padding:24px;border:1px solid #c5cec8;min-height:260px}section[hidden]{display:none}button{font:inherit;padding:12px;margin:6px}header p{color:#46584d}*{box-sizing:border-box}body{background:#edf4eb}header{display:flex;align-items:center;justify-content:space-between;gap:16px}.badge{background:#6840a0;color:white;border-radius:30px;padding:10px 16px;font-size:14px;font-weight:700}h1{font-size:42px;margin:8px 0}section{background:white;border:0;border-radius:24px;box-shadow:0 12px 40px #19382812}nav a{padding:10px 18px;border-radius:24px;text-decoration:none;font-weight:700}nav a[aria-current=page]{background:#6840a0;color:white}button{background:#6840a0;color:white;border:2px solid #6840a0;border-radius:14px;cursor:pointer}button[aria-pressed=true]{background:#fff2be;color:#342b0d;border-color:#715500}button:disabled{background:#e3e6e0;color:#536050;border-color:#b7c2b6;cursor:default}:focus-visible{outline:3px solid #995c00;outline-offset:4px}.choices{display:grid;grid-template-columns:1fr 1fr;gap:10px}.score{font-weight:750;color:#6840a0}#feedback{min-height:2em}footer{margin-top:24px;font-size:14px;color:#46584d}@media(max-width:600px){body{margin:0;padding:16px}header{align-items:start}h1{font-size:30px}nav{gap:4px}nav a{padding:10px}.choices{grid-template-columns:1fr}section{padding:18px}.badge{font-size:12px}}</style></head><body><header><div><p>TEAM B · POLISH</p><h1>Pocket Planner</h1></div><span class=\"badge\">10 coins · 60 seconds</span></header><nav aria-label=\"Game screens\"><a href=\"#welcome\">Welcome</a><a href=\"#play\">Play</a><a href=\"#results\">Results</a></nav><main><section id=\"welcome\" aria-label=\"Welcome\"><h2>Big choices. Small budget.</h2><p>You have 10 coins and 60 seconds. Cover your needs, pick a treat if you can, and save at least 2 coins.</p><ul><li>Bus ride: 2 coins</li><li>Lunch: 3 coins</li><li>Sticker: 2 coins</li><li>Toy: 5 coins</li></ul><button id=\"start\">Start the challenge</button></section><section id=\"play\" aria-label=\"Play\" hidden><h2>Spend with a plan</h2><p class=\"score\">Coins left: <output id=\"balance\">10</output> · Time: <output id=\"timer\">60</output>s</p><div class=\"choices\"><button data-cost=\"2\" data-item=\"bus\" aria-pressed=\"false\">Bus · need · 2 coins</button><button data-cost=\"3\" data-item=\"lunch\" aria-pressed=\"false\">Lunch · need · 3 coins</button><button data-cost=\"2\" data-item=\"sticker\" aria-pressed=\"false\">Sticker · want · 2 coins</button><button data-cost=\"5\" data-item=\"toy\" aria-pressed=\"false\">Toy · want · 5 coins</button></div><p id=\"feedback\" role=\"status\">Choose your needs first. Tap a choice again to put it back.</p><button id=\"finish\">Check my budget</button></section><section id=\"results\" aria-label=\"Results\" hidden><h2>Your money story</h2><p id=\"summary\" role=\"status\">No round played yet. Start a challenge to see what you saved.</p><button id=\"again\">Play again</button></section></main><footer>Needs first. Wants next. A little saved for tomorrow.</footer><script>const screens=[...document.querySelectorAll('main section')];function route(){const id=['welcome','play','results'].includes(location.hash.slice(1))?location.hash.slice(1):'welcome';screens.forEach(s=>s.hidden=s.id!==id);document.querySelectorAll('nav a').forEach(a=>{if(a.hash==='#'+id)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')})}addEventListener('hashchange',route);route();const byId=id=>document.getElementById(id);const choices=[...document.querySelectorAll('[data-cost]')];let coins=10,selected=new Set(),clock,remaining=60,active=false;function update(){byId('balance').textContent=coins;choices.forEach(b=>{b.setAttribute('aria-pressed',String(selected.has(b.dataset.item)));b.disabled=!active})}function finish(){if(!active){byId('feedback').textContent='Start a challenge first.';return}active=false;clearInterval(clock);const needs=selected.has('bus')&&selected.has('lunch');byId('summary').textContent=(needs&&coins>=2?'Great plan! Needs covered and savings protected.':needs?'Needs covered. Try saving 2 coins next time.':'Cover bus and lunch before buying wants.')+' You saved '+coins+' of 10 coins.';update();location.hash='results'}function start(){clearInterval(clock);coins=10;selected.clear();remaining=60;active=true;byId('timer').textContent=remaining;byId('feedback').textContent='Cover bus and lunch, then decide what to save.';update();location.hash='play';clock=setInterval(()=>{byId('timer').textContent=--remaining;if(remaining<=0)finish()},1000)}choices.forEach(b=>b.onclick=()=>{if(!active){byId('feedback').textContent='Start a challenge first.';return}const cost=Number(b.dataset.cost),item=b.dataset.item;if(selected.has(item)){selected.delete(item);coins+=cost}else if(cost<=coins){selected.add(item);coins-=cost}else{byId('feedback').textContent='Not enough coins. Put back a want and try again.';return}byId('feedback').textContent=coins+' coins left. Keep at least 2 for savings.';update()});byId('start').onclick=start;byId('again').onclick=start;byId('finish').onclick=finish;update();</script></body></html>"
         }
       ]
     }

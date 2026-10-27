@@ -92,7 +92,7 @@ function shapedSecretRules(rep: Replace): void {
   redactPrivateKeys(rep);
 
   // credentials embedded in a URL: scheme://user:pass@host
-  rep(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s:@/]*:[^\s@/]+@/gi, "url_credentials", (_m, scheme) => scheme + mark("url_credentials") + "@");
+  rep(/\b([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s:@/]*:[^\s@/]+@/gi, "url_credentials", (_m, scheme) => scheme + mark("url_credentials") + "@");
 
   // Explicit authorization fields accept credential tokens of any length or alphabet.
   rep(/\b((?:Proxy-)?Authorization\s*:\s*Basic\s+)[A-Za-z0-9+/]+={0,2}/gi, "basic_auth", (_m, p) => p + mark("basic_auth"));

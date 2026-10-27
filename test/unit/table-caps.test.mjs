@@ -127,7 +127,7 @@ test('unknown prices use the routing estimate, free models cost zero, and the ca
   assert.equal(stops, 1);
   const free = lineFor(scope, { provider: 'ollama', model: 'any-local', usage: { inputTokens: 100, outputTokens: 20 } }, 'srv-test');
   assert.equal(sessionSpend(free), 0);
-  assert.equal(sessionSpend({ ...line, usd: 0 }), 0);
+  assert.equal(sessionSpend({ ...line, usd: 0, usd_prov: 'reported' }), 0);
   clearSessionCap(scope.session);
 });
 
@@ -314,4 +314,24 @@ test('MCP start handlers pass positive spend caps into meeting, collaboration an
   assert.equal(result.resumable, true);
   assert.equal(result.usage.max_usd, 0.001);
   assert.ok(result.usage.spent_usd >= 0.001);
+});
+
+test('a partly priced model is topped up with the routing estimate for its unpriced token classes', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const file = join(mkdtempSync(join(tmpdir(), 'rt-price-')), 'prices.json');
+  writeFileSync(file, JSON.stringify({ 'partly-priced': { input: 1, output: null } }));
+  const before = process.env.ROUNDTABLE_PRICING_FILE;
+  process.env.ROUNDTABLE_PRICING_FILE = file;
+  try {
+    const scope = { session: 'meeting-partial-price', kind: 'meeting', agent: 'sample' };
+    const line = lineFor(scope, { provider: 'openai_compatible', model: 'partly-priced', usage: { inputTokens: 100, outputTokens: 20_000 } }, 'srv-test');
+    const conservative = budgetEstimate('openai_compatible', 'partly-priced', { inputTokens: 100, outputTokens: 20_000 }).usd;
+    assert.ok(line.usd < 0.001);
+    assert.equal(sessionSpend(line), conservative);
+    assert.equal(sessionSpend({ ...line, usd_prov: 'reported' }), line.usd);
+  } finally {
+    if (before === undefined) delete process.env.ROUNDTABLE_PRICING_FILE; else process.env.ROUNDTABLE_PRICING_FILE = before;
+  }
 });

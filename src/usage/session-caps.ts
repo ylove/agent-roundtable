@@ -2,6 +2,7 @@
 // Session spend caps: cumulative metered spend, including estimates for unpriced calls
 // ============================================================================
 
+import { estimateUsd } from "../execution/pricing.js";
 import { budgetEstimate } from "../providers/router.js";
 import type { TableLine } from "./table.js";
 
@@ -44,14 +45,19 @@ export function stopCappedSession(id: string): Promise<void> {
   return pending;
 }
 
-/** Known free models cost zero; unknown prices use the routing budget estimate. */
+/**
+ * Known free models cost zero; unknown prices use the routing budget estimate. A price that covers only some
+ * token classes (a null or omitted rate) is topped up with the same conservative estimate. Reported costs stand.
+ */
 export function sessionSpend(line: TableLine): number {
-  if (line.usd !== undefined) return line.usd;
   const t = line.tokens;
+  if (line.usd !== undefined && (line.usd_prov === "reported" || !t)) return line.usd;
   if (!t) return 0;
-  return budgetEstimate(line.provider ?? "", line.model ?? "", {
-    inputTokens: t.input + t.cache_read + t.cache_write, outputTokens: t.output,
-  }).usd;
+  const tokens = { inputTokens: t.input + t.cache_read + t.cache_write, outputTokens: t.output };
+  const conservative = budgetEstimate(line.provider ?? "", line.model ?? "", tokens).usd;
+  if (line.usd === undefined) return conservative;
+  const partial = estimateUsd(line.model ?? "", { inputTokens: t.input, outputTokens: t.output, cacheReadTokens: t.cache_read, cacheWriteTokens: t.cache_write }, { provider: line.provider }).estimated;
+  return partial ? Math.max(line.usd, conservative) : line.usd;
 }
 
 /** Returns true exactly once, on the call that reaches the cap. */

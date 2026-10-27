@@ -71,7 +71,6 @@ function readRegular(path: string, owned = false): { text: string; mode: number 
   if (!isAbsolute(path)) throw new Error("The env file must be an absolute path to a regular file.");
   let fd: number | undefined;
   try {
-    if (!statSync(path).isFile()) throw new Error();
     fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
     const st = fstatSync(fd);
     if (!st.isFile()) throw new Error();

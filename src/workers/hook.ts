@@ -20,7 +20,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { EXECUTION_ID_RE } from "../ids.js";
 import { ID_RE } from "../execution/events.js";
 import { hasDotGitSegment, pathCovered } from "../execution/leases.js";
-import { isContained } from "../security/fs-safe.js";
+import { isContained, readRegularFile } from "../security/fs-safe.js";
 
 /** Tools whose target the hook checks; any other tool that reaches it is left to the permission rules. */
 export const GATED_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "NotebookEdit", "MultiEdit", "Read", "Glob", "Grep"]);
@@ -47,9 +47,7 @@ interface LeasesFile {
 
 function readLeases(path: string): LeasesFile | null {
   try {
-    const st = lstatSync(path);
-    if (!st.isFile() || st.size > MAX_INPUT_BYTES) return null;
-    const f = JSON.parse(readFileSync(path, "utf8")) as LeasesFile;
+    const f = JSON.parse(readRegularFile(path, { noFollow: true, maxBytes: MAX_INPUT_BYTES }).data.toString("utf8")) as LeasesFile;
     if (!f || typeof f !== "object" || !Array.isArray(f.leases)) return null;
     return f;
   } catch {

@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from "node:fs";
+import { readRegularFile } from "../security/fs-safe.js";
 import type { IncomingMessage } from "node:http";
 import { join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
@@ -22,9 +22,7 @@ interface CastingSummary {
 export function latestCasting(): CastingSummary | undefined {
   try {
     const path = join(ROUNDTABLE_HOME, "casting", "latest.json");
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.size > MAX_BODY_BYTES) return undefined;
-    const report = JSON.parse(readFileSync(path, "utf8"));
+    const report = JSON.parse(readRegularFile(path, { noFollow: true, maxBytes: MAX_BODY_BYTES }).data.toString("utf8"));
     if (!report || typeof report.id !== "string" || typeof report.brief !== "string" || typeof report.createdAt !== "string" || !Array.isArray(report.agents)) return undefined;
     const agents: CastingSummary["agents"] = [];
     for (const agent of report.agents) {

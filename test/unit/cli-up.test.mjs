@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { PassThrough } from "node:stream";
 
-const { runDoctor, formatDoctor, nodeMeets, checkRoundtableBin, onboard, missingSetup, runUpCli, MCP_ADD } = await import("../../dist/cli-up.js");
+const { runDoctor, formatDoctor, nodeMeets, checkRoundtableBin, wrapperRunsEntry, onboard, missingSetup, runUpCli, MCP_ADD } = await import("../../dist/cli-up.js");
 const { privateText } = await import("../../dist/serve/messages.js");
 const { VERSION } = await import("../../dist/config.js");
 
@@ -265,4 +265,14 @@ test("check-in text masks paths but not ratios or alternatives", () => {
   assert.equal(privateText("at C:\\Work\\proj\\a.ts"), "at [private path]");
   assert.equal(privateText("D:/work/a"), "[private path]");
   assert.equal(privateText("a / b"), "a / b");
+});
+
+test("a small shell wrapper that execs this package's entry point counts as this package", () => {
+  const entry = "/opt/rt/dist/index.js";
+  assert.equal(wrapperRunsEntry(`#!/bin/sh\nexec node ${entry} "$@"\n`, [entry]), true);
+  assert.equal(wrapperRunsEntry(`#!/bin/sh\nexec node "${entry}" "$@"\n`, [entry]), true);
+  assert.equal(wrapperRunsEntry(`#!/bin/sh\n# ${entry}\nexec node /elsewhere/index.js "$@"\n`, [entry]), false);
+  assert.equal(wrapperRunsEntry(`#!/bin/sh\nexec node ${entry}.bak "$@"\n`, [entry]), false);
+  assert.equal(wrapperRunsEntry(`exec node ${entry}`, [entry]), false);
+  assert.equal(wrapperRunsEntry("#!/bin/sh\n" + "x".repeat(5000), [entry]), false);
 });

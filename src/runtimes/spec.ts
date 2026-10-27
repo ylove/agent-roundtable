@@ -5,7 +5,7 @@ export type UsagePath = string | string[];
 export interface RuntimeUsage { inputTokens?: UsagePath; outputTokens?: UsagePath; costUsd?: UsagePath }
 export type RuntimeOutput =
   | { mode: "text"; stripDecoration?: boolean }
-  | { mode: "json"; path: string; status?: { path: string; success: string; errorPath?: string } }
+  | { mode: "json"; path: string; status?: { path: string; success: string; errorPath?: string; deniedPath?: string } }
   | { mode: "jsonl"; path: string; filter: Record<string, string | string[]> };
 export interface RuntimeSpec {
   argv: string[];
@@ -39,7 +39,7 @@ export function validateRuntimeSpec(value: unknown, partial = false): asserts va
   if (value.output !== undefined || !partial) {
     const o = value.output;
     if (!record(o) || !keys(o, ["mode", "path", "filter", "stripDecoration", "status"]) || !["text", "json", "jsonl"].includes(String(o.mode))) throw new Error("Invalid runtime output.");
-    if (o.status !== undefined && (o.mode !== "json" || !record(o.status) || !keys(o.status, ["path", "success", "errorPath"]) || !path(o.status.path) || !safeString(o.status.success) || (o.status.errorPath !== undefined && !path(o.status.errorPath)))) throw new Error("Invalid runtime output status.");
+    if (o.status !== undefined && (o.mode !== "json" || !record(o.status) || !keys(o.status, ["path", "success", "errorPath", "deniedPath"]) || !path(o.status.path) || !safeString(o.status.success) || (o.status.errorPath !== undefined && !path(o.status.errorPath)) || (o.status.deniedPath !== undefined && !path(o.status.deniedPath)))) throw new Error("Invalid runtime output status.");
     if (o.mode === "text" ? (o.path !== undefined || o.filter !== undefined || (o.stripDecoration !== undefined && typeof o.stripDecoration !== "boolean")) : (!path(o.path) || o.stripDecoration !== undefined)) throw new Error("Invalid runtime output path.");
     if (o.mode === "json" && o.filter !== undefined) throw new Error("Invalid runtime output filter.");
     if (o.mode === "jsonl" && (!record(o.filter) || !Object.keys(o.filter).length || Object.keys(o.filter).length > 8 || Object.entries(o.filter).some(([k, v]) => !path(k) || !(safeString(v) || (Array.isArray(v) && v.length > 0 && v.length <= 8 && v.every(safeString)))))) throw new Error("Invalid runtime event filter.");

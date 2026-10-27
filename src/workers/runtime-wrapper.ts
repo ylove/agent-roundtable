@@ -151,7 +151,7 @@ async function main(): Promise<void> {
   let usage: RuntimeResultLine["usage"] | undefined;
   let costUsd: number | undefined;
   try {
-    const parsed = parseRuntimeOutput(spec, raw);
+    const parsed = parseRuntimeOutput(spec, raw, process.env, true);
     ({ text, usage } = parsed);
     costUsd = parsed.costUsd;
   } catch (error) {

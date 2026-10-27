@@ -306,14 +306,14 @@ test("agy: sandboxed driver-side submit, reported tokens, sign-in auth and no in
 });
 
 test("agy exit-0 ERROR and empty SUCCESS fail the worker without submitting edits", async (t) => {
-  for (const marker of ["FAIL_ME", "DENY_ME"]) {
+  for (const marker of ["FAIL_ME", "DENY_ME", "DENY_TEXT"]) {
     const s = await setup(t, { driverId: "runtime:agy", prompt: `FIXTURE write src/api/partial.js\n${marker}` });
     const h = await s.driver.launch(s.launch);
     assert.equal((await workerExit(h.pid)).code, 1, logOf(s.launch));
     assert.equal((await events(s.store, "task.submitted")).length, 0);
     const result = resultOf(s.launch);
     assert.equal(result.ok, false);
-    assert.match(result.text, marker === "FAIL_ME" ? /failure status: ERROR: boom/ : /no final text/);
+    assert.match(result.text, marker === "FAIL_ME" ? /failure status: ERROR: boom/ : marker === "DENY_TEXT" ? /denied actions/ : /denied actions|no final text/);
   }
 });
 

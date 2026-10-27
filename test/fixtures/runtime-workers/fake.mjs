@@ -52,9 +52,10 @@ for (const m of prompt.matchAll(/FIXTURE (\S+)(?: (\S+))?/g)) {
 }
 if (name === "agy") {
   const failed = prompt.includes("FAIL_ME");
-  const denied = prompt.includes("DENY_ME");
+  const deniedText = prompt.includes("DENY_TEXT");
+  const denied = prompt.includes("DENY_ME") || deniedText;
   console.log(JSON.stringify({
-    status: failed ? "ERROR" : "SUCCESS", response: failed || denied ? "" : summary,
+    status: failed ? "ERROR" : "SUCCESS", response: failed || (denied && !deniedText) ? "" : deniedText ? "I could not write the file; the write was denied." : summary,
     ...(failed && { error: "boom" }),
     ...(denied && { denied_actions: [{ action: "write_file" }] }),
     usage: { input_tokens: 7709, output_tokens: 1, thinking_tokens: 20 },

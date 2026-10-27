@@ -163,7 +163,7 @@ function usageNumber(event: unknown, paths: UsagePath | undefined): number | und
   return undefined;
 }
 /** The final text and usage of a runtime's stdout, by the profile's output mode (shared by seats and heads-down workers). */
-export function parseRuntimeOutput(spec: RuntimeSpec, stdout: string, env: NodeJS.ProcessEnv = process.env): RuntimeResult {
+export function parseRuntimeOutput(spec: RuntimeSpec, stdout: string, env: NodeJS.ProcessEnv = process.env, strictDenials = false): RuntimeResult {
   const output = spec.output;
   let text: unknown;
   let usage: RuntimeResult["usage"], costUsd: number | undefined;
@@ -193,6 +193,10 @@ export function parseRuntimeOutput(spec: RuntimeSpec, stdout: string, env: NodeJ
           // Scrub decoded strings before capping, so truncation cannot expose a partial secret.
           throw new Error(`Runtime returned failure status: ${scrubSecrets(reason, env).text.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 500)}`);
         }
+      }
+      if (strictDenials && output.mode === "json" && output.status?.deniedPath) {
+        const denied = runtimePath(event, output.status.deniedPath);
+        if (Array.isArray(denied) && denied.length) throw new Error("Runtime reported denied actions; the work is incomplete.");
       }
       extract(event);
       if (output.mode === "json" || Object.entries(output.filter).every(([path, expected]) => {

@@ -27,6 +27,4 @@ process.env.ROUNDTABLE_PROVIDER_RETRIES = "0";
 process.env.ROUNDTABLE_AGENT_PATHS = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // execute probes its provider once; offline tests skip that call (the preflight test turns it back on).
 process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT = "1";
-// Suites start many sessions in one process; the live-session limit has its own tests.
-process.env.ROUNDTABLE_MAX_LIVE_SESSIONS = "1000";
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));

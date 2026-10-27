@@ -2,7 +2,6 @@
 // Ultraplan: specialist input, independent reviews and final sign-offs
 // ============================================================================
 
-import { reserveLiveSession, registerLiveSessionSource } from "../usage/live-limit.js";
 import { validateSessionCap, setSessionCap, stopCappedSession, clearSessionCap, sessionCapView } from "../usage/session-caps.js";
 import { prepareSeats } from "../table/seats.js";
 import { callSeat } from "../table/dispatch.js";
@@ -101,7 +100,6 @@ export interface UltraplanFinalResult {
 }
 
 export const ultraplans = new Map<string, Ultraplan>();
-registerLiveSessionSource("ultraplan", () => ultraplans.keys());
 
 function ultraplanBusy(id: string): string {
   return sessionBusyMessage("Ultraplan", id, "a phase");
@@ -443,7 +441,6 @@ export async function startUltraplan(
 ): Promise<UltraplanStepResult | UltraplanFinalResult> {
   validateSessionCap(opts.maxUsd);
   const id = newId("ultraplan");
-  const releaseRoom = reserveLiveSession(id);
   try {
     if ((opts.provider === undefined || opts.provider === "auto") && opts.baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
     if (!Array.isArray(agents) || agents.length < 1) throw new Error("Ultraplan requires at least 1 agent");
@@ -533,7 +530,6 @@ export async function startUltraplan(
       release();
     }
   } finally {
-    releaseRoom();
     if (!ultraplans.has(id) && !sessionCapView(id)?.reached) clearSessionCap(id);
   }
 }

@@ -2,7 +2,6 @@
 // Local Meeting Functions (CLI-based, uses local Claude installation)
 // ============================================================================
 
-import { reserveLiveSession, registerLiveSessionSource } from "../usage/live-limit.js";
 import { validateSessionCap, setSessionCap, stopCappedSession, clearSessionCap, sessionCapView } from "../usage/session-caps.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
@@ -62,7 +61,6 @@ export interface LocalMeeting {
 }
 
 export const localMeetings = new Map<string, LocalMeeting>();
-registerLiveSessionSource("local-meetings", () => localMeetings.keys());
 
 function localMeetingBusy(id: string): string {
   return sessionBusyMessage("Local meeting", id);
@@ -449,7 +447,6 @@ export async function startLocalMeeting(
 }> {
   validateSessionCap(maxUsd);
   const meetingId = newId("local");
-  const releaseRoom = reserveLiveSession(meetingId);
   try {
     setSessionCap(meetingId, maxUsd);
     assertMeetingMode(mode);
@@ -532,7 +529,6 @@ export async function startLocalMeeting(
       ...(prototype && { prototypes: prototype.takeCallSummary() }),
     };
   } finally {
-    releaseRoom();
     if (!localMeetings.has(meetingId) && !sessionCapView(meetingId)?.reached) clearSessionCap(meetingId);
   }
 }

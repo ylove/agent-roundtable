@@ -1,4 +1,4 @@
-import { reserveLiveSession, registerLiveSessionSource } from "../usage/live-limit.js";
+import { reserveLiveSession } from "../usage/live-limit.js";
 import { validateSessionCap, setSessionCap, stopCappedSession, clearSessionCap, sessionCapView } from "../usage/session-caps.js";
 import { MAX_TOKENS } from "../config.js";
 import type { Seat } from "../table/events.js";
@@ -112,7 +112,6 @@ export interface Collaboration {
 }
 
 export const collaborations = new Map<string, Collaboration>();
-registerLiveSessionSource("collaborations", () => collaborations.keys());
 
 /** Match the selected seat's model and send a pinned compatible endpoint only to that provider. */
 function agentCallOptions(collaboration: Collaboration, agent: CollaborationAgent) {
@@ -341,7 +340,8 @@ export async function startCollaboration(
 }> {
   validateSessionCap(options.maxUsd);
   const collaborationId = newId("collab");
-  const releaseRoom = reserveLiveSession(collaborationId);
+  // Only a session that runs rounds by itself during the start call takes a live slot.
+  const releaseRoom = options.autoRun && options.runRounds && options.runRounds > 0 ? reserveLiveSession(collaborationId) : () => {};
   try {
     setSessionCap(collaborationId, options.maxUsd);
     // A bad or unknown duel fails here, before a session exists or any provider is called.

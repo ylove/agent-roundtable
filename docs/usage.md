@@ -27,6 +27,8 @@ Two limits to know. The host agent itself (your main chat) is not metered by the
 
 Live capped sessions show **spent $x of $cap cap** in the usage report and dashboard; JSON/tool agent entries include `max_usd`, `spent_usd` and `cap_reached`. These values describe the whole session, so each participant shows the same cap and cumulative spend. The live duel/casting registry and room metrics show them too. Unpriced tokens count toward `spent_usd` using provider judgment’s estimate; known free models count as zero. A spend cap stops a meeting, collaboration or ultraplan as stopped by "spend cap". A duel saves a resumable checkpoint; use `roundtable duel --resume <id> --max-usd <higher-cap>` to continue.
 
+`ROUNDTABLE_MAX_LIVE_SESSIONS` (default 4) limits concurrent self-running sessions: duels (including resume), casting calls, and a collaboration while it auto-runs rounds inside its start call. Meetings, local meetings, collaborations and ultraplans that advance one tool call per step are not counted, since they spend only when the caller advances them (their `max_usd` cap still applies). The slot is released when the run finishes, stops or fails.
+
 ## The status line
 
 Add this to your Claude Code settings (`~/.claude/settings.json`, or the project's `.claude/settings.json`):

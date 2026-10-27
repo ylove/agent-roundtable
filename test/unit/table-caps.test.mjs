@@ -157,36 +157,47 @@ test('a collaboration crossing the cap cleanly stops after its opening contribut
   assert.equal(calls.length, 1);
 });
 
-test('the live cap counts session kinds, rejects starts before calls, and ignores casting dry runs', async t => {
-  env(t, 'ROUNDTABLE_MAX_LIVE_SESSIONS', '1');
-  const calls = provider(t), first = await start(undefined);
-  t.after(async () => { if (meetings.has(first.meetingId)) await endMeeting(first.meetingId, false); });
-  const fail = /Live session limit 1 reached \(ROUNDTABLE_MAX_LIVE_SESSIONS\)/;
-  for (const action of [() => start(undefined),
-    () => startCollaboration([sample, plain], 'topic', {}),
-    () => startLocalMeeting(sample, 'topic'),
-    () => startUltraplan([sample], 'task'),
-    () => runDuel(opts, observer(), signal(), deps),
-    () => runCastingCall({ brief: 'a cast', agents: [sample, plain] }, observer(), signal()),
-  ]) await assert.rejects(action(), fail);
-  assert.equal(calls.length, 1);
+test('the live cap counts autonomous runs only: a fifth duel or casting call is refused, caller-driven sessions are not', async t => {
+  env(t, 'ROUNDTABLE_MAX_LIVE_SESSIONS', '4');
+  const calls = provider(t);
+  const ids = [1, 2, 3, 4].map(n => `duel-live-slot-${n}`);
+  for (const id of ids) { registerDuel({ id, agents: ['sample'], started: new Date().toISOString() }); t.after(() => unregisterDuel(id)); }
+  const fail = /Live session limit 4 reached \(ROUNDTABLE_MAX_LIVE_SESSIONS\)/;
+  await assert.rejects(runDuel(opts, observer(), signal(), deps), fail);
+  await assert.rejects(runCastingCall({ brief: 'a cast', agents: [sample, plain] }, observer(), signal()), fail);
+  assert.equal(calls.length, 0);
+  // Meetings, collaborations and ultraplans advance one caller step at a time and are not counted.
+  const opened = [];
+  for (let i = 0; i < 5; i++) opened.push(await start(undefined));
+  for (const m of opened) await endMeeting(m.meetingId, false);
+  const collab = await startCollaboration([sample, plain], 'topic', {});
+  await endCollaboration(collab.collaborationId, false);
   const cast = await runCastingCall({ brief: 'a cast', agents: [sample, plain], dryRun: true }, observer(), signal());
   assert.equal(cast.dryRun, true);
   for (const value of [undefined, 'bad-private-value', '0', '-2', '1.5', 'Infinity']) assert.equal(liveSessionLimit({ ROUNDTABLE_MAX_LIVE_SESSIONS: value }), 4);
   assert.equal(liveSessionLimit({ ROUNDTABLE_MAX_LIVE_SESSIONS: '12' }), 12);
 });
 
-test('overlapping openings reserve room before their live maps exist', async t => {
+test('a duel slot is released after a cap stop and after an error', async t => {
+  env(t, 'ROUNDTABLE_MAX_LIVE_SESSIONS', '1');
+  provider(t);
+  const stopped = await runDuel({ ...opts, maxUsd: 0.001 }, observer(), signal(), deps);
+  assert.equal(stopped.resumable, true);
+  await assert.rejects(runDuel({ ...opts, humanJudge: true }, observer(), signal(), {}), /humanJudge requires duel controls/);
+  const resumed = await runDuel({ resume: stopped.id, maxUsd: 1 }, observer(), signal(), deps);
+  assert.notEqual(resumed.resumable, true);
+});
+
+test('overlapping duel starts reserve their slot before the duel is listed', async t => {
   env(t, 'ROUNDTABLE_MAX_LIVE_SESSIONS', '1');
   let entered, release;
   const ready = new Promise(r => { entered = r; }), gate = new Promise(r => { release = r; });
   provider(t, async () => { entered(); await gate; });
-  const opening = start(undefined);
+  const first = runDuel({ ...opts, maxUsd: 0.001 }, observer(), signal(), deps);
   await ready;
-  await assert.rejects(start(undefined), /Live session limit 1/);
+  await assert.rejects(runDuel(opts, observer(), signal(), deps), /Live session limit 1/);
   release();
-  const r = await opening;
-  await endMeeting(r.meetingId, false);
+  await first;
 });
 
 test('terminal cap stops print cumulative spend and the higher-cap resume command', () => {

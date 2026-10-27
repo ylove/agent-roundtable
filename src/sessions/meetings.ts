@@ -1,4 +1,3 @@
-import { reserveLiveSession, registerLiveSessionSource } from "../usage/live-limit.js";
 import { validateSessionCap, setSessionCap, stopCappedSession, clearSessionCap, sessionCapView } from "../usage/session-caps.js";
 import { prepareSeats } from "../table/seats.js";
 import { callSeat } from "../table/dispatch.js";
@@ -79,7 +78,6 @@ function meetingCallOptions(meeting: Pick<Meeting, "provider" | "model" | "baseU
 }
 
 export const meetings = new Map<string, Meeting>();
-registerLiveSessionSource("meetings", () => meetings.keys());
 
 function meetingBusy(id: string): string {
   return sessionBusyMessage("Meeting", id);
@@ -142,7 +140,6 @@ export async function startMeeting(
 }> {
   validateSessionCap(connectorOptions.maxUsd);
   const meetingId = newId("meeting");
-  const releaseRoom = reserveLiveSession(meetingId);
   try {
     setSessionCap(meetingId, connectorOptions.maxUsd);
     if ((provider === undefined || provider === "auto") && baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
@@ -244,7 +241,6 @@ export async function startMeeting(
       ...(prototype && { prototypes: prototype.takeCallSummary() }),
     };
   } finally {
-    releaseRoom();
     if (!meetings.has(meetingId) && !sessionCapView(meetingId)?.reached) clearSessionCap(meetingId);
   }
 }

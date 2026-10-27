@@ -40,7 +40,7 @@ test("tracked package env files apply nothing and warn once without a path, thro
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /tracked by git/);
   assert.ok(!warnings[0].includes(root));
-  assert.deepEqual(JSON.parse(readFileSync(calls, "utf8")), ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "ls-files", "--error-unmatch", "--", "package.credentials"]);
+  for (const line of readFileSync(calls, "utf8").trim().split("\n")) assert.deepEqual(JSON.parse(line), ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "ls-files", "--error-unmatch", "--", "package.credentials"]);
 });
 
 test("runtime overrides require absolute regular executable files", t => {

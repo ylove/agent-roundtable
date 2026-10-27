@@ -5,7 +5,7 @@
 //
 // Lines are read from the last turn's own lines only (never inside blockquotes or fences, where a
 // turn quotes the charge and other seats). A line that does not parse is reported back, never
-// dropped silently. Accepting an artifact applies it on conclude, and only then.
+// dropped silently. Persisted artifacts need a person’s sign-off on conclude or a later review.
 // ============================================================================
 
 import { createHash } from "node:crypto";

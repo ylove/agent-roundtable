@@ -12,6 +12,8 @@
 //   usage [--json] [--watch]                                            who is using what, on which platform
 //   stop <agent> [--execution <exe> | --session <id>] [--reason <text>] stop one agent (heads-down or at the table)
 //   preview start|list|stop                                             Docker dev-server previews on 127.0.0.1
+//   postmortem pending|signoff                                         review and sign off persisted lessons
+//   connectors trust <name>                                             accept a connector's tools on its next start
 //   up / doctor                                                         set up, check and start the local service
 //   --version | -v | version                                            print the version
 //   help                                                                this text
@@ -47,6 +49,8 @@ export const USAGE = [
   "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2] [--max-usd n]",
   "  roundtable up [--setup] [--no-input] [--no-serve] [--open] [--check-keys]",
   "  roundtable doctor [--json] [--check-keys]",
+  "  roundtable postmortem pending [--project <dir>] [--json]",
+  "  roundtable postmortem signoff <pm> --by <identity> <artifact-id>... [--json]",
   "  roundtable --version | -v | version",
   "  roundtable serve [--detach] [--no-keep-runners] [--bind loopback|tailnet] | serve status|stop",
   "  roundtable serve --print-service launchd|systemd",
@@ -60,6 +64,7 @@ export const USAGE = [
   "  roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>",
   "  roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value]",
   "  roundtable config unset connector <name> | secrets check",
+  "  roundtable connectors trust <name>",
   "  agent-roundtable help                           this text",
 ].join("\n");
 
@@ -308,6 +313,11 @@ export async function runCli(argv: string[]): Promise<void> {
       process.exitCode = await runNotifyCli(rest);
       return;
     }
+    case "postmortem": {
+      const { runPostmortemCli } = await import("./cli-postmortem.js");
+      process.exitCode = await runPostmortemCli(rest);
+      return;
+    }
     case "agents": {
       const { runAgentsCli } = await import("./cli-agents.js");
       process.exitCode = await runAgentsCli(rest);
@@ -332,6 +342,7 @@ export async function runCli(argv: string[]): Promise<void> {
     case "waffle":
     case "meeting":
     case "secrets":
+    case "connectors":
     case "config": {
       const { runTableCli } = await import("./cli-table.js");
       process.exitCode = await runTableCli(command, rest);

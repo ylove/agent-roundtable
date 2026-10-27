@@ -18,6 +18,7 @@ The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts th
 | `notify` | `init ntfy`, `test` | Set up and test private check-in channels. [Setup](long-running.md#private-check-in-channels). |
 | `runtimes` | `[--json]` | List installed CLI runtimes, paths and versions. See [CLI runtimes](runtimes.md). |
 | `agents` | `[--json]`, `import <absolute file\|dir>`, `starter`, or `--open [--no-hold]` | Browse and import personas or open the local drop zone. See [agents library](agents-library.md). |
+| `postmortem` | `pending [--project <dir>] [--json]` or `signoff <pm> --by <identity> <artifact-id>... [--json]` | Review pending text and hashes, then sign off exactly the selected ids. [Postmortem sign-off](modes/postmortem.md#signing-off-persisted-lessons). |
 | `up` | `[--setup] [--no-input] [--no-serve] [--open] [--check-keys]` | First-run setup (terminal only), the doctor, then the local service and the next steps. [Getting started](getting-started.md#quick-start-roundtable-up). |
 | `doctor` | `[--json] [--check-keys]` | One line per check: Node, bundled undici, git, `bin` (roundtable on PATH, advisory), provider keys (names only), runtimes, Docker, Chrome. Exit 0 when Node, git and a key pass. |
 | `--version` | `-v`, `version` | Print the version. |
@@ -25,7 +26,9 @@ The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts th
 
 `doctor` reports an informational Node update notice for bundled undici versions covered by GHSA-xjj6-f33q-929c. Outbound requests already use the pinned npm undici package through global `fetch`, including the runner, workers and serve supervisor. The notice does not change the command's exit status; `--json` includes it as a nonessential check.
 
-These are the **15 named subcommands** for heads-down runs, usage, runtime detection and the agents library of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches seven table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
+`doctor` and `up` also show an informational postmortem review notice when a project has items pending or lessons accepted before sign-off. Legacy lessons keep flowing into prompts; review with `roundtable postmortem pending --project <dir>` and `postmortem(action: "lessons", project)`. This notice does not affect exit status.
+
+These are the **16 named subcommands** for heads-down runs, usage, runtime detection and the agents library of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches table and connector commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
 
 ```sh
 agent-roundtable help
@@ -57,6 +60,7 @@ Exit status of the subcommands above is 0 for success, 1 for a refusal or failed
 | `debate`, `waffle`, `meeting` | `<topic> --agents <a,b,...> [--rounds N] [--seat ...] [--mix ...] [--duel duel-<id> [--no-duel-source]] [--json]` | Stream a collaboration (debate, waffle-house, collaborate) with per-seat models and spend. With `--duel` the topic may be omitted. |
 | `preview` | `start <exe> <task>` or `start --prototype <dir>` `[--script dev\|start\|preview] [--port N]`; `list [--json]`; `stop <id>` | Run a task's or a prototype's dev server in a locked-down container on `127.0.0.1` and embed it in the dashboard, room and serve index. See [previews](previews.md). |
 | `config` | `show`, or `set env-file\|agents-dir <absolute-path>` | Save the env-file and persona-directory settings; `show` prints only set or unset. See [configuration](configuration.md#saved-cli-settings-and-env-files). |
+| `connectors` | `trust <name>` | Clear a configured connector's tool pin so its next table start records the current list. See [metadata and pinning](connectors.md#metadata-and-pinning). |
 
 Every table command accepts `--help`. Exit codes are 0 for completion or tie, 1 for failure or interruption, and 2 for usage errors or missing credentials.
 
@@ -69,3 +73,11 @@ See [configuration](configuration.md), [contracts and execution](heads-down.md),
 `roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value] [--tool name]` configures a stdio MCP server; `--arg`, `--env` and `--tool` repeat. `--tool` lets seats at the table call that non-read-only tool (see [connectors at the table](connectors.md#at-the-table)). Credential-shaped env names require references. Remove it with `config unset connector <name>`. `config show` lists reference backends and connector/env names without values or locators. See [secrets](secrets.md) and [worker connectors](connectors.md).
 
 `roundtable config set notify.<key> <value>` sets allowlisted private check-in options; credentials must be `secret://` references. `status` also accepts an unambiguous six-character run tag. See [long-running runs](long-running.md).
+
+`roundtable connectors trust <name>` clears that configured connector's accepted tool digest. After reviewing a tool-list change, run it to record the current list on the next table start. It also rewrites an unreadable or invalid pin file. See [metadata and pinning](connectors.md#metadata-and-pinning).
+
+## Postmortem review
+
+`roundtable postmortem pending [--project <dir>] [--json]` lists the current project's pending artifact ids, kinds, targets, text and hashes. A project key also works for `--project`.
+
+`roundtable postmortem signoff <pm> --by <identity> <artifact-id>... [--json]` signs off the explicit pending ids, leaving the rest pending. The identity comes from the person accepting the lessons and must match the frozen contract's orchestrator for an execution. Repeated signed-off ids are reported without reapplying them. Exit codes are 0 for success, 1 for refusal or a failed application, and 2 for usage errors. See [persisted lesson sign-off](modes/postmortem.md#signing-off-persisted-lessons).

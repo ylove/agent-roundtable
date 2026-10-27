@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import { parseFlags } from "./cli.js";
 import { bundledUndiciNeedsUpdate } from "./http/fetch.js";
 import { VERSION } from "./config.js";
+import { activeLessons, isLegacyLesson } from "./postmortem/lessons.js";
+import { listProjectKeys, pendingPostmortems } from "./postmortem/store.js";
 import { scrub } from "./security/secrets.js";
 import { loadUserEnvironment, readUserConfig, setNotifyConfig, setUserConfig, userConfigHome } from "./user-config.js";
 
@@ -109,6 +111,16 @@ export async function runDoctor(probes: Probes, options: { checkKeys?: boolean }
   add({ id: "docker", label: "Docker", essential: false, ok: docker.ok, detail: docker.ok ? "daemon running" : (docker.reason ?? "not running"), fix: "Start Docker; it is the default sandbox for heads-down checks." });
   const chrome = probes.chrome();
   add({ id: "chrome", label: "Chrome", essential: false, ok: !!chrome, detail: chrome ? "found" : "not found", fix: "Install Chrome or Chromium, or set ROUNDTABLE_CHROME_PATH, for page checks and screenshots." });
+  for (const key of listProjectKeys()) {
+    try {
+      const legacy = activeLessons(key).filter(isLegacyLesson).length;
+      const pending = pendingPostmortems(key).length;
+      if (legacy || pending) add({
+        id: `postmortem-${key}`, label: `Postmortem review (${key})`, essential: false, ok: true,
+        detail: `${legacy} accepted before sign-off; ${pending} pending. Review with roundtable postmortem pending --project ${key} and postmortem(action: "lessons").`,
+      });
+    } catch { /* A review notice does not affect setup checks. */ }
+  }
   return { ok: checks.filter(c => c.essential).every(c => c.ok), checks };
 }
 

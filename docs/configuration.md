@@ -67,6 +67,8 @@ roundtable config show
 
 Settings are saved as `{ "envFile": "…", "agentsDir": "…" }` in `~/.agent-roundtable/config.json`, or `ROUNDTABLE_HOME/config.json` when a state root is configured. Writes use mode 0600. `config show` prints `env-file: set|unset`, `agents-dir: set|unset`, secret names with backend ids, and connector names with env variable names; it never displays paths, locators or values.
 
+The same file can contain [runtime profiles and overrides](runtimes.md#configuration) under `runtimes`. Google Antigravity's built-in name is `agy`; it needs its own saved sign-in and no new login setting. JSON output accepts optional `output.status: { "path": "status", "success": "SUCCESS", "errorPath": "error" }` (`errorPath` is optional). Any other or missing status fails with a scrubbed, capped diagnostic, including in workers. This is agy's default; other runtimes keep their existing behavior. All paths are dotted own-property paths as described in the runtime reference.
+
 `ROUNDTABLE_ENV_FILE` overrides the saved `envFile`. The target must be an absolute path to an accessible regular file. A file readable by group or world produces a warning without revealing its path. Restrict it to mode 0600. Invalid targets are skipped with a path-free warning.
 
 **Owner-only rule.** Both `config.json` and the pointed env file are read only when you own them and neither group nor world can write to them (mode 0600 or 0644 passes; 0666, or a file owned by another user, does not). A file that fails the rule is skipped with a path-free warning: the settings and keys in it are not used. The package `.env` is not subject to this rule.
@@ -98,7 +100,7 @@ These settings complete the table above. `SANDBOX_ENV` is re-exported by `src/sa
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `ROUNDTABLE_HOME` | Root for the agents library (`agents/`), execution state, sessions, worktrees, audit, activity and transcripts unless individually overridden | `~/.agent-roundtable`; fresh OS temp directory in a Node test process when unset |
+| `ROUNDTABLE_HOME` | Root for the agents library (`agents/`), duel archives/checkpoints/chosen artifacts (`duels/`), execution state, sessions, worktrees, audit, activity and transcripts unless individually overridden | `~/.agent-roundtable`; fresh OS temp directory in a Node test process when unset |
 | `ROUNDTABLE_SANDBOX_IMAGE` | Default Docker command/check image; contract `sandbox.image` can override it | `node:22-bookworm-slim` |
 | `ROUNDTABLE_SANDBOX_PROXY_IMAGE` | Docker HTTPS install-egress proxy image | `node:22-alpine` |
 | `ROUNDTABLE_SANDBOX_MEMORY` | Docker memory limit with swap disabled; invalid values warn and fall back | `2g` |
@@ -109,7 +111,7 @@ These settings complete the table above. `SANDBOX_ENV` is re-exported by `src/sa
 | `ROUNDTABLE_PREVIEW_READY_TIMEOUT_SEC` | Seconds to wait for a preview's dev server to answer HTTP (5–1800) | `120` |
 | `ROUNDTABLE_ALLOW_LOCAL_SANDBOX` | Allow the weaker local command backend | off; exactly `1` enables, or explicitly choose `execute(sandbox: "local")` |
 | `ROUNDTABLE_ALLOW_CODEX_DRIVER` | Opt into the Codex worker driver and its broader access model | off; exactly `1` enables, or explicitly choose `execute(worker_driver: "codex")` |
-| `ROUNDTABLE_ALLOW_RUNTIME_WORKERS` | Opt into runtime profiles (`hermes`, `openclaw`, `gemini`, or a configured one) as heads-down workers, `workers.driver: "runtime:<name>"`; contract validation and `execute` refuse the choice without it. See [runtimes as workers](runtimes.md#as-heads-down-workers) | off; exactly `1` enables |
+| `ROUNDTABLE_ALLOW_RUNTIME_WORKERS` | Opt into runtime profiles (`hermes`, `openclaw`, `gemini`, `agy`, or a configured one) as heads-down workers, `workers.driver: "runtime:<name>"`; contract validation and `execute` refuse the choice without it. See [runtimes as workers](runtimes.md#as-heads-down-workers) | off; exactly `1` enables |
 | `ROUNDTABLE_CODEX_READ_ROOTS` | Extra absolute, colon-separated toolchain read roots in the Codex permissions profile; denied home/state/checkout roots stay denied | none |
 | `ROUNDTABLE_PRICING_FILE` | JSON model-price overrides, USD per million tokens; re-read when file changes | built-in table; unknown rates are estimated |
 | `ROUNDTABLE_SMOKE_CHECKS` | Comma-separated contract command ids for integration checks after each merge | contract `validation.final` |
@@ -169,6 +171,7 @@ Terminal output honors the standard `NO_COLOR` (any value turns colors off in th
 | `NODE_TEST_CONTEXT` | Set by Node's test runner; config uses fresh temp state and warns once if `ROUNDTABLE_HOME` is unset | absent outside tests; do not set manually |
 | `ROUNDTABLE_RUNNER_TICK_MS` | Runner tick for tests/demos, 50–10000 ms | `1500` |
 | `ROUNDTABLE_TEST_CHROME` | `1` enables real-browser screenshot tests | off |
+| `ROUNDTABLE_TEST_AGY` | `1` enables the installed Antigravity CLI smoke (`node --test test/live-agy.mjs`); required for agy in the general runtime live smoke too | off |
 | `ROUNDTABLE_LIVE_TEST` | `1` permits paid live-provider smoke tests | off |
 | `ROUNDTABLE_LIVE_PROVIDERS` | Comma-separated live test providers | `anthropic,openai,together` |
 | `ROUNDTABLE_LIVE_REPLICATE` | `1` adds Replicate to live checks | off |

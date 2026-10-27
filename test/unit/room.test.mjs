@@ -40,15 +40,15 @@ test("room capability checks, strict shell CSP, and recorded prototype serving",
   assert.equal(state.assessments.length, 4);
   assert.equal(state.dissents.length, 1);
   assert.equal(state.end.winner, "A");
-  assert.equal(state.usage.totalCostUsd, 0.06);
-  assert.ok(!JSON.stringify(state).includes("<script>"));
   const archive = JSON.parse(await readFile(fixture, "utf8"));
+  assert.equal(state.usage.totalCostUsd, archive.events.find(e => e.type === "usage").totalCostUsd);
+  assert.ok(!JSON.stringify(state).includes("<script>"));
   for (const team of ["A", "B"]) {
     const response = await fetch(new URL(`p/${team}/index.html`, base));
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("content-security-policy"), APP_CSP);
     assert.equal(response.headers.get("x-frame-options"), "SAMEORIGIN");
-    assert.equal(await response.text(), archive.prototypes.find(p => p.team === team).files[0].content);
+    assert.equal(await response.text(), archive.prototypes.findLast(p => p.team === team).files[0].content);
   }
 });
 

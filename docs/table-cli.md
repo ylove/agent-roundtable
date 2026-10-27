@@ -72,8 +72,13 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | `--connectors a,b` | Let every seat call these configured MCP connectors (read-only tools unless the connector config lists more). An unknown name is a usage error before any provider call. See [connectors at the table](connectors.md#at-the-table) |
 | `--seat-connectors s=a+b,...` | With `--connectors`: limit a seat to some of those connectors, e.g. `ada=figma,bob=jira+figma`. Seats not listed get all. A connector outside `--connectors` or a seat not at the table is a usage error. See [limiting a seat](connectors.md#limiting-a-seat) |
 | `--kind` | Duel only: `web` (default), `code`, `diagram` or `text` |
-| `--criteria` | Duel only: judging rubric of 1 to 8 items, comma-separated (separate with `;` instead when an item contains a comma); default: fit to the brief, quality, usability and accessibility, risk or safety |
-| `--judges` | Duel only: 1 to 5 comma-separated agents |
+| `--criteria` | Duel only: judging rubric of 1 to 8 items, comma-separated (separate with `;` instead when an item contains a comma); default: fit to the brief, quality, usability and accessibility, risk or safety, process efficiency |
+| `--judges` | Duel only: 1 to 5 comma-separated agents; optional and advisory with `--human-judge` |
+| `--stages` | Duel only: integer 1–4; default 4 for web and 1 for other kinds |
+| `--human-judge` | Duel only: choose the winner after builds, advisory verdicts and any revision; without a room requires a TTY |
+| `--resume <duel-id>` | Continue a checkpoint; no topic or duel options, replay or dry-run; display flags and `--out` are allowed |
+| `--out <dir>` | Export the chosen artifact into an absent or empty real directory; refuse symlinks and overwrites |
+| `--layout` | Terminal layout: `auto` (default), `split` or `stack` |
 | `--duel` | Debate, waffle or meeting only: a saved duel id (`duel-<id>`) to focus the session on; the topic may then be omitted |
 | `--no-duel-source` | With `--duel`: leave artifact file contents out of the brief to save tokens (titles, file names, verdicts, tally and dissents stay) |
 | `--agents` | Debate, waffle or meeting participants, in speaking order |
@@ -82,7 +87,7 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 | `--seat` | One comma-separated set of per-agent assignments; repeated flags are refused |
 | `--mix` | `auto` or `cheap`, using providers that pass automatic preflight |
 | `--turn-timeout` | Per-turn timeout in seconds (default 90) |
-| `--max-seconds` | Overall deadline in seconds (default 600) |
+| `--max-seconds` | Overall deadline in seconds: default 600 + 150 per extra build stage + 120 per member beyond two on the larger duel team, capped at 3600; other commands default 600 |
 | `--preflight` | Check selected provider/model pairs and report pass/fail; automatic for routed seats |
 | `--no-preflight` | Skip probes; retain known health exclusions |
 | `--open` | Duel only: open the local room |
@@ -95,7 +100,9 @@ For MCP parity, `start_collaboration` accepts a `seats` object keyed by the exac
 
 `--help` (or `-h`) on any table command prints its usage. The topic is one positional argument before the flags; quote topics containing spaces. Terminal colors require a TTY and an unset `NO_COLOR`. Turns wrap to about six lines, prototype submissions print a short summary, and the closing footer shows spend. JSON output retains full events.
 
-A completed duel keeps its room open until Ctrl-C unless `--no-hold` is set. During a run, the first Ctrl-C aborts and lets the runner archive; its room stays available. A second Ctrl-C exits. Exit codes are 0 for completion or tie, 1 for failure or interruption, and 2 for usage errors or missing credentials.
+Staged web builds progress independently through Skeleton, Screens, Working and Polish. Live process metrics show time, tokens, cost, versions, rewrites and errors; judges receive an engine-written process record. Final A/B winners keep a private chosen artifact, also exported by `--out`. See [duel](modes/duel.md) and [room/layout](modes/duel-room.md).
+
+A completed duel keeps its room open until Ctrl-C unless `--no-hold` is set. During a duel, the first Ctrl-C stops calls and saves a private resumable checkpoint, emitting no end event. The held room can Resume; the next Ctrl-C exits and prints `Resume with: roundtable duel --resume <id>`. With `--no-room` or `--no-hold`, the first stop exits with that line. A deadline instead judges the latest valid versions and finishes. `--human-judge --no-room` prompts `Choose the winner [A/B]:` on a TTY and is a usage error otherwise. Exit codes are 0 for completion or tie, 1 for failure or interruption, and 2 for usage errors or missing credentials.
 
 ```sh
 roundtable duel --dry-run --speed 4 --no-room --no-hold --json

@@ -16,6 +16,7 @@ import { join } from "node:path";
 import type { SandboxBackend, SandboxResult, SandboxRunRequest } from "../execution/types.js";
 import { randomBase32 } from "../ids.js";
 import { childEnv } from "../security/child-env.js";
+import { findExecutable, isExecutableFile } from "../executables.js";
 import { isContained } from "../security/fs-safe.js";
 import {
   DEFAULT_SANDBOX_IMAGE,
@@ -49,22 +50,22 @@ export const DEFAULT_DOCKER_LIMITS: DockerLimits = { memory: "2g", cpus: "2", pi
 
 const MEMORY_RE = /^\d+(?:\.\d+)?[bkmg]?$/i;
 const CPUS_RE = /^(?:\d+(?:\.\d+)?|\.\d+)$/;
-const IMAGE_RE = /^[a-z0-9][a-z0-9._/:@-]{0,254}$/i;
+export const IMAGE_RE = /^[a-z0-9][a-z0-9._/:@-]{0,254}$/i;
 const CONTAINER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}$/;
 /** Variables the sandbox sets itself (compared case-insensitively). */
 const RESERVED_ENV = ["HOME", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY"];
 /** Both spellings: npm and pip read either, curl only the lower-case http_proxy. */
 const PROXY_VARS = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
 
-function validMemory(v: string): boolean {
+export function validMemory(v: string): boolean {
   return MEMORY_RE.test(v) && parseFloat(v) > 0;
 }
 
-function validCpus(v: string): boolean {
+export function validCpus(v: string): boolean {
   return CPUS_RE.test(v) && parseFloat(v) > 0;
 }
 
-function validPids(n: number): boolean {
+export function validPids(n: number): boolean {
   return Number.isInteger(n) && n >= 16 && n <= 1_000_000;
 }
 
@@ -118,6 +119,28 @@ export interface DockerRunOptions {
   egress?: Pick<EgressNetwork, "network" | "proxyUrl">;
 }
 
+/** The isolation flags every Roundtable container shares (also used by dev-server previews). Pure; the caller validates. */
+export function hardeningArgs(o: { network: string; uid: number; gid: number; limits: DockerLimits; extraTmpfs?: string[] }): string[] {
+  const { memory, cpus, pids } = o.limits;
+  return [
+    "--network", o.network,
+    "--read-only",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
+    ...(o.extraTmpfs ?? []).flatMap((spec) => ["--tmpfs", spec]),
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--pids-limit", String(pids),
+    "--memory", memory,
+    "--memory-swap", memory,
+    "--cpus", cpus,
+    "--user", `${o.uid}:${o.gid}`,
+    "-e", "HOME=/tmp",
+  ];
+}
+
+/** The proxy variables an egress container carries. */
+export { PROXY_VARS };
+
 /**
  * The `docker run` argv for one request. Pure; throws SandboxRequestError for an invalid argv,
  * env (secret-shaped or reserved names), cwd (absolute or escaping), workdir, image, name or limit.
@@ -149,17 +172,7 @@ export function buildDockerRunArgs(req: SandboxRunRequest, opts: DockerRunOption
     "--label", "roundtable.sandbox=1",
     "--label", `roundtable.owner-pid=${process.pid}`,
     "--label", `roundtable.owner-host=${hostname()}`,
-    "--network", egress ? egress.network : "none",
-    "--read-only",
-    "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
-    "--cap-drop", "ALL",
-    "--security-opt", "no-new-privileges",
-    "--pids-limit", String(pids),
-    "--memory", memory,
-    "--memory-swap", memory,
-    "--cpus", cpus,
-    "--user", `${opts.uid}:${opts.gid}`,
-    "-e", "HOME=/tmp",
+    ...hardeningArgs({ network: egress ? egress.network : "none", uid: opts.uid, gid: opts.gid, limits: opts.limits }),
   ];
   if (egress) for (const k of PROXY_VARS) args.push("-e", `${k}=${egress.proxyUrl}`);
   for (const [k, v] of Object.entries(env)) args.push("-e", `${k}=${v}`);
@@ -180,7 +193,7 @@ export function buildDockerRunArgs(req: SandboxRunRequest, opts: DockerRunOption
 export interface DockerBackendOptions {
   /** Names and labels egress networks (rt-egress-<tag>-<id>); random when unset. */
   executionTag?: string;
-  /** Default image; otherwise ROUNDTABLE_SANDBOX_IMAGE or node:22-bookworm-slim. */
+  /** Default image; otherwise ROUNDTABLE_SANDBOX_IMAGE or the digest-pinned DEFAULT_SANDBOX_IMAGE. */
   image?: string;
   limits?: Partial<DockerLimits>;
   /** The docker CLI (default "docker" on PATH). Tests point this at a fake. */
@@ -254,7 +267,8 @@ export class DockerBackend implements SandboxBackend {
 
   constructor(opts: DockerBackendOptions = {}) {
     this.env = opts.env ?? process.env;
-    this.docker = opts.dockerPath ?? "docker";
+    this.docker = opts.dockerPath === undefined ? findExecutable("docker", this.env.PATH) ?? ""
+      : isExecutableFile(opts.dockerPath) ? opts.dockerPath : "";
     this.image = opts.image ?? defaultSandboxImage(this.env);
     this.limits = { ...dockerLimitsFromEnv(this.env), ...opts.limits };
     this.tag = (opts.executionTag ?? randomBase32(6)).toLowerCase();

@@ -24,6 +24,8 @@ export interface SpawnWorkerOptions {
   /** Written to stdin, which is then closed. */
   prompt: string;
   outputPath: string;
+  /** Private launch files removed by the relay even when the runner restarts. */
+  cleanupPaths?: string[];
 }
 
 export interface WorkerExit {

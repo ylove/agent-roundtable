@@ -15,11 +15,16 @@ process.env.ROUNDTABLE_TRANSCRIPTS_DIR = join(root, "transcripts");
 process.env.ROUNDTABLE_PROTOTYPE_DIR = join(root, "prototypes");
 delete process.env.ROUNDTABLE_PROTOTYPE_OPEN;
 // Never spawn a real browser for screenshots unless the opt-in Chrome test is requested.
-if (process.env.ROUNDTABLE_TEST_CHROME !== "1") process.env.ROUNDTABLE_PROTOTYPE_SCREENSHOTS = "0";
+if (process.env.ROUNDTABLE_TEST_CHROME !== "1") {
+  process.env.ROUNDTABLE_PROTOTYPE_SCREENSHOTS = "0";
+  process.env.ROUNDTABLE_PAGE_CHECKS = "0";
+}
 // Personal skills (~/.claude/skills) take precedence over project skills: never read the developer's.
 process.env.HOME = join(root, "home");
 // Scripted provider failures fail at once; test/unit/retry.test.mjs turns retries on where it tests them.
 process.env.ROUNDTABLE_PROVIDER_RETRIES = "0";
 // Path-like agent refs must stay inside allowed roots; tests pass fixture paths under test/fixtures.
 process.env.ROUNDTABLE_AGENT_PATHS = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// execute probes its provider once; offline tests skip that call (the preflight test turns it back on).
+process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT = "1";
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));

@@ -207,22 +207,56 @@ test("withLock serializes critical sections and releases on throw", async () => 
   assert.equal(existsSync(lockDir), false);
 });
 
-test("processes racing to steal a dead pid's lock keep mutual exclusion", async () => {
+test("timeoutMs 0 still takes a dead holder's lock after clearing it", async () => {
+  const lockDir = join(freshDir(), "once.lock");
+  plant(lockDir, { pid: await deadPid(), host: hostname(), token: "dead", at: new Date().toISOString() });
+  const release = await acquireLock(lockDir, { staleMs: 10_000, timeoutMs: 0 });
+  assert.equal(release.held(), true);
+  assert.equal(release(), true);
+});
+
+test("processes racing to steal a dead pid's lock keep mutual exclusion", { timeout: 120_000 }, async (t) => {
   const dir = freshDir();
   const lockDir = join(dir, "race.lock");
   const counter = join(dir, "counter");
   writeFileSync(counter, "0");
-  plant(lockDir, { pid: await deadPid(), host: hostname(), token: "dead", at: new Date().toISOString() });
-  const runs = Array.from({ length: 4 }, () =>
-    new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [LOCK_WORKER, lockDir, counter, "25"], { stdio: ["ignore", "ignore", "pipe"] });
-      let err = "";
-      child.stderr.on("data", (d) => (err += d));
-      child.on("error", reject);
-      child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`worker exited ${code}: ${err}`))));
-    })
-  );
-  await Promise.all(runs);
+  // An old lock with a start time no live process has: cleared at once even if its pid was reused.
+  plant(lockDir, { pid: await deadPid(), host: hostname(), token: "dead", at: ago(60_000), started: "Thu Jan  1 00:00:00 1970" });
+  const workers = Array.from({ length: 4 }, (_, i) => {
+    const child = spawn(process.execPath, [LOCK_WORKER, lockDir, counter, "25"], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+    let err = "";
+    child.stderr.on("data", (d) => (err += d));
+    const failure = (code, signal) => new Error(`worker ${i} (pid ${child.pid}) exited ${code}, signal ${signal}; stderr:\n${err}`);
+    const ready = new Promise((resolve, reject) => {
+      child.once("message", (message) => (message === "ready" ? resolve() : reject(new Error(`worker ${i}: unexpected message ${message}`))));
+      child.once("error", reject);
+      child.once("close", (code, signal) => reject(failure(code, signal)));
+    });
+    // 'close' follows stderr closing, so failures include the complete worker diagnostic.
+    const done = new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => (code === 0 ? resolve() : reject(failure(code, signal))));
+    });
+    const closed = new Promise((resolve) => child.once("close", resolve));
+    return { child, ready, done, closed, stderr: () => err };
+  });
+  t.after(async () => {
+    for (const worker of workers) {
+      if (worker.child.exitCode === null && worker.child.signalCode === null) {
+        t.diagnostic(`stopping worker ${worker.child.pid}; stderr:\n${worker.stderr()}`);
+        worker.child.kill("SIGKILL");
+      }
+    }
+    await Promise.all(workers.map((worker) => worker.closed));
+  });
+  await Promise.all([
+    Promise.all(workers.map((worker) => worker.ready)).then(() =>
+      Promise.all(workers.map(({ child }) => new Promise((resolve, reject) => {
+        child.send("start", (error) => (error ? reject(error) : resolve()));
+      })))
+    ),
+    Promise.all(workers.map((worker) => worker.done)),
+  ]);
   assert.equal(readFileSync(counter, "utf8"), "100");
   assert.deepEqual(readdirSync(dir).sort(), ["counter"], "no lock or stale leftovers remain");
 });

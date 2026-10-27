@@ -3,8 +3,10 @@
 // ultraplan, agent workshops and diagnostics
 // ============================================================================
 
+import { withDuelFocus } from "../sessions/duel-focus.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { LLMProvider } from "../config.js";
+import type { SeatSpec } from "../table/events.js";
 import {
   VERSION,
   DEFAULT_MODELS,
@@ -31,6 +33,7 @@ import {
 } from "../config.js";
 import type { LLMMessage } from "../providers/index.js";
 import { chatCompletion, isOllamaAvailable } from "../providers/index.js";
+import { MAX_REQUEST_TOKENS } from "../providers/limits.js";
 import { metered } from "../usage/session-scope.js";
 import { findExecutable } from "../executables.js";
 import { describeUrl } from "../security/url-guard.js";
@@ -61,6 +64,7 @@ import {
 } from "../sessions/collaborations.js";
 import type { MeetingMode, CollaborationMode } from "../sessions/modes.js";
 import { COLLABORATION_MODES } from "../sessions/modes.js";
+import type { SeatConnectorMap } from "../table/seat-connectors.js";
 import { startUltraplan, submitPlan, endUltraplan, ultraplans } from "../sessions/ultraplan.js";
 import { createAgent, improveAgent } from "../sessions/agent-creation.js";
 import { prototypeTrailer } from "../sessions/prototype-mode.js";
@@ -85,6 +89,8 @@ import {
   END_COLLABORATION,
   GET_COLLABORATION_TRANSCRIPT,
   LIST_COLLABORATIONS,
+  START_DUEL,
+  CASTING_CALL,
   START_ULTRAPLAN,
   SUBMIT_PLAN,
   END_ULTRAPLAN,
@@ -92,19 +98,27 @@ import {
   IMPROVE_AGENT,
   DEBUG_ENV,
 } from "./names.js";
+import { CASTING_CALL_DESCRIPTION, CASTING_CALL_SCHEMA, castingCallTool } from "./casting.js";
+import { START_DUEL_DESCRIPTION, START_DUEL_SCHEMA, startDuelTool } from "./duel.js";
 import {
   ORCHESTRATOR_ONLY,
   READ_ONLY_LOCAL,
   SESSION_END,
   SESSION_TURN,
   PROVIDER_PROPS,
+  AUTO_PROVIDER_PROPS,
   MEETING_MODE_PROPS,
   PUBLIC_PROP,
   PROTOTYPE_PROP,
+  DUEL_PROP,
+  DUEL_SOURCE_PROP,
+  CONNECTORS_PROP,
+  SEAT_CONNECTORS_PROP,
   validateProviderOptions,
   formatUltraplanResult,
   formatAgentWorkshopResult,
   type ToolArgs,
+  type ToolCallContext,
   type ToolDefinition,
 } from "./shared.js";
 
@@ -153,12 +167,17 @@ export const deliberationTools: ToolDefinition[] = [
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
+        duel: DUEL_PROP,
+        duel_source: DUEL_SOURCE_PROP,
+        connectors: CONNECTORS_PROP,
+        seat_connectors: SEAT_CONNECTORS_PROP,
         provider: {
           type: "string",
-          enum: PROVIDER_IDS,
+          enum: ["auto", ...PROVIDER_IDS],
           "x-advisory-enum": true,
           description:
-            "LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
+            "LLM provider. Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
         model: {
           type: "string",
@@ -254,6 +273,9 @@ export const deliberationTools: ToolDefinition[] = [
         debate_focus: MEETING_MODE_PROPS.debate_focus,
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
+        duel: DUEL_PROP,
+        duel_source: DUEL_SOURCE_PROP,
       },
       required: ["agent", "agenda"],
     },
@@ -317,7 +339,7 @@ export const deliberationTools: ToolDefinition[] = [
     modes: ORCHESTRATOR_ONLY,
     annotations: { title: "Chat completion", readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     description:
-      "Call an LLM for text completion. Providers: anthropic (claude-opus-5 / claude-sonnet-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).",
+      "Call an LLM for text completion. Providers: anthropic (claude-opus-5-5 / claude-sonnet-5-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).",
     inputSchema: {
       type: "object",
       properties: {
@@ -348,11 +370,15 @@ export const deliberationTools: ToolDefinition[] = [
           description: MODEL_PARAM_DESCRIPTION,
         },
         max_tokens: {
-          type: "number",
-          description: "Maximum tokens in the response. Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this.",
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_REQUEST_TOKENS,
+          description: "Maximum tokens in the response (integer, 1-32768). Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this.",
         },
         temperature: {
           type: "number",
+          minimum: 0,
+          maximum: 2,
           description: "Sampling temperature (0-2). Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too. Replicate: sent only when the model's schema declares it.",
         },
         base_url: {
@@ -381,6 +407,22 @@ export const deliberationTools: ToolDefinition[] = [
           minItems: 2,
           description:
             'Array of agent identifiers. Examples: ["cfo", "fpa"], ["product", "engineering", "design"]',
+        },
+        seats: {
+          type: "object",
+          description: 'Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (a provider or explicit runtime name) and model.',
+          additionalProperties: true,
+          patternProperties: {
+            "^.+$": {
+              type: "object",
+              properties: {
+                agent: { type: "string" },
+                provider: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,31}$", description: "Provider or explicit configured runtime name." },
+                model: { type: "string", minLength: 1 },
+              },
+              additionalProperties: false,
+            },
+          },
         },
         topic: {
           type: "string",
@@ -422,12 +464,17 @@ export const deliberationTools: ToolDefinition[] = [
         },
         public: PUBLIC_PROP,
         prototype: PROTOTYPE_PROP,
+        page_check: { type: "boolean", description: "Check web prototypes in local headless Chrome when available (default true)." },
+        duel: DUEL_PROP,
+        duel_source: DUEL_SOURCE_PROP,
+        connectors: CONNECTORS_PROP,
+        seat_connectors: SEAT_CONNECTORS_PROP,
         provider: {
           type: "string",
-          enum: PROVIDER_IDS,
+          enum: ["auto", ...PROVIDER_IDS],
           "x-advisory-enum": true,
           description:
-            "LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
+            "LLM provider. Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url).",
         },
         model: {
           type: "string",
@@ -441,6 +488,20 @@ export const deliberationTools: ToolDefinition[] = [
       },
       required: ["agents"],
     },
+  },
+  {
+    name: CASTING_CALL,
+    modes: ORCHESTRATOR_ONLY,
+    annotations: { title: "Casting Call", ...SESSION_TURN },
+    description: CASTING_CALL_DESCRIPTION,
+    inputSchema: CASTING_CALL_SCHEMA,
+  },
+  {
+    name: START_DUEL,
+    modes: ORCHESTRATOR_ONLY,
+    annotations: { title: "Start duel", ...SESSION_TURN },
+    description: START_DUEL_DESCRIPTION,
+    inputSchema: START_DUEL_SCHEMA,
   },
   {
     name: CONTINUE_COLLABORATION,
@@ -553,7 +614,7 @@ export const deliberationTools: ToolDefinition[] = [
   {
     name: START_ULTRAPLAN,
     modes: ORCHESTRATOR_ONLY,
-    precheck: checkProviderArgs,
+    precheck: args => validateProviderOptions(args.provider as LLMProvider | "auto" | undefined, args.base_url as string | undefined, true),
     annotations: { title: "Start ultraplan", ...SESSION_TURN },
     description:
       "Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: \"plan\" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. The final result ends with a JSON trailer {ultraplan_id, archived, tally}; signed off means no OBJECT and no UNCLEAR sign-off. With execution_ready: true, plans end with a roundtable-tasks block and sign-offs check it, so propose_contract { from_session: ultraplan_id } can build a contract from it. Public runs post the task and phase outputs, never context.",
@@ -563,13 +624,17 @@ export const deliberationTools: ToolDefinition[] = [
         agents: { type: "array", items: { type: "string" }, minItems: 1, description: "Specialists contributing input, independent reviews and sign-offs. A planner may also be a participant." },
         task: { type: "string", description: "What the plan must accomplish; required and non-empty.", "x-nonblank": true, "x-hint": "describe what the plan is for" },
         context: { type: "string", description: "Optional background shared with the agents; never posted publicly." },
+        duel: DUEL_PROP,
+        duel_source: DUEL_SOURCE_PROP,
+        connectors: CONNECTORS_PROP,
+        seat_connectors: SEAT_CONNECTORS_PROP,
         draft_plan: { type: "string", description: "Optional full draft: becomes v1 by orchestrator and skips the input phase. Whitespace-only counts as absent." },
         planner: { type: "string", description: "Optional persona that owns drafting and revision server-side; runs the whole loop in one call." },
         revision_rounds: { type: "number", description: "Planner only: review/revise cycles before sign-off, default 1, clamped to 1..3." },
         execution_ready: { type: "boolean", description: "Default false. True when the plan will be executed heads-down: planner drafts and revisions (and your next steps) must end with a fenced roundtable-tasks JSON block of tasks, commands and interfaces, and sign-offs check it." },
         repo_dir: { type: "string", description: "A directory inside the repository the plan is for. When earlier postmortems of that project left lessons, a bounded \"Lessons from past postmortems\" section (misreadings first) is added to the context the agents plan with. Never posted publicly." },
         public: PUBLIC_PROP,
-        ...PROVIDER_PROPS,
+        ...AUTO_PROVIDER_PROPS,
       },
       required: ["agents", "task"],
     },
@@ -678,23 +743,36 @@ export const deliberationTools: ToolDefinition[] = [
 ];
 
 /** Dispatch one deliberation tool. Errors are thrown to handleToolCall, which formats them. */
-export async function handleDeliberationTool(name: string, args: ToolArgs): Promise<CallToolResult> {
+export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?: ToolCallContext): Promise<CallToolResult> {
   switch (name) {
+    case CASTING_CALL:
+      return castingCallTool(args ?? {}, ctx);
+    case START_DUEL:
+      return startDuelTool(args ?? {}, ctx);
+
     // === Meeting Tools ===
     case START_MEETING: {
-      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype } = args as {
+      const { agent, agenda, context, provider, model, base_url, mode, debate_focus, public: isPublic, prototype, page_check, duel, duel_source, connectors, seat_connectors } = args as {
         agent: string;
         agenda: string;
         context?: string;
-        provider?: LLMProvider;
+        duel?: string;
+        duel_source?: boolean;
+        connectors?: string[];
+        seat_connectors?: SeatConnectorMap;
+        provider?: LLMProvider | "auto";
         model?: string;
         base_url?: string;
         mode?: MeetingMode;
         debate_focus?: string;
         public?: boolean;
         prototype?: boolean;
+        page_check?: boolean;
       };
-      const result = await startMeeting(agent, agenda, context, provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true);
+      const result = await startMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), provider, model, base_url, mode, debate_focus, isPublic === true, prototype === true, page_check !== false, {
+        ...(connectors?.length && { connectors }),
+        ...(seat_connectors !== undefined && { seatConnectors: seat_connectors }),
+      });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -741,16 +819,19 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Local Meeting Tools (CLI-based) ===
     case START_LOCAL_MEETING: {
-      const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype } = args as {
+      const { agent, agenda, context, mode, debate_focus, public: isPublic, prototype, page_check, duel, duel_source } = args as {
         agent: string;
         agenda: string;
         context?: string;
+        duel?: string;
+        duel_source?: boolean;
         mode?: MeetingMode;
         debate_focus?: string;
         public?: boolean;
         prototype?: boolean;
+        page_check?: boolean;
       };
-      const result = await startLocalMeeting(agent, agenda, context, mode, debate_focus, isPublic === true, prototype === true);
+      const result = await startLocalMeeting(agent, agenda, withDuelFocus(context, duel, duel_source !== false), mode, debate_focus, isPublic === true, prototype === true, page_check !== false);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
@@ -821,35 +902,47 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Collaboration Tools ===
     case START_COLLABORATION: {
-      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, base_url, mode, debate_focus, grounding, public: isPublic, prototype } = args as {
+      const { agents, topic, context, max_rounds, auto_run_rounds, provider, model, seats, base_url, mode, debate_focus, grounding, public: isPublic, prototype, page_check, duel, duel_source, connectors, seat_connectors } = args as {
         agents: string[];
+        connectors?: string[];
+        seat_connectors?: SeatConnectorMap;
         topic?: string;
         context?: string;
+        duel?: string;
+        duel_source?: boolean;
         max_rounds?: number;
         auto_run_rounds?: number;
-        provider?: LLMProvider;
+        provider?: LLMProvider | "auto";
         model?: string;
+        seats?: Record<string, SeatSpec>;
         base_url?: string;
         mode?: CollaborationMode;
         debate_focus?: string;
         grounding?: boolean;
         public?: boolean;
         prototype?: boolean;
+        page_check?: boolean;
       };
 
       const result = await startCollaboration(agents, topic, {
         context,
+        duel,
+        duelSource: duel_source,
+        ...(connectors?.length && { connectors }),
+        ...(seat_connectors !== undefined && { seatConnectors: seat_connectors }),
         maxRounds: max_rounds,
         autoRun: auto_run_rounds !== undefined,
         runRounds: auto_run_rounds,
         provider,
         model,
+        seats,
         baseUrl: base_url,
         mode,
         debateFocus: debate_focus,
         grounding,
         public: isPublic === true,
         ...(prototype === true && { prototype: true }),
+        ...(page_check !== undefined && { pageCheck: page_check }),
       });
 
       return {
@@ -959,29 +1052,35 @@ export async function handleDeliberationTool(name: string, args: ToolArgs): Prom
 
     // === Ultraplan Tools ===
     case START_ULTRAPLAN: {
-      const { agents, task, context: given, draft_plan, planner, revision_rounds, execution_ready, repo_dir, public: isPublic, provider, model, base_url } = (args ?? {}) as {
+      const { agents, task, context: given, draft_plan, planner, revision_rounds, execution_ready, repo_dir, duel, duel_source, connectors, seat_connectors, public: isPublic, provider, model, base_url } = (args ?? {}) as {
         agents: string[];
+        connectors?: string[];
+        seat_connectors?: SeatConnectorMap;
         task: string;
         context?: string;
+        duel?: string;
+        duel_source?: boolean;
         repo_dir?: string;
         draft_plan?: string;
         planner?: string;
         revision_rounds?: number;
         execution_ready?: boolean;
         public?: boolean;
-        provider?: LLMProvider;
+        provider?: LLMProvider | "auto";
         model?: string;
         base_url?: string;
       };
       // What earlier postmortems of the project taught is read whether or not postmortem mode is on now.
       const lessons = repo_dir ? ultraplanSection((await resolveRepo(repo_dir)).root) : "";
-      const context = [given, lessons].filter((x) => x?.trim()).join("\n\n") || undefined;
+      const context = withDuelFocus([given, lessons].filter((x) => x?.trim()).join("\n\n") || undefined, duel, duel_source !== false) || undefined;
       const result = await startUltraplan(agents, task, {
         context,
         draftPlan: draft_plan,
         planner,
         revisionRounds: revision_rounds,
         executionReady: execution_ready === true,
+        ...(connectors?.length && { connectors }),
+        ...(seat_connectors !== undefined && { seatConnectors: seat_connectors }),
         public: isPublic === true,
         provider,
         model,

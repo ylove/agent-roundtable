@@ -1,14 +1,44 @@
 # MCP tool reference
 
-Generated from the registered definitions in `src/tools/*.ts` after building: **42 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
+Generated from the registered definitions in `src/tools/*.ts` after building: **49 orchestrator tools**, of which **8** are also exposed by worker servers. Names, descriptions, argument types, nested fields, required fields and constraints below come from those schemas. Examples use placeholders for ids and complete plan text.
 
-Use these through your MCP client; Claude Code names them `mcp__agent-roundtable__<tool>`. Omitted optional fields use the behavior described below. A nested field marked required is required only when its enclosing object/item is supplied. Null optional values are treated as absent. New contract, run and worker tools reject unknown arguments.
+Use these through your MCP client; Claude Code names them `mcp__<server name>__<tool>`, for example `mcp__roundtable__start_meeting`. Omitted optional fields use the behavior described below. A nested field marked required is required only when its enclosing object/item is supplied. Null optional values are treated as absent. New contract, run and worker tools reject unknown arguments.
 
 Worker examples below use the **worker server** schema, bound to its startup identity. On the orchestrator server each of the 7 execution worker tools additionally requires `execution_id` and `agent_token` from `join_execution`; keep that token private. The eighth worker tool is `file_dissent`, which also accepts orchestrator authority on the orchestrator server; see the [dissent guide](dissents.md). `join_execution` itself exists only on the orchestrator server. Every execution worker response carries new inbox decisions/directives, including errors; acknowledge directives with `post_update(kind: "ack", directive_id, text)`.
+
+## Casting Call
+
+### casting_call
+
+Audition 2 to 24 personas for any brief, cross-examine them through a neutral casting director, and return redundancy, gaps and a recommended cast. Sends progress notifications on every visible step. No duel or heads-down run is started. See [Casting Call](modes/casting-call.md).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `brief` | string | yes | Brief of 1 to 4000 characters. |
+| `agents` | array of string | no | 2 to 24 persona identifiers; default every persona in the directory. |
+| `agents_dir` | string | no | Absolute persona directory. |
+| `seats` | number | no | Whole number from 1 to persona count, at most 24; default min(5, persona count). |
+| `examine` | boolean | no | Default true; ask and answer one probing question per persona. |
+| `dry_run` | boolean | no | Static lint and similarity only; zero provider calls, no keys needed. |
+| `provider` | string | no | `auto` (default), `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
+| `model` | string | no | Provider model override, as in `start_duel`. |
+| `seat` | object | no | Assignments keyed by persona, with `agent`, `provider` and `model` fields as in duel's `seats`. The director's key is `casting-director`. |
+| `mix` | string | no | `auto` or `cheap` for cost-aware routing. |
+| `turn_timeout_s` | number | no | 1 to 3600 seconds; default 90. |
+| `max_seconds` | number | no | 1 to 3600 seconds; default 300. |
+
+Returns report markdown, `archive_id`, `archive: "casting/<id>.json"`, the structured report, usage and per-seat routing reasons. The report contains `agents` (verdicts, roles, strengths, risks, overlaps and lint), `redundancy`, `gaps`, and `recommended.seats`. With at least four requested seats the director is asked for `recommended.teamA`, `teamB` and `judges`; these render a ready-to-run, shell-quoted duel command. Aborts and time limits archive available results. Invalid director JSON retries once then falls back to static checks; a failed persona is `unclear` and excluded from recommendations. The latest report and scrubbed transcript are copied to `ROUNDTABLE_HOME/casting/latest.json`.
+
+```json
+casting_call { "brief": "Build a queue module", "agents": ["architect", "engineer", "researcher", "reviewer"], "seats": 4 }
+casting_call { "brief": "Draft a policy", "agents_dir": "/absolute/path/to/agents", "dry_run": true }
+```
 
 ## Meetings
 
 ### start_meeting
+
+Omitting `provider`, or passing `"provider": "auto"`, routes eligible seats automatically. The result includes `routing`, an array of seat identifiers, providers, models and short `reason` strings. Explicit seat assignments take priority; runtime seats stay explicit. Caller `base_url` requires an explicit compatible provider. See [Provider judgment](providers.md#provider-judgment).
 
 Start a meeting with an agent. Returns a meeting ID for follow-up messages. Use this to begin a synchronous conversation with another agent (CFO, FP&A, Product, etc.). Pass mode: "debate" to have the agent stress-test your agenda as a challenger instead. Pass prototype: true to have the agent show its proposals as ephemeral prototypes that you assess.
 
@@ -21,8 +51,10 @@ Start a meeting with an agent. Returns a meeting ID for follow-up messages. Use 
 | `debate_focus` | string | no | Optional: what the challenge should concentrate on (only used with mode debate). |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
 | `prototype` | boolean | no | Default false. Prototype mode: agents show proposals as ephemeral artifacts — a scaled-down page shown in a sandboxed frame on a localhost board, the code/IaC that would produce the proposal (never executed), a Mermaid diagram, or a text draft — and the other participants (in meetings: you) give verdicts; the proposer then revises, scraps or shortlists. Results include a prototypes block with the board URL: show it to the human. Prototypes are destroyed as soon as assessment completes. Do not relay the human's feedback on prototypes into the session until it ends; end_* lists outcomes and the shortlist for the human. Combinable with public (public posts get code, diagram links and screenshots of web prototypes, never the localhost board). Not supported with mode conversation. |
-| `provider` | string | no | LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `duel` | string | no | Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call. See [a duel as a meeting's focus](modes/duel.md#a-duel-as-a-meetings-focus). |
+| `duel_source` | boolean | no | Default true; only with duel. The duel brief is resent on every turn to every participant (a full brief can be about 20k tokens per turn). Set false to leave out artifact file contents and keep titles, file names and sizes, verdicts, tally and dissents. |
+| `provider` | string | no | Omit or use `auto` for [provider judgment](providers.md#provider-judgment). Explicit providers retain their defaults. Values: `auto`, `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `start_meeting`
@@ -98,6 +130,8 @@ Start a LOCAL meeting with an agent using the installed Claude CLI. This uses yo
 | `debate_focus` | string | no | Optional: what the challenge should concentrate on (only used with mode debate). |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
 | `prototype` | boolean | no | Default false. Prototype mode: agents show proposals as ephemeral artifacts — a scaled-down page shown in a sandboxed frame on a localhost board, the code/IaC that would produce the proposal (never executed), a Mermaid diagram, or a text draft — and the other participants (in meetings: you) give verdicts; the proposer then revises, scraps or shortlists. Results include a prototypes block with the board URL: show it to the human. Prototypes are destroyed as soon as assessment completes. Do not relay the human's feedback on prototypes into the session until it ends; end_* lists outcomes and the shortlist for the human. Combinable with public (public posts get code, diagram links and screenshots of web prototypes, never the localhost board). Not supported with mode conversation. |
+| `duel` | string | no | Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call. See [a duel as a meeting's focus](modes/duel.md#a-duel-as-a-meetings-focus). |
+| `duel_source` | boolean | no | Default true; only with duel. The duel brief is resent on every turn to every participant (a full brief can be about 20k tokens per turn). Set false to leave out artifact file contents and keep titles, file names and sizes, verdicts, tally and dissents. |
 
 Example: `start_local_meeting`
 
@@ -160,11 +194,14 @@ Example: `list_local_meetings`
 
 ### start_collaboration
 
+Omitting `provider`, or passing `"provider": "auto"`, routes eligible seats automatically. The result includes `routing`, an array of seat identifiers, providers, models and short `reason` strings. Explicit seat assignments take priority; runtime seats stay explicit. Caller `base_url` requires an explicit compatible provider. See [Provider judgment](providers.md#provider-judgment).
+
 Start a collaboration where agents take turns responding; returns a collaboration ID. Default collaborate builds on ideas. Debate has agents[0] defend a position against challengers; waffle-house distills an idea through repeated attacks and rebuttals. Conversation is an informal chat from each agent's own situation, with short turns and no agenda or deliverable; topic is optional only in conversation mode. In conversation mode, put what you know about the agents' current situation in context (what was just built, what each agent last did). Private conversations default to grounding from workspace, memory and local activity; public conversations never get grounding, never open on the founder angle, and their directive does not ask agents to talk about the founder or whoever they report to. Pass prototype: true (not with conversation) to have agents show proposals as ephemeral prototypes that the other agents assess. Continue, nudge, inspect or end with the collaboration tools.
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
 | `agents` | array of string | yes | Array of agent identifiers. Examples: ["cfo", "fpa"], ["product", "engineering", "design"] minItems: `2`. |
+| `seats` | object | no | Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (an API provider or explicit [CLI runtime](runtimes.md) name) and model. |
 | `topic` | string | no | Required except in conversation mode, where it is an optional loose theme, not an agenda. |
 | `context` | string | no | Optional background for all agents. In conversation mode, share what you know about their current situation: what was just built, what each agent last did, and current problems. |
 | `grounding` | boolean | no | Conversation only, default true: send workspace, agent-memory and local activity excerpts to the session's provider as background. Set false to disable. Always disabled in public conversations. |
@@ -174,8 +211,10 @@ Start a collaboration where agents take turns responding; returns a collaboratio
 | `debate_focus` | string | no | Optional: what the challenge should concentrate on (only used with mode debate). |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
 | `prototype` | boolean | no | Default false. Prototype mode: agents show proposals as ephemeral artifacts — a scaled-down page shown in a sandboxed frame on a localhost board, the code/IaC that would produce the proposal (never executed), a Mermaid diagram, or a text draft — and the other participants (in meetings: you) give verdicts; the proposer then revises, scraps or shortlists. Results include a prototypes block with the board URL: show it to the human. Prototypes are destroyed as soon as assessment completes. Do not relay the human's feedback on prototypes into the session until it ends; end_* lists outcomes and the shortlist for the human. Combinable with public (public posts get code, diagram links and screenshots of web prototypes, never the localhost board). Not supported with mode conversation. |
-| `provider` | string | no | LLM provider to use. Default: anthropic. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `duel` | string | no | Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call. See [a duel as a meeting's focus](modes/duel.md#a-duel-as-a-meetings-focus). |
+| `duel_source` | boolean | no | Default true; only with duel. The duel brief is resent on every turn to every participant (a full brief can be about 20k tokens per turn). Set false to leave out artifact file contents and keep titles, file names and sizes, verdicts, tally and dissents. |
+| `provider` | string | no | Omit or use `auto` for [provider judgment](providers.md#provider-judgment). Explicit providers retain their defaults. Values: `auto`, `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `start_collaboration`
@@ -189,6 +228,40 @@ Example: `start_collaboration`
   "topic": "Should we raise now?",
   "max_rounds": 3,
   "auto_run_rounds": 1
+}
+```
+
+### start_duel
+
+Omitting `provider`, or passing `"provider": "auto"`, routes eligible seats automatically. The result includes `routing`, an array of seat identifiers, providers, models and short `reason` strings. Explicit seat assignments take priority; runtime seats stay explicit. Caller `base_url` requires an explicit compatible provider. See [Provider judgment](providers.md#provider-judgment).
+
+Run a duel and return its result: two teams each build an artifact for the same brief (a web page, code, a Mermaid diagram or a text document), judges assess both against a rubric, and the losing side files dissents. The call runs the whole duel, which can take several minutes. The result has the duel id, winner, tally, each team's artifact title, kind and ok flag, the judges' verdicts, the dissents, a usage summary and the archive id (duels/<id>.json, replayable with roundtable duel --replay). It never includes artifact source. The tool sends an MCP progress notification on every turn, artifact and verdict, so a host must either allow a long request timeout (default 600 seconds of duel, more for large teams) or reset its timeout on progress; a client with a fixed 60-second timeout will cancel the duel. No room is opened. Orchestrator server only. See [duel](modes/duel.md).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `provider` | string | no | Omit or use `auto` for [provider judgment](providers.md#provider-judgment). Explicit providers retain their defaults. Values: `auto`, `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
+| `model` | string | no | Optional explicit model pin. |
+| `topic` | string | yes | The brief both teams answer, for example a landing page for a product, a module with a given interface, or a written policy. maxLength: `4000`. |
+| `team_a` | array of string | yes | Team A personas, 1 to 4. The first writes the concept, the last builds, anyone between critiques the concept. A one-person team does both. |
+| `team_b` | array of string | yes | Team B personas, 1 to 4. Same roles as team_a. No persona may appear twice across both teams and the judges. |
+| `judges` | array of string | yes | Judge personas, 1 to 5. |
+| `kind` | string | no | What the teams build: web (a self-contained index.html, inline CSS, optional inline JS; default), code (source files, shown as read-only text and never executed), diagram (Mermaid source) or text (markdown or plain text). Values: `web`, `code`, `diagram`, `text`. |
+| `criteria` | array of string | no | Judging rubric. Default: fit to the brief, quality, usability and accessibility, and risk or safety within the judge's own remit. maxItems: `8`; each item up to 120 characters. |
+| `rounds` | number | no | 1 (default) judges once; 2 lets a team the judges did not approve revise once and keeps the original tally. minimum: `1`, maximum: `2`. |
+| `seats` | object | no | Optional assignments keyed by exact persona identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (an API provider or explicit [CLI runtime](runtimes.md) name) and model. |
+| `turn_timeout_s` | number | no | Seconds allowed for each turn. Default 90 (builds get at least 240). maximum: `3600`. |
+| `max_seconds` | number | no | Time limit for the whole duel before it moves to closings. Default 600, plus 120 per member beyond two on the larger team. minimum: `1`, maximum: `3600`. |
+
+Example: `start_duel`
+
+```json
+{
+  "topic": "One-page remote-work expenses policy",
+  "team_a": ["counsel"],
+  "team_b": ["hr-lead", "editor"],
+  "judges": ["cfo", "employee-advocate"],
+  "kind": "text",
+  "criteria": ["legal accuracy", "plain language"]
 }
 ```
 
@@ -294,6 +367,8 @@ Example: `list_collaborations`
 
 ### start_ultraplan
 
+Omitting `provider`, or passing `"provider": "auto"`, routes eligible seats automatically. The result includes `routing`, an array of seat identifiers, providers, models and short `reason` strings. Explicit seat assignments take priority; runtime seats stay explicit. Caller `base_url` requires an explicit compatible provider. See [Provider judgment](providers.md#provider-judgment).
+
 Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: "plan" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. The final result ends with a JSON trailer {ultraplan_id, archived, tally}; signed off means no OBJECT and no UNCLEAR sign-off. With execution_ready: true, plans end with a roundtable-tasks block and sign-offs check it, so propose_contract { from_session: ultraplan_id } can build a contract from it. Public runs post the task and phase outputs, never context.
 
 | Argument | Type | Required | Meaning and constraints |
@@ -304,11 +379,13 @@ Plan with specialist agents: you (the orchestrator) own and write the plan; agen
 | `draft_plan` | string | no | Optional full draft: becomes v1 by orchestrator and skips the input phase. Whitespace-only counts as absent. |
 | `planner` | string | no | Optional persona that owns drafting and revision server-side; runs the whole loop in one call. |
 | `repo_dir` | string | no | A directory inside the repository the plan is for. When earlier postmortems of that project left lessons, a bounded "Lessons from past postmortems" section (misreadings first) is added to the context the agents plan with. Never posted publicly. |
+| `duel` | string | no | Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call. See [a duel as a meeting's focus](modes/duel.md#a-duel-as-a-meetings-focus). |
+| `duel_source` | boolean | no | Default true; only with duel. The duel brief is resent on every turn to every participant (a full brief can be about 20k tokens per turn). Set false to leave out artifact file contents and keep titles, file names and sizes, verdicts, tally and dissents. |
 | `revision_rounds` | number | no | Planner only: review/revise cycles before sign-off, default 1, clamped to 1..3. |
 | `execution_ready` | boolean | no | Default false. True when the plan will be executed heads-down: planner drafts and revisions (and your next steps) must end with a fenced roundtable-tasks JSON block of tasks, commands and interfaces, and sign-offs check it. |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
-| `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `provider` | string | no | Omit or use `auto` for [provider judgment](providers.md#provider-judgment). Explicit providers retain their defaults. Values: `auto`, `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `start_ultraplan`
@@ -379,7 +456,7 @@ Have specialists design a new Claude Code subagent in one call: sequential contr
 | `perform_task` | boolean | no | Create + write only: start a private meeting with the new agent on its task. Default false. |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `create_agent`
@@ -411,7 +488,7 @@ Refine an existing Claude Code agent in one call, preserving its identity and us
 | `write` | boolean | no | Default true: back up and update the target. False: preview files and write nothing. |
 | `public` | boolean | no | Default false. Only set true when the human explicitly asks for a public session. When true, the whole session is posted live to the configured public channel and is world-readable: the topic/agenda, every agent reply, every message you send with say/nudge, and the summary. The context argument is never posted, but agents may paraphrase it in their replies, so keep context generic. Never include personal information, credentials, or private code anywhere in a public session. The result includes public.url so the human can watch live. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `improve_agent`
@@ -440,8 +517,9 @@ Turn an agreed plan into a heads-down contract: a draft v1 in a new execution, w
 | `title` | string | no | Short title; default the goal's first line. |
 | `original_prompt` | string | no | The human's request, verbatim (default: from_session's task or topic). Workers see it on every task card. |
 | `artifacts` | array of string | no | Repository paths or URLs the goal refers to. |
-| `from_session` | string | no | Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from. |
+| `from_session` | string | no | Id of an archived session (an ultraplan, collaboration or meeting that has ended) whose roundtable-tasks block or plan to build from, or of an archived duel (duel-<id>): its winning artifact title becomes a decision and its dissents become draft concerns (a tie or no winner imports no decision). A duel with no contract tasks or plan gets a deterministic task plan drafted from its winning artifact (see draft_plan; no model call); a tie, no winner or no artifact drafts none. |
 | `plan` | string | no | Plan text: its last roundtable-tasks block is used, else a structuring call turns it into tasks. |
+| `draft_plan` | boolean | no | Duel from_session only, default true: when neither contract (with tasks) nor plan is given, draft a task plan from the winning artifact, the judges' reasons and the dissents (deterministic, no model call). False imports only the decision and dissents, and then contract or plan is required. A tie, no winner or no artifact drafts no plan. |
 | `contract` | object | no | An explicit contract (roundtable.contract/1 fields: title, scope.paths, participants, teams, tasks, interfaces, decisions, validation {commands, final}, budget, authority, sandbox, workers). id, version, status and consent are set for you. |
 | `parent_contract` | string | no | For a child contract: the parent contract id (with parent_task, a subcontract task of it). |
 | `parent_task` | string | no | For a child contract: the parent's subcontract task this contract carries out. |
@@ -450,7 +528,7 @@ Turn an agreed plan into a heads-down contract: a draft v1 in a new execution, w
 | `base_ref` | string | no | The commit or ref the run starts from; default HEAD. Stored as the resolved sha. |
 | `consent` | boolean | no | Default false. True: ask every participant for consent right away. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `propose_contract`
@@ -474,11 +552,11 @@ Amend a contract with an RFC 7396 merge patch (objects merge, arrays replace, nu
 | `patch` | object | yes | RFC 7396 merge patch over the latest version, e.g. {"budget": {"usd": 40}} or {"tasks": [...the full new task list...]}. |
 | `reason` | string | yes | Why the contract changes; recorded and sent to affected agents. |
 | `orchestrator` | string | yes | Your name as this contract's orchestrator (e.g. main). Only the orchestrator that proposed a contract can amend or freeze it. |
-| `from_session` | string | no | Id of an archived replan or ultraplan whose roundtable-tasks block replaces the tasks, commands and interfaces. |
+| `from_session` | string | no | Id of an archived replan or ultraplan whose roundtable-tasks block replaces the tasks, commands and interfaces, or of an archived duel (duel-<id>): its winning decision and dissents are added to the contract (tasks untouched, repeats skipped). A frozen contract cannot hold a concern without a tripwire: the amend is then refused whole, naming the dissents and the next call (patch.dissents with tripwires); a decision-only duel applies at once. |
 | `consent` | boolean | no | Default false. True: ask participants about the new version: everyone for a draft or a run-wide change, the personas of affected tasks otherwise. |
 | `override_consent` | boolean | no | Frozen contracts only, default false: apply a run-wide change (budget, scope, sandbox, authority, validation, workers, goal) without everyone's consent. Audited. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `amend_contract`
@@ -519,11 +597,78 @@ Example: `freeze_contract`
 }
 ```
 
+### file_dissent
+
+File or update a structured dissent on a draft contract, creating a new version. Tripwires are data only. An agent files as its authenticated identity; an orchestrator may file for any participant. A dissent needs a tripwire before freeze or explicit excusal with a reason. Frozen contracts require `amend_contract` and consent. Available on both servers: the orchestrator server accepts `orchestrator`, or `execution_id` and `agent_token`; the worker server is already bound to its agent and accepts neither credential argument (only `contract_id`, `dissent`, `resolve_objection` and `excuse_reason`). Full behavior, tripwire kinds and freeze rules: the [dissent guide](dissents.md#file-or-update-a-concern).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `contract_id` | string | yes | The contract id (ctr-<6 characters>-<n>) from propose_contract. |
+| `dissent` | object | yes | Structured concern. Omit tripwire only for a draft. With excuse_reason, pass just {id}. by is bound to an authenticated agent; orchestrators specify a participant. |
+| `dissent.id` | string | yes | Stable id; filing an existing id replaces that concern. pattern: `^[a-z0-9][a-z0-9._-]{0,63}$`. |
+| `dissent.by` | string | no | The dissenting participant. Filled from the identity of an authenticated agent. |
+| `dissent.source` | object | no | Provenance of the concern. |
+| `dissent.source.kind` | string | yes | Values: `ultraplan`, `consent`, `debate`, `waffle_house`, `duel`, `manual`. |
+| `dissent.source.ref` | string | no | The session or duel id the concern came from. |
+| `dissent.claim` | string | no | The concern. maxLength: `500`. |
+| `dissent.predicted_failure` | string | no | What the dissenter predicts will fail. maxLength: `500`. |
+| `dissent.tripwire` | object | no | The evidence that should wake the dissenter. |
+| `dissent.tripwire.kind` | string | yes | Values: `check_failed`, `path_touched`, `task_state`. |
+| `dissent.tripwire.check` | string | no | `check_failed`: a validation command id. |
+| `dissent.tripwire.task` | string | no | A task id; limits `check_failed` and `path_touched`, and names the task for `task_state`. |
+| `dissent.tripwire.paths` | array of string | no | `path_touched`: nonempty relative globs. maxItems: `64`. |
+| `dissent.tripwire.state` | string | no | `task_state`: Values: `rejected`, `blocked`. |
+| `dissent.on_fire` | string | no | Default huddle. Values: `notify`, `huddle`, `pause_and_huddle`. |
+| `resolve_objection` | boolean | no | The objector explicitly consents to the new version with how: dissented, retaining this dissent. Other participants must re-consent. |
+| `excuse_reason` | string | no | Orchestrator only: explicitly excuse this dissent by id. Its concern and this reason remain in version history and the audit log. Creates a new draft requiring re-consent. |
+| `orchestrator` | string | no | Your name as this contract's orchestrator (e.g. main). Only the orchestrator that proposed a contract can amend or freeze it. Orchestrator server only. |
+| `execution_id` | string | no | With agent_token: the agent's execution. Orchestrator server only. |
+| `agent_token` | string | no | Authenticate as an agent instead of an orchestrator. Orchestrator server only. pattern: `^[0-9a-f]{64}$`. |
+
+Example: `file_dissent`
+
+```json
+{
+  "contract_id": "ctr-abc123-1",
+  "orchestrator": "main",
+  "dissent": {
+    "id": "retry-risk",
+    "by": "skeptic",
+    "source": { "kind": "manual" },
+    "claim": "Retries may duplicate writes.",
+    "predicted_failure": "The repeated request check fails.",
+    "tripwire": { "kind": "check_failed", "check": "unit", "task": "storage" }
+  }
+}
+```
+
+### score_dissent
+
+Record or revise an advisory dissent outcome on a frozen contract. Only its orchestrator may score. Scores are display-only and never weight votes or consent. Orchestrator server only. See [advisory scores](dissents.md#advisory-scores).
+
+| Argument | Type | Required | Meaning and constraints |
+| --- | --- | --- | --- |
+| `contract_id` | string | yes | The contract id (ctr-<6 characters>-<n>) from propose_contract. |
+| `orchestrator` | string | yes | Your name as this contract's orchestrator (e.g. main). Only the orchestrator that proposed a contract can amend or freeze it. |
+| `dissent_id` | string | yes | The dissent to score. pattern: `^[a-z0-9][a-z0-9._-]{0,63}$`. |
+| `outcome` | string | yes | `vindicated` (evidence supports the prediction), `refuted` (evidence contradicts it) or `untested` (the run did not establish an outcome). Values: `vindicated`, `refuted`, `untested`. |
+
+Example: `score_dissent`
+
+```json
+{
+  "contract_id": "ctr-abc123-1",
+  "orchestrator": "main",
+  "dissent_id": "retry-risk",
+  "outcome": "vindicated"
+}
+```
+
 ## Runs
 
 ### execute
 
-Start a heads-down run of a frozen contract, ONLY when the human has asked for it in this chat: confirmation is their words, verbatim (recorded in the event log and the audit log). A preflight runs first. When something is missing it returns {status: "needs_input", questions[]} and starts nothing: ask the human each question in plain words and call again with the answers. It asks when no visibility is chosen (dashboard, GitHub, or chat_only; ROUNDTABLE_DEFAULT_VISIBILITY sets a default), when no budget is set (here, in the contract, or ROUNDTABLE_DEFAULT_BUDGET_USD), when no sandbox is available (Docker down and the local sandbox not allowed with sandbox: "local"), when the worker CLI is missing or lacks flags (codex needs worker_driver: "codex"), when GitHub was asked for but gh lacks scopes or access, and when the repository has submodules. A dirty main worktree only warns. Settings given here that differ from the contract (budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model) are applied to it first as one audited amendment. Then the runner starts in the background, and the result has the execution_id, the runner's pid, the dashboard URL (when there is one) and watch {argv, command, instructions}: start watch.command as a background shell command right away, re-arm it after handling each wake, and answer progress questions with execution_status. Calling it again for a started run returns the run's current info.
+Start a heads-down run of a frozen contract, ONLY when the human has asked for it in this chat: confirmation is their words, verbatim (recorded in the event log and the audit log). A preflight runs first. When something is missing it returns {status: "needs_input", questions[]} and starts nothing: ask the human each question in plain words and call again with the answers. It asks when no visibility is chosen (dashboard, GitHub, or chat_only; ROUNDTABLE_DEFAULT_VISIBILITY sets a default), when no budget is set (here, in the contract, or ROUNDTABLE_DEFAULT_BUDGET_USD), when no sandbox is available (Docker down and the local sandbox not allowed with sandbox: "local"), when the worker CLI is missing or lacks flags (codex needs worker_driver: "codex", a runtime worker needs ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1), when GitHub was asked for but gh lacks scopes or access, and when the repository has submodules. A dirty main worktree only warns. Settings given here that differ from the contract (budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model) are applied to it first as one audited amendment. Then the runner starts in the background, and the result has the execution_id, the runner's pid, the dashboard URL (when there is one) and watch {argv, command, instructions}: start watch.command as a background shell command right away, re-arm it after handling each wake, and answer progress questions with execution_status. Calling it again for a started run returns the run's current info.
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
@@ -542,7 +687,7 @@ Start a heads-down run of a frozen contract, ONLY when the human has asked for i
 | `max_parallel` | integer | no | Workers at once (1–16; applied to the contract). minimum: `1`. maximum: `16`. |
 | `lead` | string | no | The persona that decides escalations when you are away (the contract's authority.lead). |
 | `sandbox` | string | no | docker (default) or local. local is weaker than a container and counts as the human's opt-in to it. Values: `docker`, `local`. |
-| `worker_driver` | string | no | Worker CLI: claude-code (default) or codex (an explicit opt-in). Values: `claude-code`, `codex`. |
+| `worker_driver` | string | no | Worker CLI: claude-code (default), codex (an explicit opt-in) or runtime:<name>, a runtime profile such as runtime:gemini (needs ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1). Pattern: `^(claude-code\|codex\|runtime:[a-z][a-z0-9_-]{0,31})$`. |
 | `worker_model` | string | no | Model for the workers (the CLI's model name). |
 
 Example: `execute`
@@ -635,7 +780,7 @@ Answer an escalation the watcher woke you for (execution_status(view: "escalatio
 | `amendment` | object | no | amend: an RFC 7396 merge patch of the contract (as for amend_contract). |
 | `resolved_by` | string | no | Who resolves: the contract's orchestrator (default) or its lead. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `resolve_escalation`
@@ -651,7 +796,7 @@ Example: `resolve_escalation`
 
 ### join_execution
 
-Register an external worker (for example this chat, or another host) in a heads-down run. Returns an agent_token ONCE: pass it with execution_id to every worker tool (read_blackboard, claim_task, lease, post_update, run_command, submit_work, escalate). With task_id, the task's worktree is created (or reused) and its task card returned. External workers are not sandboxed: their leases are checked when they submit.
+Register an external worker (for example this chat, or another host) in a heads-down run. Returns an agent_token ONCE: pass it with execution_id to every worker tool (read_blackboard, claim_task, lease, post_update, run_command, submit_work, escalate, spawn_subtasks, await_subtasks). With task_id, the task's worktree is created (or reused) and its task card returned. External workers are not sandboxed: their leases are checked when they submit.
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
@@ -668,6 +813,35 @@ Example: `join_execution`
   "agent": "reviewer"
 }
 ```
+
+## Previews
+
+Orchestrator server only. A task's build or a duel prototype runs its dev server in a locked-down Docker container published on `127.0.0.1` only; see [previews](previews.md) for what is isolated and the limits.
+
+### start_preview
+
+Runs `npm run <script>` (`dev`, `start` or `preview`; never a free-form command) for a task's worktree (`execution_id` and `task_id`) or a prototype directory under the prototype root (`prototype`, absolute). Installs dependencies in a container, with scripts off and only the npm registry reachable, when the source has no installed `node_modules` directory. Returns `preview_id`, `url`, `shows`, `script`, `container_port`, `started_at`, `idle_ttl_min` and the `page_check` record.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `execution_id` | string `exe-…` | With `task_id`. |
+| `task_id` | string | The task whose worktree to preview. |
+| `prototype` | string | Instead of a task: an absolute prototype directory. |
+| `script` | `dev` \| `start` \| `preview` | Default: the first the package defines. |
+| `port` | integer 1024–65535 | Container port; default the dev server's usual port, else 3000. |
+
+```json
+start_preview { "execution_id": "exe-0123456789abcdef", "task_id": "frontend" }
+start_preview { "prototype": "<prototype root>/<session>/P2v1", "script": "start", "port": 8080 }
+```
+
+### list_previews
+
+Takes no arguments. Lists the running previews and counts as use (restarts their idle time).
+
+### stop_preview
+
+`{ "preview_id": "prv-…" }` stops the preview and removes its containers and network.
 
 ## Usage
 
@@ -761,7 +935,7 @@ Hold the postmortem meeting for a draft, then conclude it. Refused while any fin
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
 | `action` | string | no | hold (default) or conclude. Values: `hold`, `conclude`. |
-| `project` | string | no | The project: a directory inside its repository (resolved with git rev-parse --show-toplevel; refused outside a git work tree or with submodules), or a project key returned earlier. maxLength: `1000`. |
+| `project` | string | no | The project: a directory inside its git repository (resolved with git rev-parse --show-toplevel; refused outside a git work tree or with submodules), or a project key returned earlier. |
 | `execution_id` | string | no | The heads-down run (exe-…) the draft belongs to. Give this or work. pattern: `^exe-[0-9a-hjkmnp-tv-z]{16}$`. |
 | `work` | string | no | A short label for at-the-table work (for example "checkout redesign") when there is no run. Give this or execution_id. maxLength: `200`. |
 | `opening` | string | no | hold: your account of what happened, including your own part. Do not paste the human's words. maxLength: `8000`. |
@@ -777,7 +951,7 @@ Hold the postmortem meeting for a draft, then conclude it. Refused while any fin
 | `reject[].id` | string | yes | The artifact id. maxLength: `16`. |
 | `reject[].why` | string | yes | Why not. maxLength: `400`. |
 | `provider` | string | no | LLM provider. Default: anthropic. Options: anthropic, openai, together, replicate, ollama (local, when reachable), openai_compatible (set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `hold_postmortem`
@@ -950,6 +1124,31 @@ Example: `submit_work`
 }
 ```
 
+### spawn_subtasks
+
+Delegate through the runner, authenticated like the other worker tools. Requires a frozen contract with `budget.max_agents >= 2`. Returns `{children: ["parent.child", ...]}` and records `task.spawned` on the blackboard.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `subtasks` | array | yes | 1–8 objects with `id`, `title`, `instructions`, `paths`, and optional `depends_on`. |
+| `subtasks[].id` | string | yes | Slug of lowercase letters, digits, `_` or `-`; namespaced under the parent, at most 64 characters including the prefix. |
+| `subtasks[].title` | string | yes | At most 200 characters. |
+| `subtasks[].instructions` | string | yes | At most 4000 characters. |
+| `subtasks[].paths` | string[] | yes | Nonempty relative globs inside the parent's current leases, without sibling overlaps. |
+| `subtasks[].depends_on` | string[] | no | Other sibling slugs in this call, without cycles. |
+
+Children inherit checks and use ordinary workers under `max_agents`. Depth is limited to one; open children, exhausted budgets and `max_subtasks` refuse further spawns. Delegated paths cannot be written or released by the parent until the children finish. Worker `Task` and `Agent` tools stay disallowed.
+
+### await_subtasks
+
+Wait for the latest child batch and request fan-in through the runner. Each child has `id`, `status`, `files`, `merged`, and a scrubbed `summary` when finished. `still_running: true` means call again. `ready: true` means every child merged and the runner merged integration into the parent's worktree. Failed or cancelled children are returned for the parent to retry with new ids or escalate. Merge conflicts escalate. The parent cannot submit before open children finish and merged work is brought back.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `timeout_s` | number | no | Seconds to wait, default 30, between 0 and 120. A timeout returns current status. |
+
+On the orchestrator server, both tools also require `execution_id` and `agent_token`; the worker server binds them to its token identity.
+
 ### escalate
 
 Raise an escalation when you are blocked or something is unclear. kind: blocker, ambiguity, resource, conflict, assistance or emergency; with: orchestrator, management, team, agent or path_owner (target: the agent or path). blocking: true blocks your task: end your turn with a one-line summary and you will be resumed with the resolution. emergency: money, credentials, scope or human_action.
@@ -986,7 +1185,7 @@ Example: `escalate`
 
 ### chat_completion
 
-Call an LLM for text completion. Providers: anthropic (claude-opus-5 / claude-sonnet-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).
+Call an LLM for text completion. Providers: anthropic (claude-opus-5-5 / claude-sonnet-5-5), openai (gpt-5.6-luna), together (Together AI), replicate (any Replicate text model), ollama (local, optional), openai_compatible (any /v1/chat/completions server).
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
@@ -994,9 +1193,9 @@ Call an LLM for text completion. Providers: anthropic (claude-opus-5 / claude-so
 | `messages[].role` | string | yes |  Values: `system`, `user`, `assistant`. |
 | `messages[].content` | string | yes |  |
 | `provider` | string | no | LLM provider to use. Default: openai. Options: anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url). Values: `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
-| `model` | string | no | Model id. Defaults: claude-opus-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Anthropic also accepts the aliases "opus" (claude-opus-5) and "sonnet" (claude-sonnet-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
-| `max_tokens` | number | no | Maximum tokens in the response. Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this. |
-| `temperature` | number | no | Sampling temperature (0-2). Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too. Replicate: sent only when the model's schema declares it. |
+| `model` | string | no | Model id. Defaults: claude-sonnet-5-5 (anthropic), gpt-5.6-luna (openai), zai-org/GLM-5.3 (together), qwen/qwen3-235b-a22b-instruct-2507 (replicate), qwen3:14b (ollama), default (openai_compatible). Model aliases: "opus" (claude-opus-5-5), "sonnet" (claude-sonnet-5-5), "haiku" (claude-haiku-5-5). Replicate accepts owner/name, owner/name:version, or a https://replicate.com/owner/name URL. |
+| `max_tokens` | integer | no | Maximum tokens in the response, 1–32768; values outside the range are refused. Default: ROUNDTABLE_MAX_TOKENS (8192). Thinking/reasoning tokens count against this. |
+| `temperature` | number | no | Sampling temperature (0-2); values outside the range are refused. Ignored for anthropic (current Claude models reject it); some OpenAI reasoning models reject it too. Replicate: sent only when the model's schema declares it. |
 | `base_url` | string | no | Only with provider "openai_compatible": base URL of an OpenAI-compatible /v1 endpoint (e.g. http://localhost:1234/v1). Overrides OPENAI_COMPATIBLE_BASE_URL for this session/call. OPENAI_COMPATIBLE_API_KEY, if set, is sent only to the OPENAI_COMPATIBLE_BASE_URL origin or one listed in ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS; any other base URL gets no Authorization header and must be https (http only to loopback, or to private addresses with ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS=1), never a cloud metadata or (without that setting) private address. |
 
 Example: `chat_completion`
@@ -1033,7 +1232,7 @@ Example: `debug_env`
 
 ### Meetings (API-backed)
 
-The caller talks to one agent persona. Provider and model are fixed at `start_meeting` (default provider `anthropic`).
+The caller talks to one agent persona. Provider and model are fixed at `start_meeting` (automatic provider judgment when omitted).
 
 
 ### Local meetings (no API spend)
@@ -1064,6 +1263,7 @@ A contract is what a heads-down run builds: the goal and the human's request ver
 - `propose_contract` takes the structure from an explicit `contract` object with tasks, then from the last `roundtable-tasks` block in `plan` or in the archived `from_session`, then from a structuring call on the plan (one retry quoting the errors). It resolves `repo_dir` to its git top level and `base_ref` (default `HEAD`) to a commit. `consent: true` asks every participant right away; an unclear answer is re-asked once, then counts as an objection. When the repository's project has [postmortem](modes/postmortem.md) lessons, the result gains a `postmortem_lessons` section, every active contract rule becomes a `decisions` entry (`by: "postmortem:<pm>"`) and every flag a warning; with the mode on, the draft contract carries `postmortem: {enabled: true}`.
 - `amend_contract` applies an RFC 7396 merge patch and makes v(N+1). Amending a draft makes a new proposal that everyone must consent to again (`consent: true` asks them all). Amending a frozen contract cancels the tasks it removes and tells the agents of affected tasks to re-read the contract; a change to its budget, scope, sandbox, authority, validation, workers or goal needs `consent: true` (everyone is asked first, and it applies only if all agree) or `override_consent: true` (audited). `patch: {}` with `consent: true` asks everyone who has not agreed to the current version.
 - `freeze_contract` lists every reason it refuses: an unresolved objection or unclear answer, a participant who has not answered about the current version, a consent round in flight, a busy source session, or, for a child contract, a parent that is not frozen. `excuse` sets these aside with a reason, and `abandon_round` ends a consent round whose process died. Excusals, abandoned rounds and the frozen sha256 are written to the audit log. Freezing starts nothing.
+- `file_dissent` files, completes or excuses a draft concern; `score_dissent` records an advisory outcome after freeze. Neither changes consent weight. See the [dissent guide](dissents.md).
 
 ### Heads-down runs
 
@@ -1218,3 +1418,7 @@ create_agent { "from_session": "collab-4k9q2mzt", "write": false }
 improve_agent { "agent": "cfo", "with": ["skeptic"], "focus": "Assumptions and escalation rules" }
 improve_agent { "agent": "cfo", "with": ["product-lead"], "include_self": false, "write": false }
 ```
+
+### Page-check option
+
+`start_duel`, `start_collaboration`, `start_meeting`, `start_ultraplan` and the casting call accept `connectors: ["name", ...]`, configured MCP connectors every seat may call as tools (read-only tools unless the connector config lists more; unknown names are refused before any provider call; see [connectors at the table](connectors.md#at-the-table)). They also accept `seat_connectors: {"seat": ["name", ...]}` to limit a seat to some of those connectors (seats not listed get all; see [limiting a seat](connectors.md#limiting-a-seat)). `start_local_meeting` takes neither: it runs the Claude CLI with its own tools. `start_duel` accepts `page_check: false` to skip headless checks of web builds and revisions (default on when Chrome/Chromium exists). Prototype-mode `start_collaboration`, `start_meeting` and `start_local_meeting` accept the same option alongside `prototype: true`. Check metadata includes load status, capped/scrubbed console errors and exceptions, failed-request count and an optional reason. No browser means not checked, never a failed artifact. Duel results include each team's check and the version of each verdict; screenshots stay local and outside the result/archive.

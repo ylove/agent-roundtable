@@ -184,6 +184,8 @@ export function ghText(s: unknown, max = 4000): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
+    .replace(/\](\s*)\(/g, "]\u200d$1(")
+    .replace(/!(?=\[)/g, "!\u200d")
     .replace(/@(?=[A-Za-z0-9_])/g, `@${ZWSP}`)
     .replace(/#(?=\d)/g, `#${ZWSP}`)
     .replace(/\bGH-(?=\d)/gi, (m) => `${m}${ZWSP}`)

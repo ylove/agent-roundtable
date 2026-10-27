@@ -21,6 +21,10 @@ import { fileURLToPath } from "node:url";
 import { VERSION } from "../config.js";
 import { pidAlive } from "../prototypes/sandbox.js";
 import { childEnv } from "../security/child-env.js";
+import { isExecutableFile } from "../executables.js";
+import { readUserConfig } from "../user-config.js";
+import { parseSecretRef } from "../secrets/ref.js";
+import { registerSecretLiteral } from "../security/secrets.js";
 import { writeFileAtomic } from "../security/fs-safe.js";
 import { processReused, readLockOwner } from "./lock.js";
 import { executionDir } from "./store.js";
@@ -48,7 +52,7 @@ export const runnerLogPath = (exe: string): string => join(executionDir(exe), "r
 export function readRunnerInfo(exe: string): RunnerInfo | null {
   try {
     const r = JSON.parse(readFileSync(runnerInfoPath(exe), "utf8")) as RunnerInfo;
-    return r && Number.isSafeInteger(r.pid) && typeof r.heartbeatAt === "string" ? r : null;
+    return r && Number.isSafeInteger(r.pid) && r.pid > 1 && typeof r.host === "string" && typeof r.heartbeatAt === "string" ? r : null;
   } catch {
     return null;
   }
@@ -84,7 +88,10 @@ export function runnerLiveness(exe: string, now = Date.now()): RunnerLiveness {
     return { state: "dead", pid: owner.pid, ...(heartbeat && { heartbeatAt: heartbeat }) };
   }
   if (!info) return { state: "stopped" };
+  if (info.host !== hostname()) return { state: "other_host", pid: info.pid, host: info.host };
   if (info.stoppedAt) return { state: "stopped", pid: info.pid, stoppedAt: info.stoppedAt, ...(info.stopReason && { reason: info.stopReason }) };
+  // A missing lock is never permission to replace a live pid.
+  if (pidAlive(info.pid)) return { state: "running", pid: info.pid, heartbeatAt: info.heartbeatAt, stale: now - Date.parse(info.heartbeatAt) > RUNNER_STALE_MS };
   return { state: "dead", pid: info.pid, heartbeatAt: info.heartbeatAt };
 }
 
@@ -109,6 +116,8 @@ const defaultCli = (): string => fileURLToPath(new URL("../index.js", import.met
  * process group. Returns its pid; the runner itself takes runner.lock (a second one refuses).
  */
 export function launchRunner(exe: string, opts: LaunchRunnerOptions = {}): { pid: number; log: string } {
+  const binary = opts.execPath ?? process.execPath;
+  if (!isExecutableFile(binary)) throw new Error("The runner executable must be an absolute path to a regular executable.");
   const dir = executionDir(exe);
   let repoRoot: string;
   try {
@@ -118,14 +127,24 @@ export function launchRunner(exe: string, opts: LaunchRunnerOptions = {}): { pid
   }
   if (typeof repoRoot !== "string" || !existsSync(repoRoot)) throw new Error(`Execution ${exe}: its repository ${String(repoRoot)} is gone`);
   const log = runnerLogPath(exe);
+  const extra: Record<string, string> = {};
+  const config = readUserConfig();
+  const refs = [...Object.values(config.secrets ?? {}), ...Object.values(config.connectors ?? {}).flatMap(c => Object.values(c.env).filter(v => v.startsWith("secret://")))];
+  for (const ref of refs) {
+    const { backend, locator } = parseSecretRef(ref);
+    if (backend === "env" && process.env[locator] !== undefined) {
+      extra[locator] = process.env[locator]!;
+      registerSecretLiteral(extra[locator]);
+    }
+  }
   const fd = openSync(log, "a", 0o600);
   try {
     fchmodSync(fd, 0o600);
-    const child = spawn(opts.execPath ?? process.execPath, [opts.cliPath ?? defaultCli(), "run", exe], {
+    const child = spawn(binary, [opts.cliPath ?? defaultCli(), "run", exe], {
       detached: true,
       stdio: ["ignore", fd, fd],
       cwd: repoRoot,
-      env: childEnv("runner", opts.env ?? {}),
+      env: childEnv("runner", { ...extra, ...opts.env }),
       shell: false,
       windowsHide: true,
     });

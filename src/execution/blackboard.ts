@@ -18,6 +18,8 @@
 //  - Stored objects are copies; callers may keep and mutate the events they passed in.
 // ============================================================================
 
+import { spawnSpecs } from "./swarms.js";
+import { canonicalJSON } from "./chain.js";
 import { ID_RE, preview } from "./events.js";
 import { POSTMORTEM_HANDLERS, postmortemAfter } from "./postmortem-state.js";
 import { blockingIds, taskHeld, tripwireKey } from "./task-holds.js";
@@ -52,8 +54,10 @@ import {
  * 8: escalation resolution releases its own hold, including historical retries without an unblock.
  * 9: WS14 combines dissent state with postmortem findings, fix transitions and meetings.
  * 10: WS15 per-agent, per-model usage with provenance (budget.by_agent_usage); agent.stop_requested / agent.stopped.
+ * 11: WS27 bounded swarms, durable batches, fan-in and cascading cancellation.
+ * 12: Failed or cancelled subtasks cancel transitive dependent siblings.
  */
-export const REDUCER_VERSION = 10;
+export const REDUCER_VERSION = 12;
 
 /** Inputs apply cannot read from the event: the contract named by a contract.frozen/amended blob. */
 export interface Resolved {
@@ -273,6 +277,12 @@ function finish(s: BlackboardState, id: string, rt: TaskRuntime, state: TaskStat
   if (note !== undefined) rt.last_note = note;
   delete rt.blocked_by;
   dropClaim(s, id);
+  if (state === "failed" || state === "cancelled") {
+    for (const child of Object.values(s.tasks)) {
+      if (child.spec.parent === id && !TERMINAL.has(child.state)) finish(s, child.spec.id, child, "cancelled", ts, `parent ${id} ${state}`);
+      else if (rt.spec.parent && child.spec.parent === rt.spec.parent && child.spec.depends_on.includes(id) && !TERMINAL.has(child.state)) finish(s, child.spec.id, child, "cancelled", ts, `dependency ${id} ${state}`);
+    }
+  }
 }
 
 /** Accept a live (non-failed, non-cancelled) task and promote its dependents; accepting twice is a no-op. */
@@ -575,8 +585,10 @@ const HANDLERS: Handlers = {
     const rt = liveTask(s, e, x);
     if (!rt) return;
     if (taskHeld(s, p.task, true)) return refuse(x, `task.submitted: task ${p.task} is held by an escalation`);
+    if ((rt.subtasks ?? []).some((id) => !TERMINAL.has(s.tasks[id].state)) || (rt.subtasks?.some((id) => s.tasks[id].state === "accepted") && !rt.subtasks_joined)) return refuse(x, "task.submitted: await_subtasks before submitting the parent");
     rt.state = "submitted";
     rt.last_commit = p.commit;
+    if (p.summary !== undefined) rt.last_note = p.summary;
     rt.submitted_seq = e.seq;
     const patched = own(s.diffs, p.task)?.blob !== p.diff_blob;
     put(s.diffs, p.task, { stat: p.stat, blob: p.diff_blob, commit: p.commit });
@@ -692,13 +704,40 @@ const HANDLERS: Handlers = {
     finish(s, p.task, rt, "cancelled", e.ts, `split into ${ids.join(", ")}`);
     refreshReadiness(s);
   },
+  "task.spawned": (s, e, x) => {
+    const p = e.payload;
+    const rt = liveTask(s, e, x);
+    if (!rt) return;
+    let into: TaskSpec[];
+    try {
+      // Admission applies to new writes; historical batches may have filled the worker cap.
+      into = spawnSpecs(s, p.task, p.by, p.into.map((spec) => ({ id: spec.id.slice(p.task.length + 1), title: spec.title, instructions: spec.instructions!, paths: spec.paths.write, depends_on: spec.depends_on.map((id) => id.slice(p.task.length + 1)) })), x.strict);
+    } catch (err) { return refuse(x, `task.spawned: ${(err as Error).message}`); }
+    if (canonicalJSON(into) !== canonicalJSON(p.into)) return refuse(x, "task.spawned: children must inherit the parent task's checks and persona");
+    for (const spec of p.into) put(s.tasks, spec.id, { spec: clone(spec), state: "pending", attempt: 0 });
+    rt.subtasks = p.into.map((t) => t.id);
+    delete rt.subtasks_joined;
+    delete rt.subtasks_waiting;
+    refreshReadiness(s);
+  },
+  "task.subtasks_awaited": (s, e, x) => {
+    const rt = liveTask(s, e, x);
+    if (rt) rt.subtasks_waiting = true;
+  },
+  "task.subtasks_joined": (s, e, x) => {
+    const rt = liveTask(s, e, x);
+    if (!rt) return;
+    if (JSON.stringify(rt.subtasks) !== JSON.stringify(e.payload.children) || e.payload.children.some((id) => !TERMINAL.has(s.tasks[id]?.state))) return refuse(x, "task.subtasks_joined: children have not finished");
+    rt.subtasks_joined = e.payload.commit;
+    delete rt.subtasks_waiting;
+  },
   "task.failed": (s, e, x) => {
     const rt = liveTask(s, e, x);
     if (rt) finish(s, e.payload.task, rt, "failed", e.ts, e.payload.why);
   },
   /** Cancels a live or failed task. */
   "task.cancelled": (s, e, x) => {
-    const rt = liveTask(s, e, x, ["failed"]);
+    const rt = liveTask(s, e, x, ["failed", "cancelled"]);
     if (rt) finish(s, e.payload.task, rt, "cancelled", e.ts, e.payload.why);
   },
 

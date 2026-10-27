@@ -10,11 +10,14 @@
 import { statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { AGENTS_DIR } from "../config.js";
+import { readUserConfig } from "../user-config.js";
+import { CONNECTOR_NAME } from "../connectors/config.js";
 import { isPathLikeRef, loadAgent } from "../agents.js";
 import { normalizeRelPath } from "../security/fs-safe.js";
 import { scrubSecrets } from "../security/secrets.js";
 import { DEFAULT_SANDBOX_IMAGE, isPrivilegedCommand, isShellCommand, resolveCwd, validateArgv } from "../sandbox/common.js";
 import { canonicalJSON, sha256Hex } from "./chain.js";
+import { isRuntimeDriver, RUNTIME_DRIVER_PREFIX, runtimeDriverProblem } from "../runtimes/worker.js";
 import { ID_RE } from "./events.js";
 import {
   CONTRACT_DEFAULTS,
@@ -28,6 +31,7 @@ import {
   type Decision,
   type InterfaceSpec,
   type TaskSpec,
+  type WorkerDriverId,
 } from "./types.js";
 
 /** `ctr-<exe6>-<n>`: the execution's 6-character tag and the contract's number within it. */
@@ -246,7 +250,8 @@ class Checker {
       this.err(path, "contains a NUL byte");
       return undefined;
     }
-    if (opts.max !== undefined && v.length > opts.max) this.err(path, `is longer than ${opts.max} characters`);
+    const max = opts.max ?? 4000;
+    if (v.length > max) this.err(path, `is longer than ${max} characters`);
     return v.trim();
   }
   text(v: unknown, path: string, fallback = ""): string {
@@ -255,6 +260,7 @@ class Checker {
       this.err(path, "must be a string");
       return fallback;
     }
+    if (v.length > 4000) this.err(path, "is longer than 4000 characters");
     return v;
   }
   strs(v: unknown, path: string): string[] {
@@ -295,6 +301,16 @@ class Checker {
   }
 }
 
+/** workers.driver: claude-code (default), codex, or runtime:<name> for a runtime profile (a known one, with the opt-in set). */
+function workerDriver(ck: Checker, v: unknown): WorkerDriverId {
+  if (typeof v === "string" && v.startsWith(RUNTIME_DRIVER_PREFIX)) {
+    const problem = runtimeDriverProblem(v);
+    if (problem) ck.err("workers.driver", problem);
+    return v as WorkerDriverId;
+  }
+  return ck.oneOf(v, "workers.driver", DRIVERS, "claude-code")!;
+}
+
 function artifacts(ck: Checker, v: unknown, path: string): ArtifactRef[] {
   return ck.arr(v, path).flatMap((item, i) => {
     const p = `${path}[${i}]`;
@@ -312,6 +328,7 @@ function artifacts(ck: Checker, v: unknown, path: string): ArtifactRef[] {
 function globs(ck: Checker, v: unknown, path: string): string[] {
   const out: string[] = [];
   for (const [i, raw] of ck.arr(v, path, CONTRACT_LIMITS.globs).entries()) {
+    if (typeof raw === "string" && raw.length > 4000) ck.err(`${path}[${i}]`, "is longer than 4000 characters");
     const r = normalizeGlob(raw);
     if ("error" in r) ck.err(`${path}[${i}]`, `${q(raw)} ${r.error}`);
     else if (!out.includes(r.glob)) out.push(r.glob);
@@ -351,6 +368,7 @@ function commandSpec(ck: Checker, v: unknown, path: string, backend: string | un
   const argv = argvOf(ck, o.argv, `${path}.argv`, backend);
   let cwd: string | undefined;
   if (o.cwd !== undefined && o.cwd !== null) {
+    if (typeof o.cwd === "string" && o.cwd.length > 4000) ck.err(`${path}.cwd`, "is longer than 4000 characters");
     try {
       cwd = typeof o.cwd === "string" ? resolveCwd(o.cwd) || undefined : (ck.err(`${path}.cwd`, "must be a string"), undefined);
     } catch (e) {
@@ -366,6 +384,7 @@ function commandSpec(ck: Checker, v: unknown, path: string, backend: string | un
     env = {};
     for (const [k, val] of Object.entries(envObj)) {
       if (!ENV_KEY_RE.test(k)) ck.err(`${path}.env`, `name ${q(k)} is not a valid variable name`);
+      else if (k.length > 4000) ck.err(`${path}.env`, `name ${q(k)} is longer than 4000 characters`);
       else if (CONTRACT_SECRET_ENV_RE.test(k)) ck.err(`${path}.env.${k}`, "looks like a credential: secrets never go in a contract or the sandbox");
       else if (typeof val !== "string") ck.err(`${path}.env.${k}`, "must be a string");
       else if (val.includes("\0")) ck.err(`${path}.env.${k}`, "contains a NUL byte");
@@ -418,7 +437,7 @@ export function findCycle(tasks: ReadonlyArray<Pick<TaskSpec, "id" | "depends_on
 function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   const c = isObj(input) ? input : (ck.err("", "the contract must be a JSON object"), {} as Obj);
   ck.known(c, ["schema", "id", "version", "status", "title", "goal", "scope", "participants", "teams", "tasks", "interfaces",
-    "decisions", "dissents", "validation", "budget", "authority", "sandbox", "workers", "postmortem", "consent", "frozen"], "");
+    "decisions", "dissents", "validation", "budget", "authority", "sandbox", "workers", "connectors", "postmortem", "consent", "frozen"], "");
   if (c.schema !== undefined && c.schema !== CONTRACT_SCHEMA) ck.err("schema", `must be ${q(CONTRACT_SCHEMA)}`);
   let id = "";
   if (c.id === undefined || c.id === null) ck.err("id", "is required");
@@ -432,12 +451,13 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   const g = ck.obj(c.goal, "goal", true) ?? {};
   ck.known(g, ["ultimate", "original_prompt", "artifacts", "source_session"], "goal");
   const goal: Contract["goal"] = {
-    ultimate: ck.str(g.ultimate, "goal.ultimate", { required: true }) ?? "",
+    ultimate: ck.str(g.ultimate, "goal.ultimate", { required: true, max: 2000 }) ?? "",
     original_prompt: typeof g.original_prompt === "string" && g.original_prompt.trim()
       ? g.original_prompt
       : (ck.err("goal.original_prompt", "is required: the human's request, verbatim"), ""),
     artifacts: artifacts(ck, g.artifacts, "goal.artifacts"),
   };
+  if (goal.original_prompt.length > 64_000) ck.err("goal.original_prompt", "is longer than 64000 characters");
   const source = ck.str(g.source_session, "goal.source_session");
   if (source !== undefined) goal.source_session = source;
 
@@ -462,7 +482,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
   }
   const wk = ck.obj(c.workers, "workers") ?? {};
   ck.known(wk, ["driver", "model", "fallback_model"], "workers");
-  const workers: Contract["workers"] = { driver: ck.oneOf(wk.driver, "workers.driver", DRIVERS, "claude-code")! };
+  const workers: Contract["workers"] = { driver: workerDriver(ck, wk.driver) };
   const model = ck.str(wk.model, "workers.model");
   const fallback = ck.str(wk.fallback_model, "workers.fallback_model");
   if (model !== undefined) workers.model = model;
@@ -558,7 +578,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     const p = `tasks[${i}]`;
     const o = ck.obj(raw, p, true);
     if (!o) continue;
-    ck.known(o, ["id", "title", "team", "persona", "kind", "depends_on", "paths", "acceptance", "checks", "effort", "budget_usd", "context"], p);
+    ck.known(o, ["id", "title", "team", "persona", "kind", "depends_on", "paths", "acceptance", "checks", "verify", "effort", "budget_usd", "context"], p);
     const tid = ck.id(o.id, `${p}.id`);
     if (tid !== undefined && RESERVED_TASK_IDS.includes(tid)) {
       ck.err(`${p}.id`, `${q(tid)} is reserved: its branch would clash with the run's integration branch`);
@@ -590,6 +610,20 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
       if (!commandIds.has(cid)) ck.err(`${p}.checks[${j}]`, `names unknown command ${q(cid)} (define it in validation.commands)`);
       else if (!checks.includes(cid)) checks.push(cid);
     }
+    const verify: NonNullable<TaskSpec["verify"]> = [];
+    if (o.verify !== undefined) for (const [j, raw] of ck.arr(o.verify, `${p}.verify`, 16).entries()) {
+      const at = `${p}.verify[${j}]`;
+      const predicate = ck.obj(raw, at, true);
+      if (!predicate) continue;
+      ck.known(predicate, ["page_loads"], at);
+      const page = ck.obj(predicate.page_loads, `${at}.page_loads`, true);
+      if (!page) continue;
+      ck.known(page, ["path"], `${at}.page_loads`);
+      if (typeof page.path === "string" && page.path.length > 4000) ck.err(`${at}.page_loads.path`, "is longer than 4000 characters");
+      const path = typeof page.path === "string" ? normalizeRelPath(page.path) : null;
+      if (!path || /[*?]/.test(path)) ck.err(`${at}.page_loads.path`, "must be a repository-relative file path");
+      else verify.push({ page_loads: { path } });
+    }
     const effort = ck.oneOf(o.effort, `${p}.effort`, EFFORTS);
     const budget = ck.num(o.budget_usd, `${p}.budget_usd`, { gt: 0 });
     const context = o.context === undefined || o.context === null ? undefined : artifacts(ck, o.context, `${p}.context`);
@@ -601,6 +635,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     tasks.push({
       id: tid, title: taskTitle, ...(team !== undefined && { team }), persona, kind, depends_on: deps,
       paths: { write, ...(read !== undefined && { read }) }, acceptance, checks,
+      ...(o.verify !== undefined && { verify }),
       ...(effort !== undefined && { effort }), ...(budget !== undefined && { budget_usd: budget }),
       ...(context !== undefined && { context }),
     });
@@ -651,6 +686,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     if (owner && !taskIds.has(owner)) ck.err(`${p}.owner`, `must be a task id (got ${q(owner)})`);
     let path: string | undefined;
     if (o.path !== undefined && o.path !== null) {
+      if (typeof o.path === "string" && o.path.length > 4000) ck.err(`${p}.path`, "is longer than 4000 characters");
       path = typeof o.path === "string" ? normalizeRelPath(o.path) ?? undefined : undefined;
       if (path === undefined) ck.err(`${p}.path`, "must be a repository-relative path (no absolute path, '..' or NUL)");
     }
@@ -701,7 +737,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     if (by && !agents.has(by)) ck.err(`${p}.by`, `${q(by)} is not a participant`);
     const src = ck.obj(o.source, `${p}.source`, true) ?? {};
     ck.known(src, ["kind", "ref"], `${p}.source`);
-    const kind = ck.oneOf(src.kind, `${p}.source.kind`, ["ultraplan", "consent", "debate", "waffle_house", "manual"] as const);
+    const kind = ck.oneOf(src.kind, `${p}.source.kind`, ["ultraplan", "consent", "debate", "waffle_house", "duel", "manual"] as const);
     if (!kind) ck.err(`${p}.source.kind`, "is required");
     const ref = ck.str(src.ref, `${p}.source.ref`);
     const claim = ck.str(o.claim, `${p}.claim`, { required: true, max: CONTRACT_LIMITS.dissent_claim });
@@ -744,7 +780,7 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
 
   // --- budget ---
   const b = ck.obj(c.budget, "budget") ?? {};
-  ck.known(b, ["usd", "per_task_usd", "per_agent_usd", "wall_clock_min", "max_parallel", "max_attempts"], "budget");
+  ck.known(b, ["usd", "per_task_usd", "per_agent_usd", "wall_clock_min", "max_parallel", "max_attempts", "max_agents", "max_subtasks"], "budget");
   const parentCap = parentTask && opts.parent
     ? Math.max(0, childBudgetCap(opts.parent, parentTask.id) - (opts.parent.siblingsUsd ?? 0)) || undefined
     : undefined;
@@ -760,6 +796,10 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     max_parallel: ck.num(b.max_parallel, "budget.max_parallel", { min: 1, max: MAX_PARALLEL_LIMIT, int: true }) ?? CONTRACT_DEFAULTS.max_parallel,
     max_attempts: ck.num(b.max_attempts, "budget.max_attempts", { min: 1, max: 10, int: true }) ?? CONTRACT_DEFAULTS.max_attempts,
   };
+  const maxAgents = ck.num(b.max_agents, "budget.max_agents", { min: 1, max: 32, int: true });
+  if (maxAgents !== undefined) budget.max_agents = maxAgents;
+  const maxSubtasks = ck.num(b.max_subtasks, "budget.max_subtasks", { min: 1, max: 64, int: true });
+  if (maxSubtasks !== undefined) budget.max_subtasks = maxSubtasks;
   const perAgent = ck.num(b.per_agent_usd, "budget.per_agent_usd", { gt: 0 });
   if (perAgent !== undefined) budget.per_agent_usd = perAgent;
   if (budget.per_task_usd > budget.usd) ck.err("budget.per_task_usd", `($${budget.per_task_usd}) must not exceed budget.usd ($${budget.usd})`);
@@ -811,6 +851,16 @@ function normalize(input: unknown, ck: Checker, opts: CheckOptions): Contract {
     schema: CONTRACT_SCHEMA, id, version, status, title, goal, scope, participants, teams, tasks, interfaces, decisions, dissents,
     validation: { commands, final }, budget, authority, sandbox, workers, consent,
   };
+  if (c.connectors !== undefined) {
+    out.connectors = [];
+    for (const name of ck.arr(c.connectors, "connectors", 8)) {
+      if (typeof name !== "string" || !CONNECTOR_NAME.test(name) || name === "roundtable") ck.err("connectors", "must contain connector names");
+      else if (out.connectors.includes(name)) ck.err("connectors", `names ${name} twice`);
+      else out.connectors.push(name);
+    }
+    if (out.connectors.length && workers.driver === "codex") ck.err("connectors", "are not supported by codex workers; use claude-code");
+    if (out.connectors.length && isRuntimeDriver(workers.driver)) ck.err("connectors", "are not supported by runtime workers; use claude-code");
+  }
   if (postmortem) out.postmortem = postmortem;
   if (frozen) out.frozen = frozen;
   if (scope.parent) checkChild(ck, out, opts);
@@ -868,6 +918,11 @@ function agentsDirAvailable(): boolean {
 export async function validateContract(input: unknown, opts: ValidateOptions = {}): Promise<ContractValidation> {
   const ck = new Checker();
   const contract = normalize(input, ck, opts);
+  if (contract.connectors?.length) {
+    let connectors: Record<string, unknown> = {};
+    try { connectors = readUserConfig().connectors ?? {}; } catch { /* Missing local connectors are named below. */ }
+    for (const name of contract.connectors) if (!Object.hasOwn(connectors, name)) ck.err("connectors", `names unknown connector ${name}`);
+  }
   if (opts.personas !== false) {
     const dirOk = agentsDirAvailable();
     const refs = [...new Set([...contract.tasks.map((t) => t.persona), ...contract.participants.map((p) => p.agent)])];
@@ -986,6 +1041,7 @@ export interface RenderOptions {
 /** The contract as Markdown, for CONTRACT.md, tool results and consent prompts. */
 export function renderContractMarkdown(c: Contract, opts: RenderOptions = {}): string {
   const out: string[] = [`# Contract: ${c.title}`];
+  if (c.connectors?.length) out.push(`Connectors: ${c.connectors.join(", ")}`);
   out.push(`\`${c.id}\` v${c.version} · status: ${c.status} · orchestrator: ${c.scope.orchestrator} · lead: ${c.authority.lead}` +
     (c.frozen ? `\nFrozen by ${c.frozen.by} at ${c.frozen.at} · sha256 ${c.frozen.hash}` : ""));
   const goal = [`## Goal`, c.goal.ultimate, `**Original request:**\n${c.goal.original_prompt.split(/\r?\n/).map((l) => `> ${l}`).join("\n")}`];
@@ -1013,6 +1069,7 @@ export function renderContractMarkdown(c: Contract, opts: RenderOptions = {}): s
     lines.push(`- Writes: ${code(t.paths.write)}${t.paths.read?.length ? ` · reads: ${code(t.paths.read)}` : ""}`);
     lines.push(`- Acceptance:${t.acceptance.length ? "\n" + t.acceptance.map((a) => `  - ${a}`).join("\n") : " (none)"}`);
     lines.push(`- Checks: ${code(t.checks)}`);
+    if (t.verify?.length) lines.push(`- Verify: ${t.verify.map(v => `page_loads \`${v.page_loads.path}\``).join(", ")}`);
     if (t.context?.length) lines.push(`- Context: ${t.context.map((a) => `${a.kind} \`${a.ref}\``).join(", ")}`);
     return lines.join("\n");
   }).join("\n\n"));
@@ -1028,7 +1085,7 @@ export function renderContractMarkdown(c: Contract, opts: RenderOptions = {}): s
     : "(no commands)") + `\n\nFinal validation: ${code(c.validation.final)}`);
   const b = c.budget;
   out.push(`## Budget and authority\n\n${usd(b.usd)} total · ${usd(b.per_task_usd)} per task${b.per_agent_usd !== undefined ? ` · ${usd(b.per_agent_usd)} per agent` : ""} · ` +
-    `${b.wall_clock_min} min wall clock · max parallel ${b.max_parallel} · max attempts ${b.max_attempts}\n\n` +
+    `${b.wall_clock_min} min wall clock · max parallel ${b.max_parallel} · max agents ${b.max_agents ?? "unset (swarms disabled)"} · max subtasks ${b.max_subtasks ?? CONTRACT_DEFAULTS.max_subtasks} · max attempts ${b.max_attempts}\n\n` +
     `Lead ${c.authority.lead} may: ${list(c.authority.may)} · budget extension up to ${c.authority.budget_extension_pct}%\n\n` +
     `Sandbox: ${c.sandbox.backend} (\`${c.sandbox.image}\`)${c.sandbox.install ? ` · install \`${argvText(c.sandbox.install.argv)}\` (egress ${list(c.sandbox.install.egress)})` : ""} · ` +
     `workers: ${c.workers.driver}${c.workers.model ? ` (${c.workers.model}${c.workers.fallback_model ? `, fallback ${c.workers.fallback_model}` : ""})` : ""}` +

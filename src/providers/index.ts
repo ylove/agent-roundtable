@@ -1,8 +1,27 @@
+import { providerHealth, endpointFingerprint, credentialFingerprint } from "./health.js";
+import { MAX_REQUEST_TOKENS } from "./limits.js";
+import { ProviderHttpError } from "./retry.js";
+import { appendTableLine, newServerId } from "../usage/table.js";
+
+let outcomeServer: string | undefined;
+function recordOutcome(provider: LLMProvider, model: string, started: number, outcome: ProviderOutcome["outcome"], reportsUsage: boolean, baseUrl?: string): ProviderOutcome {
+  const endpoint = endpointFingerprint(provider, process.env, baseUrl), cred = credentialFingerprint(provider, process.env);
+  const result: ProviderOutcome = { provider, model, outcome, latency_ms: Math.max(0, Date.now() - started), ...(endpoint !== undefined && { endpoint }), ...(cred !== undefined && { cred }) };
+  // A session or execution sink already owns this call. Never create a second table row for it.
+  if (activeUsageSink()) {
+    if (!reportsUsage) reportProviderFailure(result);
+  } else {
+    try { appendTableLine({ at: new Date(Date.now()).toISOString(), server: outcomeServer ??= newServerId(), session: "provider-calls", kind: "provider-call", agent: "provider", ...result }); }
+    catch { /* Health must work when the usage directory is read-only. */ }
+  }
+  return result;
+}
 // ============================================================================
 // LLM Completion Functions (provider table + routing)
 // ============================================================================
 
-import type { LLMMessage, LLMCompletionResult, ProviderCall } from "./shared.js";
+import type { LLMMessage, LLMCompletionResult, ProviderCall, ToolRound, ToolSpec } from "./shared.js";
+import { runToolLoop, toolResultTurns, type RunTool, type ToolLoopLimits, type ToolLoopResult } from "./tool-loop.js";
 import type { LLMProvider } from "../config.js";
 import {
   DEFAULT_MODELS,
@@ -15,9 +34,9 @@ import { callAnthropic } from "./anthropic.js";
 import { callOpenAI, callTogether, callOpenAICompatible } from "./openai-compatible.js";
 import { callReplicate } from "./replicate.js";
 import { callOllama, isOllamaAvailable } from "./ollama.js";
-import { activeAbortSignal, reportUsage, StoppedError } from "./usage.js";
+import { activeAbortSignal, activeUsageSink, reportUsage, StoppedError, withProviderOutcome, reportProviderFailure, type ProviderOutcome } from "./usage.js";
 
-export type { LLMMessage, LLMCompletionResult, ProviderCall, ProviderCallOptions } from "./shared.js";
+export type { LLMMessage, LLMCompletionResult, ProviderCall, ProviderCallOptions, ToolSpec } from "./shared.js";
 export { isOllamaAvailable };
 export {
   withUsageSink,
@@ -48,12 +67,20 @@ export interface ChatCompletionOptions {
   baseUrl?: string;
   /** Postmortems retain a text-length estimate for a dispatched call that fails without usage. */
   estimateUsageOnFailure?: boolean;
+  /** Set only by callLLMWithTools: one request of a tool loop. */
+  toolRound?: ToolRound;
 }
 
 export async function chatCompletion(
   messages: LLMMessage[],
   options: ChatCompletionOptions = {}
 ): Promise<LLMCompletionResult> {
+  if (options.maxTokens !== undefined && (!Number.isInteger(options.maxTokens) || options.maxTokens < 1 || options.maxTokens > MAX_REQUEST_TOKENS)) {
+    throw new Error(`max_tokens must be an integer from 1 to ${MAX_REQUEST_TOKENS}`);
+  }
+  if (options.temperature !== undefined && (typeof options.temperature !== "number" || !Number.isFinite(options.temperature) || options.temperature < 0 || options.temperature > 2)) {
+    throw new Error("temperature must be a number from 0 to 2");
+  }
   const provider = options.provider || "openai";
   // Own-property check: "constructor", "toString", "__proto__" must not resolve via Object.prototype.
   const call = Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider] : undefined;
@@ -75,6 +102,8 @@ export async function chatCompletion(
 
   const stop = activeAbortSignal();
   let dispatched = false;
+  const started = Date.now();
+  let failedOutcome: ProviderOutcome | undefined;
   try {
     stop?.throwIfAborted();
     const timeout = AbortSignal.timeout(LLM_TIMEOUT_MS);
@@ -85,18 +114,29 @@ export async function chatCompletion(
       temperature: options.temperature,
       signal: stop ? AbortSignal.any([timeout, stop]) : timeout,
       ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
+      ...(options.toolRound && { toolRound: options.toolRound }),
     });
+    providerHealth.recordCall(provider, true, undefined, process.env, options.baseUrl, model);
+    const outcome = recordOutcome(provider, model, started, "ok", true, options.baseUrl);
     // Every completion (engines via callLLM, and the chat_completion tool) reaches the active usage sink.
-    reportUsage({
+    withProviderOutcome(outcome, () => reportUsage({
       provider: result.provider,
       model: result.model,
       ...(result.usage && { usage: result.usage }),
       chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: result.content.length },
-    });
+    }));
     return result;
   } catch (error) {
+    if (dispatched && !stop?.aborted) {
+      const status = error instanceof ProviderHttpError ? error.status : undefined;
+      const outcome = status === 401 || status === 403 ? "auth" : status === 429 ? "rate_limit" : error instanceof Error && /timeout|timed out|abort/i.test(error.name + error.message) ? "timeout" : "error";
+      // Unknown persona models are handled by the existing model fallback, not provider exclusion.
+      if (outcome === "auth" || outcome === "timeout" || outcome === "rate_limit") providerHealth.recordCall(provider, false, outcome === "auth" ? "auth failed" : outcome === "timeout" ? "request timed out" : "rate limited", process.env, options.baseUrl);
+      failedOutcome = recordOutcome(provider, model, started, outcome, options.estimateUsageOnFailure === true, options.baseUrl);
+    }
     if (dispatched && options.estimateUsageOnFailure) {
-      reportUsage({ provider, model, chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });
+      const report = () => reportUsage({ provider, model, chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });
+      if (failedOutcome) withProviderOutcome(failedOutcome, report); else report();
     }
     if (stop?.aborted) throw new StoppedError();
     if (
@@ -156,4 +196,29 @@ export async function callLLM(
   options: CallLLMOptions
 ): Promise<string> {
   return (await callLLMDetailed(systemPrompt, messages, options)).content;
+}
+
+/** Providers whose request shape here carries tools. Replicate speaks without them. */
+export const TOOL_PROVIDERS: readonly LLMProvider[] = ["anthropic", "openai", "together", "openai_compatible", "ollama"];
+export const supportsTools = (provider: string): boolean => (TOOL_PROVIDERS as readonly string[]).includes(provider);
+
+/**
+ * Like callLLMDetailed, but the model may call `tools` (runTool executes them) before it answers.
+ * Every round trip is metered through chatCompletion. Callers that pass no tools use callLLM, unchanged.
+ */
+export async function callLLMWithTools(
+  systemPrompt: string,
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+  { provider, model, maxTokens = MAX_TOKENS, baseUrl, estimateUsageOnFailure }: CallLLMOptions,
+  tools: ToolSpec[],
+  runTool: RunTool,
+  limits?: ToolLoopLimits,
+): Promise<ToolLoopResult> {
+  if (!supportsTools(provider)) throw new Error(`Tool use is not available for the ${provider} provider.`);
+  const llmMessages: LLMMessage[] = [{ role: "system", content: systemPrompt }, ...messages];
+  return runToolLoop(
+    toolRound => chatCompletion(llmMessages, { provider, model, maxTokens, baseUrl, estimateUsageOnFailure, toolRound }),
+    tools, runTool, (calls, results) => toolResultTurns(provider === "anthropic" ? "anthropic" : provider === "ollama" ? "ollama" : "openai", calls, results),
+    activeAbortSignal(), limits,
+  );
 }

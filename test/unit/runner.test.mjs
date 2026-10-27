@@ -356,3 +356,28 @@ test("a vanished resume session starts fresh and retains the WIP diff in its car
   assert.match(driver.calls[2].prompt, /1 file changed/);
   assert.equal(readFileSync(join(driver.calls[2].cwd, "src/a/draft.txt"), "utf8"), "saved work\n");
 });
+
+test("a run that ends stops its previews (bounded, best effort); a run that is only stopped does not", async (t) => {
+  const stopped = [];
+  const { store, r, driver } = await setup(t, oneTask, undefined, { stopPreviews: async (exe) => { stopped.push(exe); throw new Error("docker is gone"); } });
+  await r.tick();
+  const h = driver.calls.at(-1);
+  await waitFor(() => existsSync(h.outputPath) && readFileSync(h.outputPath, "utf8").includes("init"));
+  await submit(store, h);
+  stream(h, [resultLine()]);
+  await driver.stop(h);
+  await tickUntil(r, async () => (await store.state()).status === "completed");
+  r.stop("finished");
+  await r.run();
+  assert.deepEqual(stopped, [store.id], "stopped once, for this run; a failing stop never fails the run");
+  assert.equal((await store.state()).status, "completed");
+});
+
+test("a runner stopped before the run ends leaves its previews alone", async (t) => {
+  const stopped = [];
+  const { store, r } = await setup(t, oneTask, undefined, { stopPreviews: async (exe) => { stopped.push(exe); } });
+  r.stop("operator stop");
+  await r.run();
+  assert.notEqual((await store.state()).status, "completed");
+  assert.deepEqual(stopped, []);
+});

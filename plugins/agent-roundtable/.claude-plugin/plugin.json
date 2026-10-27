@@ -1,0 +1,19 @@
+{
+  "name": "agent-roundtable",
+  "version": "2.0.0",
+  "description": "Multi-agent meetings, duels and collaborations over MCP",
+  "author": {
+    "name": "Yitz Jordan",
+    "url": "https://github.com/ylove"
+  },
+  "homepage": "https://github.com/ylove/agent-roundtable#readme",
+  "repository": "https://github.com/ylove/agent-roundtable",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "multi-agent",
+    "agents",
+    "collaboration",
+    "duel"
+  ]
+}

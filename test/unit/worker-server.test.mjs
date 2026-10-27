@@ -35,7 +35,7 @@ function refuse(args) {
   return { code: r.status, stderr: r.stderr };
 }
 
-test("a good token starts the server, is unlinked, and binds 8 tools to the agent; a reused token refuses", { skip: process.platform === "win32" }, async () => {
+test("a good token starts the server, is unlinked, and binds 10 tools to the agent; a reused token refuses", { skip: process.platform === "win32" }, async () => {
   const { run, files, args } = await setup();
   const token = readFileSync(files.tokenPath, "utf8").trim();
   const server = startServer({ args, env: { ROUNDTABLE_DOTENV: "off" } });
@@ -43,7 +43,7 @@ test("a good token starts the server, is unlinked, and binds 8 tools to the agen
     await server.init();
     assert.equal(existsSync(files.tokenPath), false, "the token file is consumed");
     const tools = await server.listTools();
-    assert.deepEqual(tools.map((t) => t.name), ["file_dissent", "read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"]);
+    assert.deepEqual(tools.map((t) => t.name), ["file_dissent", "read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate", "spawn_subtasks", "await_subtasks"]);
     assert.ok(tools.every((t) => !t.inputSchema.properties.agent_token), "no token arguments on the worker server");
     const sum = JSON.parse((await server.callTool("read_blackboard", {})).text);
     assert.equal(sum.you.agent, "builder-1");

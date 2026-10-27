@@ -1,21 +1,28 @@
+import { MAX_TOKENS } from "../config.js";
+import type { Seat } from "../table/events.js";
 // ============================================================================
 // Collaboration Functions (Agent-to-Agent)
 // ============================================================================
 
 import type { LLMProvider } from "../config.js";
 import { DEFAULT_MODELS } from "../config.js";
-import { agentKey, loadAgent, loadAgentPrompt, renderSkillsSection } from "../agents.js";
+import { prepareSeats, resolveSeats, validateSeatSpecs } from "../table/seats.js";
+import type { SeatSpec } from "../table/events.js";
+import { agentKey, loadAgent, renderSkillsSection } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
 import { sessionBusyMessage, withSessionLock } from "./lock.js";
 import { archiveCollaboration } from "./archive.js";
 import { isPostmortemOrigin } from "../postmortem/sessions.js";
-import { callLLM } from "../providers/index.js";
+import { callSeat } from "../table/dispatch.js";
+import { activeAbortSignal, withAbortSignal } from "../providers/index.js";
 import { metered, stoppedOutcome, type StoppedInfo } from "../usage/session-scope.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel, type FinalizeResult } from "./public.js";
 import type { CollaborationMode, CollaborationRole, ConversationAngle } from "./modes.js";
+import { withDuelFocus, type DuelFocus } from "./duel-focus.js";
 import { buildGrounding, type Grounding } from "./grounding.js";
+import { checkSeatConnectorArgs, startSeatConnectors, withSeatConnectors, type SeatConnectorMap, type SeatConnectorSession, type SeatToolUse } from "../table/seat-connectors.js";
 import {
   NUDGE_HELD_ERROR,
   PROTOTYPE_CONVERSATION_ERROR,
@@ -48,6 +55,9 @@ import {
 
 export interface CollaborationAgent {
   name: string;
+  provider?: string;
+  model?: string;
+  maxOutputTokens?: number;
   systemPrompt: string;
   /** Set in debate (proponent/challenger) and waffle-house (defender/attacker) modes. */
   role?: CollaborationRole;
@@ -79,6 +89,8 @@ export interface Collaboration {
   model: string;
   /** Only with provider "openai_compatible": base URL pinned for the life of the collaboration. */
   baseUrl?: string;
+  /** Optional caller cancellation, combined with the metered session stop signal. */
+  signal?: AbortSignal;
   mode: CollaborationMode;
   debateFocus?: string;
   conversationAngle?: ConversationAngle;
@@ -89,14 +101,42 @@ export interface Collaboration {
   prototype?: PrototypeTracker;
   /** Who it runs for, e.g. a heads-down huddle; tags its activity entry and archive record. */
   origin?: string;
+  /** MCP connectors seats may call as tools; started once for the session and closed when it ends. */
+  connectors?: SeatConnectorSession;
+  /** One scrubbed line per connector call or notice ("<seat> used <connector>__<tool> ..."); never the payload. */
+  toolNotes?: string[];
   /** Set when a person stopped the collaboration (usage visibility): it then ends without a summary. */
   stopped?: StoppedInfo;
 }
 
 export const collaborations = new Map<string, Collaboration>();
 
+/** Match the selected seat's model and send a pinned compatible endpoint only to that provider. */
+function agentCallOptions(collaboration: Collaboration, agent: CollaborationAgent) {
+  const provider = agent.provider ?? collaboration.provider;
+  return {
+    provider,
+    model: agent.model ?? (provider === collaboration.provider ? collaboration.model : (Object.hasOwn(DEFAULT_MODELS, provider ?? "") ? DEFAULT_MODELS[provider as LLMProvider] : "")),
+    baseUrl: provider === "openai_compatible" ? collaboration.baseUrl : undefined,
+    ...(agent.maxOutputTokens !== undefined && { maxTokens: Math.min(MAX_TOKENS, agent.maxOutputTokens) }),
+    estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin),
+  };
+}
+
 /** Hard cap on max_rounds and on rounds per continue (the tool schemas declare the same maximum). */
 export const MAX_COLLABORATION_ROUNDS = 20;
+
+function callAgent(collaboration: Collaboration, agent: CollaborationAgent, messages: Parameters<typeof callSeat>[1]): Promise<string> {
+  return metered({ session: collaboration.id, kind: "collaboration", agent: agent.name }, () => {
+    const call = () => withSeatConnectors(collaboration.connectors, () => callSeat(agent.systemPrompt, messages, agentCallOptions(collaboration, agent), {
+      agent: agent.name, onModelFallback: model => { agent.model = model; },
+    }));
+    if (!collaboration.signal) return call();
+    const sessionStop = activeAbortSignal();
+    const signal = sessionStop ? AbortSignal.any([sessionStop, collaboration.signal]) : collaboration.signal;
+    return withAbortSignal(signal, call);
+  });
+}
 
 function collaborationBusy(id: string): string {
   return sessionBusyMessage("Collaboration", id);
@@ -261,18 +301,32 @@ export async function startCollaboration(
     maxRounds?: number;
     autoRun?: boolean;
     runRounds?: number;
-    provider?: LLMProvider;
+    provider?: LLMProvider | "auto";
     model?: string;
+    seats?: Record<string, SeatSpec>;
+    signal?: AbortSignal;
     baseUrl?: string;
     mode?: CollaborationMode;
     debateFocus?: string;
     public?: boolean;
     grounding?: boolean;
     prototype?: boolean;
+    pageCheck?: boolean;
     origin?: string;
+    /** A duel id whose brief is added to the context every participant sees. */
+    duel?: string | DuelFocus;
+    /** Default true; false leaves artifact source out of the duel brief. */
+    duelSource?: boolean;
+    /** Names of configured MCP connectors every seat may use as tools (see docs/connectors.md). */
+    connectors?: string[];
+    /** Limits a seat to some of those connectors (seat name to connector names); other seats get them all. */
+    seatConnectors?: SeatConnectorMap;
+    /** Called for each connector call or notice, as it happens. */
+    onToolNote?: (use: SeatToolUse) => void;
   } = {}
 ): Promise<{
   collaborationId: string;
+  routing?: Seat[];
   messages: CollaborationMessage[];
   status: string;
   public?: { url: string | null; topic: string };
@@ -281,10 +335,22 @@ export async function startCollaboration(
   /** Prototype sessions only. */
   prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
+  // A bad or unknown duel fails here, before a session exists or any provider is called.
+  if (options.duel !== undefined) options = { ...options, context: withDuelFocus(options.context, options.duel, options.duelSource !== false) };
   const collaborationId = newId("collab");
-  return withSessionLock(collaborationId, collaborationBusy(collaborationId), () =>
-    openCollaboration(collaborationId, agentNames, topic, options)
-  );
+  // An unknown connector fails here, before a session exists or any provider is called.
+  const checked = checkSeatConnectorArgs(options.connectors, options.seatConnectors, agentNames);
+  const connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: options.signal, seatConnectors: checked.seatConnectors }) : undefined;
+  try {
+    const result = await withSessionLock(collaborationId, collaborationBusy(collaborationId), () =>
+      openCollaboration(collaborationId, agentNames, topic, options, connectors)
+    );
+    if (!collaborations.has(collaborationId)) await connectors?.close();
+    return result;
+  } catch (e) {
+    await connectors?.close();
+    throw e;
+  }
 }
 
 /** The opening turn and any auto-run, holding the session lock (the session is listed before the first call). */
@@ -292,7 +358,8 @@ async function openCollaboration(
   collaborationId: string,
   agentNames: string[],
   topic: string | undefined,
-  options: NonNullable<Parameters<typeof startCollaboration>[2]>
+  options: NonNullable<Parameters<typeof startCollaboration>[2]>,
+  connectors?: SeatConnectorSession,
 ): ReturnType<typeof startCollaboration> {
   if (agentNames.length < 2) {
     throw new Error("Collaboration requires at least 2 agents");
@@ -301,8 +368,8 @@ async function openCollaboration(
     throw new Error(`max_rounds must be at most ${MAX_COLLABORATION_ROUNDS} (got ${options.maxRounds})`);
   }
 
-  const provider = options.provider || "anthropic";
-  const resolvedModel = options.model || DEFAULT_MODELS[provider];
+  const provider = options.provider === "auto" ? undefined : options.provider;
+  const resolvedModel = options.model || (Object.hasOwn(DEFAULT_MODELS, provider ?? "") ? DEFAULT_MODELS[provider as LLMProvider] : "");
   const baseUrl = options.baseUrl;
   const mode: CollaborationMode = options.mode ?? "collaborate";
   assertCollaborationMode(mode);
@@ -318,13 +385,39 @@ async function openCollaboration(
   const groundingSources: Grounding["sources"] = [];
   let openingSources: Grounding["sources"] = [];
 
+  if (options.seats != null) validateSeatSpecs(options.seats);
+  // Explicit session-wide assignments keep their established behavior; per-seat assignments win.
+  const assigned: Record<string, SeatSpec> | undefined = provider !== undefined
+    ? Object.fromEntries(agentNames.map(agent => {
+        const override = options.seats?.[agent];
+        const model = override?.model ?? (override?.provider ? (Object.hasOwn(DEFAULT_MODELS, override.provider) ? DEFAULT_MODELS[override.provider as LLMProvider] : "") : resolvedModel);
+        return [agent, { agent, provider, ...override, ...(model && { model }) }];
+      }))
+    : options.seats;
+  if (options.seats && Object.keys(options.seats).some(agent => !agentNames.includes(agent))) {
+    throw new Error("Seat override names an agent outside the roster.");
+  }
+  const loadedAgents = new Map<string, Awaited<ReturnType<typeof loadAgent>>>();
+  // Explicit seats dispatch directly, retaining per-call endpoint and credential validation.
+  const explicitRoster = agentNames.every(name => assigned?.[name]?.provider !== undefined);
+  if (!explicitRoster && baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
+  const resolveRoster = explicitRoster ? resolveSeats : prepareSeats;
+  const seats = await resolveRoster({
+    agents: [...new Set(agentNames)], seats: assigned, provider: provider as LLMProvider | undefined, model: options.model,
+    load: async name => {
+      const loaded = await loadAgent(name);
+      loadedAgents.set(name, loaded);
+      return loaded;
+    },
+  });
+
   // Load all agent prompts (debate: agents[0] proponent, others challengers;
   // waffle-house: agents[0] defender, others attackers)
   const agents: CollaborationAgent[] = [];
   for (const [i, name] of agentNames.entries()) {
     let systemPrompt: string;
     if (mode === "conversation") {
-      const loaded = await loadAgent(name);
+      const loaded = loadedAgents.get(name)!;
       systemPrompt = loaded.body + renderSkillsSection(loaded.skills) + buildConversationDirective({ public: !!options.public });
       if (options.grounding !== false && !options.public) {
         const grounding = await buildGrounding(loaded);
@@ -335,7 +428,8 @@ async function openCollaboration(
         }
       }
     } else {
-      systemPrompt = await loadAgentPrompt(name);
+      const loaded = loadedAgents.get(name)!;
+      systemPrompt = loaded.body + renderSkillsSection(loaded.skills);
     }
     let role: CollaborationRole | undefined;
     if (mode === "debate") {
@@ -347,7 +441,7 @@ async function openCollaboration(
     }
     if (options.public) systemPrompt += publicDirectiveSuffix();
     if (isPrototype) systemPrompt += prototypeSystemSuffix({ assessorIsCaller: false, public: !!options.public });
-    agents.push({ name, systemPrompt, ...(role !== undefined && { role }) });
+    agents.push({ name, systemPrompt, provider: seats.get(name)!.provider, model: seats.get(name)!.model, maxOutputTokens: seats.get(name)!.maxOutputTokens, ...(role !== undefined && { role }) });
   }
 
   const maxRounds = options.maxRounds || 5;
@@ -363,7 +457,7 @@ async function openCollaboration(
   // the board first).
   const { prototype, publicChannel } = await openSessionSurfaces(
     isPrototype
-      ? { sessionId: collaborationId, mode, participants: roleNames, assessorIsCaller: false, public: isPublic, topic }
+      ? { sessionId: collaborationId, mode, participants: roleNames, assessorIsCaller: false, public: isPublic, topic, pageCheck: options.pageCheck }
       : undefined,
     () =>
       options.public
@@ -382,16 +476,19 @@ async function openCollaboration(
     currentRound: 0,
     status: "running",
     startedAt: new Date(),
-    provider,
-    model: resolvedModel,
+    provider: (provider ?? seats.values().next().value!.provider) as LLMProvider,
+    model: resolvedModel || seats.values().next().value!.model,
     ...(baseUrl !== undefined && { baseUrl }),
+    ...(options.signal && { signal: options.signal }),
     mode,
     ...(conversationAngle !== undefined && { conversationAngle, groundingSources }),
     ...(debateFocus !== undefined && { debateFocus }),
     ...(publicChannel && { publicChannel }),
     ...(prototype && { prototype }),
     ...(options.origin !== undefined && { origin: options.origin }),
+    ...(connectors && { connectors, toolNotes: [] }),
   };
+  connectors?.onNote(use => { collaboration.toolNotes?.push(use.note); options.onToolNote?.(use); });
 
   collaborations.set(collaborationId, collaboration);
 
@@ -434,11 +531,7 @@ async function openCollaboration(
   const firstAgent = agents[0];
   let firstMessage: string;
   try {
-    firstMessage = await metered({ session: collaborationId, kind: "collaboration", agent: firstAgent.name }, () => callLLM(
-      firstAgent.systemPrompt,
-      [{ role: "user", content: initialPrompt }],
-      { provider, model: resolvedModel, baseUrl, estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin) }
-    ));
+    firstMessage = await callAgent(collaboration, firstAgent, [{ role: "user", content: initialPrompt }]);
   } catch (e) {
     // Nothing was said: do not leave an orphan session, an unfinalized public topic or a board behind.
     collaborations.delete(collaborationId);
@@ -484,6 +577,7 @@ async function openCollaboration(
 
   return {
     collaborationId,
+    routing: [...seats.values()].map(seat => ({ ...seat, model: agents.find(a => a.name === seat.id)?.model ?? seat.model })),
     messages: collaboration.messages,
     status: collaboration.status,
     ...(autoRunError !== undefined && { error: `Auto-run stopped: ${autoRunError}. The session is paused; use nudge_collaboration to resume or end_collaboration to close it.` }),
@@ -560,11 +654,7 @@ export async function advanceCollaboration(
     conversationContext += `and move toward actionable conclusions.`;
   }
 
-  const messageContent = await metered({ session: collaboration.id, kind: "collaboration", agent: currentAgent.name }, () => callLLM(
-    currentAgent.systemPrompt,
-    [{ role: "user", content: conversationContext }],
-    { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl, estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin) }
-  ));
+  const messageContent = await callAgent(collaboration, currentAgent, [{ role: "user", content: conversationContext }]);
 
   const newMessage: CollaborationMessage = {
     agentIndex: collaboration.currentAgentIndex,
@@ -713,6 +803,8 @@ export async function endCollaboration(
   dissentSummaries?: Array<{ agent: string; content: string }>;
   publicBlock?: string;
   publicResult?: FinalizeResult;
+ /** One line per connector call, when the session used connectors. */
+  toolUses?: string[];
   /** Prototype sessions only: "## Prototype outcomes" and "## Shortlist for the human" (full shortlisted source). */
   prototypeOutcomes?: string;
 }> {
@@ -754,18 +846,12 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
       `**${nameFor(msg.agent, !!collaboration.publicChannel)}:** ${msg.content}\n\n`).join("");
     summaryPrompt += transcriptPrompt;
 
-    summary = await metered({ session: collaboration.id, kind: "collaboration", agent: summarizer.name }, () => callLLM(
-      summarizer.systemPrompt,
-      [{ role: "user", content: summaryPrompt }],
-      { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl, estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin) }
-    ));
+    summary = await callAgent(collaboration, summarizer, [{ role: "user", content: summaryPrompt }]);
     if (collaboration.mode === "debate" || collaboration.mode === "waffle-house") {
       const role = collaboration.mode === "debate" ? "challenger" : "attacker";
       for (const agent of collaboration.agents.slice(1)) {
-        const content = await metered({ session: collaboration.id, kind: "collaboration", agent: agent.name }, () => callLLM(agent.systemPrompt,
-          [{ role: "user", content: buildDissentSummaryPrompt(role, collaboration.topic) +
-            transcriptPrompt }],
-          { provider: collaboration.provider, model: collaboration.model, baseUrl: collaboration.baseUrl, estimateUsageOnFailure: isPostmortemOrigin(collaboration.origin) }));
+        const content = await callAgent(collaboration, agent,
+          [{ role: "user", content: buildDissentSummaryPrompt(role, collaboration.topic) + transcriptPrompt }]);
         dissentSummaries.push({ agent: agent.name, content });
       }
     }
@@ -784,6 +870,7 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
   const transcript = [...messages];
   archiveCollaboration(collaboration, transcript, summary, dissentSummaries);
   collaborations.delete(collaborationId);
+  await collaboration.connectors?.close();
   const outcomes = tracker ? { prototypeOutcomes: tracker.outcomesMarkdown() } : undefined;
 
   if (collaboration.publicChannel) {
@@ -795,9 +882,10 @@ async function closeCollaboration(collaborationId: string, requestSummary: boole
       publicResult,
       publicBlock: formatPublicBlock(collaboration.publicChannel, publicResult),
       ...outcomes,
+      ...((collaboration.toolNotes?.length ?? 0) > 0 && { toolUses: collaboration.toolNotes }),
     };
   }
-  return { transcript, summary, ...(dissentSummaries.length && { dissentSummaries }), ...outcomes };
+  return { transcript, summary, ...(dissentSummaries.length && { dissentSummaries }), ...outcomes, ...((collaboration.toolNotes?.length ?? 0) > 0 && { toolUses: collaboration.toolNotes }) };
 }
 
 /** The transcript as agents see it: resolved prototypes are stubs (shortlisted source is in the outcomes). */

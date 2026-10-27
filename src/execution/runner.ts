@@ -26,8 +26,9 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { executionLLM, PROVIDER_IDS, VERSION } from "../config.js";
+import { PROVIDER_IDS, VERSION } from "../config.js";
 import { executionTag } from "../ids.js";
+import { executionLLM, seedExecutionProvider } from "./provider-routing.js";
 import { loadAgent } from "../agents.js";
 import { pidAlive } from "../prototypes/sandbox.js";
 import { DockerBackend, LocalBackend, SANDBOX_ENV, selectBackend } from "../sandbox/index.js";
@@ -36,7 +37,9 @@ import { writeFileAtomic } from "../security/fs-safe.js";
 import { scrub, scrubAndCap } from "../security/secrets.js";
 import { ClaudeCodeDriver, WORKER_ATTESTATION } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
-import { agentDir, writeAgentLeases, prepareWorkerFiles } from "../workers/files.js";
+import { RuntimeWorkerDriver } from "../workers/runtime.js";
+import { isRuntimeDriver } from "../runtimes/worker.js";
+import { agentDir, writeAgentLeases, prepareWorkerFiles, removeWorkerMcpConfig, registerWorkerSecrets } from "../workers/files.js";
 import { RunMonitor, type ExitReason, type MonitorCheckpoint } from "../workers/monitor.js";
 import { reconcileLaunch } from "../workers/launch-intent.js";
 import { stopGroup, workerExit, type WorkerExit } from "../workers/process.js";
@@ -44,7 +47,10 @@ import { autoFindings } from "../postmortem/auto.js";
 import { cardLessons } from "../postmortem/lessons.js";
 import { scrubbedJSON } from "./blobs.js";
 import { remainingUsd } from "./budget.js";
+import { batchChildren, openSubtasks, SUBTASK_TERMINAL } from "./swarms.js";
+import { prepareConflictResolution, mergeDrafts } from "./merge.js";
 import { classifyFailure } from "./circuit.js";
+import { stopExecutionPreviews } from "../previews/manager.js";
 import { createRunnerHooks } from "./escalation.js";
 import { stopMicroHuddles } from "./huddle.js";
 import { integrationBranch, SubmodulesUnsupportedError } from "./git.js";
@@ -92,7 +98,7 @@ import {
   type WatchdogAction,
   type WatchdogConfig,
 } from "./watchdog.js";
-import { ensureIntegrationWorktree, taskDiffSummary, taskStartPoint, ensureTaskWorktree, snapshotWip, taskWorktreePath } from "./worktrees.js";
+import { ensureIntegrationWorktree, taskDiffSummary, taskStartPoint, ensureTaskWorktree, snapshotWip, taskWorktreePath, withGitLock } from "./worktrees.js";
 import { startDashboard, type Dashboard } from "../dashboard/server.js";
 import { taskHeld, blockingIds } from "./task-holds.js";
 import { GitHubSync } from "../github/sync.js";
@@ -102,14 +108,18 @@ import { GitHubSync } from "../github/sync.js";
 // ============================================================================
 
 export interface RunnerOptions {
+  /** Stops a finished run's dev-server previews (default: the preview manager; tests inject a fake). */
+  stopPreviews?: (execution: string) => Promise<unknown>;
   /**
    * WS10's escalation router, lead fallback, goal review and escalation pass. runRunner installs
    * createRunnerHooks (persona calls per ROUNDTABLE_EXECUTION_*); a Runner built without them uses
    * DEFAULT_HOOKS, which only log and review COMPLETE (tests).
    */
   hooks?: Partial<RunnerHooks>;
-  /** Worker drivers by id (default ClaudeCodeDriver and CodexDriver). */
+  /** Worker drivers by id (default ClaudeCodeDriver and CodexDriver; a runtime:<name> driver is made when a contract names it). */
   drivers?: Partial<Record<WorkerDriverId, WorkerDriver>>;
+  /** First pause before a failed escalation route is retried; doubles per attempt (default 30 s). */
+  routeRetryBaseMs?: number;
   /** Tick interval (default 1500 ms). */
   tickMs?: number;
   heartbeatMs?: number;
@@ -138,6 +148,8 @@ const SNAPSHOT_MS = 60_000;
 const TERMINAL_RUN: ReadonlySet<string> = new Set(["completed", "failed", "aborted"]);
 /** As control_execution abort: the CLI's time to stop before its group is killed. */
 const ABORT_STOP_GRACE_MS = 5_000;
+const ROUTE_RETRY_BASE_MS = 30_000;
+const ROUTE_MAX_ATTEMPTS = 5;
 const OPEN_ESCALATION: ReadonlySet<string> = new Set(["open", "routed", "in_huddle", "awaiting_human"]);
 const ACTIVE_TASK: ReadonlySet<string> = new Set(["claimed", "in_progress", "submitted", "checking"]);
 const SESSION_GONE_RE = /no conversation found|session(?: id)?[^\n]{0,80}\bnot found|could not (?:find|resume) (?:the )?session/i;
@@ -164,6 +176,12 @@ const own = <T>(rec: Readonly<Record<string, T>> | undefined, key: string | unde
   rec !== undefined && key !== undefined && Object.hasOwn(rec, key) ? rec[key] : undefined;
 
 /** The runner's agent id for a task: w-<task>, shortened with a hash when that would pass 64 characters. */
+/** The contract's worker driver: codex or a runtime:<name> profile when it names one, else claude-code. */
+function contractDriverId(state: Readonly<BlackboardState>): WorkerDriverId {
+  const d = state.contract?.workers.driver;
+  return d === "codex" || isRuntimeDriver(d) ? d : "claude-code";
+}
+
 export function workerAgentId(task: string): string {
   const id = `w-${task}`;
   if (id.length <= 64) return id;
@@ -329,6 +347,9 @@ export class Runner {
   /** Stop requests (agent.stop_requested event ids) this process has applied. */
   private readonly stopApplied = new Set<string>();
   private readonly routed = new Set<string>();
+  /** A failed route (for example no healthy provider) is offered again after a pause, not on every tick. */
+  private readonly routeRetryAt = new Map<string, number>();
+  private readonly routeAttempts = new Map<string, number>();
   private readonly leadInFlight = new Set<string>();
   /** The hooks' escalation pass: one at a time, when the log moved or every PASS_MS. */
   private passInFlight = false;
@@ -346,6 +367,7 @@ export class Runner {
   private driverChecked?: Promise<{ ok: boolean; missing: string[] }>;
   private driverCheckedId?: WorkerDriverId;
   private merge!: MergeQueue;
+  private readonly joining = new Set<string>();
   private dashboard?: Dashboard;
   private github?: GitHubSync;
   private githubTimer?: NodeJS.Timeout;
@@ -422,7 +444,8 @@ export class Runner {
       await this.refreshLog();
       const state = await this.store.state();
       this.snapSeq = state.seq;
-      this.driverId = state.contract?.workers.driver === "codex" ? "codex" : "claude-code";
+      this.contractConnectors = state.contract?.connectors;
+      this.driverId = contractDriverId(state);
       if (TERMINAL_RUN.has(state.status)) {
         if (state.status === "failed") this.exitCode = 1;
         // An abort interrupted before its workers stopped (both the tool and the previous runner
@@ -541,6 +564,10 @@ export class Runner {
     if (terminal && this.github) {
       await bounded(this.github.syncOnce(), 60_000).catch(() => undefined);
     }
+    if (terminal) {
+      // Best effort and bounded: a preview that will not stop never fails the run; the sweep is the backstop.
+      await bounded((this.opts.stopPreviews ?? stopExecutionPreviews)(this.execution), 30_000).catch((e) => this.say(`previews: ${errText(e)}`));
+    }
     await this.dashboard?.close().catch(() => undefined);
     if (this.lock?.held()) {
       await this.commit([{ type: "runner.stopped", source: this.source, payload: { reason: scrub(reason) } }]).catch((e) => this.say(`runner.stopped: ${errText(e)}`));
@@ -586,6 +613,9 @@ export class Runner {
         const a = owners.get(e.payload.lease_id);
         if (a) touched.add(a);
       }
+    }
+    if (fresh.some((e) => ["task.spawned", "task.merged", "task.accepted", "task.failed", "task.cancelled"].includes(e.type))) {
+      for (const l of Object.values((await this.store.state()).leases)) touched.add(l.agent);
     }
     for (const agent of touched) {
       try {
@@ -635,6 +665,7 @@ export class Runner {
     if (Object.entries(state.agents).some(([id, a]) => !a.external && !this.workers.has(id) && !this.busy.has(id) && ["registered", "running"].includes(a.status))) {
       await this.reconcile();
     }
+    await this.recordChildCancellations(state);
     await this.stopSuperseded();
     await this.applyStops();
     await this.pollWorkers();
@@ -657,7 +688,8 @@ export class Runner {
     this.passEscalations();
     await this.postmortemPass();
     await this.retireMerged();
-    await this.schedule(state);
+    this.joinSubtasks(state);
+    await this.schedule(await this.store.state());
     this.merge.feed(await this.store.state());
     await this.checkFailure(await this.store.state());
     this.checkIdle(state);
@@ -680,15 +712,22 @@ export class Runner {
     }
   }
 
-  /** Retry/reassignment drops a claim durably, so a lost handoff can never orphan its worker. */
+  /** Superseded claims and connector amendments stop workers even if a handoff was lost. */
   private async stopSuperseded(): Promise<void> {
     const state = await this.store.state();
     for (const t of this.workers.values()) {
+      const registered = this.lastSeq((e) => e.type === "agent.registered" && e.payload.agent === t.agent);
+      let connectorsChanged = false;
+      for (const e of this.log) {
+        if (e.type !== "contract.amended" || e.seq <= registered || !e.payload.affected_tasks.includes(t.task)) continue;
+        const patch = JSON.parse((await this.store.getBlob(e.payload.patch_blob)).toString("utf8"));
+        if (Object.hasOwn(patch, "connectors")) { connectorsChanged = true; break; }
+      }
       // An accepted task drops its claim; retireMerged stops its worker after the merge grace.
-      if (own(state.tasks, t.task)?.state === "accepted") continue;
+      if (own(state.tasks, t.task)?.state === "accepted" && !connectorsChanged) continue;
       const claim = own(state.claims, t.task);
-      if (!t.exit && (!claim || claim.agent !== t.agent || claim.attempt > t.attempt)) {
-        await this.killWorker(t.agent, "killed", "its task claim or attempt was superseded");
+      if (!t.exit && (connectorsChanged || !claim || claim.agent !== t.agent || claim.attempt > t.attempt)) {
+        await this.killWorker(t.agent, "killed", connectorsChanged ? "its connectors were amended" : "its task claim or attempt was superseded");
       }
     }
   }
@@ -834,6 +873,7 @@ export class Runner {
     if (p.attestation) t.attested = p.attestation.ok;
     if (t.exit && this.sessionGone(t)) return this.restartFresh(t);
     if (t.exit) {
+      removeWorkerMcpConfig(this.execution, t.agent);
       // An adopted worker is not our child: its exit code is unknown, so its stream says how it ended.
       const acc = t.monitor.acc;
       const reason = t.killReason ?? (t.adopted && t.exit.code === null && !t.exit.signal ? (acc.done && !acc.isError ? "completed" : "lost") : undefined);
@@ -845,7 +885,7 @@ export class Runner {
     try {
       await this.commit(drafts);
     } catch (e) {
-      t.monitor = this.monitorFor(this.drivers[t.driver] ?? this.driver(), t.agent, t.task, t.outputPath, offset, undefined, checkpoint);
+      t.monitor = this.monitorFor(this.driverFor(t.driver) ?? this.driver(), t.agent, t.task, t.outputPath, offset, undefined, checkpoint);
       t.attested = checkpoint.attestation?.ok;
       throw e;
     }
@@ -1002,7 +1042,7 @@ export class Runner {
       t.exit = { code: null, signal: null };
       return;
     }
-    const d = this.drivers[t.driver];
+    const d = this.driverFor(t.driver);
     if (d) await d.stop(this.handleOf(t), reason);
     else await stopGroup(t.pgid, 10_000, t.started);
   }
@@ -1014,6 +1054,7 @@ export class Runner {
       if (!processMatches(t.pid, t.started)) t.exit = { code: null, signal: "SIGTERM" };
       else await sleep(25);
     }
+    if (t.exit) removeWorkerMcpConfig(this.execution, t.agent);
     return t.exit ?? { code: null, signal: "SIGKILL" };
   }
 
@@ -1026,6 +1067,7 @@ export class Runner {
       if (rec?.status === "running" && rec.pid && !rec.external) {
         if (processMatches(rec.pid, rec.started)) await stopGroup(rec.pid, 10_000, rec.started);
         else await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, code: null, reason: "lost" } }]);
+        if (!processMatches(rec.pid, rec.started)) removeWorkerMcpConfig(this.execution, agent);
       }
       return;
     }
@@ -1212,16 +1254,30 @@ export class Runner {
     );
   }
 
+  /** Retry a failed route with exponential backoff (30 s, 60 s, 120 s...), then hand the escalation to a human. */
+  private routeFailed(id: string, e: unknown): void {
+    const attempts = (this.routeAttempts.get(id) ?? 0) + 1;
+    this.routeAttempts.set(id, attempts);
+    this.say(`escalation router on ${id} (attempt ${attempts} of ${ROUTE_MAX_ATTEMPTS}): ${errText(e)}`);
+    if (attempts < ROUTE_MAX_ATTEMPTS) {
+      this.routed.delete(id);
+      this.routeRetryAt.set(id, Date.now() + (this.opts.routeRetryBaseMs ?? ROUTE_RETRY_BASE_MS) * 2 ** (attempts - 1));
+      return;
+    }
+    const message = `The runner could not route this escalation after ${ROUTE_MAX_ATTEMPTS} attempts (${scrubAndCap(errText(e), 300)}). Check the provider keys, or resolve it by hand.`;
+    this.track(Promise.resolve(this.hooks.escalationGiveUp?.(this.ctx, id, message)).catch((err) => this.say(`escalation ${id} could not be handed to the human: ${errText(err)}`)));
+  }
+
   /** New open escalations go to the router once per process (a restarted runner offers them again). */
   private routeEscalations(state: Readonly<BlackboardState>): void {
     for (const esc of Object.values(state.escalations)) {
-      if (esc.status !== "open" || this.routed.has(esc.id)) continue;
+      if (esc.status !== "open" || this.routed.has(esc.id) || (this.routeRetryAt.get(esc.id) ?? 0) > Date.now()) continue;
       this.routed.add(esc.id);
       this.track(
         this.hooks
           .escalationRouter(this.ctx, structuredClone(esc))
-          .then((ops) => this.applyResolutionOps(ops ?? [], `escalation ${esc.id}`))
-          .catch((e) => this.say(`escalation router on ${esc.id}: ${errText(e)}`))
+          .then((ops) => { this.routeAttempts.delete(esc.id); this.routeRetryAt.delete(esc.id); return this.applyResolutionOps(ops ?? [], `escalation ${esc.id}`); })
+          .catch((e) => this.routeFailed(esc.id, e))
       );
     }
   }
@@ -1251,16 +1307,24 @@ export class Runner {
 
   /** The contract's worker driver (claude-code unless it names codex). */
   driver(): WorkerDriver {
-    const d = this.drivers[this.driverId];
+    const d = this.driverFor(this.driverId);
     if (!d) throw new Error(`No worker driver ${this.driverId}`);
     return d;
   }
 
+  /** A driver by id; a runtime:<name> driver is made on first use. */
+  private driverFor(id: WorkerDriverId): WorkerDriver | undefined {
+    if (isRuntimeDriver(id) && !this.drivers[id]) this.drivers[id] = new RuntimeWorkerDriver(id);
+    return this.drivers[id];
+  }
+
   private driverId: WorkerDriverId = "claude-code";
+  private contractConnectors?: string[];
 
   /** The driver must pass detect() (its required flags) before the first spawn; a failure escalates once. */
   private async driverReady(state: Readonly<BlackboardState>): Promise<boolean> {
-    this.driverId = state.contract?.workers.driver === "codex" ? "codex" : "claude-code";
+    this.contractConnectors = state.contract?.connectors;
+    this.driverId = contractDriverId(state);
     const d = this.driver();
     if (this.driverCheckedId !== d.id) this.driverChecked = undefined;
     this.driverCheckedId = d.id;
@@ -1283,17 +1347,59 @@ export class Runner {
     return false;
   }
 
+  private async recordChildCancellations(state: Readonly<BlackboardState>): Promise<void> {
+    const events: AnyEventDraft[] = [];
+    for (const rt of Object.values(state.tasks)) {
+      if (rt.state !== "cancelled" || !rt.spec.parent) continue;
+      if (this.log.some((e) => e.type === "task.cancelled" && e.payload.task === rt.spec.id)) continue;
+      events.push({ type: "task.cancelled", source: this.source, payload: { task: rt.spec.id, why: rt.last_note ?? "subtask cancelled" } });
+    }
+    if (events.length) await this.commit(events);
+  }
+
+  private joinSubtasks(state: Readonly<BlackboardState>): void {
+    if (state.status !== "running") return;
+    for (const rt of Object.values(state.tasks)) {
+      const task = rt.spec.id;
+      const children = batchChildren(state, task);
+      if (!rt.subtasks_waiting || rt.subtasks_joined || this.joining.has(task) || taskHeld(state, task) || state.paused_tasks.includes(task) || SUBTASK_TERMINAL.has(rt.state)) continue;
+      if (!children.length || children.some((c) => !SUBTASK_TERMINAL.has(c.state)) || !children.some((c) => c.state === "accepted")) continue;
+      this.joining.add(task);
+      this.track((async () => {
+        try {
+          const prep = await withGitLock(this.execution, async () => {
+            await snapshotWip(taskWorktreePath(this.execution, task), "rt: wip snapshot", leasesFor(await this.store.state(), task));
+            return prepareConflictResolution(this.header, task);
+          });
+          if (prep.conflicts.length) {
+            await this.store.transact(({ state: s }) => ({ events: [
+              mergeDrafts.conflicted(task, prep.conflicts, this.source),
+              ...runnerEscalation(s, { key: `swarm_conflict:${task}:${rt.subtasks!.join(",")}`, task, kind: "conflict", summary: `Subtask fan-in conflicts in ${prep.conflicts.join(", ")}. Resolve the merge in the parent worktree, then await_subtasks again.`, block: true }, this.source),
+            ] }));
+            return;
+          }
+          await this.store.transact(({ state: s }) => {
+            const parent = s.tasks[task];
+            if (SUBTASK_TERMINAL.has(parent.state) || JSON.stringify(parent.subtasks) !== JSON.stringify(rt.subtasks)) return { events: [] };
+            return { events: [{ type: "task.subtasks_joined", source: this.source, payload: { task, children: rt.subtasks!, commit: prep.head } }] };
+          });
+          await this.refreshLog();
+        } catch (e) {
+          await this.store.transact(({ state: s }) => ({ events: runnerEscalation(s, { key: `swarm_join:${task}:${rt.subtasks!.join(",")}`, task, kind: "conflict", summary: `Subtask fan-in failed: ${scrubAndCap(errText(e), 1500)}. Resolve the parent worktree, then await_subtasks again.`, block: true }, this.source) }));
+        } finally { this.joining.delete(task); }
+      })());
+    }
+  }
+
   /** Spawn ready tasks, in contract order, up to max_parallel. */
   private async schedule(state: Readonly<BlackboardState>): Promise<void> {
     if (state.status !== "running" || this.spawnBlocked || !state.contract) return;
-    const max = Math.max(1, state.contract.budget.max_parallel);
-    let active = Object.values(state.tasks).filter((rt) => ACTIVE_TASK.has(rt.state) || this.hasLiveWorker(rt.spec.id)).length;
-    for (const rt of Object.values(state.tasks)) {
-      if (active >= max) break;
+    const tasks = Object.values(state.tasks).sort((a, b) => Number(!!b.spec.parent) - Number(!!a.spec.parent));
+    for (const rt of tasks) {
       const task = rt.spec.id;
       if (rt.state !== "ready" || own(state.claims, task) || state.paused_tasks.includes(task) || this.starting.has(task)) continue;
-      if (await this.startWorker(task, { claim: true })) active++;
-      else if (this.spawnBlocked) break;
+      await this.startWorker(task, { claim: true });
+      if (this.spawnBlocked) break;
     }
   }
 
@@ -1309,8 +1415,13 @@ export class Runner {
     // A person asked for this agent to stop: whatever lost or resumed it must not undo that. The stop settles first.
     if (own(s.agents, agent)?.stop?.state === "requested") return `a stop for ${agent} is waiting`;
     if (this.hasLiveWorker(task)) return `a worker already runs on ${task}`;
-    const active = Object.values(s.tasks).filter((t) => t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id))).length;
-    if (active >= (s.contract?.budget.max_parallel ?? 1)) return "max_parallel workers already run";
+    const active = Object.values(s.tasks).filter((t) => t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id) || !!own(s.agents, own(s.claims, t.spec.id)?.agent)?.external)).length;
+    if (s.contract?.budget.max_agents !== undefined && active >= s.contract.budget.max_agents) return "max_agents workers already run";
+    const top = Object.values(s.tasks).filter((t) => !t.spec.parent && t.spec.id !== task && (ACTIVE_TASK.has(t.state) || this.hasLiveWorker(t.spec.id) || !!own(s.agents, own(s.claims, t.spec.id)?.agent)?.external)).length;
+    if (!rt.spec.parent && top >= (s.contract?.budget.max_parallel ?? 1)) return "max_parallel workers already run";
+    if (!rt.spec.parent && s.contract?.budget.max_agents !== undefined && active + 1 >= s.contract.budget.max_agents &&
+        Object.values(s.tasks).some((t) => t.spec.parent && ["pending", "ready"].includes(t.state) && !SUBTASK_TERMINAL.has(s.tasks[t.spec.parent]?.state))) return "max_agents reserves a worker slot for unstarted subtasks";
+    if (rt.spec.parent && (SUBTASK_TERMINAL.has(s.tasks[rt.spec.parent]?.state) || s.paused_tasks.includes(rt.spec.parent))) return "the parent task is finished or paused";
     const c = own(s.claims, task);
     if (claim) {
       if (c) return `${task} is claimed by ${c.agent}`;
@@ -1395,11 +1506,11 @@ export class Runner {
       const rt = state.tasks[task];
       const spec = rt.spec;
       const wt = await ensureTaskWorktree(this.header, task, taskStartPoint(state, task));
-      const files = await prepareWorkerFiles({ store: this.store, agent, persona: await this.persona(spec.persona), task });
+      const files = await prepareWorkerFiles({ store: this.store, agent, persona: await this.persona(spec.persona), task, driver: driver.id });
       const rec = own(state.agents, agent);
       const run = readRunFile(this.execution, agent);
       const previous = run && run.task === task ? run.session_id : rec?.task === task ? rec.session_id : undefined;
-      const resume = o.session !== "new" && previous !== undefined && (driver.id === "claude-code" ? /^[0-9a-f-]{36}$/i.test(previous) : true);
+      const resume = o.session !== "new" && previous !== undefined && (driver.id === "claude-code" ? /^[0-9a-f-]{36}$/i.test(previous) : !isRuntimeDriver(driver.id));
       const sessionId = resume ? previous! : randomUUID();
       const attempt = o.claim ? Math.max(1, o.attempt ?? rt.attempt) : (claimed?.attempt ?? Math.max(1, rt.attempt));
       const mode = state.contract?.workers;
@@ -1419,7 +1530,7 @@ export class Runner {
           },
         ];
         if (o.claim) events.push({ type: "task.claimed", source: this.source, payload: { task, agent, attempt, ttl_s: 0 } });
-        if (spec.paths.write.length) {
+        if (spec.paths.write.length && !(openSubtasks(s, task) && leasesFor(s, task, agent).length)) {
           const queued = s.lease_queue.some((q) => q.agent === agent && q.task === task);
           const d = decideLeaseRequest(s, { agent, task, paths: spec.paths.write, mode: "exclusive", reason: `the write scope of task ${task}` });
           if ("grant" in d) {
@@ -1429,12 +1540,13 @@ export class Runner {
         return { events, result: null };
       });
       pre = [];
-      if (reg.result) return false;
+      if (reg.result) { removeWorkerMcpConfig(this.execution, agent); return false; }
       registered = true;
       await writeAgentLeases(this.store, agent, { task });
       const after = await this.store.state();
       const finalGate = canRespawn(after, Date.now(), this.observations(after), { task, agent, driver: driver.id });
       if (this.stopping || after.status !== "running" || after.paused_tasks.includes(task) || after.contract?.version !== state.contract?.version || !finalGate.ok || remainingUsd(after, { task, agent }) < 0.01) {
+        removeWorkerMcpConfig(this.execution, agent);
         await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, task, code: null, reason: "lost", result_subtype: "launch_interrupted" } }]);
         return false;
       }
@@ -1453,6 +1565,7 @@ export class Runner {
         prompt: card,
         appendPromptPath: files.promptPath,
         mcpConfigPath: files.mcpConfigPath,
+        connectors: state.contract?.connectors,
         settingsPath: files.settingsPath,
         ...(mode?.model && { model: mode.model }),
         ...(mode?.fallback_model && { fallbackModel: mode.fallback_model }),
@@ -1512,6 +1625,7 @@ export class Runner {
       await flush().catch((x) => this.say(`committing the previous run's exit: ${errText(x)}`));
       const pending = registered && !this.workers.has(agent)
         ? await reconcileLaunch(join(agentDir(this.execution, agent), "launch.json")).catch(() => undefined) : null;
+      if (!this.workers.has(agent) && pending === null) removeWorkerMcpConfig(this.execution, agent);
       if (registered && !this.workers.has(agent) && pending === null) {
         // Registered and claimed but nothing runs: an exit lets the watchdog retry it (and count it).
         await this.commit([{ type: "agent.exited", source: this.source, payload: { agent, task, code: null, reason: "error", result_subtype: "spawn_failed" } }]).catch(() => undefined);
@@ -1531,7 +1645,7 @@ export class Runner {
       agent,
       task,
       source: this.source,
-      expected: driver.id === "claude-code" ? WORKER_ATTESTATION : null,
+      expected: driver.id === "claude-code" ? { ...WORKER_ATTESTATION, mcpServers: [...WORKER_ATTESTATION.mcpServers, ...(this.contractConnectors ?? [])] } : null,
       provider: driver.id,
       ...(model && { model }),
       offset,
@@ -1602,6 +1716,7 @@ export class Runner {
    */
   private async reconcile(): Promise<void> {
     const state = await this.store.state();
+    this.contractConnectors = state.contract?.connectors;
     for (const [agent, rec] of Object.entries(state.agents)) {
       if (this.workers.has(agent) || this.busy.has(agent) || rec.external || (rec.status !== "running" && rec.status !== "registered")) continue;
       let run = readRunFile(this.execution, agent);
@@ -1625,9 +1740,11 @@ export class Runner {
           };
         }
         if (alive && run && task !== undefined) {
+          registerWorkerSecrets(this.execution, agent);
           await this.adopt(agent, run, rec.status === "registered");
           continue;
         }
+        removeWorkerMcpConfig(this.execution, agent);
         if (!claim) {
           if (rec.status === "running") await this.commit(this.lostDrafts(agent, rec.task ?? run?.task, run));
           continue;
@@ -1648,7 +1765,7 @@ export class Runner {
 
   /** Keep tailing a live worker an earlier runner started. */
   private async adopt(agent: string, run: RunFile, registeredOnly: boolean): Promise<void> {
-    const driver = this.drivers[run.driver] ?? this.driver();
+    const driver = this.driverFor(run.driver) ?? this.driver();
     const spawnSeq = this.lastSeq((e) => e.type === "agent.spawned" && e.payload.agent === agent);
     const after = this.log.filter((e) => e.seq > spawnSeq);
     const attestedEv = after.find((e) => e.type === "agent.attested" && e.payload.agent === agent);
@@ -1689,7 +1806,7 @@ export class Runner {
   /** The rest of a dead run's output (usage it reported) and its agent.exited {lost}. */
   private lostDrafts(agent: string, task: string | undefined, run: RunFile | null): AnyEventDraft[] {
     if (run && task !== undefined && run.task === task) {
-      const driver = this.drivers[run.driver] ?? this.driver();
+      const driver = this.driverFor(run.driver) ?? this.driver();
       const spawnSeq = this.lastSeq((e) => e.type === "agent.spawned" && e.payload.agent === agent);
       const after = this.log.filter((e) => e.seq > spawnSeq);
       const t = {
@@ -1849,8 +1966,14 @@ export class Runner {
 
 /** Run the runner of an execution until it stops; resolves with the process exit code. */
 export async function runRunner(execution: string, opts: RunnerOptions = {}): Promise<number> {
-  const llm = executionLLM();
-  if (llm.unknown) console.error(`agent-roundtable run: ROUNDTABLE_EXECUTION_PROVIDER ${JSON.stringify(llm.unknown.slice(0, 40))} is not a provider (${PROVIDER_IDS.join(", ")}); using ${llm.provider}`);
+  const raw = process.env.ROUNDTABLE_EXECUTION_PROVIDER?.trim();
+  const llm = raw && raw !== "auto" ? executionLLM() : undefined;
+  // The health cache lives in this process: probe once so the runner does not route blind. Failure is not a refusal.
+  if (opts.hooks === undefined && process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT !== "1") {
+    const failure = await seedExecutionProvider();
+    if (failure) console.error(`agent-roundtable run: provider judgment found no healthy provider yet (${scrubAndCap(failure, 300)}); model calls will retry.`);
+  }
+  if (llm?.unknown) console.error(`agent-roundtable run: ROUNDTABLE_EXECUTION_PROVIDER ${JSON.stringify(llm.unknown.slice(0, 40))} is not a provider (${PROVIDER_IDS.join(", ")}); using ${llm.provider}`);
   // The real hooks: escalation routing, huddles, the lead fallback and goal review (WS10).
   const r = new Runner(execution, { ...opts, hooks: opts.hooks ?? createRunnerHooks(), signals: false });
   const onSignal = (sig: string) => r.stop(`signal ${sig}`);

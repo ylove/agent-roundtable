@@ -1,3 +1,4 @@
+import { prepareExecutionProvider, seedExecutionProvider } from "./provider-routing.js";
 // ============================================================================
 // The orchestrator's run controls (heads-down.md §13): execute, control_execution, resolve_escalation
 //
@@ -32,8 +33,14 @@ import { DockerBackend, LocalBackend, SANDBOX_ENV, SandboxUnavailableError, sele
 import { localSandboxAllowed } from "../sandbox/common.js";
 import { appendAudit } from "../security/audit.js";
 import { scrub } from "../security/secrets.js";
+import { availableProviders, PROVIDER_KEYS, preflightSeats } from "../table/seats.js";
+import { readUserConfig } from "../user-config.js";
+import { isExecutableFile } from "../executables.js";
+import type { ConnectorSpec } from "../connectors/config.js";
 import { ClaudeCodeDriver } from "../workers/claude-code.js";
 import { CodexDriver } from "../workers/codex.js";
+import { RuntimeWorkerDriver } from "../workers/runtime.js";
+import { isRuntimeDriver, runtimeDriverName, runtimeDriverProblem } from "../runtimes/worker.js";
 import { stopGroup } from "../workers/process.js";
 import { amendContract } from "./contract-lifecycle.js";
 import { openContractStore, orchestratorSource } from "./contract-state.js";
@@ -52,6 +59,7 @@ import type {
   Contract,
   HuddleFormat,
   ResolutionAction,
+  RuntimeDriverId,
   SandboxBackendId,
   Visibility,
   WorkerRecord,
@@ -82,7 +90,7 @@ export interface SandboxProbe {
   image?: string;
 }
 
-export type WorkerCli = "claude-code" | "codex";
+export type WorkerCli = "claude-code" | "codex" | RuntimeDriverId;
 
 export interface OrchestratorDeps {
   launchRunner(exe: string): { pid: number };
@@ -108,7 +116,7 @@ const DEFAULT_DEPS: OrchestratorDeps = {
     });
     return { backend: sel.backend.id, ...(sel.degraded && { degraded: sel.degraded }) };
   },
-  detectDriver: (id) => (id === "codex" ? new CodexDriver() : new ClaudeCodeDriver()).detect(),
+  detectDriver: (id) => (id === "codex" ? new CodexDriver() : isRuntimeDriver(id) ? new RuntimeWorkerDriver(id) : new ClaudeCodeDriver()).detect(),
   checkGh: (opts) => checkGhReady(opts),
   stopGroup: (pgid, graceMs, started) => stopGroup(pgid, graceMs, started),
   dashboardWaitMs: 5_000,
@@ -307,11 +315,11 @@ async function probeWorkers(driver: WorkerCli, explicit: WorkerCli | undefined):
   }
   const d = await deps.detectDriver(driver).catch((e: unknown) => ({ ok: false, missing: [errText(e)] }));
   if (!d.ok) {
-    const name = driver === "codex" ? "codex" : "Claude Code (claude)";
+    const name = driver === "codex" ? "codex" : isRuntimeDriver(driver) ? runtimeDriverName(driver) : "Claude Code (claude)";
     out.push({
       topic: "workers",
       question: `The ${name} CLI that runs the workers is not ready: it needs ${cap(d.missing.join(", "), 600) || "a working install"}. Can you install or update it?`,
-      answer_with: driver === "codex" ? 'install the codex CLI and call execute again, or pass worker_driver: "claude-code"' : "install or update Claude Code (claude --version), then call execute again",
+      answer_with: driver === "codex" || isRuntimeDriver(driver) ? `install the ${name} CLI and call execute again, or pass worker_driver: "claude-code"` : "install or update Claude Code (claude --version), then call execute again",
     });
   }
   return out;
@@ -437,6 +445,31 @@ async function startedInfo(store: FileExecutionStore, state: BlackboardState, wa
   };
 }
 
+/**
+ * One cheap call with the provider the runner's goal review and lead calls use. A dead key there leaves a run
+ * stuck at 100% accepted. Automatic choices retry surviving providers; an explicit 401/403 refuses.
+ * Other explicit-provider failures retain their established behavior; ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT=1 skips the call (offline tests).
+ */
+export async function preflightExecutionProvider(remainingBudgetUsd?: number): Promise<void> {
+  if (process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT === "1") return;
+  const raw = process.env.ROUNDTABLE_EXECUTION_PROVIDER?.trim();
+  if (!raw || raw === "auto") {
+    // Automatic judgment never refuses a run: claude-code workers need no API key, and the budget is not a reason to stall. Probing seeds the health cache.
+    await seedExecutionProvider(); // Never throws: routing is retried at each model call and fails clearly there.
+    return;
+  }
+  const { provider, model, unknown } = await prepareExecutionProvider({ remainingBudgetUsd });
+  if (unknown) return;
+  const [result] = await preflightSeats([{ id: "execution", name: "execution", provider, model }]);
+  if (result?.reason !== "auth failed") return;
+  const key = PROVIDER_KEYS[provider];
+  const other = availableProviders().find((p) => p !== provider) ?? "together";
+  throw new Error(
+    `execute: the execution provider (${provider}${key ? `, ${key}` : ""}) rejected its credentials, and the runner's goal review and lead calls use it, so the run would stall at the end. ` +
+      `Nothing has started. Fix the key, or switch providers with ROUNDTABLE_EXECUTION_PROVIDER=${other} (and ROUNDTABLE_EXECUTION_MODEL if needed), then call execute again.`,
+  );
+}
+
 /** execute: preflight, then start the run (heads-down.md §13). */
 export async function execute(a: ExecuteInput): Promise<Json> {
   const contractId = a.contract_id.trim();
@@ -452,6 +485,13 @@ export async function execute(a: ExecuteInput): Promise<Json> {
   if (!c || c.id !== contractId) {
     throw new Error(`Contract ${contractId} is not frozen: freeze_contract it once every participant agrees (only a frozen contract can be executed)`);
   }
+  if (c.connectors?.length) {
+    let connectors: Record<string, ConnectorSpec> = {};
+    try { connectors = readUserConfig().connectors ?? {}; } catch { /* Report the missing name only. */ }
+    for (const name of c.connectors) if (!Object.hasOwn(connectors, name) || !isExecutableFile(connectors[name].command)) throw new Error(`Connector ${name} is unavailable.`);
+    if ((a.worker_driver ?? c.workers.driver) === "codex") throw new Error("Connectors are not supported by codex workers; use claude-code.");
+    if (isRuntimeDriver(a.worker_driver ?? c.workers.driver)) throw new Error("Connectors are not supported by runtime workers; use claude-code.");
+  }
   const orchestrator = c.scope.orchestrator;
 
   const questions: PreflightQuestion[] = [];
@@ -464,7 +504,11 @@ export async function execute(a: ExecuteInput): Promise<Json> {
       answer_with: "budget_usd: <dollars>; ROUNDTABLE_DEFAULT_BUDGET_USD sets a default",
     });
   }
-  const driver: WorkerCli = a.worker_driver ?? (c.workers.driver === "codex" ? "codex" : "claude-code");
+  const driver: WorkerCli = a.worker_driver ?? (c.workers.driver === "codex" || isRuntimeDriver(c.workers.driver) ? c.workers.driver : "claude-code");
+  if (isRuntimeDriver(driver)) {
+    const problem = runtimeDriverProblem(driver);
+    if (problem) throw new Error(`worker_driver ${driver}: ${problem}`);
+  }
   const [sandbox, workerQuestions, github, repository] = await Promise.all([
     probeSandbox(c, a, exe),
     probeWorkers(driver, a.worker_driver),
@@ -487,6 +531,8 @@ export async function execute(a: ExecuteInput): Promise<Json> {
       next: "Nothing has started. Ask the human these questions in plain words, then call execute again with their answers (and their confirmation).",
     };
   }
+
+  await preflightExecutionProvider(Math.max(0, usd + state.budget.extensions_usd - state.budget.spent_usd));
 
   // The human's settings become part of the frozen contract the runner reads.
   const { patch, changes } = settingsPatch(c, a, usd, driver);

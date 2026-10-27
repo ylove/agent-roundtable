@@ -33,6 +33,7 @@ td.num{white-space:nowrap}td.note{max-width:420px;overflow-wrap:anywhere}
 .st-claimed,.st-in_progress,.st-open,.st-in_huddle{color:var(--warn)}.st-submitted,.st-checking,.st-merging{color:var(--busy)}
 .st-blocked,.st-failed,.st-aborted,.st-awaiting_human,.st-timed_out{color:var(--bad)}
 .st-pending,.st-paused,.st-cancelled,.st-created,.st-withdrawn,.st-unknown{color:var(--muted)}.st-alive{color:var(--ok)}.st-stale{color:var(--bad)}
+iframe.preview{display:block;width:100%;height:480px;border:1px solid var(--line);border-radius:8px;background:#fff}figure.preview{margin:0 0 16px}figure.preview figcaption{margin-bottom:6px;font-size:.9em}
 pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;white-space:pre-wrap;
 word-break:break-word;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
 code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}

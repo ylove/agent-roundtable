@@ -24,9 +24,11 @@ import { join } from "node:path";
 import { openExecutionStore } from "../execution/store.js";
 import { EVENT_TYPES, type AnyEvent, type BlackboardState, type EventType, type ExecutionStore } from "../execution/types.js";
 import { hasBody, newCapabilityToken, sameOriginProblem, SecureServer, tokenMatches, type ResponseStream, type RouteContext } from "../http/secure-server.js";
+import { livePreviews, previewOrigins, withFrameSrc } from "../previews/embed.js";
+import type { PreviewRecord } from "../previews/store.js";
 import { collectUsage } from "../usage/model.js";
 import { requestAgentStop, StopRefusal, stopper } from "../usage/stop.js";
-import { writeFileAtomic } from "../security/fs-safe.js";
+import { readRegularFile, writeFileAtomic } from "../security/fs-safe.js";
 import { STATIC_ASSETS } from "./assets.js";
 import { renderDagSvg } from "./dag-svg.js";
 import { renderUsage, usageSpendSeries, type SpendSeries } from "./usage-page.js";
@@ -150,7 +152,14 @@ class DashboardServer {
         { path: "/tasks", handler: page(async () => renderTasks(await this.context())) },
         { path: "/usage", handler: page(() => this.usagePage()) },
         { path: /^\/agents\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/stop$/, methods: ["POST"], handler: (c) => this.stopAgent(c) },
-        { path: /^\/tasks\/([a-z0-9][a-z0-9._-]{0,63})$/, handler: page((c) => this.taskPage(c.match![1])) },
+        { path: /^\/tasks\/([a-z0-9][a-z0-9._-]{0,63})$/, handler: async (c) => {
+          // Running previews of this task are framed; only their origins are added to the CSP.
+          const id = c.match![1];
+          const previews = livePreviews((r) => r.source.execution === this.store.id && r.source.task === id, true);
+          const html = await this.taskPage(id, previews);
+          if (html === undefined) return c.notFound();
+          c.html(200, html, withFrameSrc(DASHBOARD_CSP, previewOrigins(previews)));
+        } },
         { path: "/escalations", handler: page(async () => renderEscalations(await this.context())) },
         { path: "/dissents", handler: page(async () => renderDissents(await this.context())) },
         { path: "/events", handler: page((c) => this.eventsPage(c.query)) },
@@ -265,10 +274,10 @@ class DashboardServer {
     return capAtLine(buf.toString("utf8"), max);
   }
 
-  private async taskPage(id: string): Promise<string | undefined> {
+  private async taskPage(id: string, previews: PreviewRecord[] = []): Promise<string | undefined> {
     const state = await this.store.state();
     if (!Object.hasOwn(state.tasks, id)) return undefined;
-    const detail: TaskDetail = { events: [], outputs: {} };
+    const detail: TaskDetail = { events: [], outputs: {}, previews };
     detail.events = (await this.store.events()).filter((ev) => eventTask(ev) === id).slice(-50);
     const diff = Object.hasOwn(state.diffs, id) ? state.diffs[id] : undefined;
     if (diff) {
@@ -340,9 +349,7 @@ class DashboardServer {
     if (!/^[a-z0-9][a-z0-9._-]{0,80}$/.test(ctr) || ctr.includes("..")) return undefined;
     const path = join(this.store.dir, "contracts", ctr, "CONTRACT.md");
     try {
-      const st = lstatSync(path);
-      if (!st.isFile() || st.size > 1024 * 1024) return undefined;
-      return readFileSync(path, "utf8");
+      return readRegularFile(path, { noFollow: true, maxBytes: 1024 * 1024 }).data.toString("utf8");
     } catch {
       return undefined;
     }

@@ -10,13 +10,13 @@
 // ============================================================================
 
 import { timingSafeEqual } from "node:crypto";
-import { lstatSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { readFileSync, renameSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EXECUTION_ID_RE } from "../ids.js";
 import { preview } from "../execution/events.js";
 import { openExecutionStore, type FileExecutionStore } from "../execution/store.js";
 import type { AgentRecord } from "../execution/types.js";
-import { writeFileAtomic } from "../security/fs-safe.js";
+import { readRegularFile, RegularFileError, writeFileAtomic } from "../security/fs-safe.js";
 import { agentDir, assertAgentId, TOKEN_RE, tokenSha256 } from "./files.js";
 
 export class WorkerTokenError extends Error {
@@ -40,12 +40,22 @@ export function sameDigest(a: string, b: string): boolean {
 }
 
 function readClaimed(path: string): string {
-  const st = lstatSync(path);
+  const notPrivate = () => new WorkerTokenError("the token file is not a private regular file of this user");
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-  if (!st.isFile() || st.size > 256 || (uid !== undefined && st.uid !== uid) || (st.mode & 0o077) !== 0) {
-    throw new WorkerTokenError("the token file is not a private regular file of this user");
+  try {
+    // One descriptor: the type, size, owner and mode checked are those of the bytes read.
+    const { data } = readRegularFile(path, {
+      noFollow: true,
+      maxBytes: 256,
+      accept: (st) => {
+        if ((uid !== undefined && st.uid !== uid) || (st.mode & 0o077) !== 0) throw notPrivate();
+      },
+    });
+    return data.toString("utf8").trim();
+  } catch (e) {
+    if (e instanceof RegularFileError) throw notPrivate();
+    throw e;
   }
-  return readFileSync(path, "utf8").trim();
 }
 
 /**

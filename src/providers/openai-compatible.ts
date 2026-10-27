@@ -5,11 +5,14 @@ import { providerHttpError, withRetry } from "./retry.js";
 import type { LLMProvider } from "../config.js";
 import { openAICompatibleTrustedOrigins, requireEnv } from "../config.js";
 import { scrubAndCap } from "../security/secrets.js";
-import { guardUrl } from "../security/url-guard.js";
+import { guardedDispatcher } from "../security/url-guard.js";
 
 export interface ChatCompletionsResponse {
   error?: { message?: string } | string;
-  choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
+  choices?: Array<{
+    message?: { content?: string | null; tool_calls?: Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }> };
+    finish_reason?: string;
+  }>;
   model?: string;
   usage?: { prompt_tokens: number; completion_tokens: number };
 }
@@ -19,7 +22,8 @@ export function parseChatCompletions(
   provider: LLMProvider,
   response: Response,
   result: ChatCompletionsResponse,
-  requestedModel: string
+  requestedModel: string,
+  allowToolCalls = false
 ): LLMCompletionResult {
   if (!response.ok || result.error) {
     const message = typeof result.error === "string" ? result.error : result.error?.message;
@@ -29,8 +33,15 @@ export function parseChatCompletions(
   }
   const choice = result.choices?.[0];
   const text = stripThinkTags(choice?.message?.content ?? "");
+  const rawCalls = allowToolCalls ? (choice?.message?.tool_calls ?? []).filter((c) => typeof c.id === "string" && typeof c.function?.name === "string") : [];
+  const toolCalls = rawCalls.map((c) => {
+    let input: unknown = null;
+    try { input = JSON.parse(c.function?.arguments || "{}"); } catch { /* the loop reports the bad arguments to the model */ }
+    return { id: c.id!, name: c.function!.name!, input };
+  });
   return {
-    content: assertNonEmpty(label, text, choice?.finish_reason),
+    content: toolCalls.length ? text : assertNonEmpty(label, text, choice?.finish_reason),
+    ...(toolCalls.length > 0 && { toolCalls, assistantTurn: { role: "assistant", content: choice?.message?.content ?? null, tool_calls: rawCalls } }),
     model: result.model || requestedModel,
     provider,
     usage: result.usage
@@ -101,13 +112,14 @@ export function createOpenAICompatibleCall(spec: OpenAICompatibleSpec): Provider
       );
     }
     let apiKey = spec.apiKey();
+    let guardOverride = false;
     if (override !== undefined) {
       // A per-call base_url on an operator-configured origin is trusted like the configured URL. Any
       // other origin comes from a tool call (so possibly from injected text): guard it, and bind the
       // key to the configured origins so it never travels there.
       const origin = originOf(override);
       if (!origin || !trustedOrigins(configured).has(origin)) {
-        await guardUrl(override, { label: "base_url" });
+        guardOverride = true;
         apiKey = undefined;
       }
     }
@@ -118,15 +130,26 @@ export function createOpenAICompatibleCall(spec: OpenAICompatibleSpec): Provider
 
     const body = JSON.stringify({
       model: o.model,
-      messages, // system messages are accepted inline by every OpenAI-compatible server
+      messages: o.toolRound ? [...messages, ...o.toolRound.turns] : messages, // system messages are accepted inline by every OpenAI-compatible server
+      ...(o.toolRound && {
+        tools: o.toolRound.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })),
+        ...(o.toolRound.forbid && { tool_choice: "none" }),
+      }),
       [spec.tokenParam]: o.maxTokens,
       ...(o.temperature !== undefined && { temperature: o.temperature }),
     });
     return withRetry(async () => {
-      const response = await fetch(url, { method: "POST", headers, body, signal: o.signal, redirect: "manual" });
-      assertNotRedirect(spec.label, response, url);
-      const result = (await readProviderJson(response)) as ChatCompletionsResponse;
-      return parseChatCompletions(spec.label, spec.provider, response, result, o.model);
+      const dispatcher = guardOverride ? await guardedDispatcher(url, { label: "base_url" }) : undefined;
+      let response: Response | undefined;
+      try {
+        response = await globalThis.fetch(url, { ...(dispatcher && { dispatcher }), method: "POST", headers, body, signal: o.signal, redirect: "manual" });
+        assertNotRedirect(spec.label, response, url);
+        const result = (await readProviderJson(response)) as ChatCompletionsResponse;
+        return parseChatCompletions(spec.label, spec.provider, response, result, o.model, !!o.toolRound);
+      } finally {
+        await response?.body?.cancel().catch(() => {});
+        await dispatcher?.close();
+      }
     }, { signal: o.signal, label: spec.label });
   };
 }

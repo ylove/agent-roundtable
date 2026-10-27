@@ -29,8 +29,8 @@ const usage = (over = {}) => ({
   tokens: { inputTokens: 1000, outputTokens: 200 }, usd: 0.5, estimated: false, ...over,
 });
 
-test("REDUCER_VERSION combines usage and dissent projections at version 10", () => {
-  assert.equal(REDUCER_VERSION, 10);
+test("REDUCER_VERSION combines usage, dissent and swarm projections at version 12", () => {
+  assert.equal(REDUCER_VERSION, 12);
 });
 
 test("budget.usage_recorded: provenance is optional, validated, and old events read as 1.0 meant", () => {
@@ -194,6 +194,32 @@ test("lineFor never records a $0.00 for an unknown model, and a free provider co
   assert.equal(free.usd, 0);
   const unknown = lineFor({ session: "meeting-aaaaaaaa", kind: "meeting", agent: "x" }, { provider: "provider-b", model: "nope", usage: { inputTokens: 10, outputTokens: 10 } }, "srv-aaaaaaaa");
   assert.equal(unknown.usd, undefined);
+});
+
+test("lineFor marks runtime-reported dollars as reported, including cost-only and zero reports", () => {
+  const scope = { session: "collab-aaaaaaaa", kind: "collaboration", agent: "designer" };
+  for (const counts of [{ usage: { inputTokens: 10, outputTokens: 5 } }, { chars: { input: 40, output: 20 } }]) {
+    for (const usd of [0.012, 0]) {
+      const line = lineFor(scope, { provider: "gemini", model: "fixture-model", tokensProvenance: "reported", usd, ...counts }, "srv-aaaaaaaa");
+      assert.equal(line.usd, usd);
+      assert.equal(line.usd_prov, "reported");
+      assert.equal(line.tokens_prov, counts.usage ? "reported" : "estimated");
+    }
+  }
+});
+
+test("lineFor keeps claude-code worker dollars on the existing estimate path", () => {
+  const scope = { session: "collab-aaaaaaaa", kind: "collaboration", agent: "designer" };
+  const at = new Date("2026-10-20T12:00:00Z");
+  for (const tokensProvenance of [undefined, "measured"]) {
+    const report = { provider: "claude-code", model: "claude-sonnet-5-5", usage: { inputTokens: 1000, outputTokens: 500 }, tokensProvenance };
+    const baseline = lineFor(scope, report, "srv-aaaaaaaa", at);
+    const line = lineFor(scope, { ...report, usd: 0.92 }, "srv-aaaaaaaa", at);
+    assert.deepEqual(line, baseline);
+    assert.equal(line.tokens_prov, "measured");
+    assert.equal(line.usd_prov, "estimated");
+    assert.ok(Math.abs(line.usd - 0.007) < 1e-12);
+  }
 });
 
 test("table ledger lines are validated on the way back in and pruned by age", () => {

@@ -1,5 +1,6 @@
 // Text renderings of prototypes: public Markdown references, agent-history stubs, end-of-session
 // outcomes, and mermaid.live links. Public renderings never carry a local address.
+import { pageCheckSummary } from "./page-check.js";
 import { deflateSync } from "node:zlib";
 import { diagramFile, mermaidSourceOf } from "./parse.js";
 import type { PrototypeFile, PrototypeRecord, VerdictEntry } from "./types.js";
@@ -176,7 +177,7 @@ function outcomeLine(p: PrototypeRecord): string {
   if (p.status === "revised" && p.supersededBy) status += ` (superseded by ${p.supersededBy})`;
   return (
     `- **${p.label}** · ${p.proposer} · ${p.kind} · "${oneLine(p.title, 120)}" · ` +
-    `verdicts: ${verdictList(p.verdicts, true)} · decision: ${decision} · status: ${status}`
+    `verdicts: ${verdictList(p.verdicts, true)}${p.check ? ` · ${pageCheckSummary(p.check)}` : ""} · decision: ${decision} · status: ${status}`
   );
 }
 

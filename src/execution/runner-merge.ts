@@ -14,6 +14,7 @@
 //              for it; only the integration branch is pushed.
 // ============================================================================
 
+import { verifyPageLoads } from "./verify.js";
 import { createHash } from "node:crypto";
 import { redact } from "../publishers/redact.js";
 import { scrubAndCap } from "../security/secrets.js";
@@ -48,7 +49,7 @@ export function allAccepted(state: Readonly<BlackboardState>): boolean {
   const tasks = Object.values(state.tasks);
   return (
     tasks.length > 0 &&
-    tasks.every((rt) => rt.state === "accepted" || rt.state === "cancelled") &&
+    tasks.every((rt) => rt.state === "accepted" || rt.state === "cancelled" || (rt.spec.parent && state.tasks[rt.spec.parent]?.state === "accepted" && rt.state === "failed")) &&
     tasks.some((rt) => rt.state === "accepted") &&
     Object.keys(state.claims).length === 0
   );
@@ -146,7 +147,7 @@ export class MergeQueue {
     // Checks that passed before an amendment touched the task run again first (WS04).
     const amended = history.filter((e) => e.type === "contract.amended" && e.payload.affected_tasks.includes(task)).at(-1)?.seq ?? 0;
     const passed = checked.seq;
-    if (amended > passed && rt.spec.checks.length) {
+    if (amended > passed && (rt.spec.checks.length || rt.spec.verify?.length)) {
       r.say(`re-running the checks of ${task}: the contract was amended after they passed`);
       const res = await withCommitCheckout(r.header, task, commit, (dir) => this.runChecks(state, "task", rt.spec.checks, dir, task, submission));
       if (!res.ok) {
@@ -253,7 +254,7 @@ export class MergeQueue {
   async runChecks(state: Readonly<BlackboardState>, scope: "task" | "integration", ids: readonly string[], workdir: string, task?: string, submission?: { commit: string; submitted_seq: number }): Promise<ChecksResult> {
     const r = this.r;
     const src = r.source;
-    const backend = await r.sandbox();
+    const backend = ids.length ? await r.sandbox() : undefined;
     const commands = state.contract?.validation.commands ?? [];
     const image = state.contract?.sandbox.image || undefined;
     const out: ChecksResult = { ok: true, failed: [], tails: {} };
@@ -269,7 +270,7 @@ export class MergeQueue {
       if (!spec) output = `The contract defines no command ${id}`;
       else {
         try {
-          const res = await runCommandSpec(backend, spec, workdir, { ...(image && { image }), signal: r.abort.signal, maxTimeoutMs: CHECK_MAX_MS });
+          const res = await runCommandSpec(backend!, spec, workdir, { ...(image && { image }), signal: r.abort.signal, maxTimeoutMs: CHECK_MAX_MS });
           ({ output, exit, timedOut, durationMs: duration } = res);
         } catch (e) {
           output = scrubAndCap(errText(e), 4000);
@@ -289,6 +290,20 @@ export class MergeQueue {
         out.failed.push({ id, status: "failed" });
         out.tails[id] = tailForTool(output, 2000);
         await r.commit([{ type: "check.failed", source: src, payload: { command_id: id, scope, ...at, exit, signature: failureSignature(id, output), output_blob: blob } }]);
+      }
+    }
+    if (scope === "task" && task) for (const [index, predicate] of (state.tasks[task]?.spec.verify ?? []).entries()) {
+      if (r.isStopping()) throw new Error("runner stopped during validation");
+      const id = `page-loads-${index + 1}`;
+      await r.commit([{ type: "check.started", source: src, payload: { command_id: id, scope, ...at } }]);
+      const start = Date.now();
+      const result = await verifyPageLoads(workdir, predicate, { signal: r.abort.signal });
+      await r.commit([{ type: "note.posted", source: src, payload: { topic: "page_loads", text: result.note, refs: [task, id] } }]);
+      if (result.ok) await r.commit([{ type: "check.passed", source: src, payload: { command_id: id, scope, ...at, duration_ms: Date.now() - start } }]);
+      else {
+        out.ok = false; out.failed.push({ id, status: "failed" }); out.tails[id] = result.note;
+        const blob = await r.store.putBlob(result.note);
+        await r.commit([{ type: "check.failed", source: src, payload: { command_id: id, scope, ...at, exit: null, signature: failureSignature(id, result.note), output_blob: blob } }]);
       }
     }
     return out;

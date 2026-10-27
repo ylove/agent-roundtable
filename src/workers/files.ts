@@ -1,7 +1,7 @@
 // ============================================================================
 // Worker files: what the runner generates for one worker, under executions/<exe>/agents/<id>/
 //
-//   mcp.json        the roundtable worker server, and nothing else (no secrets in its env)
+//   mcp.json        the worker server and opted-in connectors (temporary resolved credentials)
 //   settings.json   permission denials and the PreToolUse lease hook
 //   prompt.md       persona, skills and the worker protocol (--append-system-prompt-file)
 //   token           32 random bytes as hex, single use: the worker server claims and unlinks it
@@ -16,23 +16,32 @@
 // ============================================================================
 
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ROUNDTABLE_HOME } from "../config.js";
 import { loadAgent, renderSkillsSection, type LoadedAgent } from "../agents.js";
+import { leasesFor } from "../execution/leases.js";
 import { ID_RE, preview } from "../execution/events.js";
 import { executionDir } from "../execution/store.js";
 import { taskWorktreePath } from "../execution/worktrees.js";
-import type { BlackboardState, ExecutionStore, LeaseMode, WorkerDriverId } from "../execution/types.js";
+import type { BlackboardState, ExecutionStore, LeaseMode, RuntimeDriverId, WorkerDriverId } from "../execution/types.js";
+import { isRuntimeDriver, runtimeDriverName, workerProfile } from "../runtimes/worker.js";
 import { mkdirPrivate, writeFileAtomic } from "../security/fs-safe.js";
+import { childEnv } from "../security/child-env.js";
+import { configuredSecretLiterals, registerSecretLiteral, SCRUB_LITERALS_ENV } from "../security/secrets.js";
+import { readUserConfig } from "../user-config.js";
+import { resolveSecrets } from "../secrets/broker.js";
+import { isExecutableFile } from "../executables.js";
 
 // ============================================================================
 // Names and locations
 // ============================================================================
 
-/** The one MCP server a worker may have. Its tools appear as mcp__roundtable__<tool>. */
+/** The worker's own MCP server. Its tools appear as mcp__roundtable__<tool>. */
 export const ROUNDTABLE_SERVER = "roundtable";
+/** The settings file a runtime worker reads its MCP server from (written next to mcp.json by the runtime driver). */
+export const RUNTIME_SETTINGS_FILE = "runtime-settings.json";
 
 /** Agent ids name directories, so they follow the task id rule. */
 export function assertAgentId(agent: string): string {
@@ -106,18 +115,21 @@ export interface McpConfigInput extends WorkerCommand {
   tokenFile: string;
   /** ROUNDTABLE_HOME for the worker server. */
   home: string;
+  connectors?: string[];
 }
 
 export interface McpConfig {
   mcpServers: Record<string, { type: "stdio"; command: string; args: string[]; env: Record<string, string> }>;
 }
 
-/** One stdio server, roundtable, running the worker server keyless (ROUNDTABLE_DOTENV=off). */
-export function buildMcpConfig(i: McpConfigInput): McpConfig {
+/** The keyless worker server, plus any opted-in connectors resolved before launch. */
+export function buildMcpConfig(i: McpConfigInput & { connectors: string[] }): Promise<McpConfig>;
+export function buildMcpConfig(i: McpConfigInput): McpConfig | Promise<McpConfig>;
+export function buildMcpConfig(i: McpConfigInput): McpConfig | Promise<McpConfig> {
   for (const [name, p] of [["execPath", i.execPath], ["cli", i.cli], ["tokenFile", i.tokenFile], ["home", i.home]] as const) {
     if (typeof p !== "string" || !isAbsolute(p)) throw new Error(`buildMcpConfig: ${name} must be an absolute path`);
   }
-  return {
+  const config: McpConfig = {
     mcpServers: {
       [ROUNDTABLE_SERVER]: {
         type: "stdio",
@@ -127,6 +139,37 @@ export function buildMcpConfig(i: McpConfigInput): McpConfig {
       },
     },
   };
+  if (!i.connectors?.length) return i.connectors ? Promise.resolve(config) : config;
+  return addConnectors(config, i.connectors, i.home, i.execPath);
+}
+
+async function addConnectors(config: McpConfig, names: string[], home: string, execPath: string): Promise<McpConfig> {
+  const specs = readUserConfig(home).connectors ?? {};
+  for (const name of names) {
+    const spec = Object.hasOwn(specs, name) ? specs[name] : undefined;
+    if (!spec || !isExecutableFile(spec.command)) throw new Error(`Connector ${name} is unavailable.`);
+    const env = childEnv("connector", await resolveSecrets(spec.env));
+    config.mcpServers[name] = {
+      type: "stdio", command: execPath,
+      args: [fileURLToPath(new URL("./connector-host.js", import.meta.url)), JSON.stringify(Object.keys(env)), spec.command, ...spec.args], env,
+    };
+  }
+  // The trusted worker server writes tool events directly; it needs the same exact redactions.
+  config.mcpServers[ROUNDTABLE_SERVER].env[SCRUB_LITERALS_ENV] = JSON.stringify(configuredSecretLiterals(process.env));
+  return config;
+}
+
+/** Re-register active connector credentials when a replacement runner adopts a worker. */
+export function registerWorkerSecrets(execution: string, agent: string): void {
+  try {
+    const config = JSON.parse(readFileSync(join(agentDir(execution, agent), "mcp.json"), "utf8")) as McpConfig;
+    for (const value of configuredSecretLiterals(config.mcpServers[ROUNDTABLE_SERVER].env)) registerSecretLiteral(value);
+  } catch { /* A completed relay may already have removed the file. */ }
+}
+
+export function removeWorkerMcpConfig(execution: string, agent: string): void {
+  rmSync(join(agentDir(execution, agent), "mcp.json"), { force: true });
+  rmSync(join(agentDir(execution, agent), RUNTIME_SETTINGS_FILE), { force: true });
 }
 
 /** The file-writing tools the lease hook gates (an unanchored regex, as Claude Code reads matchers). */
@@ -187,6 +230,7 @@ export function buildWorkerSettings(c: WorkerCommand): WorkerSettings {
 /** Appended to every worker's system prompt (the task card arrives as the first user message). */
 export function workerProtocol(task: string, driver: WorkerDriverId = "claude-code"): string {
   const codex = driver === "codex";
+  if (isRuntimeDriver(driver)) return runtimeProtocol(task, driver);
   return [
     "## Heads-down worker protocol",
     "",
@@ -197,6 +241,7 @@ export function workerProtocol(task: string, driver: WorkerDriverId = "claude-co
       ? "- Edit only files your leases cover. Request them first with `lease(action: \"request\", paths: [...])`; leases are checked when you submit, and a submission that changed anything else is rejected. If someone else holds a path, use `escalate(with: \"path_owner\")`."
       : "- Edit only files your leases cover. Request them first with `lease(action: \"request\", paths: [...])`; an edit outside your leases is refused. If someone else holds a path, use `escalate(with: \"path_owner\")`.",
     "- Make targeted edits instead of rewriting whole files.",
+    "- If the frozen contract enables swarms (budget.max_agents >= 2), delegate with spawn_subtasks, then await_subtasks until ready: true. Delegated paths belong to the children until they finish. Children cannot delegate. Never use Task or Agent tools. Report failures or retry with new ids within the contract limits.",
     codex
       ? "- Your shell is sandboxed to your worktree, with no network: use it to build and test. Contract checks run with `run_command(command_id)` and `submit_work`."
       : "- You have no shell. Run builds, tests and checks with `run_command` (a named `command_id`, or an `argv`), which runs in a sandbox.",
@@ -206,6 +251,46 @@ export function workerProtocol(task: string, driver: WorkerDriverId = "claude-co
     "- Every tool response may carry an `inbox` of directives and decisions. Follow them; acknowledge directives that ask for it.",
     "- Stay within your budget: stop and escalate rather than retrying the same failing approach.",
     "- Never read or write secrets (.env files, keys, credentials), and never try to reach the network.",
+  ].join("\n");
+}
+
+/**
+ * The protocol for a runtime worker. One with the roundtable worker server (gemini) calls the tools
+ * itself; one without cannot lease, post or submit: it edits the files its task owns and the driver
+ * submits for it when it exits 0, with its final message as the summary.
+ */
+function runtimeProtocol(task: string, driver: RuntimeDriverId): string {
+  const mcp = workerProfile(runtimeDriverName(driver)).mcp;
+  const head = [
+    "## Heads-down worker protocol",
+    "",
+    `You are a worker in a heads-down run of the agent roundtable, assigned to task \`${task}\`. You work alone in your task's git worktree (your working directory). No human is watching this session.`,
+    "",
+  ];
+  const common = [
+    "- Make targeted edits instead of rewriting whole files.",
+    "- Edit only files your task owns (its write paths are in the task card); a submission that changed anything else is rejected.",
+    "- Never read or write secrets (.env files, keys, credentials), and never try to reach the network.",
+  ];
+  if (!mcp) {
+    return [
+      ...head,
+      "- You have no roundtable tools. Do the task by editing files in your worktree.",
+      "- When you are finished, stop and answer with a short summary of what you changed (a few sentences). The roundtable commits your work and runs the task's checks for you.",
+      "- If you cannot finish, say what blocked you in that final answer instead of guessing.",
+      ...common,
+    ].join("\n");
+  }
+  return [
+    ...head,
+    "- You never message other agents. Read what others did with `read_blackboard` (sections, a `query` such as \"is the nav done?\", events, blobs).",
+    "- Request the files you edit first with `lease(action: \"request\", paths: [...])`; leases are checked when you submit. If someone else holds a path, use `escalate(with: \"path_owner\")`.",
+    "- Run builds, tests and checks with `run_command` (a named `command_id`, or an `argv`), which runs in a sandbox.",
+    "- Report progress with `post_update(kind: \"progress\", percent, text)`.",
+    "- When you are blocked or unsure, `escalate`. After a blocking escalation, end your turn with a one-line summary; you will be resumed with the resolution.",
+    "- Finish with `submit_work(summary, ready: true)`: it commits your leased changes and runs your task's checks. `ready: false` saves a checkpoint.",
+    "- Every tool response may carry an `inbox` of directives and decisions. Follow them.",
+    ...common,
   ].join("\n");
 }
 
@@ -260,6 +345,11 @@ export async function prepareWorkerFiles(opts: PrepareWorkerFilesOptions): Promi
   const command: WorkerCommand = { execPath: opts.execPath ?? process.execPath, cli: opts.cliPath ?? defaultCliPath() };
   hookCommand(command); // refuse unusable paths before writing anything
   const home = opts.home ?? ROUNDTABLE_HOME;
+  const state = await store.state();
+  const connectors = state.contract?.connectors ?? [];
+  const chosen = opts.driver ?? state.contract?.workers.driver;
+  if (connectors.length && chosen === "codex") throw new Error("Connectors are not supported by codex workers; use claude-code.");
+  if (connectors.length && isRuntimeDriver(chosen)) throw new Error("Connectors are not supported by runtime workers; use claude-code.");
   const persona = typeof opts.persona === "string" ? await loadAgent(opts.persona) : opts.persona;
 
   const dir = ensureAgentDir(store.id, opts.agent);
@@ -272,9 +362,10 @@ export async function prepareWorkerFiles(opts: PrepareWorkerFilesOptions): Promi
     tokenPath: join(dir, "token"),
     leasesPath: join(dir, "leases.json"),
   };
+  const mcp = await buildMcpConfig({ ...command, execution: store.id, agent: opts.agent, tokenFile: files.tokenPath, home, connectors });
   const { token, sha256 } = newAgentToken();
   writeFileAtomic(files.tokenPath, token + "\n");
-  writeFileAtomic(files.mcpConfigPath, json(buildMcpConfig({ ...command, execution: store.id, agent: opts.agent, tokenFile: files.tokenPath, home })));
+  writeFileAtomic(files.mcpConfigPath, json(mcp));
   writeFileAtomic(files.settingsPath, json(buildWorkerSettings(command)));
   writeFileAtomic(files.promptPath, buildWorkerPrompt(persona, opts.task, opts.driver));
   await writeAgentLeases(store, opts.agent, { task: opts.task });
@@ -294,7 +385,7 @@ export interface AgentLeasesFile {
   worktree?: string;
   /** The blackboard seq this projection was taken at. */
   seq: number;
-  leases: Array<{ id: string; task: string; paths: string[]; mode: LeaseMode }>;
+  leases: Array<{ id: string; task: string; paths: string[]; excludes?: string[]; mode: LeaseMode }>;
 }
 
 const own = <T>(rec: Record<string, T>, key: string): T | undefined => (Object.hasOwn(rec, key) ? rec[key] : undefined);
@@ -310,14 +401,14 @@ export function agentTask(state: Readonly<BlackboardState>, agent: string): stri
 
 /** The agent's leases.json projection of a state. */
 export function agentLeasesProjection(state: Readonly<BlackboardState>, execution: string, agent: string, fallbackTask?: string): AgentLeasesFile {
-  const mine = Object.values(state.leases).filter((l) => l.agent === agent);
+  const mine = Object.values(state.tasks).flatMap((rt) => leasesFor(state, rt.spec.id, agent));
   const task = agentTask(state, agent) ?? fallbackTask ?? mine[0]?.task;
   const out: AgentLeasesFile = {
     v: 1,
     execution,
     agent,
     seq: state.seq,
-    leases: mine.map((l) => ({ id: l.id, task: l.task, paths: [...l.paths], mode: l.mode })),
+    leases: mine.map((l) => ({ id: l.id, task: l.task, paths: [...l.paths], ...(l.excludes && { excludes: [...l.excludes] }), mode: l.mode })),
   };
   if (task !== undefined) {
     out.task = task;

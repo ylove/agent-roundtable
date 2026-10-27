@@ -38,7 +38,7 @@ export function redact(input: string): RedactionResult {
 export function redactPII(input: string): RedactionResult {
   return redactWith(input, (rep) => {
     // emails
-    rep(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, "email");
+    rep(/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, "email");
 
     // home-directory absolute paths (unix-style /home/<name>, macOS-style, and Windows C:\Users\<name>)
     rep(

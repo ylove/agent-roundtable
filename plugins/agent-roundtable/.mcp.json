@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "roundtable": {
+      "command": "npx",
+      "args": [
+        "--prefix",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "-y",
+        "agent-roundtable@2.0.0",
+        "mcp"
+      ]
+    }
+  }
+}

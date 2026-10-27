@@ -268,7 +268,7 @@ test("spawnCaptured combines stdout and stderr and reports the exit code", async
 test("spawnCaptured reports a missing program without throwing", async () => {
   const r = await spawnCaptured("rt-definitely-not-a-program", [], { env, timeoutMs: 5_000, maxOutputBytes: 1024, label: "missing" });
   assert.equal(r.exit, null);
-  assert.match(r.error, /ENOENT/);
+  assert.match(r.error, /ENOENT|not found/);
   assert.equal(sandboxedInFlight(), 0);
 });
 

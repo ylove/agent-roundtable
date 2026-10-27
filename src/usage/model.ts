@@ -211,6 +211,7 @@ function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string
   const stopped = new Map<string, TableLine>();
   const byKey = new Map<string, { id: string; session: string; kind: string; tokens: Tokens; money: Money; models: Map<string, number>; provider?: string; last: string; priced: boolean }>();
   for (const l of lines) {
+    if (l.outcome !== undefined && l.tokens === undefined && l.usd === undefined) continue;
     if (l.event === "stopped") {
       stopped.set(l.session, l);
       continue;
@@ -236,7 +237,7 @@ function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string
       else if (!e.priced) e.money.unpriced = true;
     }
     const models = [...e.models].sort((a, b) => b[1] - a[1]).map(([m]) => m);
-    const stoppable = !!l && !wasStopped && ["meeting", "local-meeting", "collaboration", "ultraplan"].includes(e.kind);
+    const stoppable = !!l && !wasStopped && ["meeting", "local-meeting", "collaboration", "ultraplan", "duel", "casting"].includes(e.kind);
     const stopping = pending.has(e.session);
     agents.push({
       id: e.id,

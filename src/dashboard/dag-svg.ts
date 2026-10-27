@@ -54,7 +54,7 @@ export function layers(tasks: Record<string, TaskRuntime>): Map<string, number> 
     if (visiting.has(id)) return 0; // a cycle (contracts are validated as DAGs): cut it here
     visiting.add(id);
     let layer = 0;
-    for (const d of tasks[id]?.spec.depends_on ?? []) {
+    for (const d of [...(tasks[id]?.spec.depends_on ?? []), ...(tasks[id]?.spec.parent ? [tasks[id].spec.parent!] : [])]) {
       if (Object.hasOwn(tasks, d) && d !== id) layer = Math.max(layer, visit(d) + 1);
     }
     visiting.delete(id);
@@ -88,7 +88,7 @@ export function renderDagSvg(state: BlackboardState, opts: DagSvgOptions = {}): 
   for (const col of columns) {
     if (!col) continue;
     const key = (id: string) => {
-      const deps = tasks[id].spec.depends_on.filter((d) => row.has(d));
+      const deps = [...tasks[id].spec.depends_on, ...(tasks[id].spec.parent ? [tasks[id].spec.parent!] : [])].filter((d) => row.has(d));
       return deps.length ? deps.reduce((s, d) => s + row.get(d)!, 0) / deps.length : Number.POSITIVE_INFINITY;
     };
     const keyed = col.map((id) => ({ id, k: key(id) }));
@@ -106,7 +106,7 @@ export function renderDagSvg(state: BlackboardState, opts: DagSvgOptions = {}): 
   const edges: string[] = [];
   for (const id of ids) {
     const to = pos(id);
-    for (const d of tasks[id].spec.depends_on) {
+    for (const d of [...tasks[id].spec.depends_on, ...(tasks[id].spec.parent ? [tasks[id].spec.parent!] : [])]) {
       if (!Object.hasOwn(tasks, d) || d === id || layerOf.get(d)! >= layerOf.get(id)!) continue;
       const from = pos(d);
       const x1 = from.x + NODE_W;
@@ -114,7 +114,8 @@ export function renderDagSvg(state: BlackboardState, opts: DagSvgOptions = {}): 
       const x2 = to.x - 4;
       const y2 = to.y + NODE_H / 2;
       const mx = (x1 + x2) / 2;
-      edges.push(`<path class="edge" d="M${x1} ${y1} C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}" fill="none" stroke="#8a94a6" stroke-width="1.5" marker-end="url(#rt-dag-arrow)"/>`);
+      const parentEdge = tasks[id].spec.parent === d;
+      edges.push(`<path class="edge${parentEdge ? " parent-edge" : ""}"${parentEdge ? ' stroke-dasharray="5 4"' : ""} d="M${x1} ${y1} C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}" fill="none" stroke="#8a94a6" stroke-width="1.5" marker-end="url(#rt-dag-arrow)"/>`);
     }
   }
 

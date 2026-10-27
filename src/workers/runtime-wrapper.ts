@@ -14,6 +14,7 @@
 // A stop (SIGTERM) is forwarded to the runtime and nothing is submitted.
 // ============================================================================
 
+import { installHttpStack } from "../http/fetch.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { parseRuntimeOutput } from "../runtimes/runner.js";
 import { scrubAndCap } from "../security/secrets.js";
@@ -31,6 +32,7 @@ const STDERR_TAIL = 64 * 1024;
 const HEARTBEAT_MS = 60_000;
 const SUMMARY_MAX = 1500;
 
+installHttpStack();
 process.umask(0o077);
 
 const emit = (o: object) => process.stdout.write(JSON.stringify(o) + "\n");

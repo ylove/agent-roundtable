@@ -19,9 +19,11 @@ The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts th
 | `runtimes` | `[--json]` | List installed CLI runtimes, paths and versions. See [CLI runtimes](runtimes.md). |
 | `agents` | `[--json]`, `import <absolute file\|dir>`, `starter`, or `--open [--no-hold]` | Browse and import personas or open the local drop zone. See [agents library](agents-library.md). |
 | `up` | `[--setup] [--no-input] [--no-serve] [--open] [--check-keys]` | First-run setup (terminal only), the doctor, then the local service and the next steps. [Getting started](getting-started.md#quick-start-roundtable-up). |
-| `doctor` | `[--json] [--check-keys]` | One line per check: Node, git, `bin` (roundtable on PATH, advisory), provider keys (names only), runtimes, Docker, Chrome. Exit 0 when Node, git and a key pass. |
+| `doctor` | `[--json] [--check-keys]` | One line per check: Node, bundled undici, git, `bin` (roundtable on PATH, advisory), provider keys (names only), runtimes, Docker, Chrome. Exit 0 when Node, git and a key pass. |
 | `--version` | `-v`, `version` | Print the version. |
 | `help` | none | Print usage. |
+
+`doctor` reports an informational Node update notice for bundled undici versions covered by GHSA-xjj6-f33q-929c. Outbound requests already use the pinned npm undici package through global `fetch`, including the runner, workers and serve supervisor. The notice does not change the command's exit status; `--json` includes it as a nonessential check.
 
 These are the **15 named subcommands** for heads-down runs, usage, runtime detection and the agents library of `src/cli.ts`; no arguments is an alias for `mcp`. The binary also dispatches seven table commands, listed next. Unknown, repeated and valueless flags are refused. Execution ids are the `exe-…` values returned by the tools, not contract ids.
 

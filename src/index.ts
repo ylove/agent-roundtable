@@ -2,6 +2,9 @@
 
 // Must be the first static import: loads .env before config.ts reads process.env (see src/env.ts).
 import "./env.js";
+import { installHttpStack } from "./http/fetch.js";
+
+installHttpStack();
 
 // No arguments (or only options) is the MCP stdio orchestrator server, exactly as before; a first
 // argument that is a word is a subcommand (src/cli.ts). Both load lazily: the lease hook runs before

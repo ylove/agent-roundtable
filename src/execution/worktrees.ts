@@ -22,7 +22,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSy
 import { basename, dirname, isAbsolute, join, posix, relative, sep } from "node:path";
 import { WORKTREES_DIR } from "../config.js";
 import { EXECUTION_ID_RE } from "../ids.js";
-import { mkdirPrivate } from "../security/fs-safe.js";
+import { mkdirPrivate, readRegularFile } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
 import { ID_RE, preview } from "./events.js";
 import {
@@ -921,9 +921,7 @@ async function escapingSymlink(t: GitTarget, rel: string): Promise<boolean> {
 
 function hasConflictMarkers(file: string): boolean {
   try {
-    const st = lstatSync(file);
-    if (!st.isFile() || st.size > 32 * 1024 * 1024) return false;
-    return MARKER_RE.test(readFileSync(file, "utf8"));
+    return MARKER_RE.test(readRegularFile(file, { noFollow: true, maxBytes: 32 * 1024 * 1024 }).data.toString("utf8"));
   } catch {
     return false;
   }

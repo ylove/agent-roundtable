@@ -11,6 +11,7 @@ import {
   sanitizeDescription, sanitizeInputSchema, connectorToolsDigest, connectorConfigDigest, checkConnectorPin,
 } from "../../dist/connectors/pin.js";
 import { allowedTools, startSeatConnectors } from "../../dist/table/seat-connectors.js";
+import { acceptConnectorTools } from "../../dist/connectors/pin.js";
 import { setConnectorConfig } from "../../dist/user-config.js";
 import { runTableCli } from "../../dist/cli-table.js";
 import { USAGE } from "../../dist/cli.js";
@@ -53,24 +54,26 @@ test("descriptions strip controls and formatting, carry an untrusted prefix and 
   assert.equal(offered[0].spec.description, CONNECTOR_TEXT_PREFIX + "Hi!");
 });
 
-test("schemas strip and scrub every string, including keys and array entries, without changing the source", () => {
+test("schemas clean prose fields and omit schemas whose meaning-bearing text would change", () => {
   const schema = {
-    type: "object", [`properties${controls}`]: { [`q${controls}`]: { type: "string", description: `A${controls}B`, enum: [`a${controls}b`] } },
-    required: [`q${controls}`], examples: [{ [`key${controls}`]: `v${controls}` }],
-    $defs: JSON.parse('{"__proto__":{"type":"string"}}'),
+    type: "object", properties: { q: { type: "string", title: `T${controls}`, description: `A${controls}B`, enum: ["a b"] } },
+    required: ["q"], $defs: JSON.parse('{"__proto__":{"type":"string"}}'),
   };
   const before = JSON.stringify(schema);
   const clean = sanitizeInputSchema(schema);
-  assert.deepEqual(clean, {
-    type: "object", properties: { q: { type: "string", description: "AB", enum: ["ab"] } },
-    required: ["q"], examples: [{ key: "v" }], $defs: JSON.parse('{"__proto__":{"type":"string"}}'),
-  });
+  assert.equal(clean.properties.q.description, "AB");
+  assert.equal(clean.properties.q.title, "T");
+  assert.deepEqual(clean.properties.q.enum, ["a b"]);
   assert.equal(JSON.stringify(schema), before);
   assert.ok(Object.hasOwn(clean.$defs, "__proto__"));
   assert.deepEqual(allowedTools("desk", {}, [tool({ inputSchema: schema })])[0].spec.inputSchema, clean);
+  // Enum values, property names and similar text are never rewritten; the schema is left out instead.
+  assert.equal(sanitizeInputSchema({ type: "object", properties: { s: { enum: ["\n", "\t"] } } }), undefined);
+  assert.equal(sanitizeInputSchema({ type: "object", properties: { [`q${controls}`]: { type: "string" } } }), undefined);
+  assert.deepEqual(allowedTools("desk", {}, [tool({ inputSchema: { type: "object", properties: { s: { enum: ["\n"] } } } })]), []);
   const credential = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
   assert.ok(!sanitizeDescription(credential).includes("abcdefghijklmnopqrstuvwxyz"));
-  const redacted = sanitizeInputSchema({ type: "object", description: credential, examples: [{ [credential]: credential }] });
+  const redacted = sanitizeInputSchema({ type: "object", description: credential });
   assert.ok(!JSON.stringify(redacted).includes("abcdefghijklmnopqrstuvwxyz"));
 });
 
@@ -242,4 +245,14 @@ test("connectors trust requires a configured name, validates usage and appears i
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Connector desk: acceptance reset/);
+});
+
+test("pin updates for different connectors keep each other's acceptance and release the lock", t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "pins-")));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  acceptConnectorTools("one", spec(), [tool()], dir);
+  acceptConnectorTools("two", spec(), [tool()], dir);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(dir, "connector-pins.json"), "utf8"))).sort(), ["one", "two"]);
+  assert.throws(() => acceptConnectorTools("one", spec(), [tool({ description: "changed" })], dir), /connectors trust one/);
+  assert.throws(() => statSync(join(dir, "connector-pins.lock")));
 });

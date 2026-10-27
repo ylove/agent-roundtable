@@ -48,6 +48,6 @@ test("child PATH keeps only absolute directories after profile extras", async ()
   for (const profile of ["git", "runner", "runtime", "sandbox-local"]) {
     assert.equal(childEnv(profile, {}, { PATH: mixed }).PATH, absolute);
     assert.equal(childEnv(profile, { PATH: mixed }, { PATH: "relative" }).PATH, absolute);
-    assert.equal(childEnv(profile, {}, {}).PATH, "");
+    assert.equal(childEnv(profile, {}, {}).PATH, undefined);
   }
 });

@@ -130,6 +130,8 @@ export interface PostmortemRecord {
   accepted?: string[];
   /** Persisted artifacts waiting for a person’s explicit sign-off. */
   pending?: string[];
+  /** The reviewed contract's orchestrator identity, kept so sign-off still validates after the run is purged. */
+  contract_orchestrator?: string;
   rejected?: Array<{ id: string; why: string }>;
   applied?: AppliedArtifact[];
   flagged?: FlagRecord[];

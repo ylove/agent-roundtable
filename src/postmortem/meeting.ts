@@ -314,9 +314,12 @@ async function validateSignoff(rec: PostmortemRecord, proj: ProjectRef, identity
   const by = scrub(identity).trim();
   if (!by || by.length > 200) throw new Error("orchestrator must be non-blank and at most 200 characters after scrubbing");
   if (rec.scope.execution_id !== undefined) {
-    const store = await executionOf(proj, rec.scope);
-    const state = await store.state();
-    if (state.contract && by !== state.contract.scope.orchestrator) throw new Error("orchestrator must equal the reviewed contract’s orchestrator identity");
+    let expected = rec.contract_orchestrator;
+    if (expected === undefined) {
+      const state = await (await executionOf(proj, rec.scope)).state();
+      expected = state.contract?.scope.orchestrator;
+    }
+    if (expected !== undefined && by !== expected) throw new Error("orchestrator must equal the reviewed contract’s orchestrator identity");
   }
   return by;
 }
@@ -399,9 +402,11 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
   const assessments = found.proposed.filter((a) => a.kind === "dissent_score" && accept.includes(a.id));
   if (assessments.length) requireEnabled(proj);
   const protectedTexts: string[] = [];
+  let contractOrchestrator: string | undefined;
   const store = found.scope.execution_id !== undefined ? await executionOf(proj, found.scope).catch(() => undefined) : undefined;
   if (store) {
     const s = await store.state();
+    contractOrchestrator = s.contract?.scope.orchestrator;
     if (s.goal?.original_prompt) protectedTexts.push(s.goal.original_prompt);
     for (const e of await store.events({ types: ["execution.started"], limit: 1 })) if (e.type === "execution.started") protectedTexts.push(e.payload.confirmation);
   }
@@ -490,6 +495,7 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
     const concluded: PostmortemRecord = {
       ...rec, status: "concluded", concluded_at: now.toISOString(), closing,
       accepted: accept, pending, rejected: reject, applied, flagged,
+      ...(contractOrchestrator !== undefined && { contract_orchestrator: contractOrchestrator }),
     };
     concluded.summary = summaryParagraph({ ...concluded, applied: applied.filter((a) => ok.has(a.id)), accepted: accept.filter((id) => ok.has(id)) });
     saveRecord(concluded, renderRecord(concluded));

@@ -131,7 +131,15 @@ test("identity is bounded and execution sign-off must match the frozen contract 
     assert.equal(loadLessons(project).length, 0);
   }
   await concludePostmortem({ pm, closing: "Review", accept: ["a1", "a2"] });
+  assert.equal(loadRecord(project, pm).contract_orchestrator, "main");
   await assert.rejects(signOffPostmortem({ pm, orchestrator: "other", accept: ["a1"] }), /orchestrator/);
+  // The identity check uses the record's snapshot, so it survives the run being purged.
+  const gone = loadRecord(project, pm);
+  gone.scope = { execution_id: "exe-0000000000000000" };
+  saveRecord(gone, renderRecord(gone));
+  await assert.rejects(signOffPostmortem({ pm, orchestrator: "other", accept: ["a1"] }), /orchestrator must equal/);
+  gone.scope = { execution_id: repo.store.id };
+  saveRecord(gone, renderRecord(gone));
   const result = await signOffPostmortem({ pm, orchestrator: "main", accept: ["a1"] });
   assert.deepEqual(result.pending, ["a2"]);
   const state = await repo.store.state();

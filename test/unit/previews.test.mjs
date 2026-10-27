@@ -200,9 +200,13 @@ test("settings: defaults and environment overrides; bad values fall back", t => 
 test("display defaults by starter, with explicit option then environment precedence", t => {
   t.mock.method(console, "error", () => {});
   const settings = previewSettings({});
-  for (const env of [{}, { ROUNDTABLE_EXECUTION_ID: EXE }, { ROUNDTABLE_AGENT_ID: "builder" }]) {
-    const starter = previewCliStarter(env);
-    assert.equal(previewDisplay({ starter }, settings), Object.keys(env).length ? "click" : "live");
+  const tty = { stdin: true, stdout: true };
+  assert.equal(previewDisplay({ starter: previewCliStarter({}, tty) }, settings), "live", "interactive terminal");
+  assert.equal(previewDisplay({ starter: previewCliStarter({}, { stdin: false, stdout: true }) }, settings), "click", "piped stdin");
+  assert.equal(previewDisplay({ starter: previewCliStarter({}, { stdin: true, stdout: false }) }, settings), "click", "piped stdout");
+  assert.equal(previewDisplay({ starter: previewCliStarter({}, {}) }, settings), "click", "no terminal");
+  for (const env of [{ ROUNDTABLE_EXECUTION_ID: EXE }, { ROUNDTABLE_AGENT_ID: "builder" }]) {
+    assert.equal(previewDisplay({ starter: previewCliStarter(env, tty) }, settings), "click", "agent marker beats a terminal");
   }
   assert.equal(previewDisplay({}, settings), "click", "MCP and execution starts default to click");
   for (const display of ["live", "click", "screenshot"]) {

@@ -103,9 +103,9 @@ export interface StartInput {
   port?: number;
 }
 
-/** A worker invoking the CLI is still an automated starter. */
-export function previewCliStarter(env: NodeJS.ProcessEnv = process.env): "cli" | "agent" {
-  return env.ROUNDTABLE_EXECUTION_ID || env.ROUNDTABLE_AGENT_ID ? "agent" : "cli";
+/** The CLI starts as a person only at an interactive terminal with no agent marker; workers never have one. */
+export function previewCliStarter(env: NodeJS.ProcessEnv = process.env, tty: { stdin?: boolean; stdout?: boolean } = { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY }): "cli" | "agent" {
+  return !env.ROUNDTABLE_EXECUTION_ID && !env.ROUNDTABLE_AGENT_ID && tty.stdin && tty.stdout ? "cli" : "agent";
 }
 
 export function previewDisplay(input: StartInput, settings: PreviewSettings): PreviewDisplay {

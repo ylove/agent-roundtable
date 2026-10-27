@@ -105,7 +105,7 @@ export interface StartInput {
 
 /** A worker invoking the CLI is still an automated starter. */
 export function previewCliStarter(env: NodeJS.ProcessEnv = process.env): "cli" | "agent" {
-  return env.ROUNDTABLE_EXECUTION_ID || env.ROUNDTABLE_AGENT_ID || env.ROUNDTABLE_PREVIEW_STARTER === "agent" ? "agent" : "cli";
+  return env.ROUNDTABLE_EXECUTION_ID || env.ROUNDTABLE_AGENT_ID ? "agent" : "cli";
 }
 
 export function previewDisplay(input: StartInput, settings: PreviewSettings): PreviewDisplay {

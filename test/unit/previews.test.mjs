@@ -200,7 +200,7 @@ test("settings: defaults and environment overrides; bad values fall back", t => 
 test("display defaults by starter, with explicit option then environment precedence", t => {
   t.mock.method(console, "error", () => {});
   const settings = previewSettings({});
-  for (const env of [{}, { ROUNDTABLE_EXECUTION_ID: EXE }, { ROUNDTABLE_AGENT_ID: "builder" }, { ROUNDTABLE_PREVIEW_STARTER: "agent" }]) {
+  for (const env of [{}, { ROUNDTABLE_EXECUTION_ID: EXE }, { ROUNDTABLE_AGENT_ID: "builder" }]) {
     const starter = previewCliStarter(env);
     assert.equal(previewDisplay({ starter }, settings), Object.keys(env).length ? "click" : "live");
   }

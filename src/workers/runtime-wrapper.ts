@@ -38,12 +38,10 @@ process.umask(0o077);
 
 const emit = (o: object) => process.stdout.write(JSON.stringify(o) + "\n");
 
-/** The runtime's environment: the wrapper's own, without the roundtable's settings (the preview display default and the automated-starter marker stay). */
+/** The runtime's environment: the wrapper's own, without the roundtable's settings. */
 function runtimeEnv(source: NodeJS.ProcessEnv): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(source)) if (typeof v === "string" && !k.startsWith("ROUNDTABLE_")) env[k] = v;
-  if (typeof source.ROUNDTABLE_PREVIEW_DISPLAY === "string") env.ROUNDTABLE_PREVIEW_DISPLAY = source.ROUNDTABLE_PREVIEW_DISPLAY;
-  env.ROUNDTABLE_PREVIEW_STARTER = "agent";
   return env;
 }
 

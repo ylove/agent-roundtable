@@ -23,13 +23,13 @@ copyFileSync(join(repo, "dist", "runtimes", "spec.js"), join(pkg, "dist", "runti
 copyFileSync(join(repo, "dist", "provider-ids.js"), join(pkg, "dist", "provider-ids.js"));
 symlinkSync(join(repo, "node_modules"), join(pkg, "node_modules"), "dir");
 writeFileSync(join(pkg, "package.json"), '{"type":"module"}');
-writeFileSync(join(pkg, ".env"), "RT_DOTENV_PROBE=from-dotenv\nANTHROPIC_API_KEY=sk-ant-from-dotenv-file\n");
+writeFileSync(join(pkg, ".env"), "OLLAMA_URL=from-dotenv\nANTHROPIC_API_KEY=sk-ant-from-dotenv-file\n");
 
 /** Import env.js in a fresh process and report what it left in process.env. */
 function load(extraEnv) {
   const script =
     `await import(${JSON.stringify(pathToFileURL(join(pkg, "dist", "env.js")).href)});\n` +
-    `process.stdout.write(JSON.stringify({ probe: process.env.RT_DOTENV_PROBE ?? null, key: process.env.ANTHROPIC_API_KEY ?? null }));`;
+    `process.stdout.write(JSON.stringify({ probe: process.env.OLLAMA_URL ?? null, key: process.env.ANTHROPIC_API_KEY ?? null }));`;
   const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
     env: { PATH: process.env.PATH, HOME: join(pkg, "home"), ROUNDTABLE_HOME: join(pkg, "state"), ...extraEnv },
     encoding: "utf8",

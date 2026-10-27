@@ -1,5 +1,11 @@
 import { isAbsolute, basename } from "node:path";
 import { PROVIDER_IDS } from "../provider-ids.js";
+import { isExecutableFile } from "../executables.js";
+
+/** Keep argv prompts as option values, including prompts beginning with a dash. */
+export function argvPrompt(prompt: string): string {
+  return prompt.startsWith("-") ? "\n" + prompt : prompt;
+}
 
 export type UsagePath = string | string[];
 export interface RuntimeUsage { inputTokens?: UsagePath; outputTokens?: UsagePath; costUsd?: UsagePath }
@@ -63,6 +69,7 @@ export function validateRuntimeConfig(value: unknown): Record<string, Partial<Ru
     const builtin = ["hermes", "openclaw", "gemini", "agy", "codex"].includes(name);
     if (builtin && record(spec) && !keys(spec, ["argv", "output", "timeoutMs", "stdoutMaxBytes", "stderrMaxBytes", "env"])) throw new Error("Built-in runtime overrides accept only argv, output, limits and env.");
     validateRuntimeSpec(spec, builtin);
+    if (spec.argv && (!isAbsolute(spec.argv[0]) || !isExecutableFile(spec.argv[0]))) throw new Error("Runtime argv overrides require an absolute path to a regular executable.");
   }
   return value as Record<string, Partial<RuntimeSpec>>;
 }

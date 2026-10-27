@@ -16,6 +16,7 @@ import { join } from "node:path";
 import type { SandboxBackend, SandboxResult, SandboxRunRequest } from "../execution/types.js";
 import { randomBase32 } from "../ids.js";
 import { childEnv } from "../security/child-env.js";
+import { findExecutable, isExecutableFile } from "../executables.js";
 import { isContained } from "../security/fs-safe.js";
 import {
   DEFAULT_SANDBOX_IMAGE,
@@ -192,7 +193,7 @@ export function buildDockerRunArgs(req: SandboxRunRequest, opts: DockerRunOption
 export interface DockerBackendOptions {
   /** Names and labels egress networks (rt-egress-<tag>-<id>); random when unset. */
   executionTag?: string;
-  /** Default image; otherwise ROUNDTABLE_SANDBOX_IMAGE or node:22-bookworm-slim. */
+  /** Default image; otherwise ROUNDTABLE_SANDBOX_IMAGE or the digest-pinned DEFAULT_SANDBOX_IMAGE. */
   image?: string;
   limits?: Partial<DockerLimits>;
   /** The docker CLI (default "docker" on PATH). Tests point this at a fake. */
@@ -266,7 +267,8 @@ export class DockerBackend implements SandboxBackend {
 
   constructor(opts: DockerBackendOptions = {}) {
     this.env = opts.env ?? process.env;
-    this.docker = opts.dockerPath ?? "docker";
+    this.docker = opts.dockerPath === undefined ? findExecutable("docker", this.env.PATH) ?? ""
+      : isExecutableFile(opts.dockerPath) ? opts.dockerPath : "";
     this.image = opts.image ?? defaultSandboxImage(this.env);
     this.limits = { ...dockerLimitsFromEnv(this.env), ...opts.limits };
     this.tag = (opts.executionTag ?? randomBase32(6)).toLowerCase();

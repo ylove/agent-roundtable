@@ -163,5 +163,5 @@ export function createTerminalObserver(options: TerminalOptions = {}): TableObse
   } };
 }
 export function createNdjsonObserver(output: TerminalOutput = process.stdout): TableObserver {
-  return { onEvent(event) { output.write(JSON.stringify(event).replace(/[\u007f-\u009f\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`) + "\n"); } };
+  return { onEvent(event) { output.write(JSON.stringify(event).replace(/[\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`) + "\n"); } };
 }

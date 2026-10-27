@@ -40,7 +40,7 @@ import { findExecutable } from "../executables.js";
 import { WORKTREES_DIR } from "../config.js";
 import { spawn } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { executionTag, EXECUTION_ID_RE } from "../ids.js";
 import { canonicalWorkdir } from "../sandbox/common.js";
 import { killTree } from "../sandbox/process.js";
@@ -379,9 +379,7 @@ async function standardLfsExecutable(cwd: string, pre: string[], entries: [strin
     return STANDARD_LFS.get(key.slice("filter.lfs.".length)) === normalized;
   })) return null;
 
-  // Resolve relative (and empty) PATH entries as git's child will, from the work tree cwd.
-  const searchPath = (process.env.PATH ?? "").split(delimiter).map(dir => resolve(cwd, dir)).join(delimiter);
-  const executable = findExecutable("git-lfs", searchPath);
+  const executable = findExecutable("git-lfs");
   if (!executable || !isAbsolute(executable)) return null;
   const dirs = await spawnGitRaw(cwd, ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], {}, pre);
   const [gitDir, commonDir] = dirs.stdout.trimEnd().split("\n");
@@ -471,14 +469,16 @@ function spawnGitRaw(cwd: string, args: string[], o: SpawnOpts = {}, pre: string
     ...(SUBMODULE_AWARE.has(sub) && !args.some((a) => a.startsWith("--ignore-submodules")) ? ["--ignore-submodules=all"] : []),
     ...args.slice(1),
   ];
-  const env = childEnv("git", { GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: ":", GIT_PAGER: "cat", ...o.env });
+  const env = childEnv("git", { GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: ":", GIT_PAGER: "cat", ...o.env, GIT_LFS_SKIP_SMUDGE: "1" });
+  const git = findExecutable("git", env.PATH);
+  if (!git) throw new GitSafetyError("git executable not found");
   const timeoutMs = o.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const max = o.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
   const label = `git ${sub}`;
   return new Promise((resolvePromise, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn("git", argv, {
+      child = spawn(git, argv, {
         cwd,
         env,
         shell: false,

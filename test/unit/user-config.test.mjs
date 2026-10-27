@@ -13,10 +13,10 @@ function fixture(t) {
   writeFileSync(file, '', { mode: 0o600 });
   return { home, file };
 }
-test('shell > package > pointed file; only allowed pointed keys are copied', t => {
+test('shell > package > pointed file; both files copy only allowed keys', t => {
   const { home, file } = fixture(t);
   const packageEnvFile = join(home, 'package.env');
-  writeFileSync(packageEnvFile, 'OPENAI_API_KEY=package\nPACKAGE_SETTING=enabled\n');
+  writeFileSync(packageEnvFile, 'OPENAI_API_KEY=package\nPACKAGE_SETTING=enabled\nOLLAMA_URL=http://127.0.0.1:11434\n');
   writeFileSync(file, ['ANTHROPIC_API_KEY=external', 'OPENAI_API_KEY=external', 'TOGETHER_API_KEY=external', 'REPLICATE_API_TOKEN=external', 'OPENAI_COMPATIBLE_BASE_URL=http://127.0.0.1:1234/v1', 'OPENAI_COMPATIBLE_API_KEY=external', 'ROUNDTABLE_ANTHROPIC_MODEL=sonnet', 'ROUNDTABLE_EXECUTION_MODEL=custom', 'ROUNDTABLE_AGENTS_DIR=/unrelated', 'ROUNDTABLE_HOME=/unrelated', 'DATABASE_PASSWORD=unrelated', 'PATH=/unrelated'].join('\n'));
   const env = { ROUNDTABLE_ENV_FILE: file, ANTHROPIC_API_KEY: 'shell', OPENAI_API_KEY: 'shell' };
   const warnings = [];
@@ -28,7 +28,8 @@ test('shell > package > pointed file; only allowed pointed keys are copied', t =
   assert.equal(env.OPENAI_COMPATIBLE_API_KEY, 'external');
   assert.equal(env.ROUNDTABLE_ANTHROPIC_MODEL, 'sonnet');
   assert.equal(env.ROUNDTABLE_EXECUTION_MODEL, 'custom');
-  assert.equal(env.PACKAGE_SETTING, 'enabled');
+  assert.equal(env.PACKAGE_SETTING, undefined);
+  assert.equal(env.OLLAMA_URL, 'http://127.0.0.1:11434');
   for (const key of ['DATABASE_PASSWORD', 'PATH', 'ROUNDTABLE_HOME', 'ROUNDTABLE_AGENTS_DIR']) assert.equal(env[key], undefined);
   assert.deepEqual(warnings, []);
   assert.equal(allowedEnvKey('ROUNDTABLE_MODEL'), false);
@@ -142,4 +143,56 @@ test('the package .env cannot complete an endpoint and key pair the shell starte
   const fresh = {};
   loadUserEnvironment({ home, env: fresh, packageEnvFile, warn: () => {} });
   assert.deepEqual([fresh.OPENAI_COMPATIBLE_BASE_URL, fresh.OPENAI_COMPATIBLE_API_KEY], ['https://package.example/v1', 'package-key']);
+});
+
+const hostile = [
+  'NODE_TLS_REJECT_UNAUTHORIZED=0', 'NODE_EXTRA_CA_CERTS=/private/certs',
+  'HTTPS_PROXY=https://proxy.example', 'ALL_PROXY=https://proxy.example',
+  'ROUNDTABLE_CHROME_PATH=./x', 'ROUNDTABLE_WORKER_AUTH=api_key',
+  'ROUNDTABLE_ALLOW_LOCAL_SANDBOX=1', 'ROUNDTABLE_SANDBOX_IMAGE=custom',
+  'ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS=https://provider.example',
+  'ROUNDTABLE_EXECUTION_PROVIDER=openai_compatible', 'ROUNDTABLE_EXECUTION_BASE_URL=https://provider.example',
+];
+const hostileKeys = hostile.map(row => row.split('=')[0]);
+test('an untracked package .env applies documented settings and never security switches', t => {
+  const { home, file } = fixture(t);
+  writeFileSync(file, [...hostile, 'OLLAMA_URL=http://127.0.0.1:11434', 'ROUNDTABLE_MAX_TOKENS=900', 'ROUNDTABLE_PUBLISHER=ntfy', 'OPENAI_COMPATIBLE_BASE_URL=https://package.example/v1', 'OPENAI_COMPATIBLE_API_KEY=package-key', 'ANTHROPIC_API_KEY=fixture-provider-value'].join('\n'));
+  const env = {};
+  loadUserEnvironment({ home, env, packageEnvFile: file, warn: () => {} });
+  assert.equal(env.OLLAMA_URL, 'http://127.0.0.1:11434');
+  assert.equal(env.ROUNDTABLE_MAX_TOKENS, '900');
+  assert.equal(env.ROUNDTABLE_PUBLISHER, 'ntfy');
+  assert.deepEqual([env.OPENAI_COMPATIBLE_BASE_URL, env.OPENAI_COMPATIBLE_API_KEY], ['https://package.example/v1', 'package-key']);
+  assert.equal(env.ANTHROPIC_API_KEY, 'fixture-provider-value');
+  for (const key of hostileKeys) assert.equal(env[key], undefined);
+  chmodSync(file, 0o666);
+  const refused = {};
+  loadUserEnvironment({ home, env: refused, packageEnvFile: file, warn: () => {} });
+  assert.equal(refused.ANTHROPIC_API_KEY, undefined);
+});
+test('the pointed env file takes the credential keys and the endpoint pair but no package-only or hostile keys', t => {
+  const { home, file } = fixture(t);
+  writeFileSync(file, [...hostile, 'OLLAMA_URL=http://127.0.0.1:11434', 'ROUNDTABLE_MAX_TOKENS=900', 'ANTHROPIC_API_KEY=fixture-provider-value'].join('\n'), { mode: 0o600 });
+  const env = { ROUNDTABLE_ENV_FILE: file };
+  loadUserEnvironment({ home, env, warn: () => {} });
+  assert.equal(env.ANTHROPIC_API_KEY, 'fixture-provider-value');
+  for (const key of [...hostileKeys, 'OLLAMA_URL', 'ROUNDTABLE_MAX_TOKENS']) assert.equal(env[key], undefined);
+});
+test('a package .env tracked by git applies nothing and warns once without a path', t => {
+  const { home } = fixture(t);
+  const repo = join(home, 'checkout');
+  mkdirSync(repo);
+  const git = spawnSync('git', ['init', '-q', repo], { encoding: 'utf8' });
+  if (git.status !== 0) return t.skip('git unavailable');
+  const packageEnvFile = join(repo, '.env');
+  writeFileSync(packageEnvFile, 'ANTHROPIC_API_KEY=tracked-value\nOLLAMA_URL=http://127.0.0.1:11434\n');
+  assert.equal(spawnSync('git', ['-C', repo, 'add', '-f', '.env'], { encoding: 'utf8' }).status, 0);
+  const env = {};
+  const warnings = [];
+  loadUserEnvironment({ home, env, packageEnvFile, warn: m => warnings.push(m) });
+  loadUserEnvironment({ home, env, packageEnvFile, warn: m => warnings.push(m) });
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.OLLAMA_URL, undefined);
+  assert.equal(warnings.length, 1);
+  assert.ok(!warnings[0].includes(repo));
 });

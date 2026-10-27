@@ -30,6 +30,14 @@ for (const srv of Object.values(mcp.mcpServers)) {
 }
 write("plugins/agent-roundtable/.mcp.json", mcp);
 
+for (const path of ["README.md", "docs/getting-started.md", "docs/distribution.md"]) {
+  const fullPath = join(root, path);
+  const doc = readFileSync(fullPath, "utf8");
+  const synced = doc.replace(/(\bnpx\b[^\n`]*?[ \t])agent-roundtable(?:@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)?(?=[ \t`]|$)/g,
+    (_, prefix) => `${prefix}agent-roundtable@${version}`);
+  writeFileSync(fullPath, synced);
+}
+
 const configPath = join(root, "src/config.ts");
 const config = readFileSync(configPath, "utf8");
 const synced = config.replace(/^export const VERSION = "[^"]*";$/m, `export const VERSION = "${version}";`);

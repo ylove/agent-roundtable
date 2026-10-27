@@ -3,9 +3,10 @@
 // ============================================================================
 
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { agentKey } from "./agents.js";
-import { ACTIVITY_LOG_PATH, ACTIVITY_LOG_MAX_ENTRIES } from "./config.js";
+import { ACTIVITY_LOG_PATH, ACTIVITY_LOG_MAX_ENTRIES, ROUNDTABLE_HOME } from "./config.js";
+import { ensureStateHome, isContained } from "./security/fs-safe.js";
 import { scrub } from "./security/secrets.js";
 
 export type ActivityKind = "meeting" | "local-meeting" | "collaboration" | "ultraplan" | "agent-creation" | "agent-refinement";
@@ -45,7 +46,8 @@ export function recordActivity(entry: Omit<ActivityEntry, "at"> & { at?: string 
       public: entry.public,
       ...(entry.origin !== undefined && { origin: entry.origin }),
     };
-    mkdirSync(dirname(path), { recursive: true });
+    if (isContained(ROUNDTABLE_HOME, resolve(path))) ensureStateHome(ROUNDTABLE_HOME);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     appendFileSync(path, JSON.stringify(normalized) + "\n", { mode: 0o600 });
     const lines = readFileSync(path, "utf-8").split(/\r?\n/).filter((line) => line.trim());
     if (lines.length > 1.2 * ACTIVITY_LOG_MAX_ENTRIES) {

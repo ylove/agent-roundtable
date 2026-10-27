@@ -45,7 +45,7 @@ export const holdPostmortemTools: ToolDefinition[] = [
       "It ends with an artifact block, one line each: Artifact: <kind> | <target> | <finding ids> | <text>. Kinds: fix (follow-up), rule and contract rule (project lessons, read before the next plan and contract), persona addendum (appended to an agent's persona file under ## Postmortem addenda, with a backup), agent rule (shown in that agent's task card), memory (the agent's memory file; memory_target: \"claude\" also writes the repository's .claude/agent-memory). " +
       "Dissent score artifacts carry a dissent id, finding ids, an outcome (vindicated/refuted/untested) and supporting evidence; the meeting context and docs/modes/postmortem.md give the exact artifact syntax. The reviewed run’s dissents are included; scores remain advisory. Accepting one requires orchestrator (the contract’s orchestrator identity) and project opt-in; it uses the same scoring path as score_dissent. " +
       "The result has the transcript, the proposed artifacts and any lines that could not be used. " +
-      "action conclude: pm, your closing statement, and accept[] (artifact ids) / reject[{id, why}]. Only accepted artifacts take effect, each audited. The result has a summary and the record path to relay to the human, who can read every turn (postmortem read).",
+      "action conclude: pm, your closing statement, and accept[] (artifact ids) / reject[{id, why}]. Persisted kinds (rule, agent_rule, contract_rule, persona_addendum, memory) need a person’s sign-off: pass orchestrator (the human-supplied identity) and explicit accept ids; otherwise they stay pending and excluded from prompts. Review with postmortem pending, then use postmortem signoff. Each application is audited. The result has a summary and the record path to relay to the human, who can read every turn (postmortem read).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -60,7 +60,7 @@ export const holdPostmortemTools: ToolDefinition[] = [
         rounds: { type: "integer", minimum: LIMITS.rounds.min, maximum: LIMITS.rounds.max, description: "hold: rounds (default 2)." },
         memory_target: { type: "string", enum: ["claude"], description: "hold: with \"claude\", accepted memory artifacts are also appended to <repo>/.claude/agent-memory/<agent>/MEMORY.md (refused through symlinks)." },
         pm: { type: "string", pattern: PM_PATTERN, description: "conclude: the postmortem (pm-…) hold returned." },
-        orchestrator: { type: "string", "x-nonblank": true, description: "conclude: required when accepting dissent score artifacts; the reviewed contract’s orchestrator identity, as for score_dissent." },
+        orchestrator: { type: "string", maxLength: 200, "x-nonblank": true, description: "conclude: human-supplied sign-off identity for persisted kinds; must match the frozen contract’s orchestrator for a run. Also required for dissent_score as for score_dissent." },
         closing: { type: "string", maxLength: LIMITS.closing, description: "conclude: your closing statement, the last turn of the record." },
         accept: { type: "array", maxItems: LIMITS.artifacts, items: { type: "string", maxLength: 16 }, description: "conclude: ids of the artifacts to apply (a1, a2, …)." },
         reject: {

@@ -2,6 +2,8 @@
 
 ## 2.1.0 (unreleased)
 
+- Persisted lessons need a person’s sign-off, with pending review in the postmortem tool, CLI and dashboard record, signer/time audit and lineage, and informational review notices for legacy lessons (#243).
+
 - **Live duel room (#228).** Side-by-side staged apps, Harness transcripts, live version swaps, metrics, stop/resume and human judging controls, plus split and stack terminal layouts. See [the duel room](docs/modes/duel-room.md).
 - Add Google Antigravity (`agy`) as an explicit seat runtime and opt-in heads-down worker, with JSON status checks, reported token usage and driver-side submission (#230, WS33).
 - **Live duel engine (#227).** Independent staged builds, live process metrics, private stop/resume checkpoints, optional human judging, and a saved chosen artifact (`--out` to export). Adds `--stages`, `--resume`, `--human-judge`, and `--layout`, MCP stages/metrics/artifact metadata, and a staged promotional demo with backward-compatible replay. See [duel](docs/modes/duel.md).

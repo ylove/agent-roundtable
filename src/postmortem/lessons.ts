@@ -14,7 +14,7 @@ import type { BlackboardState, Decision } from "../execution/types.js";
 import { loadLessons, projectKeyOf, saveLessons } from "./store.js";
 import type { Lesson } from "./types.js";
 
-export type NewLesson = Pick<Lesson, "kind" | "target" | "text" | "pm" | "findings"> & { flag?: true };
+export type NewLesson = Pick<Lesson, "kind" | "target" | "text" | "pm" | "findings"> & { flag?: true; signoff?: Lesson["signoff"] };
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 
@@ -25,6 +25,7 @@ export function addLessons(key: string, items: readonly NewLesson[], at = new Da
   for (const item of items) {
     const lesson: Lesson = {
       id: newId("les"), kind: item.kind, target: item.target, text: scrub(item.text), pm: item.pm, findings: [...item.findings], at,
+      ...(item.signoff && { signoff: item.signoff }),
       ...(item.flag && { flag: true as const }),
     };
     for (const old of all) {
@@ -36,6 +37,9 @@ export function addLessons(key: string, items: readonly NewLesson[], at = new Da
   saveLessons(key, all);
   return added;
 }
+
+/** Lessons accepted by earlier versions remain active and can be reviewed. Flags need no sign-off. */
+export const isLegacyLesson = (lesson: Lesson): boolean => lesson.kind !== "flag" && lesson.signoff === undefined;
 
 export const activeLessons = (key: string): Lesson[] => loadLessons(key).filter((l) => l.superseded_by === undefined);
 
@@ -50,21 +54,24 @@ export function lessonsForRoot(root: string): { key: string; lessons: Lesson[] }
   }
 }
 
+export type LessonView = Lesson & { accepted_before_signoff?: true };
+
 export interface LessonsView {
   project: string;
-  flags: Lesson[];
-  rules: Lesson[];
-  contract_rules: Lesson[];
-  agent_rules: Lesson[];
+  flags: LessonView[];
+  rules: LessonView[];
+  contract_rules: LessonView[];
+  agent_rules: LessonView[];
 }
 
 export function viewOf(key: string, lessons: readonly Lesson[]): LessonsView {
+  const marked = lessons.map((l) => ({ ...l, ...(isLegacyLesson(l) && { accepted_before_signoff: true as const }) }));
   return {
     project: key,
-    flags: lessons.filter((l) => l.kind === "flag"),
-    rules: lessons.filter((l) => l.kind === "rule"),
-    contract_rules: lessons.filter((l) => l.kind === "contract_rule"),
-    agent_rules: lessons.filter((l) => l.kind === "agent_rule"),
+    flags: marked.filter((l) => l.kind === "flag"),
+    rules: marked.filter((l) => l.kind === "rule"),
+    contract_rules: marked.filter((l) => l.kind === "contract_rule"),
+    agent_rules: marked.filter((l) => l.kind === "agent_rule"),
   };
 }
 

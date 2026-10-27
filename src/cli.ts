@@ -12,6 +12,7 @@
 //   usage [--json] [--watch]                                            who is using what, on which platform
 //   stop <agent> [--execution <exe> | --session <id>] [--reason <text>] stop one agent (heads-down or at the table)
 //   preview start|list|stop                                             Docker dev-server previews on 127.0.0.1
+//   postmortem pending|signoff                                         review and sign off persisted lessons
 //   up / doctor                                                         set up, check and start the local service
 //   --version | -v | version                                            print the version
 //   help                                                                this text
@@ -47,6 +48,8 @@ export const USAGE = [
   "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2]",
   "  roundtable up [--setup] [--no-input] [--no-serve] [--open] [--check-keys]",
   "  roundtable doctor [--json] [--check-keys]",
+  "  roundtable postmortem pending [--project <dir>] [--json]",
+  "  roundtable postmortem signoff <pm> --by <identity> <artifact-id>... [--json]",
   "  roundtable --version | -v | version",
   "  roundtable serve [--detach] [--no-keep-runners] [--bind loopback|tailnet] | serve status|stop",
   "  roundtable serve --print-service launchd|systemd",
@@ -306,6 +309,11 @@ export async function runCli(argv: string[]): Promise<void> {
     case "notify": {
       const { runNotifyCli } = await import("./cli-serve.js");
       process.exitCode = await runNotifyCli(rest);
+      return;
+    }
+    case "postmortem": {
+      const { runPostmortemCli } = await import("./cli-postmortem.js");
+      process.exitCode = await runPostmortemCli(rest);
       return;
     }
     case "agents": {

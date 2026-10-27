@@ -9,14 +9,15 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { readDraft, recordFinding, scopeLabel, scopeOf, updateFix, type DraftView } from "../postmortem/draft.js";
 import { activeLessons, viewOf } from "../postmortem/lessons.js";
+import { signOffPostmortem } from "../postmortem/meeting.js";
 import { isEnabled, requireEnabled, resolveProject, setEnabled, type ProjectRef } from "../postmortem/project.js";
 import { renderRecord } from "../postmortem/record.js";
-import { findRecord, listDrafts, listProjectKeys, listRecords, loadDraft, readProject, recordPath } from "../postmortem/store.js";
+import { findRecord, listDrafts, listProjectKeys, listRecords, loadDraft, pendingPostmortems, readProject, recordPath } from "../postmortem/store.js";
 import { CATEGORIES, LIMITS, PM_ID_RE } from "../postmortem/types.js";
 import { POSTMORTEM } from "./names.js";
 import { ORCHESTRATOR_ONLY, type ToolArgs, type ToolDefinition } from "./shared.js";
 
-export const POSTMORTEM_ACTIONS = ["enable", "disable", "record", "fix", "draft", "lessons", "list", "read"] as const;
+export const POSTMORTEM_ACTIONS = ["enable", "disable", "record", "fix", "draft", "lessons", "list", "read", "pending", "signoff"] as const;
 
 export const EXECUTION_ID = { type: "string", pattern: "^exe-[0-9a-hjkmnp-tv-z]{16}$", description: "The heads-down run (exe-…) the draft belongs to. Give this or work." } as const;
 export const WORK = { type: "string", maxLength: LIMITS.work, description: "A short label for at-the-table work (for example \"checkout redesign\") when there is no run. Give this or execution_id." } as const;
@@ -62,6 +63,13 @@ function checkPostmortemArgs(a: Record<string, unknown>): void {
       need("project", "for draft");
       checkScope(POSTMORTEM, a);
       break;
+    case "signoff":
+      need("pm", "for signoff");
+      need("orchestrator", "for signoff: the human-supplied identity");
+      need("accept", "for signoff: explicit artifact ids");
+      if (!Array.isArray(a.accept) || !a.accept.length) throw new Error("accept must list at least one pending artifact id");
+      break;
+    case "pending":
     case "lessons":
     case "list":
       need("project", `for ${action}`);
@@ -84,12 +92,12 @@ export const postmortemTools: ToolDefinition[] = [
       "Nothing infers it. A heads-down run inherits it from its contract (propose_contract sets it); the runner then records a finding by itself when a submission is sent back after testing. disable turns it off and keeps stored postmortems. " +
       "record adds a finding to the draft of a scope (execution_id for a run, or work for at-the-table work): {summary, detected_by, responsible[] (persona names, or \"orchestrator\"), category, task?, evidence[] (refs only: sha256: blob refs, event ids, commit shas, paths)}. " +
       "fix sets a finding's fix {status: pending|fixed|abandoned, by?, ref?}; in a run, retries, merges and failures update fixes by themselves. draft returns the findings, what is still pending and whether the meeting can be held. " +
-      "lessons returns the active lessons of a project (always, whether or not the mode is on); list shows its drafts and postmortems; read returns a postmortem's full record (every turn) for you to show the human verbatim.",
+      "Persisted kinds (rule, agent_rule, contract_rule, persona_addendum, memory) need a person’s sign-off: orchestrator (the human-supplied identity) and explicit accept ids. pending lists pending text and hashes for a project; signoff applies selected pending ids from a concluded pm. Without sign-off they stay visible in the record and never enter prompts. lessons returns the active lessons, pending count and accepted_before_signoff markers for legacy lessons (which keep flowing into prompts, whether or not the mode is on); list shows its drafts and postmortems; read returns a postmortem's full record (every turn) for you to show the human verbatim.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        action: { type: "string", enum: [...POSTMORTEM_ACTIONS], description: "enable, disable, record, fix, draft, lessons, list or read." },
+        action: { type: "string", enum: [...POSTMORTEM_ACTIONS], description: "enable, disable, record, fix, draft, lessons, list, read, pending or signoff." },
         project: PROJECT,
         execution_id: EXECUTION_ID,
         work: WORK,
@@ -120,7 +128,9 @@ export const postmortemTools: ToolDefinition[] = [
           },
           required: ["status"],
         },
-        pm: { type: "string", pattern: PM_PATTERN, description: "read: the postmortem (pm-…) hold_postmortem returned." },
+        orchestrator: { type: "string", maxLength: 200, "x-nonblank": true, description: "signoff: the human-supplied identity; must match the frozen contract’s orchestrator for a run." },
+        accept: { type: "array", minItems: 1, maxItems: LIMITS.artifacts, items: { type: "string", maxLength: 16 }, description: "signoff: explicit pending artifact ids to apply." },
+        pm: { type: "string", pattern: PM_PATTERN, description: "read / signoff: the postmortem (pm-…) hold_postmortem returned." },
       },
       required: ["action"],
     },
@@ -153,7 +163,7 @@ function listBody(p: ProjectRef) {
     drafts: listDrafts(p.key).map((d) => ({ pm: d.pm, scope: d.scope, findings: d.findings.length, created: d.created })),
     postmortems: listRecords(p.key).map((r) => ({
       pm: r.pm, status: r.status, scope: r.scope, format: r.format, held_at: r.held_at, ...(r.concluded_at && { concluded_at: r.concluded_at }),
-      findings: r.findings.length, proposed: r.proposed.length, ...(r.accepted && { accepted: r.accepted.length }), record: recordPath(r.project, r.pm, "md"),
+      findings: r.findings.length, proposed: r.proposed.length, ...(r.accepted && { accepted: r.accepted.length }), pending: r.pending?.length ?? 0, record: recordPath(r.project, r.pm, "md"),
     })),
   };
 }
@@ -164,6 +174,7 @@ export async function handlePostmortemTool(name: string, args: ToolArgs): Promis
   // null means "not given", as in validation.
   const a = Object.fromEntries(Object.entries(args ?? {}).filter(([, v]) => v !== null && v !== undefined)) as Record<string, unknown>;
   const action = a.action as (typeof POSTMORTEM_ACTIONS)[number];
+  if (action === "signoff") return render(await signOffPostmortem({ pm: a.pm as string, orchestrator: a.orchestrator as string, accept: a.accept as string[] }));
   if (action === "read") {
     const pm = a.pm as string;
     if (!PM_ID_RE.test(pm)) throw new Error(`"pm" is not a postmortem id (pm-…)`);
@@ -202,8 +213,10 @@ export async function handlePostmortemTool(name: string, args: ToolArgs): Promis
       const d = await readDraft(project, scope);
       return render(d ? draftBody(d) : { project: project.key, scope, findings: [], ready: false, next: `No findings are recorded for ${scopeLabel(scope)}.` });
     }
+    case "pending":
+      return render({ project: project.key, pending: pendingPostmortems(project.key) });
     case "lessons":
-      return render({ ...viewOf(project.key, activeLessons(project.key)), postmortem_mode: isEnabled(project.key) ? "on" : "off" });
+      return render({ pending: pendingPostmortems(project.key).length, ...viewOf(project.key, activeLessons(project.key)), postmortem_mode: isEnabled(project.key) ? "on" : "off" });
     case "list":
       return render(listBody(project));
     default:

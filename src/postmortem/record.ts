@@ -5,7 +5,7 @@
 import { scrub } from "../security/secrets.js";
 import { dissentsSection } from "./dissents.js";
 import { scopeLabel } from "./draft.js";
-import type { PostmortemRecord } from "./types.js";
+import { PERSISTED_KINDS, type PostmortemRecord } from "./types.js";
 
 const text = (s: string | undefined) => scrub(s ?? "").trim();
 const cell = (s: string, n = 300) => {
@@ -19,7 +19,10 @@ const quote = (s: string) => text(s).split(/\r?\n/).map((l) => `> ${l}`).join("\
 
 function artifactStatus(r: PostmortemRecord, id: string): string {
   if (r.status !== "concluded") return "proposed";
+  if (r.pending?.includes(id)) return "pending sign-off";
   const applied = r.applied?.find((a) => a.id === id);
+  if (applied?.signoff) return `accepted; signed off by ${cell(applied.signoff.by, 200)} at ${cell(applied.signoff.at)}${applied.audit_pending ? "; audit pending" : ""}`;
+  if (applied && PERSISTED_KINDS.includes(applied.kind) && !applied.note?.startsWith("failed")) return "accepted before sign-off";
   if (applied) return applied.note?.startsWith("failed") ? `accepted, not applied (${cell(applied.note, 200)})` : applied.audit_pending ? "accepted, audit pending" : "accepted";
   const rej = r.rejected?.find((x) => x.id === id);
   return rej ? `rejected: ${cell(rej.why, 200)}` : "not accepted";
@@ -60,7 +63,13 @@ export function renderRecord(r: PostmortemRecord): string {
     out.push("None were proposed.");
   }
   if (r.rejected_lines.length) out.push("", "Lines that could not be used:", ...r.rejected_lines.map((l) => `- ${text(l)}`));
-  if (r.applied?.length) out.push("", "## Applied", "", ...r.applied.map((a) => `- ${a.id} (${a.kind} → ${cell(a.target, 80)}): ${cell(a.note ?? "recorded", 300)}${a.audit_pending ? " (audit pending)" : ""}`));
+  if (r.pending?.length) {
+    out.push("", "## Pending sign-off", "", "These artifacts await a person’s sign-off and are excluded from future prompts.", "");
+    for (const a of r.proposed.filter((a) => r.pending?.includes(a.id))) {
+      out.push(`- ${a.id} (${a.kind} → ${cell(a.target, 80)}), hash: ${a.hash}`, "", quote(a.text), "");
+    }
+  }
+  if (r.applied?.length) out.push("", "## Applied", "", ...r.applied.map((a) => `- ${a.id} (${a.kind} → ${cell(a.target, 80)}): ${cell(a.note ?? "recorded", 300)}${a.signoff ? `; signed off by ${cell(a.signoff.by, 200)} at ${cell(a.signoff.at)}` : PERSISTED_KINDS.includes(a.kind) && !r.pending?.includes(a.id) && !a.note?.startsWith("failed") ? "; accepted before sign-off" : ""}${a.audit_pending ? " (audit pending)" : ""}`));
   if (r.flagged?.length) {
     out.push("", "## Flags", "", ...r.flagged.map((f) => `- \`${f.finding}\` [${f.category}] misread: ${cell(f.misread, 300)}${f.clearer ? `; clearer wording: ${cell(f.clearer, 300)}` : ""}`));
   }
@@ -70,14 +79,15 @@ export function renderRecord(r: PostmortemRecord): string {
 /** One paragraph for the host to relay to the human. */
 export function summaryParagraph(r: PostmortemRecord): string {
   const kinds = new Map<string, number>();
-  for (const a of r.applied ?? []) kinds.set(a.kind, (kinds.get(a.kind) ?? 0) + 1);
-  const accepted = r.accepted?.length ?? 0;
+  for (const a of (r.applied ?? []).filter((a) => !r.pending?.includes(a.id) && !a.note?.startsWith("failed"))) kinds.set(a.kind, (kinds.get(a.kind) ?? 0) + 1);
+  const accepted = (r.accepted ?? []).filter((id) => !r.pending?.includes(id) && !r.applied?.some((a) => a.id === id && a.note?.startsWith("failed"))).length;
   const cats = [...new Set(r.findings.map((f) => f.category))].join(", ");
   return (
     `A postmortem meeting (${r.format}, ${r.rounds} round${r.rounds === 1 ? "" : "s"}) took place for ${scopeLabel(r.scope)} with ${r.seats.join(", ")}; you were not at the table and nothing you type reaches it. ` +
     `It looked at ${r.findings.length} finding${r.findings.length === 1 ? "" : "s"} (${cats}). ` +
     `${accepted} of ${r.proposed.length} proposed artifact${r.proposed.length === 1 ? "" : "s"} ${accepted === 1 ? "was" : "were"} accepted` +
     `${kinds.size ? ` (${[...kinds].map(([k, n]) => `${n} ${k}`).join(", ")})` : ""}` +
+    `${r.pending?.length ? `; ${r.pending.length} pending sign-off` : ""}` +
     `${r.flagged?.length ? `, and ${r.flagged.length} misreading${r.flagged.length === 1 ? " was" : "s were"} flagged so the next plan states it explicitly` : ""}. ` +
     "The full record, every turn included, is available to read."
   );

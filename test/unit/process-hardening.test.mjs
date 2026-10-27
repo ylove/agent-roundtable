@@ -24,7 +24,7 @@ function fixture(t) {
   return root;
 }
 
-test("tracked package env files produce one path-free warning through resolved git", t => {
+test("tracked package env files apply nothing and warn once without a path, through resolved git", t => {
   const root = fixture(t), bin = join(root, "bin"), calls = join(root, "calls");
   mkdirSync(bin);
   const git = join(bin, "git");
@@ -35,7 +35,7 @@ test("tracked package env files produce one path-free warning through resolved g
   for (let i = 0; i < 2; i++) {
     const env = { PATH: ["", "relative", bin].join(delimiter) };
     loadUserEnvironment({ home: root, env, packageEnvFile, warn: message => warnings.push(message) });
-    assert.equal(env.ANTHROPIC_API_KEY, "fixture-value");
+    assert.equal(env.ANTHROPIC_API_KEY, undefined);
   }
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /tracked by git/);

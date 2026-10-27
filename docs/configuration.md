@@ -55,7 +55,7 @@
 | `ROUNDTABLE_SESSION_RETENTION_DAYS` | days an archived at-the-table session, and a postmortem draft that was never held, is kept; swept at server start | `30` (`0` or `off` keeps all) |
 | `ROUNDTABLE_AUDIT_RETENTION_DAYS` | days the audit log keeps a month file after the month ended; swept at server start | `365` (`0` or `off` keeps all) |
 
-The launcher's environment takes precedence. The package `.env` (next to `package.json`) fills allowed unset credentials and model defaults; an optional pointed env file then fills the same allowed unset variables. Existing values, including empty values, are preserved. See [`.env.example`](../.env.example).
+The launcher's environment takes precedence. The package `.env` (next to `package.json`) fills allowed unset settings; an optional pointed env file then fills its own allowed unset variables. Existing values, including empty values, are preserved. See [`.env.example`](../.env.example).
 
 ## Saved CLI settings and env files
 
@@ -71,15 +71,17 @@ Settings are saved as `{ "envFile": "…", "agentsDir": "…" }` in `~/.agent-ro
 
 **Owner-only rule.** `config.json`, the package `.env` and the pointed env file are read only when you own them and neither group nor world can write to them (mode 0600 or 0644 passes; 0666, or a file owned by another user, does not). Files that fail this rule supply no settings or keys. Invalid saved settings and pointed files produce path-free warnings; the optional package file is skipped. A tracked package `.env` produces one stderr warning per process, without its path. Keep credentials in an untracked private file.
 
-**OpenAI-compatible credentials.** Env files may fill `OPENAI_COMPATIBLE_API_KEY` only when the launcher set neither that key nor `OPENAI_COMPATIBLE_BASE_URL`. Endpoints come from the launcher, not env files. When selecting an endpoint, set its key in the launcher too.
+**OpenAI-compatible endpoint.** Env files supply `OPENAI_COMPATIBLE_BASE_URL` and `OPENAI_COMPATIBLE_API_KEY` only as a pair, and only when the launcher set neither. When the launcher selects an endpoint, set its key there too.
 
-Only these key names may be copied from either env file:
+**Pointed env file.** These key names may be copied from it:
 
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TOGETHER_API_KEY`, `REPLICATE_API_TOKEN`
-- `OPENAI_COMPATIBLE_API_KEY`, `OPENAI_COMPATIBLE_MODEL`
+- `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY`, `OPENAI_COMPATIBLE_MODEL`
 - `ROUNDTABLE_ANTHROPIC_MODEL`, `ROUNDTABLE_OPENAI_MODEL`, `ROUNDTABLE_TOGETHER_MODEL`, `ROUNDTABLE_REPLICATE_MODEL`, `ROUNDTABLE_OLLAMA_MODEL`, `ROUNDTABLE_EXECUTION_MODEL`
 
-Other credentials, `NODE_*`, proxy settings, `ROUNDTABLE_*` security switches, executable paths and URLs from either env file are ignored. Parsing copies only the allowed keys. The pointed file preserves existing values, including empty values. Precedence is the launcher's environment, then package `.env`, then the pointed file.
+**Package `.env`.** An untracked package `.env` may copy the same keys plus the settings `.env.example` documents: `OLLAMA_URL`, `ROUNDTABLE_AGENTS_DIR`, `ROUNDTABLE_MAX_TOKENS`, `ROUNDTABLE_LLM_TIMEOUT_MS`, `ROUNDTABLE_PUBLISHER`, `ROUNDTABLE_NTFY_URL`, `ROUNDTABLE_PUBLIC_TOPIC_PREFIX` and `ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS`. When git tracks the file, none of it is applied and one path-free warning is printed; move the settings to an untracked file. Other `ROUNDTABLE_*` settings in `.env.example` belong in the launcher's environment.
+
+From either file, other credentials, `NODE_*`, proxy settings, `ROUNDTABLE_*` security switches, executable paths and other URLs are ignored. Parsing copies only the allowed keys. Existing values, including empty values, are preserved. Precedence is the launcher's environment, then package `.env`, then the pointed file.
 
 The saved `agentsDir` sets `ROUNDTABLE_AGENTS_DIR` only when the variable is unset, before model and persona configuration is evaluated. `--agents-dir` overrides it for a terminal session. Set paths through `config set` or the shell, because the pointed env-file allowlist excludes `ROUNDTABLE_AGENTS_DIR`.
 

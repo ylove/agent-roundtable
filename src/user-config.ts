@@ -47,9 +47,20 @@ export interface UserConfig {
 }
 type Environment = Record<string, string | undefined>;
 const allowedKeys = new Set(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TOGETHER_API_KEY", "REPLICATE_API_TOKEN"]);
+// The endpoint and its key travel together, and only when the launcher set neither.
+const endpointPair = ["OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_API_KEY"];
+// Settings the package .env honours in addition to the pointed file's keys.
+const packageKeys = new Set([
+  "OLLAMA_URL", "ROUNDTABLE_AGENTS_DIR", "ROUNDTABLE_MAX_TOKENS", "ROUNDTABLE_LLM_TIMEOUT_MS", "ROUNDTABLE_PUBLISHER",
+  "ROUNDTABLE_NTFY_URL", "ROUNDTABLE_PUBLIC_TOPIC_PREFIX", "ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS",
+]);
 export function allowedEnvKey(key: string): boolean {
   return allowedKeys.has(key) || key === "OPENAI_COMPATIBLE_API_KEY" || key === "OPENAI_COMPATIBLE_MODEL" || /^ROUNDTABLE_(?:ANTHROPIC|OPENAI|TOGETHER|REPLICATE|OLLAMA|EXECUTION)_MODEL$/.test(key);
 }
+/** Keys the pointed env file may set: the secret-bearing set plus the documented endpoint. */
+function pointedEnvKey(key: string): boolean { return allowedEnvKey(key) || key === "OPENAI_COMPATIBLE_BASE_URL"; }
+/** Keys an untracked package .env may set. */
+function packageEnvKey(key: string): boolean { return pointedEnvKey(key) || packageKeys.has(key); }
 export function userConfigHome(env: Environment = process.env): string {
   return env.ROUNDTABLE_HOME || join(homedir(), ".agent-roundtable");
 }
@@ -153,22 +164,20 @@ export function unsetConfigEntry(kind: "secrets" | "connectors", name: string, h
 
 let warnedTrackedPackageEnv = false;
 
-/** Report tracked package credentials once, without naming the file. */
-function warnTrackedPackageEnv(file: string, source: Environment, warn: (message: string) => void): void {
-  if (warnedTrackedPackageEnv) return;
+/** Whether git tracks the package env file; false when git or the repository is unavailable. */
+function packageEnvTracked(file: string, source: Environment): boolean {
   const env = childEnv("git", {}, source);
   const git = findExecutable("git", env.PATH);
-  if (!git) return;
+  if (!git) return false;
   try {
     execFileSync(git, ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "ls-files", "--error-unmatch", "--", basename(file)], {
       cwd: dirname(file), env, timeout: 2000, maxBuffer: 4096, stdio: "ignore",
     });
-  } catch { return; }
-  warnedTrackedPackageEnv = true;
-  warn("The package env file is tracked by git; keep credentials in an untracked private file.");
+    return true;
+  } catch { return false; }
 }
 
-/** Preserve shell values; both env files fill only allowed keys. */
+/** Preserve shell values; each env file fills only its own allowed keys. */
 export function loadUserEnvironment(options: {
   env?: Environment; home?: string; packageEnvFile?: string; warn?: (message: string) => void;
 } = {}): void {
@@ -177,18 +186,24 @@ export function loadUserEnvironment(options: {
   const referenced = new Set<string>();
   const warn = options.warn ?? ((message: string) => console.error(message));
   const enabled = (env.ROUNDTABLE_DOTENV ?? "").trim().toLowerCase() !== "off";
-  const apply = (data: Record<string, string>) => {
+  const apply = (data: Record<string, string>, allowed: (key: string) => boolean) => {
+    const pairFree = endpointPair.every(key => shell[key] === undefined && (env[key] === undefined || referenced.has(key)));
     for (const [key, value] of Object.entries(data)) {
-      if (!allowedEnvKey(key) || referenced.has(key)) continue;
-      // Launcher-selected endpoints use launcher-selected credentials.
-      if (key === "OPENAI_COMPATIBLE_API_KEY" && shell.OPENAI_COMPATIBLE_BASE_URL !== undefined) continue;
+      if (!allowed(key) || referenced.has(key)) continue;
+      if (endpointPair.includes(key)) { if (pairFree) env[key] = value; continue; }
       if (env[key] === undefined) env[key] = value;
     }
   };
   if (enabled && options.packageEnvFile) {
     try {
-      warnTrackedPackageEnv(options.packageEnvFile, env, warn);
-      apply(parse(readRegular(options.packageEnvFile, true).text));
+      const file = readRegular(options.packageEnvFile, true);
+      if (packageEnvTracked(options.packageEnvFile, env)) {
+        // A tracked file can change with a checkout, so it supplies nothing.
+        if (!warnedTrackedPackageEnv) {
+          warnedTrackedPackageEnv = true;
+          warn("The package env file is tracked by git and was ignored; keep settings in an untracked private file.");
+        }
+      } else apply(parse(file.text), packageEnvKey);
     }
     catch { /* The package .env is optional. */ }
   }
@@ -213,7 +228,7 @@ export function loadUserEnvironment(options: {
     try {
       const file = readRegular(envFile, true);
       if (file.mode & 0o044) warn("The configured env file allows group or world read; restrict its permissions to 0600.");
-      apply(parse(file.text));
+      apply(parse(file.text), pointedEnvKey);
     } catch { warn("Unable to load the configured env file; it must be an absolute path to a regular file that you own and that others cannot modify."); }
   }
 }

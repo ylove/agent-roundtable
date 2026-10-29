@@ -49,8 +49,8 @@
     "test:live": "node test/live-smoke.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
-    "dotenv": "^18.0.8",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "dotenv": "^18.0.9",
     "yaml": "^2.9.1"
   },
   "devDependencies": {

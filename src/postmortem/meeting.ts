@@ -28,6 +28,7 @@ import { addLessons, activeLessons, type NewLesson } from "./lessons.js";
 import { requireEnabled, type ProjectRef } from "./project.js";
 import { renderRecord, summaryParagraph } from "./record.js";
 import { POSTMORTEM_ORIGIN_PREFIX, registerPostmortemSession } from "./sessions.js";
+import { lessonSignoffMode } from "./signoff-policy.js";
 import { findRecord, loadLessons, readProject, recordPath, removeDraft, saveRecord, withProjectLock } from "./store.js";
 import { PERSISTED_KINDS, FLAG_CATEGORIES, LIMITS, type AppliedArtifact, type Artifact, type FlagRecord, type PostmortemRecord, type PostmortemScope, type Signoff, type Turn } from "./types.js";
 
@@ -259,7 +260,10 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
     rejected_lines: rejected, warnings, record: recordPath(i.project.key, view.pm, "md"),
     next:
       `Read the transcript, then close the meeting with your own words: hold_postmortem { "action": "conclude", "pm": "${view.pm}", "closing": "…", "accept": [artifact ids], "reject": [{ "id", "why" }] }. ` +
-      "Persisted kinds need a person’s sign-off: pass orchestrator (the human-supplied identity) and explicit accept ids, otherwise they stay pending. For dissent_score, pass the contract’s orchestrator identity. Only signed-off persisted artifacts take effect. Tell the human the meeting happened; they can read every turn with postmortem(action: \"read\").",
+      (lessonSignoffMode() === "human"
+        ? `Persisted kinds stay pending until the person runs roundtable postmortem signoff ${view.pm} --by <identity> <artifact-id>... themselves. `
+        : "Persisted kinds need a person’s sign-off: pass orchestrator (the human-supplied identity) and explicit accept ids, otherwise they stay pending. ") +
+      "For dissent_score, pass the contract’s orchestrator identity. Only signed-off persisted artifacts take effect. Tell the human the meeting happened; they can read every turn with postmortem(action: \"read\").",
   };
 }
 
@@ -296,6 +300,9 @@ export interface ConcludeResult {
 
 function resultOf(r: PostmortemRecord, warnings: string[], lessonsAdded: number, already = false): ConcludeResult {
   const accepted = r.accepted ?? [];
+  const signoffNext = !r.pending?.length ? "" : lessonSignoffMode() === "human"
+    ? ` Persisted artifacts await a person's sign-off. Ask the person to review with postmortem(action: "pending") or roundtable postmortem pending, then run roundtable postmortem signoff ${r.pm} --by <identity> <artifact-id>... themselves.`
+    : " Persisted artifacts await a person’s sign-off; review with postmortem(action: \"pending\") and apply explicit ids with postmortem(action: \"signoff\", pm, orchestrator, accept).";
   return {
     status: "concluded", pm: r.pm, ...(already && { already_concluded: true as const }), record: recordPath(r.project, r.pm, "md"),
     summary: r.summary ?? summaryParagraph(r), accepted, pending: r.pending ?? [], rejected: r.rejected ?? [],
@@ -303,7 +310,7 @@ function resultOf(r: PostmortemRecord, warnings: string[], lessonsAdded: number,
     applied: r.applied ?? [],
     follow_ups: r.proposed.filter((a) => a.kind === "fix" && accepted.includes(a.id)).map((a) => ({ id: a.id, target: a.target, text: a.text })),
     flagged: r.flagged ?? [], lessons_added: lessonsAdded, warnings,
-    tell_the_human: `${r.summary ?? summaryParagraph(r)} The record is at ${recordPath(r.project, r.pm, "md")}; show it verbatim if they want to read it.${r.pending?.length ? " Persisted artifacts await a person’s sign-off; review with postmortem(action: \"pending\") and apply explicit ids with postmortem(action: \"signoff\", pm, orchestrator, accept)." : ""}${r.applied?.some((a) => a.audit_pending) ? " An application audit is still pending; repeat conclude to finish it." : ""}`,
+    tell_the_human: `${r.summary ?? summaryParagraph(r)} The record is at ${recordPath(r.project, r.pm, "md")}; show it verbatim if they want to read it.${signoffNext}${r.applied?.some((a) => a.audit_pending) ? " An application audit is still pending; repeat conclude to finish it." : ""}`,
   };
 }
 
@@ -430,7 +437,7 @@ export async function concludePostmortem(i: ConcludeInput): Promise<ConcludeResu
       return;
     }
     const signedKinds = rec.proposed.some((a) => accept.includes(a.id) && PERSISTED_KINDS.includes(a.kind));
-    const by = signedKinds && i.orchestrator !== undefined ? await validateSignoff(rec, proj, i.orchestrator) : undefined;
+    const by = signedKinds && lessonSignoffMode() === "any" && i.orchestrator !== undefined ? await validateSignoff(rec, proj, i.orchestrator) : undefined;
     const pending: string[] = [];
     // A damaged lessons.json fails here, before any persona or memory file is written.
     loadLessons(rec.project);

@@ -12,6 +12,7 @@ import { activeLessons, viewOf } from "../postmortem/lessons.js";
 import { signOffPostmortem } from "../postmortem/meeting.js";
 import { isEnabled, requireEnabled, resolveProject, setEnabled, type ProjectRef } from "../postmortem/project.js";
 import { renderRecord } from "../postmortem/record.js";
+import { lessonSignoffMode } from "../postmortem/signoff-policy.js";
 import { findRecord, listDrafts, listProjectKeys, listRecords, loadDraft, pendingPostmortems, readProject, recordPath } from "../postmortem/store.js";
 import { CATEGORIES, LIMITS, PM_ID_RE } from "../postmortem/types.js";
 import { POSTMORTEM } from "./names.js";
@@ -92,7 +93,7 @@ export const postmortemTools: ToolDefinition[] = [
       "Nothing infers it. A heads-down run inherits it from its contract (propose_contract sets it); the runner then records a finding by itself when a submission is sent back after testing. disable turns it off and keeps stored postmortems. " +
       "record adds a finding to the draft of a scope (execution_id for a run, or work for at-the-table work): {summary, detected_by, responsible[] (persona names, or \"orchestrator\"), category, task?, evidence[] (refs only: sha256: blob refs, event ids, commit shas, paths)}. " +
       "fix sets a finding's fix {status: pending|fixed|abandoned, by?, ref?}; in a run, retries, merges and failures update fixes by themselves. draft returns the findings, what is still pending and whether the meeting can be held. " +
-      "Persisted artifacts (rules, addenda and memory) need a person’s sign-off: orchestrator (the human-supplied identity) and explicit accept ids. pending lists pending text and hashes for a project; signoff applies selected pending ids from a concluded pm. Without sign-off they stay visible in the record and never enter prompts. lessons returns the active lessons, pending count and markers for lessons accepted before sign-off (which keep flowing into prompts, whether or not the mode is on); list shows its drafts and postmortems; read returns a postmortem's full record (every turn) for you to show the human verbatim.",
+      "Persisted artifacts (rules, addenda and memory) need a person’s sign-off: orchestrator (the human-supplied identity) and explicit accept ids. pending lists pending text and hashes for a project; signoff applies selected pending ids from a concluded pm. ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI. Without sign-off they stay visible in the record and never enter prompts. lessons returns the active lessons, pending count and markers for lessons accepted before sign-off (which keep flowing into prompts, whether or not the mode is on); list shows its drafts and postmortems; read returns a postmortem's full record (every turn) for you to show the human verbatim.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -174,7 +175,13 @@ export async function handlePostmortemTool(name: string, args: ToolArgs): Promis
   // null means "not given", as in validation.
   const a = Object.fromEntries(Object.entries(args ?? {}).filter(([, v]) => v !== null && v !== undefined)) as Record<string, unknown>;
   const action = a.action as (typeof POSTMORTEM_ACTIONS)[number];
-  if (action === "signoff") return render(await signOffPostmortem({ pm: a.pm as string, orchestrator: a.orchestrator as string, accept: a.accept as string[] }));
+  if (action === "signoff") {
+    if (lessonSignoffMode() === "human") {
+      const pm = typeof a.pm === "string" && PM_ID_RE.test(a.pm) ? a.pm : "<pm>";
+      throw new Error(`postmortem: ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI. Ask the person to run roundtable postmortem signoff ${pm} --by <identity> <artifact-id>... themselves.`);
+    }
+    return render(await signOffPostmortem({ pm: a.pm as string, orchestrator: a.orchestrator as string, accept: a.accept as string[] }));
+  }
   if (action === "read") {
     const pm = a.pm as string;
     if (!PM_ID_RE.test(pm)) throw new Error(`"pm" is not a postmortem id (pm-…)`);

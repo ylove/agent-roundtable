@@ -60,7 +60,9 @@ The orchestrator then closes the meeting with `hold_postmortem(action: "conclude
 
 ## Signing off persisted lessons
 
-Persisted lessons need a person's sign-off. This covers `rule`, `agent_rule`, `contract_rule`, `persona_addendum` and `memory`. Supply `orchestrator` (the human-supplied identity, non-blank after scrubbing and at most 200 characters) and an explicit `accept` list when concluding. For an execution, the identity must equal the frozen contract's `scope.orchestrator`; at the table, any non-blank identity is accepted and recorded. `fix` and `dissent_score` keep their existing checks.
+Persisted lessons need a person's sign-off. This covers `rule`, `agent_rule`, `contract_rule`, `persona_addendum` and `memory`. In `any` mode, supply `orchestrator` (the human-supplied identity, non-blank after scrubbing and at most 200 characters) and an explicit `accept` list when concluding. For an execution, the identity must equal the frozen contract's `scope.orchestrator`; at the table, any non-blank identity is accepted and recorded. `fix` and `dissent_score` keep their existing checks.
+
+Set `ROUNDTABLE_LESSON_SIGNOFF=human` to limit sign-off to the CLI. This stops sign-off through MCP tool calls, including prompt-injected ones. Concluding a meeting leaves persisted artifacts pending even if an identity is supplied. Pending lists and records remain available. The default is `any`, which keeps the existing behavior. Values are trimmed and case-insensitive; unset or empty means `any`. Any other value uses `human` and writes one warning to stderr per process. This is not a sandbox. An agent with shell access can still run the CLI.
 
 Without that identity, the listed persisted artifacts stay **pending sign-off** in the concluded record. Their full text and hash remain visible under **Pending sign-off**, including on the dashboard. They write no lesson, persona addendum or memory file and never enter plan, contract, card or ultraplan prompts. Flags still record findings; their clearer wording comes only from signed-off artifacts.
 

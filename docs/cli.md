@@ -1,6 +1,6 @@
 # CLI reference
 
-The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts the orchestrator MCP stdio server. From a source checkout, replace `agent-roundtable` with `node dist/index.js`. Requires Node 22+.
+The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts the orchestrator MCP stdio server. From a source checkout, replace `agent-roundtable` with `node dist/index.js`. Requires Node 22.19+.
 
 | Subcommand | Arguments | Purpose |
 | --- | --- | --- |

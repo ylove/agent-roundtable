@@ -2,6 +2,7 @@
 
 ## 2.0.0 (not yet published to npm)
 
+- **Node 22.19 or later.** The pinned HTTP client moves to undici 8, which requires Node 22.19.0; `engines`, the doctor's Node check and the docs follow.
 - **Distribution controls (#231).** Plugin-root package resolution, version-pinned npx commands, CLI bin advice, digest-pinned sandbox images, private state-home creation, explicit container build scripts, extended CodeQL queries, and a protected release publish job with SBOM attachments.
 
 2.0 runs the table from a terminal as well as over MCP, and keeps heads-down runs going on their own. Headlines: the duel mode and the `roundtable` CLI with per-seat models and provider judgment; CLI runtimes (Hermes, OpenClaw, Gemini CLI, Codex) as seats and as heads-down workers; the agents library and Casting Call; a credentials broker with MCP connectors for workers and seats; page checks and Docker dev-server previews; swarms; `roundtable serve` with private check-ins; `roundtable up` and `doctor`; a Docker image, a Claude Code plugin and an MCP registry listing; and the move to the Apache License 2.0. 1.1.0 was never published and ships with this release.

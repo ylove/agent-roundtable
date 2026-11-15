@@ -9,7 +9,7 @@
     "roundtable": "dist/index.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "license": "Apache-2.0",
   "repository": {

@@ -24,6 +24,8 @@ test("nodeMeets compares against the engines range", () => {
   assert.equal(nodeMeets("v24.1.0", ">=22"), true);
   assert.equal(nodeMeets("20.11.1", ">=22"), false);
   assert.equal(nodeMeets("garbage", ">=22"), false);
+  assert.equal(nodeMeets("v22.18.0", ">=22.19.0"), false);
+  assert.equal(nodeMeets("v22.19.0", ">=22.19.0"), true);
 });
 
 test("doctor passes with the essentials and names keys without values", async () => {

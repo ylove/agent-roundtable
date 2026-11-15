@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { json } from "./unit/helpers.mjs";
 
+const AUTO_TOOLS = ["start_meeting", "start_collaboration", "start_ultraplan", "start_duel", "casting_call"];
 const EXPECTED_PROVIDERS = ["anthropic", "openai", "together", "replicate", "ollama", "openai_compatible"];
 const PROVIDER_TOOLS = ["start_meeting", "chat_completion", "start_collaboration", "start_ultraplan", "create_agent", "improve_agent", "propose_contract", "amend_contract", "resolve_escalation", "hold_postmortem"];
 const NEW_START_TOOLS = ["start_ultraplan", "create_agent", "improve_agent"];
@@ -15,7 +16,7 @@ const root = mkdtempSync(join(tmpdir(), "roundtable-smoke-"));
 const agentsDir = join(root, "agents");
 mkdirSync(agentsDir);
 for (const name of ["cfo", "product-lead", "skeptic"]) {
-  writeFileSync(join(agentsDir, `${name}.md`), readFileSync(new URL(`../examples/${name}.md`, import.meta.url)));
+  writeFileSync(join(agentsDir, `${name}.md`), readFileSync(new URL(`../examples/starter-pack/${name}.md`, import.meta.url)));
 }
 writeFileSync(join(root, "README.md"), "Smoke project: ship the onboarding launch.");
 // Keys are deliberately absent/unset so no provider can be reached even by accident; a fake
@@ -41,14 +42,14 @@ const smokeEnv = {
   ROUNDTABLE_PROVIDER_RETRIES: "0",
   // Prototype sandboxes stay under the temp root; never spawn a browser or headless Chrome.
   ROUNDTABLE_PROTOTYPE_DIR: join(root, "prototypes"),
-  ROUNDTABLE_PROTOTYPE_SCREENSHOTS: "0",
+  ROUNDTABLE_PROTOTYPE_SCREENSHOTS: "0", ROUNDTABLE_PAGE_CHECKS: "0",
   ROUNDTABLE_PROTOTYPE_OPEN: "",
 };
 const PROTOTYPE_START_TOOLS = ["start_meeting", "start_local_meeting", "start_collaboration"];
 const RUN_TOOLS = ["execute", "execution_status", "control_execution", "resolve_escalation"];
-const WORKER_TOOLS = ["read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"];
+const WORKER_TOOLS = ["read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate", "spawn_subtasks", "await_subtasks"];
 
-// A worker server (mcp --worker) for a registered agent lists dissent filing and the seven execution tools.
+// A worker server (mcp --worker) for a registered agent lists dissent filing and the nine execution tools.
 async function checkWorkerServer() {
   console.log("worker server");
   Object.assign(process.env, smokeEnv);
@@ -67,7 +68,7 @@ async function checkWorkerServer() {
   try {
     await worker.init();
     const listed = await worker.listTools();
-    check("worker-mode listTools returns dissent filing and the 7 execution tools", () =>
+    check("worker-mode listTools returns dissent filing and the 9 execution tools", () =>
       assert(JSON.stringify(listed.map((t) => t.name)) === JSON.stringify(["file_dissent", ...WORKER_TOOLS]), listed.map((t) => t.name).join(", ")));
     check("the worker server consumed its token file", () => assert(!existsSync(files.tokenPath), files.tokenPath));
     check("the worker server writes only JSON-RPC to stdout", () => assert(worker.noise().length === 0, JSON.stringify(worker.noise())));
@@ -339,7 +340,7 @@ try {
   const serialized = JSON.stringify(tools);
 
   console.log("tools/list");
-  check("exposes 42 distinct tools", () => assert(tools.length === 42 && new Set(tools.map((t) => t.name)).size === 42, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
+  check("exposes 49 distinct tools", () => assert(tools.length === 49 && new Set(tools.map((t) => t.name)).size === 49, `got ${tools.length}: ${tools.map((t) => t.name).join(", ")}`));
   check("contract and run tools are strict (additionalProperties: false)", () => {
     for (const name of ["propose_contract", "amend_contract", "freeze_contract", "file_dissent", "score_dissent", "postmortem", "hold_postmortem", ...RUN_TOOLS]) assert(byName[name]?.inputSchema?.additionalProperties === false, name);
   });
@@ -359,10 +360,16 @@ try {
     }
     assert(byName.debug_env.annotations.readOnlyHint === true && byName.improve_agent.annotations.readOnlyHint === false, "annotation values");
   });
+  for (const name of AUTO_TOOLS) {
+    check(`${name} supports automatic provider judgment`, () => {
+      assert(JSON.stringify(byName[name]?.inputSchema?.properties?.provider?.enum) === JSON.stringify(["auto", ...EXPECTED_PROVIDERS]), name);
+    });
+  }
   for (const name of PROVIDER_TOOLS) {
     check(`${name}.provider enum = ${EXPECTED_PROVIDERS.join("|")}`, () => {
       const e = byName[name]?.inputSchema?.properties?.provider?.enum;
-      assert(JSON.stringify(e) === JSON.stringify(EXPECTED_PROVIDERS), `got ${JSON.stringify(e)}`);
+      const want = AUTO_TOOLS.includes(name) ? ["auto", ...EXPECTED_PROVIDERS] : EXPECTED_PROVIDERS;
+      assert(JSON.stringify(e) === JSON.stringify(want), `got ${JSON.stringify(e)}`);
     });
     check(`${name}.model description names both Claude ids + aliases`, () => {
       const d = byName[name]?.inputSchema?.properties?.model?.description || "";
@@ -530,7 +537,7 @@ try {
     assert(ollama.isError && /Ollama is not reachable at http:\/\/127\.0\.0\.1:9/.test(ollama.text), ollama.text));
 
   const debug = await server.callTool("debug_env");
-  check("debug_env reports version 1.0.0", () => assert(/"version": "1\.0\.0"/.test(debug.text), debug.text.slice(0, 200)));
+  check("debug_env reports version 2.0.0", () => assert(/"version": "2\.0\.0"/.test(debug.text), debug.text.slice(0, 200)));
   check("debug_env reports integration config and active ultraplans", () => {
     const d = JSON.parse(debug.text);
     assert(d.skills_dir === smokeEnv.ROUNDTABLE_SKILLS_DIR && d.workspace_dir === root, debug.text);

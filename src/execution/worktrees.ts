@@ -22,7 +22,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSy
 import { basename, dirname, isAbsolute, join, posix, relative, sep } from "node:path";
 import { WORKTREES_DIR } from "../config.js";
 import { EXECUTION_ID_RE } from "../ids.js";
-import { mkdirPrivate } from "../security/fs-safe.js";
+import { mkdirPrivate, readRegularFile } from "../security/fs-safe.js";
 import { scrub } from "../security/secrets.js";
 import { ID_RE, preview } from "./events.js";
 import {
@@ -35,6 +35,7 @@ import {
   integrationBranch,
   openLinkedWorktree,
   openRepo,
+  populateWorktree,
   resolveCommit,
   runGit,
   splitZ,
@@ -223,16 +224,17 @@ async function ensureWorktree(header: ExecutionHeader, name: string, startPoint:
     let args: string[];
     if (await branchExists(repo, branch)) {
       await assertNoGitlinksInTree(repo, `refs/heads/${branch}`);
-      args = ["worktree", "add", "-q", path, branch];
+      args = ["worktree", "add", "--no-checkout", "-q", path, branch];
     } else {
       const start = await startPoint();
       await assertNoGitlinksInTree(repo, start);
-      args = ["worktree", "add", "-q", "-b", branch, path, start];
+      args = ["worktree", "add", "--no-checkout", "-q", "-b", branch, path, start];
     }
     if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
     mkdirPrivate(path);
     try {
       await runGit(repo, args, { timeoutMs: ADD_TIMEOUT_MS });
+      await populateWorktree(openLinkedWorktree(repo, path), { timeoutMs: ADD_TIMEOUT_MS });
     } catch (e) {
       const left = findWorktreeAdmin(repo, path);
       if (left) rmSync(left, { recursive: true, force: true });
@@ -256,7 +258,7 @@ export function ensureIntegrationWorktree(header: ExecutionHeader): Promise<Work
 export function taskStartPoint(state: Readonly<BlackboardState>, taskId: string): "base" | "integration" {
   const rt = Object.hasOwn(state.tasks, taskId) ? state.tasks[taskId] : undefined;
   const accepted = (rt?.spec.depends_on ?? []).some((d) => Object.hasOwn(state.tasks, d) && state.tasks[d].state === "accepted");
-  return accepted ? "integration" : "base";
+  return accepted || rt?.spec.parent ? "integration" : "base";
 }
 
 /**
@@ -323,7 +325,8 @@ export async function withCommitCheckout<T>(header: ExecutionHeader, label: stri
     const path = join(realpathSync(base), `${label}-${randomBytes(6).toString("hex")}`);
     mkdirSync(path, { mode: 0o700 });
     try {
-      await runGit(repo, ["worktree", "add", "-q", "--detach", path, commit], { timeoutMs: ADD_TIMEOUT_MS });
+      await runGit(repo, ["worktree", "add", "--no-checkout", "-q", "--detach", path, commit], { timeoutMs: ADD_TIMEOUT_MS });
+      await populateWorktree(openLinkedWorktree(repo, path), { timeoutMs: ADD_TIMEOUT_MS });
       return openLinkedWorktree(repo, path).workTree;
     } catch (e) {
       await dropCheckout(repo, path);
@@ -918,9 +921,7 @@ async function escapingSymlink(t: GitTarget, rel: string): Promise<boolean> {
 
 function hasConflictMarkers(file: string): boolean {
   try {
-    const st = lstatSync(file);
-    if (!st.isFile() || st.size > 32 * 1024 * 1024) return false;
-    return MARKER_RE.test(readFileSync(file, "utf8"));
+    return MARKER_RE.test(readRegularFile(file, { noFollow: true, maxBytes: 32 * 1024 * 1024 }).data.toString("utf8"));
   } catch {
     return false;
   }

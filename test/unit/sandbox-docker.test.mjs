@@ -123,7 +123,7 @@ test("limits, image and user come from the environment with safe fallbacks", () 
     { memory: "4g", cpus: "1.5", pids: 1024 }
   );
   assert.deepEqual(dockerLimitsFromEnv({ ROUNDTABLE_SANDBOX_MEMORY: "-1", ROUNDTABLE_SANDBOX_CPUS: "all", ROUNDTABLE_SANDBOX_PIDS: "3" }), DEFAULT_DOCKER_LIMITS);
-  assert.equal(defaultSandboxImage({}), "node:22-bookworm-slim");
+  assert.equal(defaultSandboxImage({}), "node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d");
   assert.equal(defaultSandboxImage({ ROUNDTABLE_SANDBOX_IMAGE: "ghcr.io/acme/ci:1" }), "ghcr.io/acme/ci:1");
   const u = containerUser();
   assert.ok(u.uid > 0 && Number.isInteger(u.gid));

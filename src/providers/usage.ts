@@ -23,8 +23,31 @@ export interface UsageReport {
   usage?: LLMCompletionResult["usage"];
   /** A driver may report a measured cost along with provider token usage. */
   usd?: number;
+  /** External runtimes report their own counts; API response counts are measured by default. */
+  tokensProvenance?: "measured" | "reported";
   /** Lengths (not text) of the request and the reply, so a call without usage can still be estimated. */
   chars?: { input: number; output: number };
+}
+
+/** Kept outside UsageReport so existing usage sinks retain their exact payload contract. */
+export interface ProviderOutcome {
+  provider: string;
+  model: string;
+  outcome: "ok" | "auth" | "rate_limit" | "timeout" | "error";
+  latency_ms: number;
+  /** Endpoint hash for operator-pointable providers (see endpointFingerprint). */
+  endpoint?: string;
+  /** Credential hash (see credentialFingerprint); never the key. */
+  cred?: string;
+}
+type OutcomeSink = (outcome: ProviderOutcome) => void;
+const outcomeContext = new AsyncLocalStorage<ProviderOutcome>();
+const failureSink = new AsyncLocalStorage<OutcomeSink | undefined>();
+export const activeProviderOutcome = (): ProviderOutcome | undefined => outcomeContext.getStore();
+export function withProviderOutcome<T>(outcome: ProviderOutcome, fn: () => T): T { return outcomeContext.run(outcome, fn); }
+export function withProviderFailureSink<T>(sink: OutcomeSink | undefined, fn: () => T): T { return failureSink.run(sink, fn); }
+export function reportProviderFailure(outcome: ProviderOutcome): void {
+  try { failureSink.getStore()?.(outcome); } catch { /* Diagnostics must not change provider failures. */ }
 }
 
 export type UsageSink = (report: UsageReport) => void;

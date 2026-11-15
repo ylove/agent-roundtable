@@ -159,6 +159,26 @@ test("execute: GitHub without the gh scopes, codex without an opt-in, and a cont
   assert.match(errorOf(await handleToolCall("execute", { contract_id: draft.contractId, confirmation: " " })), /"confirmation" is required/);
 });
 
+test("execute: worker_driver runtime:<name> needs the opt-in and a known runtime, then probes that runtime", async (t) => {
+  const f = await frozenRun(t);
+  const old = process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS;
+  t.after(() => (old === undefined ? delete process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS : (process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS = old)));
+  const run = (driver) => handleToolCall("execute", { contract_id: f.contractId, confirmation: "go", budget_usd: 10, worker_driver: driver, visibility: { dashboard: true } });
+  delete process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS;
+  assert.match(errorOf(await run("runtime:gemini")), /worker_driver runtime:gemini: runtime workers need ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1/);
+  process.env.ROUNDTABLE_ALLOW_RUNTIME_WORKERS = "1";
+  assert.match(errorOf(await run("runtime:nonesuch")), /unknown runtime "nonesuch"/);
+  assert.match(errorOf(await handleToolCall("execute", { contract_id: f.contractId, confirmation: "go", worker_driver: "gemini" })), /"worker_driver"/);
+  restore = ((prev) => {
+    const undo = setOrchestratorDeps({ detectDriver: async (id) => (calls.detect.push(id), { ok: false, missing: ["the gemini CLI on PATH"] }) });
+    return () => (undo(), prev());
+  })(restore);
+  const r = parse(await run("runtime:gemini"));
+  assert.equal(r.status, "needs_input");
+  assert.deepEqual(calls.detect, ["runtime:gemini"]);
+  assert.match(r.questions.find((q) => q.topic === "workers").question, /The gemini CLI that runs the workers is not ready/);
+});
+
 test("execute: starts the run with the human's settings and words, then answers again without starting twice", async (t) => {
   const f = await frozenRun(t);
   writeFileSync(join(f.root, "notes.txt"), "uncommitted\n");
@@ -463,4 +483,28 @@ test("10: repeated execute preflight needs_input or failure creates no integrati
   assert.equal(again.execution_id, f.exe);
   assert.equal((await f.eventsOf("execution.started")).length, 1);
   assert.deepEqual(calls.launch, [f.exe]);
+});
+
+test("execute: a 401 from the execution provider refuses before anything starts, naming the provider and the switch, never a key", async (t) => {
+  const f = await frozenRun(t);
+  const saved = Object.fromEntries(["ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT", "ROUNDTABLE_EXECUTION_PROVIDER", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY"].map((k) => [k, process.env[k]]));
+  t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  delete process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT;
+  process.env.ROUNDTABLE_EXECUTION_PROVIDER = "anthropic";
+  process.env.ANTHROPIC_API_KEY = "sk-dead-key-value";
+  process.env.TOGETHER_API_KEY = "together-key-value";
+  let alive = false;
+  const seen = stubFetch(t, () => alive ? json(200, { content: [{ type: "text", text: "OK" }] }) : json(401, { error: { message: "invalid x-api-key sk-dead-key-value" } }));
+  const args = { contract_id: f.contractId, confirmation: "go", budget_usd: 10, visibility: { chat_only: true } };
+  const message = errorOf(await handleToolCall("execute", args));
+  assert.match(message, /anthropic/);
+  assert.match(message, /ROUNDTABLE_EXECUTION_PROVIDER=together/);
+  assert.doesNotMatch(message, /sk-dead-key-value|together-key-value/);
+  assert.equal(seen.length, 1);
+  assert.equal(calls.launch.length, 0);
+  assert.equal((await f.eventsOf("execution.started")).length, 0);
+  // A working key (or the opt-out) starts the run.
+  alive = true;
+  parse(await handleToolCall("execute", args));
+  assert.equal((await f.eventsOf("execution.started")).length, 1);
 });

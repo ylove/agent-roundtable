@@ -14,7 +14,7 @@ import { scrub } from "../security/secrets.js";
 import { executionBudgetUsd } from "./budget.js";
 import { runnerLiveness, type RunnerLiveness } from "./runner-launch.js";
 import { reconcileLaunch } from "../workers/launch-intent.js";
-import { agentDir } from "../workers/files.js";
+import { agentDir, removeWorkerMcpConfig } from "../workers/files.js";
 import { join } from "node:path";
 import { acquireLock, processMatches, LockTimeoutError } from "./lock.js";
 import { executionDir, openExecutionStore } from "./store.js";
@@ -63,6 +63,7 @@ export async function stopLiveWorkers(
   const after = await store.state();
   const live = Object.values(after.agents).filter((x) => !x.external && x.status === "running" && x.pid !== undefined && x.pid > 1 && processMatches(x.pid, x.started));
   const gone = Object.values(after.agents).filter((x) => !x.external && x.status === "running" && !live.includes(x));
+  for (const x of gone) removeWorkerMcpConfig(exe, x.id);
   if (gone.length) await store.transact(() => ({ events: gone.map((x) => ({
     type: "agent.exited" as const, source, payload: { agent: x.id, ...(x.task && { task: x.task }), code: null, reason: "lost" as const },
   })) }));
@@ -71,6 +72,7 @@ export async function stopLiveWorkers(
   await Promise.all(live.map(async (x) => {
     try {
       await stop(x.pid!, graceMs, x.started);
+      if (!processMatches(x.pid!, x.started)) removeWorkerMcpConfig(exe, x.id);
       stopped.push(x.id);
     } catch (e) {
       warnings.push(`could not stop ${x.id} (pid ${x.pid}): ${e instanceof Error ? e.message : String(e)}`);

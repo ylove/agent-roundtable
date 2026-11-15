@@ -40,6 +40,10 @@ export const END_COLLABORATION = "end_collaboration";
 export const GET_COLLABORATION_TRANSCRIPT = "get_collaboration_transcript";
 export const LIST_COLLABORATIONS = "list_collaborations";
 
+// Duel
+export const START_DUEL = "start_duel";
+export const CASTING_CALL = "casting_call";
+
 // Ultraplan
 export const START_ULTRAPLAN = "start_ultraplan";
 export const SUBMIT_PLAN = "submit_plan";
@@ -68,6 +72,11 @@ export const CONTROL_EXECUTION = "control_execution";
 export const RESOLVE_ESCALATION = "resolve_escalation";
 export const JOIN_EXECUTION = "join_execution";
 
+// Previews (orchestrator server only)
+export const START_PREVIEW = "start_preview";
+export const LIST_PREVIEWS = "list_previews";
+export const STOP_PREVIEW = "stop_preview";
+
 // Usage (orchestrator server only)
 export const USAGE = "usage";
 // Postmortem mode (orchestrator server only)
@@ -82,6 +91,8 @@ export const POST_UPDATE = "post_update";
 export const RUN_COMMAND = "run_command";
 export const SUBMIT_WORK = "submit_work";
 export const ESCALATE = "escalate";
+export const SPAWN_SUBTASKS = "spawn_subtasks";
+export const AWAIT_SUBTASKS = "await_subtasks";
 
 /** Execution tools authenticated with agent_token. Draft FILE_DISSENT also supports worker mode. */
-export const WORKER_TOOL_NAMES = [READ_BLACKBOARD, CLAIM_TASK, LEASE, POST_UPDATE, RUN_COMMAND, SUBMIT_WORK, ESCALATE] as const;
+export const WORKER_TOOL_NAMES = [READ_BLACKBOARD, CLAIM_TASK, LEASE, POST_UPDATE, RUN_COMMAND, SUBMIT_WORK, ESCALATE, SPAWN_SUBTASKS, AWAIT_SUBTASKS] as const;

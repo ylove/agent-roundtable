@@ -34,7 +34,7 @@ export const executionTools: ToolDefinition[] = [
       "Start a heads-down run of a frozen contract, ONLY when the human has asked for it in this chat: confirmation is their words, verbatim (recorded in the event log and the audit log). " +
       "A preflight runs first. When something is missing it returns {status: \"needs_input\", questions[]} and starts nothing: ask the human each question in plain words and call again with the answers. " +
       "It asks when no visibility is chosen (dashboard, GitHub, or chat_only; ROUNDTABLE_DEFAULT_VISIBILITY sets a default), when no budget is set (here, in the contract, or ROUNDTABLE_DEFAULT_BUDGET_USD), " +
-      "when no sandbox is available (Docker down and the local sandbox not allowed with sandbox: \"local\"), when the worker CLI is missing or lacks flags (codex needs worker_driver: \"codex\"), " +
+      "when no sandbox is available (Docker down and the local sandbox not allowed with sandbox: \"local\"), when the worker CLI is missing or lacks flags (codex needs worker_driver: \"codex\", a runtime worker needs ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1), " +
       "when GitHub was asked for but gh lacks scopes or access, and when the repository has submodules. A dirty main worktree only warns. " +
       "Settings given here that differ from the contract (budget_usd, max_parallel, lead, sandbox, worker_driver, worker_model) are applied to it first as one audited amendment. " +
       "Then the runner starts in the background, and the result has the execution_id, the runner's pid, the dashboard URL (when there is one) and watch {argv, command, instructions}: start watch.command as a background shell command right away, " +
@@ -77,7 +77,7 @@ export const executionTools: ToolDefinition[] = [
         max_parallel: { type: "integer", minimum: 1, maximum: MAX_PARALLEL_LIMIT, description: `Workers at once (1–${MAX_PARALLEL_LIMIT}; applied to the contract).` },
         lead: { type: "string", description: "The persona that decides escalations when you are away (the contract's authority.lead)." },
         sandbox: { type: "string", enum: ["docker", "local"], description: "docker (default) or local. local is weaker than a container and counts as the human's opt-in to it." },
-        worker_driver: { type: "string", enum: ["claude-code", "codex"], description: "Worker CLI: claude-code (default) or codex (an explicit opt-in)." },
+        worker_driver: { type: "string", pattern: "^(claude-code|codex|runtime:[a-z][a-z0-9_-]{0,31})$", description: "Worker CLI: claude-code (default), codex (an explicit opt-in) or runtime:<name>, a runtime profile such as runtime:gemini (needs ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1)." },
         worker_model: { type: "string", description: "Model for the workers (the CLI's model name)." },
       },
       required: ["contract_id", "confirmation"],

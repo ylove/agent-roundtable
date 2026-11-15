@@ -65,7 +65,7 @@ test("config derives workspace, skills, activity, parallel turns, and version", 
     return JSON.parse(child.stdout);
   }
   const defaults = config();
-  assert.equal(defaults.VERSION, "1.0.0");
+  assert.equal(defaults.VERSION, "2.0.0");
   assert.equal(defaults.SKILLS_DIR, skillsDir);
   assert.equal(defaults.WORKSPACE_DIR, root);
   assert.equal(defaults.ACTIVITY_LOG_PATH, join(fakeHome, ".agent-roundtable", "activity.jsonl"));

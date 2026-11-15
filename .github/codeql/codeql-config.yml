@@ -1,4 +1,6 @@
 name: agent-roundtable CodeQL config
+queries:
+  - uses: security-extended
 
 # Test code builds fake URLs, stub servers and planted secrets on purpose; scanning it only
 # produces noise that hides real alerts. Everything shipped (src/, and dist/ built from it) is scanned.

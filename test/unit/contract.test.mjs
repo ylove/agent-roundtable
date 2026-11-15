@@ -472,3 +472,24 @@ test("contractPath and contractMarkdownPath live under the execution's contracts
   assert.throws(() => contractPath(store, "../x", 1), /Not a contract id/);
   assert.throws(() => contractPath(store, "ctr-abc123-1", 0), /Not a contract version/);
 });
+
+test("page_loads predicates normalize, render, affect consent and reject unsafe paths", () => {
+  const r = check({ tasks: [task("a", [], { verify: [{ page_loads: { path: "src/a/index.html" } }] })] });
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(checkContract(r.contract).contract, r.contract);
+  assert.match(renderContractMarkdown(r.contract), /page_loads `src\/a\/index.html`/);
+  const before = check({ tasks: [task("a")] }).contract;
+  assert.notEqual(contractHash(before), contractHash(r.contract));
+  assert.deepEqual(affectedTasks(before, r.contract).changed, ["a"]);
+  for (const path of ["../page.html", "/etc/passwd", "src/*.html", "src/a\0.html"]) refused({ tasks: [task("a", [], { verify: [{ page_loads: { path } }] })] }, /repository-relative file path/);
+  refused({ tasks: [task("a", [], { verify: [{ unknown: {} }] })] }, /unknown/);
+});
+
+test("drafted web duel plans include an executable page-load acceptance predicate", async () => {
+  const { draftDuelPlan } = await import("../../dist/sessions/duel-import.js");
+  const plan = draftDuelPlan({ id: "duel-web", topic: "A page", dissents: [], artifact: {
+    kind: "web", title: "Page", team: "A", files: [{ path: "index.html", bytes: 20 }], approvals: [], fixes: [],
+  } }, { build: "dev", review: "reviewer" });
+  assert.deepEqual(plan.tasks[0].verify, [{ page_loads: { path: "index.html" } }]);
+  assert.ok(plan.tasks[0].acceptance.some(s => /without exceptions/.test(s)));
+});

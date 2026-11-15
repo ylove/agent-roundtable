@@ -38,6 +38,9 @@ jobs:
       - name: Hygiene
         run: "! grep -riE 'v[o]uch|/U[s]ers/' --exclude-dir=node_modules --exclude-dir=.git --exclude=.git --exclude-dir=dist ."
 
+      - name: No merge conflict markers
+        run: "! git grep -nE '^(<{7}|>{7}) ' -- ."
+
   sbom:
     runs-on: ubuntu-latest
     steps:
@@ -61,3 +64,19 @@ jobs:
           path: sbom.cdx.json
           if-no-files-found: error
           retention-days: 30
+
+  # Builds the image and runs it once. Nothing is pushed and no registry login happens.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build -t agent-roundtable:ci .
+
+      - name: Smoke run
+        run: |
+          docker run --rm agent-roundtable:ci help
+          docker run --rm agent-roundtable:ci duel --dry-run --no-room --json --speed 1000 > /dev/null

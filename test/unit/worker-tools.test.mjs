@@ -61,8 +61,8 @@ async function join_(run, agent, extra = {}) {
 
 const eventsSince = async (store, seq, types) => (await store.events({ sinceSeq: seq })).filter((e) => !types || types.includes(e.type));
 
-test("the worker server lists dissent filing and the seven execution tools; the orchestrator also has join_execution", () => {
-  assert.deepEqual(toolsFor("worker").map((t) => t.name), ["file_dissent", "read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate"]);
+test("the worker server lists dissent filing and the nine execution tools; the orchestrator also has join_execution", () => {
+  assert.deepEqual(toolsFor("worker").map((t) => t.name), ["file_dissent", "read_blackboard", "claim_task", "lease", "post_update", "run_command", "submit_work", "escalate", "spawn_subtasks", "await_subtasks"]);
   const orch = Object.fromEntries(toolsFor("orchestrator").map((t) => [t.name, t]));
   assert.ok(orch.join_execution);
   for (const t of toolsFor("worker")) {

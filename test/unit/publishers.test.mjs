@@ -75,6 +75,45 @@ test("titles: format and parse round-trip", () => {
   assert.equal(parseTitle("random"), null);
 });
 
+test("history rejects oversized part counts and unsafe title integers", () => {
+  for (const title of ["#01 · x (1/9007199254740992)", "#01 · x (1/1001)", "#01 · x (0/2)",
+    "#9007199254740992 · x", `#01 · x (1/${"9".repeat(400)})`]) {
+    assert.equal(parseTitle(title), null);
+    assert.deepEqual(reassemble([{ title, content: "text" }]), []);
+  }
+  assert.equal(reassemble([{ title: "#01 · x (1/1000)", content: "first" }])[0].complete, false);
+  assert.equal(reassemble([
+    { title: "#01 · x (2/2)", content: "second" },
+    { title: "#01 · x (1/2)", content: "first" },
+  ])[0].complete, true);
+});
+
+test("history validates field types and caps processed records", async (t) => {
+  const pub = new NtfyPublisher({ baseUrl: ntfyCfg.ntfyUrl, topicPrefix: "rt" });
+  stubFetch(t, () => new Response(ndjson([
+    null, [], { event: "message", title: {} }, { event: "message", message: [] },
+    { event: "message", time: "1" }, { event: "message", time: null },
+    ...Array.from({ length: 10_010 }, (_, i) => msgEv(`#${i} · a`, "text")),
+  ])));
+  const history = await pub.fetchHistory(pub.openChannel("s1"));
+  assert.equal(history.truncated, true);
+  assert.equal(history.messages.length, 9994);
+  assert.ok(history.messages.every((m) => typeof m.title === "string" && typeof m.content === "string" && m.time === 1));
+});
+
+test("history cancels responses exceeding the byte limit", async (t) => {
+  let cancelled = false;
+  let pulls = 0;
+  stubFetch(t, () => new Response(new ReadableStream({
+    pull(controller) { pulls++; controller.enqueue(new Uint8Array(64 * 1024)); },
+    cancel() { cancelled = true; },
+  })));
+  const pub = new NtfyPublisher({ baseUrl: ntfyCfg.ntfyUrl, topicPrefix: "rt" });
+  assert.equal(await pub.fetchHistory(pub.openChannel("s1")), null);
+  assert.equal(cancelled, true);
+  assert.ok(pulls <= 130);
+});
+
 // ---- ntfy wire format ----
 test("ntfy: JSON body, Firebase: no, bearer auth", async (t) => {
   const calls = stubFetch(t, ok);

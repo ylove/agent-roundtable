@@ -146,7 +146,7 @@ test("Codex is opt-in, denies sensitive roots and refuses outstanding peer token
   assert.equal(detect.ok, false);
   assert.match(detect.missing.join(";"), /ROUNDTABLE_ALLOW_CODEX_DRIVER=1/);
   assert.throws(() => driver.launch({}), /opt-in/);
-  const enabled = new codex.CodexDriver({ cli: "/fake/codex", env: { ROUNDTABLE_ALLOW_CODEX_DRIVER: "1" } });
+  const enabled = new codex.CodexDriver({ cli: process.execPath, env: { ROUNDTABLE_ALLOW_CODEX_DRIVER: "1" } });
   assert.equal((await enabled.detect()).ok, true);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rt-codex-policy-")));
   for (const dir of ["home", "state", "repo/.git", "wt", "node/bin", "extra"]) mkdirSync(join(root, dir), { recursive: true });

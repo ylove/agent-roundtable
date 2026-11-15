@@ -19,7 +19,8 @@
 
 import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { basename, delimiter, dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { findExecutable } from "../executables.js";
 import { ROUNDTABLE_HOME } from "../config.js";
 import type { SandboxBackend, SandboxResult, SandboxRunRequest } from "../execution/types.js";
 import { childEnv } from "../security/child-env.js";
@@ -170,16 +171,7 @@ export type LocalIsolation =
   | { kind: "none"; degraded: string };
 
 function findOnPath(name: string): string | null {
-  for (const d of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
-    const p = join(d, name);
-    try {
-      if (statSync(p).isFile()) return p;
-    } catch {
-      /* not here */
-    }
-  }
-  for (const d of ["/usr/bin", "/bin"]) if (existsSync(join(d, name))) return join(d, name);
-  return null;
+  return findExecutable(name) ?? findExecutable(name, "/usr/bin:/bin");
 }
 
 const UNISOLATED = "commands run without isolation (network, files, the workdir's .git and the workdir itself are all reachable)";
@@ -197,7 +189,8 @@ async function probeIsolation(platform: NodeJS.Platform): Promise<LocalIsolation
   if (platform === "linux") {
     const unshare = findOnPath("unshare");
     if (unshare) {
-      const r = await runQuiet(unshare, ["-rn", "--", "true"], env, PROBE_TIMEOUT_MS);
+      const truth = findOnPath("true");
+      const r = truth ? await runQuiet(unshare, ["-rn", "--", truth], env, PROBE_TIMEOUT_MS) : { ok: false, output: "true executable not found", exit: null };
       if (r.ok) {
         return {
           kind: "unshare",

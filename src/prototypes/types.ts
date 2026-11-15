@@ -14,6 +14,7 @@ export type PrototypeStatus =
 
 export interface VerdictEntry {
   assessor: string;
+  check?: import("./page-check.js").PageCheck;
   verdict: Verdict;
   reason: string;
 }
@@ -38,6 +39,7 @@ export interface PrototypeRecord {
   demo: string;
   status: PrototypeStatus;
   verdicts: VerdictEntry[];
+  check?: import("./page-check.js").PageCheck;
   decision?: { decision: Decision; reason: string };
   /** Label of the version that replaced this one. */
   supersededBy?: string;

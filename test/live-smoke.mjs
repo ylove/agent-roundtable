@@ -7,6 +7,13 @@
 // replicate and openai_compatible are never called unless opted in via their flag or listed explicitly.
 import { startServer } from "./mcp-client.mjs";
 
+if (process.env.ROUNDTABLE_LIVE_RUNTIMES) {
+  const { smokeRuntimes } = await import("./live-runtimes.mjs");
+  const failures = await smokeRuntimes();
+  if (failures) process.exitCode = 1;
+  if (process.env.ROUNDTABLE_LIVE_TEST !== "1") process.exit(failures ? 1 : 0);
+}
+
 if (process.env.ROUNDTABLE_LIVE_TEST !== "1") {
   console.log("skipped (set ROUNDTABLE_LIVE_TEST=1 to spend a few tiny API calls)");
   process.exit(0);

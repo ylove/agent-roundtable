@@ -13,7 +13,7 @@
 
 import { agentKey } from "../agents.js";
 import { estimateUsd } from "../execution/pricing.js";
-import { activeUsageSink, withAbortSignal, withUsageSink, type UsageReport, type UsageSink } from "../providers/usage.js";
+import { activeProviderOutcome, withProviderFailureSink, activeUsageSink, withAbortSignal, withUsageSink, type UsageReport, type UsageSink } from "../providers/usage.js";
 import { appendTableLine, newServerId, type TableLine } from "./table.js";
 import { ROUNDTABLE_HOME } from "../config.js";
 import type { Provenance } from "./types.js";
@@ -132,7 +132,7 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
       cache_read: r.usage.cacheReadTokens ?? 0,
       cache_write: r.usage.cacheWriteTokens ?? 0,
     };
-    prov = "measured";
+    prov = r.tokensProvenance ?? "measured";
   } else {
     tokens = {
       input: Math.ceil((r.chars?.input ?? 0) / CHARS_PER_TOKEN),
@@ -154,6 +154,8 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
     tokens,
     tokens_prov: prov,
   };
+  const outcome = activeProviderOutcome();
+  if (outcome?.provider === r.provider) { line.outcome = outcome.outcome; line.latency_ms = outcome.latency_ms; if (outcome.endpoint !== undefined) line.endpoint = outcome.endpoint; if (outcome.cred !== undefined) line.cred = outcome.cred; }
   const count = tokens.input + tokens.output + tokens.cache_read + tokens.cache_write;
   if (count > 0) {
     const est = estimateUsd(
@@ -166,6 +168,10 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
       line.usd = est.usd;
       line.usd_prov = "estimated";
     }
+  }
+  if (r.tokensProvenance === "reported" && r.usd !== undefined && Number.isFinite(r.usd) && r.usd >= 0) {
+    line.usd = r.usd;
+    line.usd_prov = "reported";
   }
   return line;
 }
@@ -196,7 +202,10 @@ export async function metered<T>(scope: SessionScope, fn: () => Promise<T>): Pro
   const outer = activeUsageSink();
   turns.set(scope.session, (turns.get(scope.session) ?? 0) + 1);
   try {
-    return await withUsageSink(outer ? (r) => outer({ ...r, agent: agentKey(scope.agent) }) : ledgerSink(scope), run);
+    return await withProviderFailureSink(outer ? undefined : outcome => {
+      appendTableLine({ at: new Date(Date.now()).toISOString(), server: currentServerId(), session: scope.session,
+        kind: scope.kind, agent: agentKey(scope.agent), ...outcome }, ledgerHome);
+    }, () => withUsageSink(outer ? (r) => outer({ ...r, agent: agentKey(scope.agent) }) : ledgerSink(scope), run));
   } finally {
     turns.set(scope.session, (turns.get(scope.session) ?? 1) - 1);
   }

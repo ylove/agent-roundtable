@@ -1,3 +1,5 @@
+import { remainingUsd } from "./budget.js";
+import { executionLLM } from "./provider-routing.js";
 // ============================================================================
 // Escalations: routing, resolution and the runner hooks (heads-down.md §12)
 //
@@ -22,7 +24,7 @@
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { executionLLM, type LLMProvider } from "../config.js";
+import { type LLMProvider } from "../config.js";
 import { loadAgent, renderSkillsSection } from "../agents.js";
 import { newId } from "../ids.js";
 import { callLLM, withUsageSink, type UsageReport } from "../providers/index.js";
@@ -77,6 +79,9 @@ export interface HuddleLLM {
   baseUrl?: string;
 }
 
+export type HuddleLLMSource = HuddleLLM | (() => HuddleLLM);
+export const resolveHuddleLLM = (source: HuddleLLMSource): HuddleLLM => typeof source === "function" ? source() : source;
+
 export interface HookCtx {
   store: ExecutionStore;
   /** The runner's latest state. Every hook reads the store again before it acts. */
@@ -87,7 +92,7 @@ export interface HookCtx {
   worker?: RunnerContext["worker"];
   integrationSha?: string;
   /** Provider and model for persona calls (huddles, the lead, goal review). */
-  llm: HuddleLLM;
+  llm: HuddleLLMSource;
 }
 
 interface OpBase {
@@ -328,10 +333,11 @@ export function callOptions(llm: HuddleLLM): { provider: LLMProvider; model: str
 }
 
 /** One stateless persona call: the persona (body and skills) plus `directive` as the system prompt. */
-export async function askPersona(meter: UsageMeter, llm: HuddleLLM, persona: string, directive: string, prompt: string, allowance?: number): Promise<string> {
+export async function askPersona(meter: UsageMeter, source: HuddleLLMSource, persona: string, directive: string, prompt: string, allowance?: number): Promise<string> {
   if (meter.bounded && allowance === undefined) throw new Error("A bounded persona call requires a budget allowance");
   const a = await loadAgent(persona);
   const system = a.body + renderSkillsSection(a.skills) + directive;
+  const llm = resolveHuddleLLM(source);
   let maxTokens: number | undefined;
   if (allowance !== undefined) {
     const { input: inputRate, output: outputRate } = microRates(llm.model, llm.provider);
@@ -1212,23 +1218,26 @@ export async function finishConcludedHuddle(ctx: HookCtx, id: string, opts: Esca
 // ============================================================================
 
 export interface RunnerHookOptions extends EscalationOptions {
-  /** Defaults to executionLLM(): ROUNDTABLE_EXECUTION_PROVIDER, _MODEL and _BASE_URL, else anthropic. */
+  /** Defaults to executionLLM(): ROUNDTABLE_EXECUTION_PROVIDER, _MODEL and _BASE_URL, else provider judgment at judge tier. */
   llm?: HuddleLLM;
 }
 
-/** The persona-call settings from the environment (config.executionLLM), read when a hook runs. */
-export function executionHuddleLLM(): HuddleLLM {
-  const { provider, model, baseUrl } = executionLLM();
+/** The persona-call settings from the environment (executionLLM), read when a hook runs. */
+export function executionHuddleLLM(remainingBudgetUsd?: number): HuddleLLM {
+  const { provider, model, baseUrl } = executionLLM({ remainingBudgetUsd });
   return { provider, model, ...(baseUrl !== undefined && { baseUrl }) };
 }
 
 /** Adapt the WS08 controls to the context shared by WS10 and WS11. */
 export async function runnerHookContext(ctx: RunnerContext, opts: RunnerHookOptions = {}): Promise<HookCtx> {
+  const state = await ctx.store.state();
+  // One routing decision per hook context (a huddle, a lead call, a goal review), not one per turn.
+  let routed: HuddleLLM | undefined;
   return {
-    store: ctx.store, state: await ctx.store.state(), header: ctx.header,
+    store: ctx.store, state, header: ctx.header,
     // The run's driver: a live claude-code worker answers a micro-huddle through driver.answer().
     driver: ctx.driver(), worker: (agent) => ctx.worker(agent),
-    llm: opts.llm ?? executionHuddleLLM(),
+    llm: opts.llm ?? (() => (routed ??= executionHuddleLLM(remainingUsd(state)))),
   };
 }
 
@@ -1243,6 +1252,9 @@ export function createRunnerHooks(opts: RunnerHookOptions = {}): RunnerHooks {
     },
     async leadFallback(ctx, id) {
       return leadFallback(await runnerHookContext(ctx, opts), id, opts);
+    },
+    async escalationGiveUp(ctx, id, message) {
+      await awaitHuman(await runnerHookContext(ctx, opts), id, { actor: { kind: "runner" }, message });
     },
     async escalationPass(ctx) {
       // No model call here: owed resumes, and concluded huddles applied from their records.

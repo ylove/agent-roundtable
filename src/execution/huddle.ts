@@ -33,6 +33,7 @@ import {
   UsageMeter,
   actorSource,
   askPersona,
+  resolveHuddleLLM,
   cap,
   commitIf,
   commitResolution,
@@ -482,7 +483,7 @@ interface EngineRun {
 async function runEngine(
   format: FormatHuddleOptions["format"], participants: string[], lead: string, topic: string, context: string, ctx: HookCtx, origin: string
 ): Promise<EngineRun> {
-  const llm = { provider: ctx.llm.provider, model: ctx.llm.model, ...(ctx.llm.baseUrl !== undefined && { baseUrl: ctx.llm.baseUrl }) };
+  const llm = resolveHuddleLLM(ctx.llm);
   if (format === "replan" || format === "ultraplan") {
     const agents = participants.filter((p) => agentKey(p) !== agentKey(lead));
     const r = await startUltraplan(agents.length ? agents : [lead], topic, {

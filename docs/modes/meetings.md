@@ -2,7 +2,7 @@
 
 At the table, a meeting is a back-and-forth conversation between you and one persona. Provider and model are fixed at `start_meeting` (default provider `anthropic`).
 
-> Start a meeting via agent-roundtable with the cfo agent. Agenda: Q3 budget review. Use Anthropic Sonnet.
+> Start a meeting via roundtable with the cfo agent. Agenda: Q3 budget review. Use Anthropic Sonnet.
 
 Follow with “Tell the CFO that runway is 14 months at current burn and ask what they would cut first,” then “End the meeting and give me the summary.”
 
@@ -20,3 +20,5 @@ Local meetings require `--restricted`, explicit `--settings` with `disableAllHoo
 Requires `claude` on `PATH` and its own login. Follow up with `say_local` and close with `end_local_meeting`. API meetings use `say` and `end_meeting`; `list_meetings` and `list_local_meetings` list their respective active sessions.
 
 One turn runs per session at a time; overlapping turns fail with a busy error. See [tool calls and concurrency](../tools.md) and [session archives](../sessions.md).
+
+A finished duel can be the focus of a session: pass `duel: "duel-<id>"` (see [a duel as a meeting's focus](duel.md#a-duel-as-a-meetings-focus)).

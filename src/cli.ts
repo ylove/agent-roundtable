@@ -11,6 +11,9 @@
 //   statusline [--agents N] [--plain] [--no-host]                       a Claude Code status line; always exits 0
 //   usage [--json] [--watch]                                            who is using what, on which platform
 //   stop <agent> [--execution <exe> | --session <id>] [--reason <text>] stop one agent (heads-down or at the table)
+//   preview start|list|stop                                             Docker dev-server previews on 127.0.0.1
+//   up / doctor                                                         set up, check and start the local service
+//   --version | -v | version                                            print the version
 //   help                                                                this text
 //
 // Modules load lazily, so the hook (which Claude Code runs before every edit) never loads the
@@ -38,6 +41,24 @@ export const USAGE = [
   "  agent-roundtable usage [--json] [--watch]       who is using what, on which platform, measured or estimated",
   "  agent-roundtable stop <agent> [--execution <exe> | --session <id>] [--reason <text>]",
   "                                                  stop one agent (a heads-down worker or an at-the-table session)",
+  "  roundtable cast <brief> [--agents a,b,... | --agents-dir <abs-path>] [--seats n] [--dry-run] [--json]",
+  "  roundtable duel <brief> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--kind web|code|diagram|text] [--criteria a,b] [--open]",
+  "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2]",
+  "  roundtable up [--setup] [--no-input] [--no-serve] [--open] [--check-keys]",
+  "  roundtable doctor [--json] [--check-keys]",
+  "  roundtable --version | -v | version",
+  "  roundtable serve [--detach] [--no-keep-runners] [--bind loopback|tailnet] | serve status|stop",
+  "  roundtable serve --print-service launchd|systemd",
+  "  roundtable preview start <exe> <task> | --prototype <dir> [--script dev|start|preview] [--port <n>]",
+  "  roundtable preview list [--json] | preview stop <id>",
+  "  roundtable notify init ntfy | notify test",
+  "  roundtable config set notify.<key> <value>",
+  "  roundtable runtimes [--json]",
+  "  roundtable agents [--json] | agents import <absolute file|dir> | agents starter | agents --open",
+  "  roundtable config set env-file|agents-dir <absolute-path> | config show",
+  "  roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>",
+  "  roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value]",
+  "  roundtable config unset connector <name> | secrets check",
   "  agent-roundtable help                           this text",
 ].join("\n");
 
@@ -49,7 +70,7 @@ function usage(problem: string): void {
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** --name value pairs and bare flags, or the problem with them (an unknown, repeated or valueless argument). */
-function parseFlags(args: string[], known: { values: string[]; flags: string[] }): Record<string, string | true> | string {
+export function parseFlags(args: string[], known: { values: string[]; flags: string[] }): Record<string, string | true> | string {
   const out: Record<string, string | true> = {};
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -148,6 +169,16 @@ async function watch(args: string[]): Promise<void> {
 
 async function status(args: string[]): Promise<void> {
   process.umask(0o077);
+  if (/^[0-9a-hjkmnp-tv-z]{6}$/.test(args[0] ?? "")) {
+    const { listExecutions } = await import("./execution/store.js");
+    const matches = (await listExecutions()).filter(h => h.id.endsWith(args[0]));
+    if (matches.length !== 1) {
+      console.error(matches.length ? "Run tag is ambiguous; use the full execution id." : "Run tag not found.");
+      process.exitCode = 1;
+      return;
+    }
+    args = [matches[0].id, ...args.slice(1)];
+  }
   const p = withExecution("status", args, { values: [], flags: ["json"] });
   if (typeof p === "string") return usage(p);
   const { executionStatus, formatStatus } = await import("./execution/run-admin.js");
@@ -229,6 +260,20 @@ export async function runCli(argv: string[]): Promise<void> {
       return mcp([]);
     case "mcp":
       return mcp(rest);
+    case "--version":
+    case "-v":
+    case "version": {
+      if (rest.length) return usage("version takes no arguments");
+      const { VERSION } = await import("./config.js");
+      process.stdout.write(VERSION + "\n");
+      return;
+    }
+    case "up":
+    case "doctor": {
+      const { runUpCli } = await import("./cli-up.js");
+      process.exitCode = await runUpCli(command, rest);
+      return;
+    }
     case "hook":
       return hook(rest);
     case "run":
@@ -247,6 +292,50 @@ export async function runCli(argv: string[]): Promise<void> {
       return usageReport(rest);
     case "stop":
       return stopAgentCommand(rest);
+    case "preview": {
+      const { runPreviewCli } = await import("./cli-preview.js");
+      process.exitCode = await runPreviewCli(rest);
+      return;
+    }
+    case "serve": {
+      const { runServeCli } = await import("./cli-serve.js");
+      process.exitCode = await runServeCli(rest);
+      return;
+    }
+    case "notify": {
+      const { runNotifyCli } = await import("./cli-serve.js");
+      process.exitCode = await runNotifyCli(rest);
+      return;
+    }
+    case "agents": {
+      const { runAgentsCli } = await import("./cli-agents.js");
+      process.exitCode = await runAgentsCli(rest);
+      return;
+    }
+    case "runtimes": {
+      if (rest.some(v => v !== "--json") || rest.length > 1) return usage("runtimes accepts only --json");
+      const { runtimeRegistry } = await import("./runtimes/registry.js");
+      const { detectRuntime } = await import("./runtimes/runner.js");
+      const profiles = [];
+      for (const [name, spec] of Object.entries(runtimeRegistry())) profiles.push({ name, ...await detectRuntime(spec) });
+      process.stdout.write(rest.includes("--json") ? JSON.stringify(profiles) + "\n" : profiles.map(p => `${p.name}: ${p.found ? "found" : "not found"}${p.path ? ` ${p.path}` : ""}${p.version ? ` (${p.version.replace(/[\r\n\x1b]/g, " ")})` : ""}${p.error ? `; ${p.error}` : ""}`).join("\n") + "\n");
+      return;
+    }
+    case "cast": {
+      const { runCastCli } = await import("./cli-cast.js");
+      process.exitCode = await runCastCli(rest);
+      return;
+    }
+    case "duel":
+    case "debate":
+    case "waffle":
+    case "meeting":
+    case "secrets":
+    case "config": {
+      const { runTableCli } = await import("./cli-table.js");
+      process.exitCode = await runTableCli(command, rest);
+      return;
+    }
     case "help":
       if (rest.length) return usage("help takes no arguments");
       process.stdout.write(USAGE + "\n");

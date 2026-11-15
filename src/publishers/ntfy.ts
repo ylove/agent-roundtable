@@ -1,4 +1,5 @@
 // ntfy publisher (default). Publishes JSON to the server root, downloads history as NDJSON.
+import { readBoundedText } from "../providers/shared.js";
 import type { Channel, HistoryMessage, OutgoingMessage, Publisher, RemoteHistory, SendResult } from "./types.js";
 import { REQUEST_TIMEOUT_MS, buildChannelId, errMessage, failFromStatus, parseRetryAfter } from "./shared.js";
 
@@ -141,19 +142,25 @@ export class NtfyPublisher implements Publisher {
         console.error(`[Publish] history download failed: HTTP ${res.status}`);
         return null;
       }
-      const text = await res.text();
+      const text = await readBoundedText(res, 8 * 1024 * 1024);
       const messages: HistoryMessage[] = [];
+      let processed = 0;
+      let truncated = res.headers.get("X-Messages-Truncated") === "1";
       for (const line of text.split("\n")) {
+        if (++processed > 10_000) { truncated = true; break; }
         if (!line.trim()) continue;
         try {
           const ev = JSON.parse(line) as { event?: string; title?: string; message?: string; time?: number };
-          if (ev.event !== "message") continue;
+          if (!ev || ev.event !== "message"
+            || (ev.title !== undefined && typeof ev.title !== "string")
+            || (ev.message !== undefined && typeof ev.message !== "string")
+            || (ev.time !== undefined && (typeof ev.time !== "number" || !Number.isFinite(ev.time)))) continue;
           messages.push({ title: ev.title ?? "", content: ev.message ?? "", time: ev.time });
         } catch {
           /* skip malformed line */
         }
       }
-      return { messages, truncated: res.headers.get("X-Messages-Truncated") === "1" };
+      return { messages, truncated };
     } catch (e) {
       console.error(`[Publish] history download failed: ${errMessage(e)}`);
       return null;

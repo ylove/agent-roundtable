@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, symlinkSync, readdirSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, statSync, symlinkSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const { newId, newExecutionId, executionTag, EXECUTION_ID_RE, randomBase32 } = await import("../../dist/ids.js");
-const { mkdirPrivate, writeFileAtomic, isContained, normalizeRelPath } = await import("../../dist/security/fs-safe.js");
+const { ensureStateHome, mkdirPrivate, writeFileAtomic, isContained, normalizeRelPath } = await import("../../dist/security/fs-safe.js");
 const { childEnv, SECRET_NAME_RE } = await import("../../dist/security/child-env.js");
 const { scrubSecrets, scrubAndCap } = await import("../../dist/security/secrets.js");
 const { redact, redactSecrets, redactPII } = await import("../../dist/publishers/redact.js");
@@ -35,6 +35,22 @@ test("mkdirPrivate creates 0700 directories and refuses symlinks", () => {
   const link = join(root, "link");
   symlinkSync(dir, link);
   assert.throws(() => mkdirPrivate(link), /not a real directory/);
+});
+
+test("state home is private when created and preserves an existing directory's mode", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "rt-state-home-"));
+  try {
+    const home = join(root, "home");
+    ensureStateHome(home);
+    assert.equal(statSync(home).mode & 0o777, 0o700);
+    chmodSync(home, 0o750);
+    ensureStateHome(home);
+    assert.equal(statSync(home).mode & 0o777, 0o750);
+    const link = join(root, "link");
+    symlinkSync(home, link);
+    assert.throws(() => ensureStateHome(link), /not a real directory/);
+    assert.equal(statSync(home).mode & 0o777, 0o750);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("writeFileAtomic writes 0600 files and leaves no temp files", () => {

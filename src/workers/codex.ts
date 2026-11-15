@@ -25,7 +25,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { ROUNDTABLE_HOME } from "../config.js";
-import { findExecutable } from "../executables.js";
+import { findExecutable, isExecutableFile } from "../executables.js";
 import { executionDir } from "../execution/store.js";
 import type { ExecutionHeader, RunAccumulator, WorkerDriver, WorkerHandle, WorkerLaunch, WorkerRecord } from "../execution/types.js";
 import { childEnv } from "../security/child-env.js";
@@ -196,6 +196,7 @@ function readExecutionHeader(execution: string): ExecutionHeader {
 /** The roundtable server from a prepared mcp.json. */
 export function readCodexMcpServer(mcpConfigPath: string): CodexMcpServer {
   const cfg = JSON.parse(readFileSync(mcpConfigPath, "utf8")) as McpConfig;
+  if (Object.keys(cfg?.mcpServers ?? {}).some(name => name !== ROUNDTABLE_SERVER)) throw new Error("Connectors are not supported by codex workers; use claude-code.");
   const s = cfg?.mcpServers?.[ROUNDTABLE_SERVER];
   if (!s || typeof s.command !== "string" || !Array.isArray(s.args)) throw new Error(`${mcpConfigPath} has no ${ROUNDTABLE_SERVER} server`);
   return { command: s.command, args: s.args.map(String), env: { ...(s.env ?? {}) } };
@@ -275,6 +276,7 @@ export class CodexDriver implements WorkerDriver {
   }
 
   private cli(): string {
+    if (this.cliOverride !== undefined && !isExecutableFile(this.cliOverride)) throw new Error("The codex CLI override must be an absolute path to a regular executable.");
     const cli = this.cliOverride ?? findExecutable("codex");
     if (!cli) throw new Error("The codex CLI is not on PATH");
     return cli;
@@ -294,6 +296,7 @@ export class CodexDriver implements WorkerDriver {
 
   /** Refuse unless opted in and no other worker's token file is still on disk. */
   private preflight(l: WorkerLaunch): void {
+    if (l.connectors?.length) throw new Error("Connectors are not supported by codex workers; use claude-code.");
     if (!codexDriverAllowed(this.env)) throw new Error(`The codex driver needs ${NOT_ALLOWED}`);
     const pending = pendingTokens(l.execution, l.agent);
     if (pending.length) {

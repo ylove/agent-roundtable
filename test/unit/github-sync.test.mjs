@@ -567,3 +567,23 @@ test("opaque configured secrets never reach fake gh issue or comment bodies", as
   assert.ok(!JSON.stringify(calls).includes(secret));
   assert.ok(calls.every(c => c.body.includes("[redacted:env:OPENAI_COMPATIBLE_API_KEY]")));
 });
+
+test("gh sync: Markdown images and links in progress notes stay plain text", async () => {
+  const gh = fakeGh();
+  const { store } = await frozenRun(twoTasks());
+  const now = clock();
+  const sync = new GitHubSync({ executionId: store.id, repo: REPO, store, now });
+  await sync.syncOnce();
+  await emit(store, "task.claimed", { task: "a", agent: "w1", attempt: 1, ttl_s: 0 });
+  const note = 'tests pass ![status](https://example.test/s.png?d=YWJj) see [log](https://example.test/log)';
+  await emit(store, "task.progress", { task: "a", percent: 50, note }, agent("w1"));
+  now.advance(61_000);
+  const result = await sync.syncOnce();
+  assert.equal(result.ok, true, result.errors.join('; '));
+  const body = gh.calls().find(call => call.body?.includes('**Progress (50%):**'))?.body;
+  assert.ok(body);
+  assert.ok(body.includes('!\u200d[status]\u200d('));
+  assert.ok(body.includes('[log]\u200d('));
+  assert.doesNotMatch(body, /!\[|\]\s*\(/);
+  assert.equal(ghText('[label] \n (https://example.test)'), '[label]\u200d \n (https://example.test)');
+});

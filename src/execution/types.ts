@@ -119,6 +119,8 @@ export interface CommandSpec {
 
 export interface TaskSpec {
   id: string;
+  parent?: string;
+  instructions?: string;
   title: string;
   team?: string;
   /** Persona ref resolved through loadAgent. */
@@ -129,6 +131,7 @@ export interface TaskSpec {
   acceptance: string[];
   /** CommandSpec ids from contract.validation.commands. */
   checks: string[];
+  verify?: import("./verify.js").PageLoadsPredicate[];
   effort?: "low" | "medium" | "high";
   budget_usd?: number;
   context?: ArtifactRef[];
@@ -159,6 +162,8 @@ export interface ContractBudget {
   per_agent_usd?: number;
   wall_clock_min: number;
   max_parallel: number;
+  max_agents?: number;
+  max_subtasks?: number;
   max_attempts: number;
 }
 
@@ -171,7 +176,7 @@ export type DissentTripwire =
 export interface Dissent {
   id: string;
   by: string;
-  source: { kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "manual"; ref?: string };
+  source: { kind: "ultraplan" | "consent" | "debate" | "waffle_house" | "duel" | "manual"; ref?: string };
   claim: string;
   predicted_failure: string;
   /** May be absent only while drafting; freeze requires arming or explicit excusal. */
@@ -205,6 +210,8 @@ export interface Contract {
   authority: { lead: string; may: AuthorityAction[]; budget_extension_pct: number };
   sandbox: { backend: SandboxBackendId; image: string; install?: { argv: string[]; egress: string[] } };
   workers: { driver: WorkerDriverId; model?: string; fallback_model?: string };
+  /** Local MCP connector names covered by consent. */
+  connectors?: string[];
   /** Postmortem mode (docs/design/postmortem.md §2): set by propose_contract when the project has it enabled. */
   postmortem?: { enabled: boolean };
   consent: Array<{ agent: string; verdict: ConsentVerdict; reason?: string }>;
@@ -213,6 +220,7 @@ export interface Contract {
 
 export const CONTRACT_DEFAULTS = {
   max_parallel: 3,
+  max_subtasks: 16,
   max_attempts: 3,
   budget_extension_pct: 0,
   authority_may: ["retry", "reassign", "resolve_merge"] as AuthorityAction[],
@@ -254,6 +262,8 @@ export interface Lease {
   task: string;
   /** Repository-relative globs: ** * ? (no braces). */
   paths: string[];
+  /** Delegated paths excluded from this worker's writes. */
+  excludes?: string[];
   mode: LeaseMode;
   branch: string;
   reason: string;
@@ -274,6 +284,10 @@ export interface LeaseRequest {
 
 export interface TaskRuntime {
   spec: TaskSpec;
+  /** Latest swarm batch and the commit brought back into this worktree. */
+  subtasks?: string[];
+  subtasks_joined?: string;
+  subtasks_waiting?: boolean;
   state: TaskState;
   attempt: number;
   agent?: string;
@@ -469,7 +483,7 @@ export interface EventPayloads {
   "task.claimed": { task: string; agent: string; attempt: number; ttl_s: number };
   "task.released": { task: string; agent: string; note?: string };
   "task.progress": { task: string; percent?: number; note: string };
-  "task.submitted": { task: string; commit: string; diff_blob: string; stat: string; files: string[]; rewrites: string[] };
+  "task.submitted": { task: string; commit: string; diff_blob: string; stat: string; files: string[]; rewrites: string[]; summary?: string };
   /**
    * commit and submitted_seq (added in WS07) bind the result to one submission: the task.submitted
    * seq and the commit its checks ran on. The runner merges exactly that commit.
@@ -483,6 +497,9 @@ export interface EventPayloads {
   "task.retried": { task: string; attempt: number; why: string };
   "task.reassigned": { task: string; from: string; to: string };
   "task.split": { task: string; into: TaskSpec[] };
+  "task.spawned": { task: string; by: string; into: TaskSpec[] };
+  "task.subtasks_awaited": { task: string };
+  "task.subtasks_joined": { task: string; children: string[]; commit: string };
   "task.failed": { task: string; why: string };
   "task.cancelled": { task: string; why: string };
 
@@ -588,7 +605,7 @@ export const EVENT_TYPES = [
   "agent.stop_requested", "agent.stopped",
   "task.ready", "task.claimed", "task.released", "task.progress", "task.submitted", "task.checks_passed",
   "task.rejected", "task.merged", "task.accepted", "task.blocked", "task.unblocked", "task.retried",
-  "task.reassigned", "task.split", "task.failed", "task.cancelled",
+  "task.reassigned", "task.split", "task.spawned", "task.subtasks_awaited", "task.subtasks_joined", "task.failed", "task.cancelled",
   "lease.granted", "lease.queued", "lease.released", "lease.expired", "lease.revoked", "lease.violation",
   "artifact.published", "artifact.changed",
   "dependency.requested", "dependency.satisfied",
@@ -846,9 +863,12 @@ export interface ExecutionStore {
 // Workers
 // ---------------------------------------------------------------------------
 
-export type WorkerDriverId = "claude-code" | "codex" | "external";
+/** A runtime profile used as a heads-down worker: `runtime:<name>` (src/runtimes/worker.ts). */
+export type RuntimeDriverId = `runtime:${string}`;
+export type WorkerDriverId = "claude-code" | "codex" | "external" | RuntimeDriverId;
 
 export interface WorkerLaunch {
+  connectors?: string[];
   execution: string;
   agent: string;
   task: string;
@@ -891,6 +911,8 @@ export interface RunAccumulator {
   tools?: string[];
   mcpServers?: string[];
   usage?: TokenUsage;
+  /** The token counts were estimated from text lengths (a runtime that reports none). */
+  tokensEstimated?: boolean;
   costUsd?: number;
   resultSubtype?: string;
   isError?: boolean;

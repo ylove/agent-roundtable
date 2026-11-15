@@ -24,13 +24,24 @@
 //    gitlink is refused outright (assertNoGitlinks*): submodules are not supported in heads-down
 //    runs in 1.0. Untracked nested repositories are listed, never entered, and never staged.
 // No protocol is allowed, not even file: worktree, merge and commit operations never use a
-// transport. Filter and merge drivers that the user's own config defines (git-lfs, typically)
-// still run when .gitattributes names them; changing .gitattributes needs an explicit lease.
+// transport. Configured filter programs and diff drivers are disabled, except the standard Git
+// LFS filter when git-lfs is installed outside the repository, its git dir and worker worktree
+// roots. Before staging or writing working-tree content (including worktree add), configured
+// clean/smudge/process filters attached to tracked or untracked non-ignored paths are refused,
+// except for that standard LFS filter. Unattached filters and read-only calls remain available.
+// New worktrees are created without checkout, then their destination configuration and indexed
+// attributes are checked before population. Permitted LFS commands use the validated absolute
+// executable path, shell-quoted, while retaining the configured required setting.
+// Named merge drivers use git's own merge-file command with fixed arguments instead of the
+// configured command.
 // ============================================================================
 
+import { findExecutable } from "../executables.js";
+import { WORKTREES_DIR } from "../config.js";
 import { spawn } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { readRegularFile, RegularFileError } from "../security/fs-safe.js";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { executionTag, EXECUTION_ID_RE } from "../ids.js";
 import { canonicalWorkdir } from "../sandbox/common.js";
 import { killTree } from "../sandbox/process.js";
@@ -68,6 +79,17 @@ export const GIT_HARDENING: readonly string[] = [
 const DIFF_COMMANDS = new Set(["diff", "log", "show"]);
 /** Subcommands that can inspect submodule working directories: --ignore-submodules=all unless the call names a mode. */
 const SUBMODULE_AWARE = new Set(["status", "diff"]);
+/** Commands that stage or write working-tree content, including their abort/reset modes. */
+const CONTENT_COMMANDS = new Set([
+  "add", "commit", "checkout", "merge", "rebase", "reset", "stash", "apply",
+  "cherry-pick", "revert", "restore", "switch",
+]);
+
+function writesContent(args: string[]): boolean {
+  return CONTENT_COMMANDS.has(args[0]) ||
+    (args[0] === "read-tree" && args.slice(1).some((a) => /^-[^-]*u/.test(a))) ||
+    (args[0] === "worktree" && args[1] === "add");
+}
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT = 16 * 1024 * 1024;
@@ -90,7 +112,7 @@ export class GitError extends Error {
   }
 }
 
-/** git was not started: the target is not a work tree we can trust. */
+/** The requested git command was not started because a safety check failed. */
 export class GitSafetyError extends Error {
   constructor(message: string) {
     super(message);
@@ -178,9 +200,14 @@ const real = (p: string): string => {
 /** Where a .git file points (resolved and canonical); throws when it is not a plain gitfile. */
 function readGitfile(workTree: string): string {
   const p = join(workTree, ".git");
-  const st = lstatSync(p);
-  if (!st.isFile() || st.size > 4096) throw new GitSafetyError(`${p} is not a gitfile`);
-  const m = /^gitdir: (.+?)\r?\n?$/.exec(readFileSync(p, "utf8"));
+  let text: string;
+  try {
+    text = readRegularFile(p, { noFollow: true, maxBytes: 4096 }).data.toString("utf8");
+  } catch (e) {
+    if (e instanceof RegularFileError) throw new GitSafetyError(`${p} is not a gitfile`);
+    throw e;
+  }
+  const m = /^gitdir: (.+?)\r?\n?$/.exec(text);
   if (!m) throw new GitSafetyError(`${p} is not a gitfile`);
   return real(resolve(workTree, m[1]));
 }
@@ -338,8 +365,104 @@ interface SpawnOpts extends GitOptions {
   env?: Record<string, string>;
 }
 
+const STANDARD_LFS = new Map([
+  ["clean", "git-lfs clean -- %f"],
+  ["smudge", "git-lfs smudge -- %f"],
+  ["process", "git-lfs filter-process"],
+  ["required", "true"],
+]);
+
+function inside(path: string, root: string): boolean {
+  const rel = relative(real(root), path);
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+
+/** Every value from every scope must match its field; never accept a shell newline as spacing. */
+async function standardLfsExecutable(cwd: string, pre: string[], entries: [string, string][]): Promise<string | null> {
+  const lfs = entries.filter(([key]) => key.startsWith("filter.lfs."));
+  if (!lfs.length || !lfs.every(([key, value]) => {
+    const normalized = value.replace(/^[ \t]+|[ \t]+$/g, "").replace(/[ \t]+/g, " ");
+    return STANDARD_LFS.get(key.slice("filter.lfs.".length)) === normalized;
+  })) return null;
+
+  const executable = findExecutable("git-lfs");
+  if (!executable || !isAbsolute(executable)) return null;
+  const dirs = await spawnGitRaw(cwd, ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], {}, pre);
+  const [gitDir, commonDir] = dirs.stdout.trimEnd().split("\n");
+  if (!gitDir || !commonDir) return null;
+  const roots = [cwd, gitDir, commonDir, WORKTREES_DIR];
+  // Also exclude the main repository when this call targets one of its linked worktrees.
+  for (const repo of repoCache.values()) if (repo.commonDir === real(commonDir)) roots.push(repo.workTree);
+  return roots.every(root => !inside(executable, root)) ? executable : null;
+}
+
+function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+// Config inspection reads all scopes, including includeIf and worktree config, on every call.
+async function driverOverrides(cwd: string, pre: string[]): Promise<{ overrides: string[]; filters: Set<string> }> {
+  const configured = await spawnGitRaw(cwd, ["config", "--null", "--get-regexp",
+    "^(filter\\..*|merge\\..*\\.driver|diff\\..*)$"], { allowExit: [1] }, pre);
+  // With --null, each record is key LF value NUL; split only the first LF so values stay intact.
+  const entries: [string, string][] = splitZ(configured.stdout).map(record => {
+    const newline = record.indexOf("\n");
+    return newline < 0 ? [record, ""] : [record.slice(0, newline), record.slice(newline + 1)];
+  });
+  const lfsExecutable = await standardLfsExecutable(cwd, pre, entries);
+  const settings = new Set<string>();
+  const filters = new Set<string>();
+  for (const [key] of entries) {
+    const filter = /^filter\.(.+)\.([^.]+)$/i.exec(key);
+    const merge = /^merge\.(.+)\.driver$/i.exec(key);
+    const diff = /^diff\.(.+)\.[^.]+$/i.exec(key);
+    if (filter) {
+      if (filter[1] === "lfs" && lfsExecutable) {
+        const command = STANDARD_LFS.get(filter[2]);
+        if (command?.startsWith("git-lfs ")) settings.add(`${key}=${shellQuote(lfsExecutable)}${command.slice("git-lfs".length)}`);
+        continue;
+      }
+      if (/^(clean|smudge|process)$/i.test(filter[2])) filters.add(filter[1]);
+      for (const field of ["clean", "smudge", "process"]) settings.add(`filter.${filter[1]}.${field}=`);
+      settings.add(`filter.${filter[1]}.required=false`);
+    }
+    if (merge) {
+      const git = findExecutable("git");
+      if (!git) throw new GitSafetyError("git executable not found");
+      const quoted = shellQuote(git);
+      settings.add(`merge.${merge[1]}.driver=${quoted} -c core.hooksPath=/dev/null -c core.fsmonitor=false merge-file -- %A %O %B`);
+    }
+    if (diff) {
+      settings.add(`diff.${diff[1]}.textconv=`);
+      settings.add(`diff.${diff[1]}.command=`);
+    }
+  }
+  return { overrides: [...settings].flatMap(setting => ["-c", setting]), filters };
+}
+
+/** Inspect attributes without running filters; scan failures prevent the requested command. */
+async function assertNoFilteredPaths(cwd: string, filters: Set<string>, pre: string[], timeoutMs?: number, cached = false): Promise<void> {
+  const paths = await spawnGitRaw(cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { timeoutMs }, pre);
+  if (!paths.stdout) return;
+  const attrs = await spawnGitRaw(cwd, ["check-attr", ...(cached ? ["--cached"] : []), "--stdin", "-z", "filter"], { timeoutMs, input: paths.stdout }, pre);
+  const fields = splitZ(attrs.stdout);
+  for (let i = 0; i < fields.length; i += 3) {
+    const [path, , filter] = fields.slice(i, i + 3);
+    if (filters.has(filter)) {
+      throw new GitSafetyError(`Filtered paths are not supported in heads-down runs: filter ${JSON.stringify(filter)} applies to ${JSON.stringify(path)}.`);
+    }
+  }
+}
+
+async function spawnGit(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] = []): Promise<GitResult> {
+  const { overrides, filters } = await driverOverrides(cwd, pre);
+  const hardened = [...pre, ...overrides];
+  if (filters.size && writesContent(args)) await assertNoFilteredPaths(cwd, filters, hardened, o.timeoutMs);
+  return spawnGitRaw(cwd, args, o, hardened);
+}
+
 /** Spawn git with the hardening options; cwd is the work tree. Throws GitError on failure. */
-function spawnGit(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] = []): Promise<GitResult> {
+function spawnGitRaw(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] = []): Promise<GitResult> {
   const sub = args[0];
   const argv = [
     ...pre,
@@ -352,14 +475,16 @@ function spawnGit(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] 
     ...(SUBMODULE_AWARE.has(sub) && !args.some((a) => a.startsWith("--ignore-submodules")) ? ["--ignore-submodules=all"] : []),
     ...args.slice(1),
   ];
-  const env = childEnv("git", { GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: ":", GIT_PAGER: "cat", ...o.env });
+  const env = childEnv("git", { GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: ":", GIT_PAGER: "cat", ...o.env, GIT_LFS_SKIP_SMUDGE: "1" });
+  const git = findExecutable("git", env.PATH);
+  if (!git) throw new GitSafetyError("git executable not found");
   const timeoutMs = o.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const max = o.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
   const label = `git ${sub}`;
   return new Promise((resolvePromise, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn("git", argv, {
+      child = spawn(git, argv, {
         cwd,
         env,
         shell: false,
@@ -442,8 +567,9 @@ function spawnGit(cwd: string, args: string[], o: SpawnOpts = {}, pre: string[] 
 
 /**
  * Run `git <args>` in a verified target with the hardening options, an explicit --git-dir and
- * --work-tree, and cwd at the work tree root. Throws GitSafetyError when the target no longer
- * checks out, GitError when git fails.
+ * --work-tree, and cwd at the work tree root. Throws GitSafetyError for an unverified target or
+ * an attached configured filter (except standard LFS) before a content-changing call; throws
+ * GitError when git fails.
  */
 export async function runGit(target: GitTarget, args: string[], opts: GitOptions = {}): Promise<GitResult> {
   if (!Array.isArray(args) || !args.length || args.some((a) => typeof a !== "string" || a.includes("\0"))) {
@@ -451,6 +577,20 @@ export async function runGit(target: GitTarget, args: string[], opts: GitOptions
   }
   verifyTarget(target);
   return spawnGit(target.workTree, args, opts, [`--git-dir=${target.gitDir}`, `--work-tree=${target.workTree}`]);
+}
+
+/** Populate a newly created --no-checkout worktree after checking its own config and HEAD attributes. */
+export async function populateWorktree(target: GitTarget, opts: GitOptions = {}): Promise<void> {
+  verifyTarget(target);
+  const pre = [`--git-dir=${target.gitDir}`, `--work-tree=${target.workTree}`];
+  const { overrides, filters } = await driverOverrides(target.workTree, pre);
+  const hardened = [...pre, ...overrides];
+  // Reading the tree into the index writes no working files and runs no filters. It makes all
+  // destination paths and attributes available even though the worktree is still empty.
+  await spawnGitRaw(target.workTree, ["read-tree", "HEAD"], opts, hardened);
+  if (filters.size) await assertNoFilteredPaths(target.workTree, filters, hardened, opts.timeoutMs, true);
+  verifyTarget(target);
+  await spawnGitRaw(target.workTree, ["reset", "--hard", "HEAD"], opts, hardened);
 }
 
 /** Split NUL-terminated output (the -z formats). */

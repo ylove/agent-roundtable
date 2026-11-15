@@ -11,6 +11,7 @@
 //   - the next tool call that names a stopped session answers {status: "stopped", …} (tools.ts).
 // ============================================================================
 
+import { liveDuels } from "../table/live-duels.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { agentKey } from "../agents.js";
 import { ROUNDTABLE_HOME, sessionRetentionDays } from "../config.js";
@@ -46,7 +47,7 @@ const clean = (s: string, max: number): string => scrub(s).replace(/[\r\n\t]+/g,
 
 interface LiveInfo {
   id: string;
-  kind: "meeting" | "local-meeting" | "collaboration" | "ultraplan";
+  kind: "meeting" | "local-meeting" | "collaboration" | "ultraplan" | "duel" | "casting";
   agents: string[];
   started: string;
   mark(stopped: StoppedInfo): void;
@@ -64,6 +65,10 @@ function sessions(): LiveInfo[] {
   }
   for (const c of collaborations.values()) {
     out.push({ id: c.id, kind: "collaboration", agents: c.agents.map((a) => agentKey(a.name)), started: c.startedAt.toISOString(), mark: (s) => void (c.stopped = s), end: () => endCollaboration(c.id, false) });
+  }
+  for (const d of liveDuels()) {
+    // The duel unwinds itself once its calls are cut, so ending it needs nothing more.
+    out.push({ id: d.id, kind: d.kind ?? "duel", agents: d.agents, started: d.started, mark: (s) => void (d.stopped = s), end: async () => undefined });
   }
   for (const u of ultraplans.values()) {
     out.push({

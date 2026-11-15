@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnWorker, workerExit, groupAlive, stopGroup } from "../../dist/workers/process.js";
@@ -108,4 +108,52 @@ test("worker relay redacts every secret-shaped JSON key and a lone PEM header ne
   const result = JSON.parse(out[7]);
   assert.equal(result.type, "result");
   assert.equal(result.total_cost_usd, 0.25, "the result line, and with it the run's cost, survives");
+});
+
+test("worker relay bounds whitespace and structured output processing", { timeout: 5000 }, async (t) => {
+  const cwd = fixture(t);
+  const outputPath = join(cwd, "bounded.jsonl");
+  const script = join(cwd, "bounded.cjs");
+  writeFileSync(script, `process.stdin.resume(); process.stdin.on("end", () => {
+    console.log("-----BEGIN PRIVATE KEY-----");
+    console.log(" ".repeat(200000) + "!");
+    console.log('{"payload":' + '['.repeat(30000) + '"private-value"' + ']'.repeat(30000) + '}');
+    console.log(JSON.stringify({ payload: Array(10001).fill("private-value") }));
+    console.log(JSON.stringify({ type: "result", usage: { output_tokens: 20 } }));
+  });`);
+  const started = performance.now();
+  const { pid } = await spawnWorker({ file: process.execPath, args: [script], cwd, env: {}, prompt: "go", outputPath });
+  t.after(() => stopGroup(pid, 100));
+  assert.equal((await workerExit(pid)).code, 0);
+  assert.ok(performance.now() - started < 1000, "relay processing stays within 1s");
+  const lines = readFileSync(outputPath, "utf8").trimEnd().split("\n");
+  assert.equal(lines[0], "[redacted:private_key]");
+  assert.equal(lines[1], " ".repeat(200000) + "!");
+  assert.ok(!lines[2].includes("private-value"));
+  assert.match(lines[2], /redacted:limit/);
+  assert.equal(JSON.parse(lines[3]).payload, "[redacted:limit]");
+  assert.equal(JSON.parse(lines[4]).usage.output_tokens, 20);
+});
+
+test("worker relay continues after a per-line processing error", { timeout: 5000 }, async (t) => {
+  const cwd = fixture(t);
+  const outputPath = join(cwd, "recovery.jsonl");
+  const preload = join(cwd, "preload.mjs");
+  writeFileSync(preload, `const original = JSON.stringify;
+    JSON.stringify = (value, ...args) => {
+      if (value?.fixtureFault) throw new Error("fixture processing error");
+      return original(value, ...args);
+    };`);
+  const relay = new URL("../../dist/workers/output-relay.js", import.meta.url);
+  const proc = spawn(process.execPath, ["--import", preload, relay.pathname], { cwd, stdio: ["pipe", "ignore", "pipe"] });
+  t.after(() => proc.kill("SIGKILL"));
+  const closed = new Promise((resolve, reject) => {
+    proc.once("error", reject);
+    proc.once("close", (code) => resolve(code));
+  });
+  proc.stdin.end(JSON.stringify({ file: process.execPath, args: ["-e",
+    'process.stdin.resume(); process.stdin.on("end", () => process.stdout.write(\'{"fixtureFault":true}\\n{"type":"result"}\\n\'));'],
+    cwd, env: {}, prompt: "go", outputPath }));
+  assert.equal(await closed, 0);
+  assert.equal(readFileSync(outputPath, "utf8"), '[redacted:processing_error]\n{"type":"result"}\n');
 });

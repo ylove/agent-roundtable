@@ -2,7 +2,7 @@
 
 At the table, two or more personas take turns on a topic using one provider and model. Start with `start_collaboration`, then continue, nudge, pause, inspect the transcript, or end it. `max_rounds` and requested continuation `rounds` are capped at 20. Nudges never count as agent turns.
 
-> Run a collaboration via agent-roundtable between cfo and skeptic on “Should we raise now?”, three rounds max, and run the first round immediately.
+> Run a collaboration via roundtable between cfo and skeptic on “Should we raise now?”, three rounds max, and run the first round immediately.
 
 ## Formats
 
@@ -29,3 +29,5 @@ Private conversations default to grounding: workspace excerpts (package metadata
 See [Conversation tool calls](../tools.md#conversation-tool-calls).
 
 See [collaboration tool calls](../tools.md#tool-call-examples), [public sessions](public-sessions.md), and [session archives](../sessions.md).
+
+A finished duel can be the focus of a session: pass `duel: "duel-<id>"` (see [a duel as a meeting's focus](duel.md#a-duel-as-a-meetings-focus)).

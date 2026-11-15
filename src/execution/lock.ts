@@ -22,6 +22,7 @@ import { linkSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statS
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { pidAlive } from "../prototypes/sandbox.js";
+import { absoluteSearchPath, findExecutable } from "../executables.js";
 
 export interface LockOptions {
   /**
@@ -105,11 +106,14 @@ export function readLockOwner(lockDir: string): LockOwner | null {
 /** A process's start time from `ps` (UTC, second resolution), or null when it is unknown. */
 export function processStart(pid: number): string | null {
   try {
-    const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    const env = { PATH: absoluteSearchPath(process.env.PATH || "/usr/bin:/bin"), TZ: "UTC", LC_ALL: "C" };
+    const ps = findExecutable("ps", env.PATH);
+    if (!ps) return null;
+    const r = spawnSync(ps, ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
       timeout: 2000,
       stdio: ["ignore", "pipe", "ignore"],
-      env: { PATH: process.env.PATH || "/usr/bin:/bin", TZ: "UTC", LC_ALL: "C" },
+      env,
     });
     const out = r.status === 0 && typeof r.stdout === "string" ? r.stdout.trim().replace(/\s+/g, " ") : "";
     return out || null;
@@ -157,7 +161,14 @@ function tryCreate(lockDir: string, token: string): boolean {
   const owner: LockOwner = { pid: process.pid, host: hostname(), token, at: new Date().toISOString(), ...(started ? { started } : {}) };
   const tmp = join(lockDir, `.owner.${token}.tmp`);
   try {
-    writeFileSync(tmp, JSON.stringify(owner), { mode: 0o600, flag: "wx" });
+    try {
+      writeFileSync(tmp, JSON.stringify(owner), { mode: 0o600, flag: "wx" });
+    } catch (e) {
+      // A contender clearing a stale lock can rename or remove our fresh directory under us; macOS
+      // reports that as EINVAL from open(2) inside it. Same meaning as ENOENT: the directory is not ours.
+      if (errCode(e) === "EINVAL") return false;
+      throw e;
+    }
     linkSync(tmp, join(lockDir, OWNER_FILE));
     return true;
   } catch (e) {
@@ -276,11 +287,20 @@ export async function acquireLock(lockDir: string, opts: LockOptions): Promise<L
   const token = randomBytes(16).toString("hex");
   const deadline = Date.now() + opts.timeoutMs;
   let delay = Math.max(1, opts.waitMs ?? 5);
+  let clears = 0;
   for (;;) {
     if (tryCreate(lockDir, token)) return makeRelease(lockDir, token);
-    if (clearIfGone(lockDir, opts.staleMs)) continue;
+    const cleared = clearIfGone(lockDir, opts.staleMs);
+    clears = cleared ? clears + 1 : 0;
     const left = deadline - Date.now();
-    if (left <= 0) throw new LockTimeoutError(lockDir, opts.timeoutMs, readLockOwner(lockDir));
+    // A clear earns an immediate retry even at the deadline (timeoutMs 0 still takes a dead holder's
+    // lock), but a run of clears that never ends in the lock stops at the deadline.
+    if (left <= 0 && !(cleared && clears <= 8)) throw new LockTimeoutError(lockDir, opts.timeoutMs, readLockOwner(lockDir));
+    if (cleared) {
+      // Retry at once, but yield first: contenders that keep clearing must not hold the event loop.
+      await new Promise<void>((r) => setImmediate(r));
+      continue;
+    }
     await sleep(Math.min(left, delay / 2 + (Math.random() * delay) / 2));
     delay = Math.min(delay * 2, MAX_WAIT_MS);
   }

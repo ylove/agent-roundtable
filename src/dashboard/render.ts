@@ -24,6 +24,8 @@ import {
   type TaskState,
 } from "../execution/types.js";
 import { renderDagSvg } from "./dag-svg.js";
+import { previewFramesHtml } from "../previews/embed.js";
+import type { PreviewRecord } from "../previews/store.js";
 import { moneyText, tokensShort, usd, useText } from "../usage/format.js";
 import { moneyTotal, tokenTotal, type UsageView } from "../usage/types.js";
 
@@ -148,6 +150,8 @@ export function awaitingHuman(state: BlackboardState): Escalation[] {
 export type PageKey = "overview" | "tasks" | "usage" | "dag" | "escalations" | "dissents" | "events" | "contract" | "postmortems" | "task";
 
 export interface PageContext {
+  /** The home link of the read-only multi-run index. */
+  indexBase?: string;
   state: BlackboardState;
   header: ExecutionHeader;
   /** "/<token>/" */
@@ -212,7 +216,7 @@ function banner(c: PageContext): string {
 export function frame(c: PageContext, page: PageKey, title: string, body: string, after = ""): string {
   const b = escapeHtml(c.base);
   const runTitle = c.state.contract?.title ?? c.state.execution;
-  const nav = NAV.filter(([key]) => key !== "postmortems" || page === "postmortems" || hasPostmortems(c.state)).map(
+  const nav = NAV.filter(([key]) => !c.indexBase || key === "overview" || key === "escalations").filter(([key]) => key !== "postmortems" || page === "postmortems" || hasPostmortems(c.state)).map(
     ([key, label, path]) => `<a href="${b}${path}"${key === page || (page === "task" && key === "tasks") ? ` class="here"` : ""}>${label}</a>`
   ).join("");
   return (
@@ -220,7 +224,7 @@ export function frame(c: PageContext, page: PageKey, title: string, body: string
     (page === "usage" && c.nonce ? `<meta name="roundtable-action" content="${escapeHtml(c.nonce)}">` : "") +
     `<title>${t(title)} · ${tc(runTitle, 80)}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head>` +
     `<body data-base="${b}" data-seq="${c.state.seq}" data-live="${LIVE[page]}"><main>` +
-    `<nav>${nav}</nav>` +
+    `<nav>${c.indexBase ? `<a href="${escapeHtml(c.indexBase)}">All runs</a>` : ""}${nav}</nav>` +
     `<p class="meta" id="runmeta">${tc(runTitle, 160)} · ${t(c.state.execution)} · ${badge(c.state.status)} · event ${c.state.seq}</p>` +
     `<p class="live" id="live" role="status" aria-live="polite">${page === "usage" ? "This page follows the run as it happens. The Stop buttons are the one thing it can change." : "Read-only. This page follows the run as it happens."}</p>` +
     (LIVE[page] === "swap" ? `<div id="swap">${banner(c)}${body}</div>` : banner(c) + body) +
@@ -253,6 +257,7 @@ export function renderOverview(c: PageContext): string {
     `<progress max="100" value="${done.percent}">${done.percent}%</progress><p class="meta">${done.total} task${done.total === 1 ? "" : "s"} ${counts}</p></div>` +
     `<div class="card"><h3>Budget</h3><div class="big">${money(budget.spent)}</div><p class="meta">` +
     (budget.limit !== undefined ? `of ${money(budget.limit)}${budget.pct !== undefined ? ` (${budget.pct}%)` : ""}` : "no budget recorded") +
+    (s.contract ? ` · max agents ${t(s.contract.budget.max_agents ?? "unset (swarms disabled)")} · max subtasks ${t(s.contract.budget.max_subtasks ?? 16)}` : "") +
     (budget.estimated ? " · partly estimated" : "") +
     (s.budget.thresholds_crossed.length ? ` · crossed ${s.budget.thresholds_crossed.map((p) => `${p}%`).join(", ")}` : "") +
     `</p></div>` +
@@ -329,6 +334,8 @@ export interface TaskDetail {
   diff?: { stat: string; text: string; truncated: boolean; commit: string } | { stat: string; error: string; commit: string };
   /** Latest output of failing checks by check key, capped at a line boundary (redacted here). */
   outputs: Record<string, string>;
+  /** Running previews of this task (embedded in a sandboxed frame). */
+  previews?: PreviewRecord[];
 }
 
 function list(items: string[], empty = "none"): string {
@@ -370,11 +377,14 @@ export function renderTaskDetail(c: PageContext, id: string, d: TaskDetail): str
     `<dt>Attempt</dt><dd>${rt.attempt}</dd><dt>Progress</dt><dd>${progressCell(rt)}</dd>` +
     `<dt>Persona</dt><dd>${t(spec.persona)}</dd><dt>Team</dt><dd>${spec.team ? t(spec.team) : "none"}</dd>` +
     `<dt>Kind</dt><dd>${t(spec.kind)}</dd><dt>Depends on</dt><dd>${spec.depends_on.length ? spec.depends_on.map((x) => taskLink(c.base, x)).join(", ") : "nothing"}</dd>` +
+    (spec.parent ? `<dt>Parent</dt><dd>${taskLink(c.base, spec.parent)}</dd>` : "") +
+    `<dt>Children</dt><dd>${Object.values(c.state.tasks).filter((child) => child.spec.parent === id).map((child) => `${taskLink(c.base, child.spec.id)} ${badge(child.state)}`).join(", ") || "none"}</dd>` +
     `<dt>Writes</dt><dd>${spec.paths.write.map((p) => `<code>${t(p)}</code>`).join(" ")}</dd>` +
     (rt.branch ? `<dt>Branch</dt><dd><code>${t(rt.branch)}</code></dd>` : "") +
     (rt.last_commit ? `<dt>Last commit</dt><dd><code>${t(rt.last_commit)}</code></dd>` : "") +
     `<dt>Blockers</dt><dd>${blockers(c, rt) || "none"}</dd>` +
     `<dt>Last note</dt><dd>${rt.last_note ? t(rt.last_note) : "none"}</dd></dl>` +
+    previewFramesHtml(d.previews ?? []) +
     `<h2>Acceptance</h2>${list(spec.acceptance)}` +
     `<h2>Checks</h2>` +
     (checks.length
@@ -590,6 +600,7 @@ export function renderDagPage(c: PageContext): string {
 /** The contract as markdown, for when the contract tools left no CONTRACT.md. */
 export function contractMarkdown(k: Contract): string {
   const lines: string[] = [`# ${k.title}`, ""];
+  if (k.connectors?.length) lines.push(`Connectors: ${k.connectors.join(", ")}`, "");
   lines.push(`Contract ${k.id}, version ${k.version}. Status: ${k.status}.${k.frozen ? ` Frozen by ${k.frozen.by} at ${k.frozen.at}.` : ""}`, "");
   lines.push("## Goal", "", k.goal?.ultimate ?? "", "");
   if (k.goal?.original_prompt) lines.push("### Original prompt", "", ...k.goal.original_prompt.split("\n").map((l) => `> ${l}`), "");
@@ -621,7 +632,7 @@ export function contractMarkdown(k: Contract): string {
       "## Budget",
       "",
       `- ${money(k.budget.usd)} in all, ${money(k.budget.per_task_usd)} per task; ${k.budget.wall_clock_min} min; ` +
-        `${k.budget.max_parallel} in parallel; ${k.budget.max_attempts} attempts`,
+        `${k.budget.max_parallel} top-level in parallel; max agents ${k.budget.max_agents ?? "unset (swarms disabled)"}; max subtasks ${k.budget.max_subtasks ?? 16}; ${k.budget.max_attempts} attempts`,
       ""
     );
   }
@@ -641,7 +652,7 @@ function inline(s: string): string {
     .map((part, i) => {
       if (i % 2 === 1) return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
       return escapeHtml(part)
-        .replace(/!?\[([^\]]+)\]\(([^)\s]+)\)/g, "$1 ($2)")
+        .replace(/!?\[([^\[\]]+)\]\(([^)\s\[\]]+)\)/g, "$1 ($2)")
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
         .replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=$|[\s).,;:!?])/g, "$1<em>$2</em>")
         .replace(/(^|[\s(])_([^_\s][^_]*?)_(?=$|[\s).,;:!?])/g, "$1<em>$2</em>");
@@ -651,10 +662,38 @@ function inline(s: string): string {
 
 function tableHtml(rows: string[]): string {
   const cells = (row: string) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((x) => x.trim());
-  const sep = rows.length > 1 && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(rows[1]);
+  const sep = rows.length > 1 && cells(rows[1]).every(cell => /^:?-{3,}:?$/.test(cell));
   const head = sep ? `<thead><tr>${cells(rows[0]).map((x) => `<th>${inline(x)}</th>`).join("")}</tr></thead>` : "";
   const body = (sep ? rows.slice(2) : rows).map((r) => `<tr>${cells(r).map((x) => `<td>${inline(x)}</td>`).join("")}</tr>`).join("");
   return `<table>${head}<tbody>${body}</tbody></table>`;
+}
+
+export const MARKDOWN_LINE_LIMIT = 4000;
+const LINE_TRUNCATED = " … [truncated]";
+
+/** Bound each source line before running Markdown rules, including fenced code. */
+export function capMarkdownLine(line: string): string {
+  return line.length <= MARKDOWN_LINE_LIMIT ? line : line.slice(0, MARKDOWN_LINE_LIMIT - LINE_TRUNCATED.length) + LINE_TRUNCATED;
+}
+
+/** Heading suffixes are trimmed with a single backwards pass. */
+function headingText(text: string): string {
+  let end = text.length;
+  while (end && /\s/.test(text[end - 1])) end--;
+  while (end && text[end - 1] === "#") end--;
+  while (end && /\s/.test(text[end - 1])) end--;
+  return text.slice(0, end);
+}
+
+function isRule(line: string): boolean {
+  const text = line.trim();
+  if (!/^[-*_]/.test(text)) return false;
+  let count = 0;
+  for (const ch of text) {
+    if (ch === text[0]) count++;
+    else if (!/\s/.test(ch)) return false;
+  }
+  return count >= 3;
 }
 
 /**
@@ -662,7 +701,7 @@ function tableHtml(rows: string[]): string {
  * tables, rules, and inline code, bold and italics. Raw HTML is escaped like any other text.
  */
 export function markdownToHtml(md: string): string {
-  const lines = md.replace(/\r\n?/g, "\n").split("\n");
+  const lines = md.replace(/\r\n?/g, "\n").split("\n").map(capMarkdownLine);
   const out: string[] = [];
   let para: string[] = [];
   let items: string[] = [];
@@ -694,15 +733,15 @@ export function markdownToHtml(md: string): string {
       flush();
       continue;
     }
-    const h = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    const h = /^\s{0,3}(#{1,6})\s+/.exec(line);
     if (h) {
       flush();
       // One level down: the page's own <h1> is the page title.
       const n = Math.min(6, h[1].length + 1);
-      out.push(`<h${n}>${inline(h[2])}</h${n}>`);
+      out.push(`<h${n}>${inline(headingText(line.slice(h[0].length)))}</h${n}>`);
       continue;
     }
-    if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+    if (/^\s{0,3}[-*_]/.test(line) && isRule(line)) {
       flush();
       out.push("<hr>");
       continue;

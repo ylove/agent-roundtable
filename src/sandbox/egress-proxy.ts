@@ -304,7 +304,7 @@ export interface EgressOptions {
   /** The execution tag (executionTag(id)); names and labels resources rt-egress-<tag>-<id>. */
   executionTag: string;
   allowlist: string[];
-  /** Default: ROUNDTABLE_SANDBOX_PROXY_IMAGE or node:22-alpine. */
+  /** Default: ROUNDTABLE_SANDBOX_PROXY_IMAGE or the digest-pinned DEFAULT_PROXY_IMAGE. */
   image?: string;
   dockerPath?: string;
   /** Source of ROUNDTABLE_SANDBOX_PROXY_IMAGE; default process.env. */

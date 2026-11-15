@@ -8,7 +8,7 @@ import { git } from "../fixtures/execution/git-fixture.mjs";
 import { cli, CLI, startRunner, waitFor } from "../fixtures/runner/harness.mjs";
 
 const { ensureRunner, launchRunner, readRunnerInfo, runnerLiveness } = await import("../../dist/execution/runner-launch.js");
-const { ensureIntegrationWorktree, ensureTaskWorktree } = await import("../../dist/execution/worktrees.js");
+const { ensureIntegrationWorktree, ensureTaskWorktree, integrationWorktreePath } = await import("../../dist/execution/worktrees.js");
 const { integrationBranch, taskBranch } = await import("../../dist/execution/git.js");
 const { verifyAudit } = await import("../../dist/security/audit.js");
 const { runRunner } = await import("../../dist/execution/runner.js");
@@ -106,23 +106,26 @@ test("runner ownership: live holder refuses a second runner and purge, dead hold
   await first.exited;
 });
 
-test("ensureRunner relaunches a dead owner and SIGTERM snapshots and releases ownership", { timeout: 20000 }, async (t) => {
+test("ensureRunner relaunches a dead owner and SIGTERM snapshots and releases ownership", { timeout: 120000 }, async (t) => {
   const { store } = await makeRun();
   await append(store, "execution.paused", { scope: "all", reason: "hold" });
   const first = startRunner(store.id);
   t.after(() => first.child.kill("SIGKILL"));
-  await waitFor(async () => (await store.events()).some((e) => e.type === "runner.started"), 10000);
+  await waitFor(async () => (await store.events()).some((e) => e.type === "runner.started"), 30000);
+  // runner.started precedes worktree creation. Killing during it can leave partial Git state
+  // or an ownerless git.lock whose 10 s cleanup grace consumes the later shutdown wait.
+  await waitFor(() => existsSync(join(integrationWorktreePath(store.id), ".git")) && !existsSync(join(store.dir, "git.lock")), 30000, "integration worktree initialization");
   first.child.kill("SIGKILL");
   await first.exited;
   assert.equal(runnerLiveness(store.id).state, "dead");
   const next = await ensureRunner(store.id, { env: { ROUNDTABLE_RUNNER_TICK_MS: "100" } });
   assert.equal(next.status, "launched");
   t.after(() => { try { process.kill(next.pid, "SIGKILL"); } catch {} });
-  await waitFor(async () => (await store.events()).some((e) => e.type === "runner.takeover"), 10000);
+  await waitFor(async () => (await store.events()).some((e) => e.type === "runner.takeover"), 30000);
   assert.equal(readRunnerInfo(store.id).pid, next.pid);
   process.kill(next.pid, "SIGTERM");
   // stoppedAt is written just before the lock is released (never after, which could mark a successor stopped).
-  await waitFor(() => readRunnerInfo(store.id)?.stoppedAt && !existsSync(join(store.dir, "runner.lock")), 10000);
+  await waitFor(() => readRunnerInfo(store.id)?.stoppedAt && !existsSync(join(store.dir, "runner.lock")), 30000);
   const snap = JSON.parse(readFileSync(join(store.dir, "snapshot.json"), "utf8"));
   assert.equal(snap.seq, (await store.state()).seq);
   assert.equal((statSync(join(store.dir, "runner.log")).mode & 0o777), 0o600);

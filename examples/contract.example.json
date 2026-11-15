@@ -62,6 +62,6 @@
   },
   "budget": { "usd": 20, "per_task_usd": 8, "wall_clock_min": 60, "max_parallel": 2, "max_attempts": 3 },
   "authority": { "lead": "product-lead", "may": ["retry", "reassign", "resolve_merge"], "budget_extension_pct": 0 },
-  "sandbox": { "backend": "docker", "image": "node:22-bookworm-slim" },
+  "sandbox": { "backend": "docker", "image": "node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d" },
   "workers": { "driver": "claude-code" }
 }

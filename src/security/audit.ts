@@ -9,7 +9,7 @@
 // pruned), and the prune itself is audited.
 // ============================================================================
 
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, fsyncSync, ftruncateSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { AUDIT_DIR } from "../config.js";
 import { scrubDeep } from "../execution/blobs.js";
@@ -172,7 +172,6 @@ export async function appendAudit(input: AuditInput, opts: AuditOptions = {}): P
     entry.hash = chainHash(prev, entry); // throws, writing nothing, if details are not JSON-safe
     const line = Buffer.from(JSON.stringify(entry) + "\n", "utf8");
     const path = join(dir, file);
-    const created = !existsSync(path);
     const fd = openSync(path, "a", 0o600);
     try {
       if (!lock.held()) throw new Error("appendAudit lost the audit lock; nothing was written");
@@ -193,7 +192,7 @@ export async function appendAudit(input: AuditInput, opts: AuditOptions = {}): P
     } finally {
       closeSync(fd);
     }
-    if (created) fsyncDir(dir);
+    if (expectedSize === 0) fsyncDir(dir); // the file was just created (or empty): make its directory entry durable
     return entry as unknown as AuditEntry;
   } finally {
     lock();

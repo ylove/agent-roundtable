@@ -2,11 +2,17 @@
 // Executable lookup on PATH (no shell, no `which`)
 // ============================================================================
 
-import { accessSync, constants, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import { delimiter, isAbsolute, join } from "node:path";
 
-/** A regular file this process may execute. */
+/** Keep only absolute PATH directories, preserving their order. */
+export function absoluteSearchPath(searchPath: string): string {
+  return searchPath.split(delimiter).filter(isAbsolute).join(delimiter);
+}
+
+/** An absolute path to a regular file this process may execute. */
 export function isExecutableFile(p: string): boolean {
+  if (!isAbsolute(p)) return false;
   try {
     if (!statSync(p).isFile()) return false;
     if (process.platform !== "win32") accessSync(p, constants.X_OK);
@@ -21,16 +27,25 @@ export function isExecutableFile(p: string): boolean {
  * directory before the next name. Names are bare program names; anything containing a slash is skipped.
  */
 export function findExecutable(names: string | readonly string[], searchPath: string = process.env.PATH || ""): string | null {
-  const dirs = searchPath.split(delimiter).filter(Boolean);
+  const dirs = searchPath.split(delimiter).filter(isAbsolute);
   const exts = process.platform === "win32" ? ["", ".exe"] : [""];
   for (const name of typeof names === "string" ? [names] : names) {
     if (!name || /[\\/]/.test(name)) continue;
     for (const d of dirs) {
       for (const e of exts) {
-        const p = join(d, name + e);
-        if (isExecutableFile(p)) return p;
+        try {
+          const p = realpathSync.native(join(d, name + e));
+          if (isExecutableFile(p)) return p;
+        } catch {
+          // Missing or unresolvable candidates are absent from PATH.
+        }
       }
     }
   }
   return null;
+}
+
+/** Resolve configured runtime binaries without invoking a shell. */
+export function resolveExecutable(command: string, searchPath = process.env.PATH || ""): string | null {
+  return isAbsolute(command) ? (isExecutableFile(command) ? command : null) : findExecutable(command, searchPath);
 }

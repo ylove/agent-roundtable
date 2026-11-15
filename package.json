@@ -1,11 +1,12 @@
 {
   "name": "agent-roundtable",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "MCP server for meetings and collaborations between AI agents — Anthropic, OpenAI, Together AI, Replicate, Ollama, or any OpenAI-compatible endpoint",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "agent-roundtable": "dist/index.js"
+    "agent-roundtable": "dist/index.js",
+    "roundtable": "dist/index.js"
   },
   "engines": {
     "node": ">=22"
@@ -46,15 +47,18 @@
     "test": "npm run test:unit && npm run test:smoke",
     "test:unit": "node --import ./test/fixtures/foundation/test-env.mjs --test test/unit/*.test.mjs",
     "test:smoke": "node test/smoke.mjs",
-    "test:live": "node test/live-smoke.mjs"
+    "test:live": "node test/live-smoke.mjs",
+    "version": "node scripts/sync-version.mjs && git add server.json .claude-plugin plugins src/config.ts README.md docs/getting-started.md docs/distribution.md"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
     "dotenv": "^18.0.8",
+    "undici": "7.30.1",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
     "typescript": "^7.0.2"
-  }
+  },
+  "mcpName": "io.github.ylove/agent-roundtable"
 }

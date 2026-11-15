@@ -114,7 +114,7 @@ after(() => prototypes.destroyAllPrototypes("shutdown"));
 
 describe("schemas", () => {
   test("the three start tools expose a boolean prototype flag; tool count unchanged", () => {
-    assert.equal(deliberationTools.length, 22, "prototype mode adds no tool");
+    assert.equal(deliberationTools.length, 24, "prototype mode adds no tool; Casting Call is the 24th");
     for (const name of ["start_meeting", "start_local_meeting", "start_collaboration"]) {
       const p = tools.find((x) => x.name === name).inputSchema.properties.prototype;
       assert.equal(p?.type, "boolean", name);
@@ -762,7 +762,7 @@ describe("debug_env", () => {
   test("reports the prototype configuration", async (t) => {
     stubFetch(t, () => json(500, {}));
     const d = JSON.parse((await handleToolCall("debug_env", {})).content[0].text);
-    assert.equal(d.version, "1.0.0");
+    assert.equal(d.version, "2.0.0");
     assert.equal(d.prototypes.dir, PROTO_ROOT);
     assert.equal(typeof d.prototypes.screenshots, "boolean");
     assert.equal(d.prototypes.open_browser, false);

@@ -1,8 +1,8 @@
 // ============================================================================
 // Worker tools (heads-down): read_blackboard, claim_task, lease, post_update, run_command,
-// submit_work and escalate, plus join_execution (orchestrator server only)
+// submit_work, escalate, spawn_subtasks and await_subtasks, plus join_execution (orchestrator server only)
 //
-// On a worker server the seven worker tools are bound to the identity its token proved at startup
+// On a worker server the worker tools are bound to the identity its token proved at startup
 // (bindWorkerIdentity). On the orchestrator server they take execution_id and agent_token, the
 // token join_execution returned once. Either way every event is stamped
 // source {kind: "agent", id, task, team, pid}, every call renews the agent's heartbeat, and every
@@ -12,6 +12,7 @@
 // happens outside it. Nothing here merges: the runner owns the merge queue.
 // ============================================================================
 
+import { verifyPageLoads, type PageLoadsPredicate } from "../execution/verify.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import { ID_RE, preview } from "../execution/events.js";
 import { integrationBranch } from "../execution/git.js";
 import {
   capPathList,
+  globsOverlap,
   decideLeaseRequest,
   leaseDrafts,
   leasesFor,
@@ -69,6 +71,7 @@ import {
   tailForTool,
 } from "../sandbox/index.js";
 import { localSandboxAllowed } from "../sandbox/common.js";
+import { batchChildren, openSubtasks, spawnSpecs, workerTasks, SUBTASK_TERMINAL, type SubtaskInput } from "../execution/swarms.js";
 import { taskHeld } from "../execution/task-holds.js";
 import { appendAudit } from "../security/audit.js";
 import { normalizeRelPath, writeFileAtomic } from "../security/fs-safe.js";
@@ -76,6 +79,8 @@ import { scrub } from "../security/secrets.js";
 import { agentTask, ensureAgentDir, newAgentToken, tokenSha256, writeAgentLeases } from "../workers/files.js";
 import { sameDigest } from "../workers/token.js";
 import {
+  AWAIT_SUBTASKS,
+  SPAWN_SUBTASKS,
   CLAIM_TASK,
   ESCALATE,
   JOIN_EXECUTION,
@@ -300,11 +305,43 @@ export const workerTools: ToolDefinition[] = [
     },
     annotations: { title: "Escalate", ...WORKER_WRITE },
   }),
+  workerTool({
+    name: SPAWN_SUBTASKS,
+    description: "Delegate 1–8 subtasks through the runner when the frozen contract enables swarms. Child ids are namespaced under yours. Paths must be within your current leases and must not overlap siblings. Children inherit your checks; only siblings in this call may be dependencies. Delegated paths are unavailable to you until the children finish. Subtasks cannot delegate.",
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["subtasks"],
+      properties: {
+        subtasks: {
+          type: "array", minItems: 1, maxItems: 8,
+          items: {
+            type: "object", additionalProperties: false, required: ["id", "title", "instructions", "paths"],
+            properties: {
+              id: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,63}$" },
+              title: { type: "string", minLength: 1, maxLength: 200 },
+              instructions: { type: "string", minLength: 1, maxLength: 4000 },
+              paths: { type: "array", minItems: 1, maxItems: 64, items: { type: "string", maxLength: 512 } },
+              depends_on: { type: "array", maxItems: 8, items: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,63}$" } },
+            },
+          },
+        },
+      },
+    },
+    annotations: { title: "Spawn subtasks", ...WORKER_WRITE },
+  }),
+  workerTool({
+    name: AWAIT_SUBTASKS,
+    description: "Wait for your latest subtask batch (default 30 seconds, at most 120). Returns child states, scrubbed summaries, changed files and merge status. ready: true means every child merged and the runner brought integration into your worktree. When children are still running, call again. Failed or cancelled children are reported for you to retry with new ids or escalate.",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: { timeout_s: { type: "number", minimum: 0, maximum: 120 } },
+    },
+    annotations: { title: "Await subtasks", ...WORKER_WRITE },
+  }),
   {
     name: JOIN_EXECUTION,
     description:
       "Register an external worker (for example this chat, or another host) in a heads-down run. Returns an agent_token ONCE: pass it with execution_id to every worker tool " +
-      "(read_blackboard, claim_task, lease, post_update, run_command, submit_work, escalate). With task_id, the task's worktree is created (or reused) and its task card returned. " +
+      "(read_blackboard, claim_task, lease, post_update, run_command, submit_work, escalate, spawn_subtasks, await_subtasks). With task_id, the task's worktree is created (or reused) and its task card returned. " +
       "External workers are not sandboxed: their leases are checked when they submit.",
     inputSchema: {
       type: "object",
@@ -549,6 +586,7 @@ interface CheckOutcome {
   /** The submitted commit a submission check ran on (run_command checks run in the worktree). */
   commit?: string;
   status: "passed" | "failed" | "timed_out";
+  skipped?: boolean;
   exit: number | null;
   duration_ms: number;
   signature?: string;
@@ -573,9 +611,9 @@ async function runCheck(
   task: string,
   spec: CommandSpec | undefined,
   commandId: string,
-  opts: { maxTimeoutMs: number; signal?: AbortSignal; image?: string; workdir?: string; bind?: CheckBinding }
+  opts: { maxTimeoutMs: number; signal?: AbortSignal; image?: string; workdir?: string; bind?: CheckBinding; predicate?: PageLoadsPredicate }
 ): Promise<CheckOutcome> {
-  const backend = await sandboxFor(a);
+  const backend = opts.predicate ? undefined : await sandboxFor(a);
   const workdir = opts.workdir ?? worktreeOf(a, task);
   const bind = opts.bind ?? {};
   const at = opts.bind ? { commit: opts.bind.commit } : {};
@@ -585,12 +623,18 @@ async function runCheck(
   let exit: number | null;
   let timedOut = false;
   let duration = 0;
-  if (!spec) {
+  let skipped = false;
+  if (opts.predicate) {
+    const start = Date.now();
+    const result = await verifyPageLoads(workdir, opts.predicate, { signal: opts.signal, timeoutMs: Math.min(opts.maxTimeoutMs, 15_000) });
+    output = result.note; exit = result.ok ? 0 : null; skipped = !!result.skipped; duration = Date.now() - start;
+    await emit(source => ({ type: "note.posted", source, payload: { topic: "page_loads", text: output, refs: [task, commandId] } }));
+  } else if (!spec) {
     output = `The contract defines no command ${commandId}`;
     exit = null;
   } else {
     try {
-      const r = await runCommandSpec(backend, spec, workdir, { maxTimeoutMs: opts.maxTimeoutMs, signal: opts.signal, image: opts.image });
+      const r = await runCommandSpec(backend!, spec, workdir, { maxTimeoutMs: opts.maxTimeoutMs, signal: opts.signal, image: opts.image });
       ({ output, exit, timedOut, durationMs: duration } = r);
     } catch (e) {
       output = scrub(e instanceof Error ? e.message : String(e));
@@ -605,7 +649,7 @@ async function runCheck(
   }
   if (exit === 0) {
     await emit((source) => ({ type: "check.passed", source, payload: { command_id: commandId, scope: "task", task, duration_ms: duration, ...bind } }));
-    return { command_id: commandId, ...at, status: "passed", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
+    return { command_id: commandId, ...at, ...(skipped && { skipped }), status: "passed", exit, duration_ms: duration, output_blob: blob, output_tail: tail };
   }
   const signature = failureSignature(commandId, output);
   await emit((source) => ({ type: "check.failed", source, payload: { command_id: commandId, scope: "task", task, exit, signature, output_blob: blob, ...bind } }));
@@ -701,6 +745,7 @@ function taskView(state: Readonly<BlackboardState>, id: string): Json {
   return {
     id,
     spec: rt.spec,
+    children: Object.values(state.tasks).filter((child) => child.spec.parent === id).map((child) => ({ id: child.spec.id, state: child.state })),
     state: rt.state,
     attempt: rt.attempt,
     agent: rt.agent,
@@ -709,7 +754,7 @@ function taskView(state: Readonly<BlackboardState>, id: string): Json {
     blocked_by: rt.blocked_by,
     last_commit: rt.last_commit,
     claim: own(state.claims, id),
-    leases: leasesFor(state, id).map((l) => ({ id: l.id, agent: l.agent, paths: l.paths, mode: l.mode })),
+    leases: leasesFor(state, id).map((l) => ({ id: l.id, agent: l.agent, paths: l.paths, ...(l.excludes && { excludes: l.excludes }), mode: l.mode })),
     diff: own(state.diffs, id),
     checks,
     files: Object.entries(state.files).filter(([, f]) => f.task === id).map(([p]) => p).slice(0, 200),
@@ -742,7 +787,7 @@ async function readBlackboard(a: Actor, args: Record<string, unknown>): Promise<
           task: mine,
           state: mineRt?.state,
           percent: mineRt?.percent,
-          leases: mine ? leasesFor(state, mine, a.agent).map((l) => ({ id: l.id, paths: l.paths, mode: l.mode })) : [],
+          leases: mine ? leasesFor(state, mine, a.agent).map((l) => ({ id: l.id, paths: l.paths, ...(l.excludes && { excludes: l.excludes }), mode: l.mode })) : [],
         },
         tasks: {
           counts,
@@ -783,7 +828,7 @@ async function readBlackboard(a: Actor, args: Record<string, unknown>): Promise<
     case "decisions":
       return { section, decisions: state.decisions.slice(-limit) };
     case "leases":
-      return { section, leases: Object.values(state.leases).filter((l) => !taskFilter || l.task === taskFilter).slice(0, limit), queue: state.lease_queue.slice(0, limit) };
+      return { section, leases: Object.values(state.tasks).flatMap((rt) => leasesFor(state, rt.spec.id)).filter((l) => !taskFilter || l.task === taskFilter).slice(0, limit), queue: state.lease_queue.slice(0, limit) };
     case "claims":
       return { section, claims: Object.values(state.claims).slice(0, limit) };
     case "files":
@@ -851,6 +896,7 @@ function claimProblem(state: Readonly<BlackboardState>, task: string): string | 
   if (own(state.claims, task)) return `Task ${task} is already claimed by ${state.claims[task].agent}`;
   if (rt.state !== "ready") return `Task ${task} is ${rt.state}, not ready`;
   if (!depsAccepted(state, task)) return `Task ${task} still waits on dependencies`;
+  if (state.contract?.budget.max_agents !== undefined && workerTasks(state).size >= state.contract.budget.max_agents) return "max_agents workers already run";
   if (state.paused_tasks.includes(task)) return `Task ${task} is paused`;
   return null;
 }
@@ -864,6 +910,7 @@ async function claimTask(a: Actor, args: Record<string, unknown>): Promise<Json>
   externalOnly(state);
   if (args.release === true) {
     const task = agentTask(state, a.agent);
+    if (task && openSubtasks(state, task)) throw new Refusal("Your task has open subtasks; await_subtasks before releasing it");
     if (!task || own(state.claims, task)?.agent !== a.agent) throw new Refusal("You hold no claim to release");
     const r = await a.store.transact(({ state: s }) => {
       externalOnly(s);
@@ -961,6 +1008,8 @@ async function lease(a: Actor, args: Record<string, unknown>): Promise<Json> {
         ...s.lease_queue.filter((q) => q.agent === a.agent && q.task === task).filter(pick).map((q) => q.id),
       ];
       if (!chosen.length) return { events: [], result: [] as string[] };
+      const delegated = batchChildren(s, task).filter((rt) => !SUBTASK_TERMINAL.has(rt.state)).flatMap((rt) => rt.spec.paths.write);
+      if (leasesFor(s, task, a.agent).filter((l) => chosen.includes(l.id)).some((l) => l.paths.some((p) => delegated.some((g) => globsOverlap(p, g))))) throw new Refusal("Your leases reserve delegated paths until the subtasks finish; await_subtasks before releasing them");
       return { events: releaseLeases(s, { agent: a.agent, task, ids: chosen }, sourceOf(s, a, task)), result: chosen };
     });
     await refreshLeaseFiles(a, r.events);
@@ -988,7 +1037,9 @@ async function lease(a: Actor, args: Record<string, unknown>): Promise<Json> {
   const mode = (args.mode as "exclusive" | "shared" | undefined) ?? "exclusive";
   const reason = typeof args.reason === "string" ? cap(args.reason, 500) : "";
   const r = await a.store.transact<LeaseDecision>(({ state: s }) => {
-    const d = decideLeaseRequest(s, { agent: a.agent, task, paths: normalized, mode, reason });
+    let d: LeaseDecision;
+    try { d = decideLeaseRequest(s, { agent: a.agent, task, paths: normalized, mode, reason }); }
+    catch (e) { throw new Refusal((e as Error).message); }
     const source = sourceOf(s, a, task);
     const events: AnyEventDraft[] = "grant" in d ? (d.existing ? [] : [leaseDrafts.granted(d.grant, source)]) : [leaseDrafts.queued(d.queue, source)];
     return { events, result: d };
@@ -1294,10 +1345,65 @@ function staleSubmission(s: Readonly<BlackboardState>, a: Actor, task: string, s
   return null;
 }
 
+async function spawnSubtasks(a: Actor, args: Record<string, unknown>): Promise<Json> {
+  const r = await a.store.transact<string[]>(({ state }) => {
+    const task = requireTask(state, a);
+    requireActive(state, task);
+    if (submitting.has(`${a.execution}\0${task}`)) throw new Refusal(`A submission of ${task} is already in progress`);
+    let into;
+    try { into = spawnSpecs(state, task, a.agent, args.subtasks as SubtaskInput[]); }
+    catch (e) { throw new Refusal((e as Error).message); }
+    return { events: [{ type: "task.spawned", source: sourceOf(state, a, task), payload: { task, by: a.agent, into } }], result: into.map((t) => t.id) };
+  });
+  // A successful response must not leave the parent with a stale write hook.
+  await writeAgentLeases(a.store, a.agent);
+  return { children: r.result };
+}
+
+async function awaitSubtasks(a: Actor, args: Record<string, unknown>, ctx: ToolCallContext): Promise<Json> {
+  const timeout = args.timeout_s === undefined ? 30 : Number(args.timeout_s);
+  if (!Number.isFinite(timeout) || timeout < 0 || timeout > 120) throw new Refusal("timeout_s must be between 0 and 120");
+  const deadline = Date.now() + timeout * 1000;
+  const task = requireTask(await a.store.state(), a);
+  await a.store.transact(({ state }) => {
+    requireActive(state, task);
+    if (requireTask(state, a) !== task) throw new Refusal("Your task claim changed");
+    return { events: state.tasks[task].subtasks_waiting || state.tasks[task].subtasks_joined || !state.tasks[task].subtasks?.length ? [] : [{ type: "task.subtasks_awaited", source: sourceOf(state, a, task), payload: { task } }] };
+  });
+  for (;;) {
+    const state = await a.store.state();
+    const batch = batchChildren(state, task);
+    const done = batch.every((rt) => SUBTASK_TERMINAL.has(rt.state));
+    const joined = !batch.length || !!state.tasks[task].subtasks_joined;
+    const ready = joined && batch.every((rt) => rt.state === "accepted");
+    if (ready || (done && (!batch.some((rt) => rt.state === "accepted") || joined)) || Date.now() >= deadline || ctx.signal?.aborted || TERMINAL_RUN.has(state.status) || SUBTASK_TERMINAL.has(state.tasks[task].state)) {
+      const events = await a.store.events({ types: ["task.submitted", "task.merged"] });
+      const children = batch.map((rt) => {
+        const submission = [...events].reverse().find((e) => e.type === "task.submitted" && e.payload.task === rt.spec.id);
+        return {
+          id: rt.spec.id, status: rt.state,
+          ...(SUBTASK_TERMINAL.has(rt.state) && { summary: cap(rt.last_note ?? "", 500) }),
+          files: submission?.type === "task.submitted" ? submission.payload.files : [],
+          merged: events.some((e) => e.type === "task.merged" && e.payload.task === rt.spec.id),
+        };
+      });
+      return { ready, still_running: !done || (done && !joined && batch.some((rt) => rt.state === "accepted")), children };
+    }
+    heartbeat(a);
+    await new Promise<void>((resolve) => {
+      const finish = () => { clearTimeout(timer); ctx.signal?.removeEventListener("abort", finish); resolve(); };
+      const timer = setTimeout(finish, Math.min(100, Math.max(0, deadline - Date.now())));
+      ctx.signal?.addEventListener("abort", finish, { once: true });
+    });
+  }
+}
+
 async function submitWork(a: Actor, args: Record<string, unknown>, ctx: ToolCallContext): Promise<Json> {
   const state = await a.store.state();
   const task = requireTask(state, a);
   requireActive(state, task);
+  if (openSubtasks(state, task)) throw new Refusal(`Task ${task} has open subtasks; await_subtasks before submitting`);
+  if (batchChildren(state, task).some((rt) => rt.state === "accepted") && !state.tasks[task].subtasks_joined) throw new Refusal(`Task ${task} must await_subtasks to bring its children's work into the worktree`);
   const key = `${a.execution}\0${task}`;
   if (submitting.has(key)) throw new Refusal(`A submission of ${task} is already in progress; wait for its result before you submit again`);
   submitting.add(key);
@@ -1375,7 +1481,7 @@ async function submitLocked(a: Actor, args: Record<string, unknown>, ctx: ToolCa
       events: [{
         type: "task.submitted",
         source: sourceOf(s, a, task),
-        payload: { task, commit: head, diff_blob: diffBlob, stat: sum.stat, files: capPathList(sum.files, 4500), rewrites: capPathList(sum.rewrites, 1500) },
+        payload: { task, commit: head, diff_blob: diffBlob, stat: sum.stat, files: capPathList(sum.files, 4500), rewrites: capPathList(sum.rewrites, 1500), summary: cap(summary, 500) },
       }],
     };
   });
@@ -1399,9 +1505,12 @@ async function submitLocked(a: Actor, args: Record<string, unknown>, ctx: ToolCa
       }
       results.push(await runCheck(a, task, c?.validation.commands.find((x) => x.id === id), id, { maxTimeoutMs: left, signal: ctx.signal, image: c?.sandbox.image || undefined, workdir: dir, bind }));
     }
+    for (const [index, predicate] of (rt.spec.verify ?? []).entries()) {
+      results.push(await runCheck(a, task, undefined, `page-loads-${index + 1}`, { predicate, maxTimeoutMs: Math.max(1, deadline - Date.now()), signal: ctx.signal, workdir: dir, bind }));
+    }
     return results;
   };
-  const results = ids.length ? await withCommitCheckout(a.store.header(), task, head, runAll) : [];
+  const results = ids.length || rt.spec.verify?.length ? await withCommitCheckout(a.store.header(), task, head, runAll) : [];
   ctx.progress?.(ids.length, ids.length, "checks done");
   const failed = results.filter((r) => r.status !== "passed");
   const view = results.map(({ output_tail, ...r }) => (r.status === "passed" ? r : { ...r, output_tail }));
@@ -1547,6 +1656,8 @@ const HANDLERS: Record<string, Handler> = {
   [RUN_COMMAND]: (a, args, ctx) => runCommand(a, args, ctx),
   [SUBMIT_WORK]: (a, args, ctx) => submitWork(a, args, ctx),
   [ESCALATE]: (a, args) => escalate(a, args),
+  [SPAWN_SUBTASKS]: (a, args) => spawnSubtasks(a, args),
+  [AWAIT_SUBTASKS]: (a, args, ctx) => awaitSubtasks(a, args, ctx),
 };
 
 export async function handleWorkerTool(name: string, args: ToolArgs, ctx: ToolCallContext = { mode: "orchestrator" }): Promise<CallToolResult> {

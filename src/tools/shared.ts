@@ -83,6 +83,11 @@ export const PROVIDER_PROPS = {
   },
 } as const;
 
+export const AUTO_PROVIDER_PROPS = {
+  ...PROVIDER_PROPS,
+  provider: { ...PROVIDER_PROPS.provider, enum: ["auto", ...PROVIDER_IDS], description: "LLM provider. Omit or use auto for provider judgment (the router picks a healthy provider per seat and reports why in a routing block); otherwise the chosen provider is used as given. Options: auto; anthropic; openai; together (Together AI — any Together model id, e.g. zai-org/GLM-5.3 or Qwen/...); replicate (owner/name, owner/name:version, or https://replicate.com/owner/name); ollama (local, only when reachable); openai_compatible (any /v1/chat/completions server — set OPENAI_COMPATIBLE_BASE_URL or pass base_url)." },
+} as const;
+
 export const MEETING_MODE_PROPS = {
   mode: {
     type: "string",
@@ -107,6 +112,30 @@ export const PUBLIC_PROP = {
     "The result includes public.url so the human can watch live.",
 } as const;
 
+export const DUEL_PROP = {
+  type: "string",
+  description: "Optional duel id (duel-...) from ROUNDTABLE_HOME/duels to make the focus of this session: a scrubbed, size-capped brief of the duel (teams, artifacts, verdicts, tally, dissents) is added to the context every participant sees, as untrusted content to discuss. An unknown or invalid id is an error before any provider call.",
+} as const;
+
+export const CONNECTORS_PROP = {
+  type: "array",
+  items: { type: "string", minLength: 1, maxLength: 32 },
+  maxItems: 8,
+  description: "Optional names of configured MCP connectors (roundtable config set connector) that every seat may call as tools during its turn. Only read-only tools are offered unless the connector's config lists more; tool results are untrusted data and are scrubbed. Seats on providers without tool support (Replicate) speak without them. An unknown connector is an error before any provider call.",
+} as const;
+
+export const SEAT_CONNECTORS_PROP = {
+  type: "object",
+  additionalProperties: true,
+  patternProperties: { "^.+$": { type: "array", items: { type: "string", minLength: 1, maxLength: 32 }, maxItems: 8 } },
+  description: "Optional per-seat limits, used with connectors: a map from a seat (agent) name to the subset of connectors that seat may call, e.g. {\"ada\": [\"figma\"], \"bob\": [\"jira\"]}. A seat not listed gets all of the session's connectors; an empty list gives that seat none. Every connector named must also be in connectors, and every seat must be at the table; otherwise the call fails before anything starts.",
+} as const;
+
+export const DUEL_SOURCE_PROP = {
+  type: "boolean",
+  description: "Default true; only with duel. The duel brief is resent on every turn to every participant (a full brief can be about 20k tokens per turn). Set false to leave out artifact file contents and keep titles, file names and sizes, verdicts, tally and dissents.",
+} as const;
+
 export const PROTOTYPE_PROP = {
   type: "boolean",
   description:
@@ -123,8 +152,12 @@ export const PROTOTYPE_PROP = {
 // ----------------------------------------------------------------------------
 
 /** Reject routing mistakes before a workshop loads personas or opens a public channel. */
-export function validateProviderOptions(provider: LLMProvider = "anthropic", baseUrl?: string): void {
-  if (!PROVIDER_IDS.includes(provider)) {
+export function validateProviderOptions(provider: LLMProvider | "auto" = "anthropic", baseUrl?: string, allowAuto = false): void {
+  if (provider === "auto" && allowAuto) {
+    if (baseUrl) throw new Error("base_url requires explicit provider openai_compatible.");
+    return;
+  }
+  if (!(PROVIDER_IDS as string[]).includes(provider)) {
     throw new Error(`Unknown provider "${provider}". Valid providers: ${PROVIDER_IDS.join(", ")}`);
   }
   if (baseUrl && provider !== "openai_compatible") {
@@ -138,8 +171,9 @@ export function validateProviderOptions(provider: LLMProvider = "anthropic", bas
  */
 export function formatUltraplanResult(result: UltraplanStepResult | UltraplanFinalResult): string {
   if (result.status !== "finalized") return JSON.stringify(result, null, 2);
-  const trailer = { ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally };
-  return result.finalPlan + (result.publicBlock ? `\n\n${result.publicBlock}` : "") +
+  const trailer = { routing: result.routing, ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally };
+  const uses = result.toolUses?.length ? `\n\nConnector use:\n${result.toolUses.map((n) => `- ${n}`).join("\n")}` : "";
+  return result.finalPlan + uses + (result.publicBlock ? `\n\n${result.publicBlock}` : "") +
     "\n\n```json\n" + JSON.stringify(trailer, null, 2) + "\n```";
 }
 

@@ -23,7 +23,7 @@ The orchestrator can call `file_dissent` while the contract is a draft:
 }
 ```
 
-The dissenter must be a contract participant. Source kinds are `manual`, `consent`, `ultraplan`, `debate` and `waffle_house`; an optional `source.ref` retains provenance. Filing with an existing dissent id replaces that concern. Every filing creates a new draft version and requires renewed consent.
+The dissenter must be a contract participant. Source kinds are `manual`, `consent`, `ultraplan`, `debate`, `waffle_house` and `duel`; an optional `source.ref` retains provenance. Filing with an existing dissent id replaces that concern. Every filing creates a new draft version and requires renewed consent.
 
 Authenticated agents use the same tool with `execution_id` and `agent_token` instead of `orchestrator`. On a worker server, identity is already bound and neither credential argument is accepted. Agents must be contract participants and may file or update only their own concerns; `by` can be omitted and is filled from their identity.
 
@@ -66,6 +66,8 @@ predicted_failure: The order validation fails after a retry.
 ```
 
 `propose_contract` with `from_session` imports these blocks as dissent drafts with `source.kind: debate` or `waffle_house` and the session id in `source.ref`. Identity comes from the archived speaker. Tags embedded in other lines, quoted or indented blocks, incomplete blocks, multiline values and extra fields (including `Decision:` or `Outcome:` lines) are ignored. A fence closes only with bare fence characters and optional whitespace; a language-labelled fence inside it does not expose its contents. Ordinary turns and the proponent's or defender's summary cannot file another participant's concern. Sessions ended without a requested summary add no dissent drafts.
+
+A finished duel imports the same way. `from_session: "duel-<id>"` reads `ROUNDTABLE_HOME/duels/<id>.json` (a regular file of at most 10 MB; the id is validated strictly, with no paths). Each archived `dissent` event becomes a draft concern with `source.kind: duel`, the duel id in `source.ref`, and the filing persona as author. Text is scrubbed and capped at 500 characters, a repeated identical dissent counts once, and a dissent already carried in the proposal is not added twice. These drafts need a tripwire or an explicit excusal before freeze, like the others. `amend_contract` accepts a duel id the same way, and a drafted duel task plan turns each dissent into an acceptance line of a risks task (see [duel](modes/duel.md#from-duel-to-contract)).
 
 Imports use the existing contract validator: each value must fit the 500-character limit and all explicit and imported dissents together must fit the 16-entry limit. Oversized imports fail proposal validation. Imports do not invent tripwires; use `file_dissent` to arm or explicitly excuse each draft before freeze.
 

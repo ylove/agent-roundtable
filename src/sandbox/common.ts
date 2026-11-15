@@ -31,8 +31,8 @@ export const SANDBOX_ENV = {
   ALLOW_LOCAL: "ROUNDTABLE_ALLOW_LOCAL_SANDBOX",
 } as const;
 
-export const DEFAULT_SANDBOX_IMAGE = "node:22-bookworm-slim";
-export const DEFAULT_PROXY_IMAGE = "node:22-alpine";
+export const DEFAULT_SANDBOX_IMAGE = "node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d";
+export const DEFAULT_PROXY_IMAGE = "node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914";
 
 export const DEFAULT_TIMEOUT_MS = 600_000;
 /** Upper bound for any single command, matching the 15-minute submit_work cap. */

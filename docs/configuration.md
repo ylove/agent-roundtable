@@ -10,12 +10,12 @@
 | `OPENAI_COMPATIBLE_API_KEY` | optional | — |
 | `OPENAI_COMPATIBLE_MODEL` | `openai_compatible` | `default` |
 | `OLLAMA_URL` | `ollama` | `http://localhost:11434` |
-| `ROUNDTABLE_AGENTS_DIR` | agent prompt lookup | `.claude/agents` (relative to the server's working directory — use an absolute path) |
+| `ROUNDTABLE_AGENTS_DIR` | agent prompt lookup; also set from the `agentsDir` saved with `roundtable config`, or per command with `--agents-dir` | `.claude/agents` (relative to the server's working directory — use an absolute path) |
 | `ROUNDTABLE_SKILLS_DIR` | last skill lookup location after personal/project skills; new create skills and improve skills outside `.claude/agents` | `skills` beside the agents directory (normally `.claude/skills`) |
 | `ROUNDTABLE_WORKSPACE_DIR` | conversation grounding | project containing `.claude/agents`, otherwise server working directory |
 | `ROUNDTABLE_ACTIVITY_LOG` | stored session activity; excerpts in private conversation grounding and private improve prompts | `~/.agent-roundtable/activity.jsonl`; `off`, `false`, `0` or `no` disables it |
 | `ROUNDTABLE_PARALLEL_TURNS` | concurrent ultraplan phases and workshop reviews | `4` (minimum 1) |
-| `ROUNDTABLE_ANTHROPIC_MODEL` | default Anthropic model (id or alias) | `claude-opus-5` |
+| `ROUNDTABLE_ANTHROPIC_MODEL` | default model for `anthropic` (id or alias) | `claude-sonnet-5-5` |
 | `ROUNDTABLE_OPENAI_MODEL` | default OpenAI model | `gpt-5.6-luna` |
 | `ROUNDTABLE_TOGETHER_MODEL` | default Together model | `zai-org/GLM-5.3` |
 | `ROUNDTABLE_REPLICATE_MODEL` | default Replicate model | `qwen/qwen3-235b-a22b-instruct-2507` |
@@ -28,21 +28,23 @@
 | `ROUNDTABLE_NTFY_USER` / `ROUNDTABLE_NTFY_PASSWORD` | ntfy basic auth, alternative to the token | — |
 | `ROUNDTABLE_WEBHOOK_URL` | webhook publisher: URL that receives each entry as JSON; https, or http to loopback or a private (LAN) address; never a cloud metadata address | — |
 | `ROUNDTABLE_WEBHOOK_VIEW_URL` | webhook publisher: URL template for the viewing page, `{channel}` is replaced | — |
-| `ROUNDTABLE_WEBHOOK_AUTH_HEADER` | webhook publisher: value sent as the `Authorization` header | — |
+| `ROUNDTABLE_WEBHOOK_AUTH_HEADER` | webhook publisher: header name and value, e.g. `Authorization: Bearer abc123` | — |
 | `ROUNDTABLE_PUBLIC_TOPIC_PREFIX` | prefix of the generated public channel name | `roundtable` |
 | `ROUNDTABLE_TRANSCRIPTS_DIR` | where public-session transcripts are saved | `~/.agent-roundtable/transcripts` |
 | `ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS` | max wait for pending posts when a public session ends | `30000` |
 | `ROUNDTABLE_PROTOTYPE_DIR` | prototype sandbox root; refused inside a git work tree, as a symlink, or when owned by another user; created with mode 0700 | `<os temp dir>/agent-roundtable-prototypes` |
 | `ROUNDTABLE_PROTOTYPE_TTL_MS` | prototype safety cap: a prototype still under assessment after this long is destroyed; values below `60000` are raised to `60000` | `1800000` (30 min) |
-| `ROUNDTABLE_PROTOTYPE_OPEN` | open the prototype board in a browser at session start | off (`1`, `true`, `yes` or `on` enables) |
-| `ROUNDTABLE_CHROME_PATH` | Chrome/Chromium binary for public-session screenshots | auto-detect: the Google Chrome or Chromium app (macOS) or Chrome install (Windows), then `google-chrome`, `google-chrome-stable`, `chromium` or `chromium-browser` on `PATH` |
+| `ROUNDTABLE_PROTOTYPE_OPEN` | open the prototype blackboard in a browser at session start | off (`1`, `true`, `yes` or `on` enables) |
+| `ROUNDTABLE_CHROME_PATH` | absolute path to a regular executable Chrome/Chromium binary for screenshots and page checks | auto-detect: the Google Chrome or Chromium app (macOS) or Chrome install (Windows), then `google-chrome`, `google-chrome-stable`, `chromium` or `chromium-browser` on `PATH` |
 | `ROUNDTABLE_PROTOTYPE_SCREENSHOTS` | screenshots of web prototypes; only used by public prototype sessions | on (`0`, `false`, `no` or `off` disables) |
+| `ROUNDTABLE_PAGE_CHECKS` | headless page checks of web artifacts (duels, prototype mode, `page_loads` verify) | on when Chrome is found (`0` disables) |
 | `ROUNDTABLE_LOCAL_TIMEOUT_MS` | local meetings: timeout for one `claude -p` call; the CLI's process group is killed after it | `300000` (5 min) |
-| `ROUNDTABLE_WORKER_AUTH` | `api_key` passes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` to the `claude` CLI (local meetings) and `OPENAI_API_KEY` to `codex`; otherwise they use their own login (including `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, and Bedrock, Vertex or Foundry credentials when the CLI is set to use them) and get no provider keys | CLI login |
+| `ROUNDTABLE_WORKER_AUTH` | `api_key` passes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` to the `claude` CLI (local meetings) and `OPENAI_API_KEY` to `codex`, and `GEMINI_API_KEY` / `GOOGLE_API_KEY` to a `runtime:gemini` worker; otherwise they use their own login (including `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, and Bedrock, Vertex or Foundry credentials when the CLI is set to use them) and get no provider keys | CLI login |
 | `ROUNDTABLE_ALLOW_PRIVATE_BASE_URLS` | a per-call `base_url` may reach private, CGNAT, link-local and ULA addresses, over plain http too (cloud metadata stays blocked; loopback is always allowed) | off (`1`, `true`, `yes` or `on` enables) |
 | `ROUNDTABLE_OPENAI_COMPATIBLE_TRUSTED_ORIGINS` | comma-separated origins (`https://host:port`) besides `OPENAI_COMPATIBLE_BASE_URL`'s that receive `OPENAI_COMPATIBLE_API_KEY` when passed as `base_url` | — (the key goes only to the configured origin) |
-| `ROUNDTABLE_AGENT_PATHS` | extra directories (separated by `:`, or `;` on Windows) that path-like agent refs may point into | — (the agents directory, `<workspace>/.claude/agents` and `~/.claude/agents` are always allowed) |
+| `ROUNDTABLE_AGENT_PATHS` | extra directories (separated by `:`, or `;` on Windows) that path-like agent refs may point into | — (the agents directory, `<workspace>/.claude/agents`, `~/.claude/agents` and the existing non-symlink library are allowed) |
 | `ROUNDTABLE_PROVIDER_RETRIES` | retries after a provider call fails with 408, 409, 429, 5xx or a network error (backoff with jitter, `Retry-After` honored up to 60 s, always within `ROUNDTABLE_LLM_TIMEOUT_MS`) | `2` (`0` disables, at most `5`) |
+| `ROUNDTABLE_ENV_FILE` | absolute path of a private env file that supplies provider keys and model defaults the shell did not set; overrides the `envFile` saved with `roundtable config`. Rules: [saved CLI settings and env files](#saved-cli-settings-and-env-files) | the saved `envFile`, otherwise none |
 | `ROUNDTABLE_DOTENV` | `off` skips loading `.env` entirely (worker MCP servers start keyless) | `.env` is loaded |
 | `ROUNDTABLE_DEFAULT_VISIBILITY` | how `execute` shows a run when the call names no channel: a comma list of `dashboard`, `chat_only` and `github:<owner/name>` | — (`execute` asks) |
 | `ROUNDTABLE_DEFAULT_BUDGET_USD` | a run's budget when neither `execute` nor the contract sets one | — (`execute` asks) |
@@ -53,22 +55,65 @@
 | `ROUNDTABLE_SESSION_RETENTION_DAYS` | days an archived at-the-table session, and a postmortem draft that was never held, is kept; swept at server start | `30` (`0` or `off` keeps all) |
 | `ROUNDTABLE_AUDIT_RETENTION_DAYS` | days the audit log keeps a month file after the month ended; swept at server start | `365` (`0` or `off` keeps all) |
 
-`.env` is loaded from the package directory (next to `package.json`) with `override: true`, so values there win over anything the MCP host passes in its `env` block. `.env` is gitignored and is the single source of truth for secrets. See [`.env.example`](../.env.example).
+The launcher's environment takes precedence. The package `.env` (next to `package.json`) fills allowed unset settings; an optional pointed env file then fills its own allowed unset variables. Existing values, including empty values, are preserved. See [`.env.example`](../.env.example).
+
+## Saved CLI settings and env files
+
+```sh
+roundtable config set env-file /absolute/path/to/private.env
+roundtable config set agents-dir /absolute/path/to/agents
+roundtable config show
+```
+
+Settings are saved as `{ "envFile": "…", "agentsDir": "…" }` in `~/.agent-roundtable/config.json`, or `ROUNDTABLE_HOME/config.json` when a state root is configured. Writes use mode 0600. `config show` prints `env-file: set|unset`, `agents-dir: set|unset`, secret names with backend ids, and connector names with env variable names; it never displays paths, locators or values.
+
+`ROUNDTABLE_ENV_FILE` overrides the saved `envFile`. The target must be an absolute path to an accessible regular file. A file readable by group or world produces a warning without revealing its path. Restrict it to mode 0600. Invalid targets are skipped with a path-free warning.
+
+**Owner-only rule.** `config.json`, the package `.env` and the pointed env file are read only when you own them and neither group nor world can write to them (mode 0600 or 0644 passes; 0666, or a file owned by another user, does not). Files that fail this rule supply no settings or keys. Invalid saved settings and pointed files produce path-free warnings; the optional package file is skipped. A tracked package `.env` produces one stderr warning per process, without its path. Keep credentials in an untracked private file.
+
+**OpenAI-compatible endpoint.** Env files supply `OPENAI_COMPATIBLE_BASE_URL` and `OPENAI_COMPATIBLE_API_KEY` only as a pair, and only when the launcher set neither. When the launcher selects an endpoint, set its key there too.
+
+**Pointed env file.** These key names may be copied from it:
+
+- `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TOGETHER_API_KEY`, `REPLICATE_API_TOKEN`
+- `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY`, `OPENAI_COMPATIBLE_MODEL`
+- `ROUNDTABLE_ANTHROPIC_MODEL`, `ROUNDTABLE_OPENAI_MODEL`, `ROUNDTABLE_TOGETHER_MODEL`, `ROUNDTABLE_REPLICATE_MODEL`, `ROUNDTABLE_OLLAMA_MODEL`, `ROUNDTABLE_EXECUTION_MODEL`
+
+**Package `.env`.** An untracked package `.env` may copy the same keys plus the settings `.env.example` documents: `OLLAMA_URL`, `ROUNDTABLE_AGENTS_DIR`, `ROUNDTABLE_MAX_TOKENS`, `ROUNDTABLE_LLM_TIMEOUT_MS`, `ROUNDTABLE_PUBLISHER`, `ROUNDTABLE_NTFY_URL`, `ROUNDTABLE_PUBLIC_TOPIC_PREFIX` and `ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS`. When git tracks the file, none of it is applied and one path-free warning is printed; move the settings to an untracked file. Other `ROUNDTABLE_*` settings in `.env.example` belong in the launcher's environment.
+
+From either file, other credentials, `NODE_*`, proxy settings, `ROUNDTABLE_*` security switches, executable paths and other URLs are ignored. Parsing copies only the allowed keys. Existing values, including empty values, are preserved. Precedence is the launcher's environment, then package `.env`, then the pointed file.
+
+The saved `agentsDir` sets `ROUNDTABLE_AGENTS_DIR` only when the variable is unset, before model and persona configuration is evaluated. `--agents-dir` overrides it for a terminal session. Set paths through `config set` or the shell, because the pointed env-file allowlist excludes `ROUNDTABLE_AGENTS_DIR`.
+
+`ROUNDTABLE_DOTENV=off` skips both env files. Worker and hook processes also skip saved settings and both env files, preserving their launcher's environment. Provider defaults use `claude-sonnet-5-5` for `anthropic`; the `opus` alias selects `claude-opus-5-5` explicitly and `haiku` selects `claude-haiku-5-5`.
+
+Executable discovery uses only absolute directories on `PATH`; empty entries, `.` and relative directories are omitted, including in child environments. Set `ROUNDTABLE_CHROME_PATH` in the launcher to an absolute path to a regular executable file. Configured runtime `argv[0]` overrides and connector commands also require absolute paths to regular executable files. Built-in runtime names are resolved through the filtered `PATH`. See [runtime configuration](runtimes.md#configuration).
+
+See [the table CLI](table-cli.md) for mixed-provider seats, preflight and replay.
 
 ## State root and sandbox
+
+The [agents library](agents-library.md) lives at `<ROUNDTABLE_HOME>/agents`.
+It is created with mode 0700 on first import; persona files use mode 0600.
+Configured agents take precedence over library personas. A symlinked library
+directory is not an allowed root.
 
 These settings complete the table above. `SANDBOX_ENV` is re-exported by `src/sandbox/index.ts` from `src/sandbox/common.ts`; defaults also come from `src/sandbox/docker.ts`.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `ROUNDTABLE_HOME` | Root for execution state, sessions, worktrees, audit, activity and transcripts unless individually overridden | `~/.agent-roundtable`; fresh OS temp directory in a Node test process when unset |
-| `ROUNDTABLE_SANDBOX_IMAGE` | Default Docker command/check image; contract `sandbox.image` can override it | `node:22-bookworm-slim` |
-| `ROUNDTABLE_SANDBOX_PROXY_IMAGE` | Docker HTTPS install-egress proxy image | `node:22-alpine` |
+| `ROUNDTABLE_HOME` | Root for the agents library (`agents/`), execution state, sessions, worktrees, audit, activity and transcripts unless individually overridden | `~/.agent-roundtable`; fresh OS temp directory in a Node test process when unset |
+| `ROUNDTABLE_SANDBOX_IMAGE` | Default Docker command/check image; contract `sandbox.image` can override it | `node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d` |
+| `ROUNDTABLE_SANDBOX_PROXY_IMAGE` | Docker HTTPS install-egress proxy image | `node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914` |
 | `ROUNDTABLE_SANDBOX_MEMORY` | Docker memory limit with swap disabled; invalid values warn and fall back | `2g` |
 | `ROUNDTABLE_SANDBOX_CPUS` | Positive Docker CPU quota; invalid values warn and fall back | `2` |
 | `ROUNDTABLE_SANDBOX_PIDS` | Docker process limit, integer 16–1000000; invalid values warn and fall back | `512` |
+| `ROUNDTABLE_PREVIEW_TTL_MIN` | Minutes a [dev-server preview](previews.md) may sit unused before it is stopped (1–1440) | `30` |
+| `ROUNDTABLE_PREVIEW_MAX` | Most previews running at once (1–20) | `3` |
+| `ROUNDTABLE_PREVIEW_READY_TIMEOUT_SEC` | Seconds to wait for a preview's dev server to answer HTTP (5–1800) | `120` |
 | `ROUNDTABLE_ALLOW_LOCAL_SANDBOX` | Allow the weaker local command backend | off; exactly `1` enables, or explicitly choose `execute(sandbox: "local")` |
 | `ROUNDTABLE_ALLOW_CODEX_DRIVER` | Opt into the Codex worker driver and its broader access model | off; exactly `1` enables, or explicitly choose `execute(worker_driver: "codex")` |
+| `ROUNDTABLE_ALLOW_RUNTIME_WORKERS` | Opt into runtime profiles (`hermes`, `openclaw`, `gemini`, or a configured one) as heads-down workers, `workers.driver: "runtime:<name>"`; contract validation and `execute` refuse the choice without it. See [runtimes as workers](runtimes.md#as-heads-down-workers) | off; exactly `1` enables |
 | `ROUNDTABLE_CODEX_READ_ROOTS` | Extra absolute, colon-separated toolchain read roots in the Codex permissions profile; denied home/state/checkout roots stay denied | none |
 | `ROUNDTABLE_PRICING_FILE` | JSON model-price overrides, USD per million tokens; re-read when file changes | built-in table; unknown rates are estimated |
 | `ROUNDTABLE_SMOKE_CHECKS` | Comma-separated contract command ids for integration checks after each merge | contract `validation.final` |
@@ -106,13 +151,27 @@ The child allowlists in `src/security/child-env.ts` additionally recognize these
 
 Claude children set `TERM=dumb`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`; worker Claude also sets `MCP_TOOL_TIMEOUT=1200000`. Codex sets `TERM=dumb` and `NO_COLOR=1`. The local sandbox inherits only `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and sets `CI=1`. The trusted runner deliberately inherits the full environment. No per-command contract `env` key may look credential-shaped or carry a recognized secret value.
 
+## Set by the server (do not set)
+
+The server and runner set these for the processes they start. They are not operator configuration; setting them yourself has no supported effect.
+
+| Name | Where | Meaning |
+| --- | --- | --- |
+| `ROUNDTABLE_EXECUTION_ID`, `ROUNDTABLE_AGENT_ID` | worker and hook processes | The run and agent identity a worker or the lease hook acts as. |
+| `ROUNDTABLE_LAUNCH_INTENT`, `ROUNDTABLE_LAUNCH_SHA` | the detached output relay of a worker launch | Path of the launch record in the agent's directory and the hash of the agent's token. The relay checks them (under a lock) before it starts, so a launch cancelled in the meantime never begins, and writes a receipt. |
+| `RT_EGRESS_ALLOW`, `RT_PROXY_PORT` | the Docker install-egress proxy container | The allowed HTTPS hosts (comma-separated) from the contract's install step, and the port the proxy listens on. |
+| `RT_PROXY_HOST` | the same proxy | Listen address; defaults to `0.0.0.0` inside the container, and the runner does not set it. |
+
+`RT_HOME` is not an environment variable: it is the name of a parameter the macOS local-sandbox profile receives, hiding the state root from local commands. `ROUNDTABLE_LABEL`, `ROUNDTABLE_SERVER` and `ROUNDTABLE_TOOL_PREFIX` in the source are constants (the `roundtable` GitHub issue label, the `roundtable` server name in generated worker configuration, and the `mcp__roundtable__` tool prefix), not variables.
+
+Terminal output honors the standard `NO_COLOR` (any value turns colors off in the table commands, `usage` and `statusline`) and `COLUMNS` (the status line width).
+
 ## Test and internal environment
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `NODE_TEST_CONTEXT` | Set by Node's test runner; config uses fresh temp state and warns once if `ROUNDTABLE_HOME` is unset | absent outside tests; do not set manually |
 | `ROUNDTABLE_RUNNER_TICK_MS` | Runner tick for tests/demos, 50–10000 ms | `1500` |
-| `ROUNDTABLE_EXECUTION_ID` / `ROUNDTABLE_AGENT_ID` | Generated worker/hook identity; not operator configuration | set by the runner |
 | `ROUNDTABLE_TEST_CHROME` | `1` enables real-browser screenshot tests | off |
 | `ROUNDTABLE_LIVE_TEST` | `1` permits paid live-provider smoke tests | off |
 | `ROUNDTABLE_LIVE_PROVIDERS` | Comma-separated live test providers | `anthropic,openai,together` |
@@ -121,3 +180,32 @@ Claude children set `TERM=dumb`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` an
 | `ROUNDTABLE_LIVE_OLLAMA` | `1` also checks Ollama | off |
 
 The standard unit-test preload isolates state, HOME, persona/skill directories and transcripts, disables retries and browser opening, and cleans up. The config fallback protects the state root when you invoke `node --test` without that preload; it does not isolate every explicitly configured path or clean up the fresh temp directory automatically.
+
+## Credential references and worker connectors
+
+Use `roundtable config set secret ANTHROPIC_API_KEY secret://keychain/roundtable/anthropic` to save a reference under `secrets` in the user config. Shell values win for referenced keys; otherwise references beat plaintext files. Startup resolves synchronously within 20 seconds; a failure warns by name and leaves the key unset. `ROUNDTABLE_SECRETS=off` disables startup resolution. Workers and hooks never run the startup broker. See [secrets](secrets.md) for backends, checks, caching and the resolver interface.
+
+The `connectors` config defines extra stdio MCP servers by absolute executable path, separate arguments and an env map. Credentials use references. Heads-down contracts opt in with `connectors: ["issues"]`; names are covered by consent. Claude workers support them; Codex workers refuse them. An optional `tools` list on a connector allows non-read-only tools for seats at the table, which opt in with `--connectors` or the `connectors` argument. See [connectors](connectors.md) for configuration, limits and trust.
+
+## Long-running service and private check-ins
+
+These options are independent of public session publishers. Use `roundtable config set notify.<key> <value>`; restart `serve` after changes. See [long-running runs](long-running.md) for setup and privacy details.
+
+| Saved key | Meaning | Default |
+| --- | --- | --- |
+| `notify.events` | Comma-separated list or JSON array of `awaiting_human`, `budget`, `completed`, `failed`, `aborted`, `postmortem_ready`, `runner_keeps_dying` | All listed events |
+| `notify.ntfy.url` | Authenticated ntfy server; HTTPS except loopback | Unset |
+| `notify.ntfy.topic` | Private topic, 16–64 letters/digits/underscores/hyphens; generate with `notify init ntfy` | Unset |
+| `notify.ntfy.token` | `secret://` reference to bearer token | Unset |
+| `notify.ntfy.user` | `secret://` reference to username, paired with password | Unset |
+| `notify.ntfy.password` | `secret://` reference to password | Unset |
+| `notify.webhook.url` | Signed check-in receiver; HTTPS except loopback | Unset |
+| `notify.webhook.secret` | `secret://` reference to HMAC signing secret | Unset |
+| `notify.desktop` | `true` for macOS or Linux desktop check-ins | `false` |
+
+| Environment variable | Meaning | Default |
+| --- | --- | --- |
+| `ROUNDTABLE_NOTIFY_NTFY_TOKEN` | Private ntfy bearer token; overrides the saved reference | Unset |
+| `ROUNDTABLE_NOTIFY_WEBHOOK_SECRET` | Private webhook HMAC secret; overrides the saved reference | Unset |
+
+`serve` uses `ROUNDTABLE_HOME/serve/` for its lock, metadata, private detached log, notification cursors/queues and relaunch history. All state files are 0600. `--bind tailnet` opts into a locally assigned private tailnet address; no wildcard bind or public tunnel is supported. Service definition printouts never contain environment values and must be installed by the person.

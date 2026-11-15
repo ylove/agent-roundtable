@@ -182,6 +182,7 @@ for (const how of ["closeSync", "close"]) {
       assessorIsCaller: false,
       public: true,
       screenshots: true,
+      pageCheck: false,
       openBrowser: false,
       root: await tmpd("rt-proto-shots-"),
     });
@@ -258,6 +259,7 @@ test("real Chrome: a public web prototype renders (CSS and classic script from i
     assessorIsCaller: false,
     public: true,
     screenshots: true,
+    pageCheck: false,
     openBrowser: false,
     root: await tmpd("rt-proto-shots-"),
   });
@@ -308,6 +310,7 @@ test("real Chrome: a page that navigates to another local server or to the inter
     assessorIsCaller: false,
     public: true,
     screenshots: true,
+    pageCheck: false,
     openBrowser: false,
     root: await tmpd("rt-proto-shots-"),
   });
@@ -353,6 +356,7 @@ test("real Chrome: closeSync() mid-capture (process exit) leaves no browser and 
     assessorIsCaller: false,
     public: true,
     screenshots: true,
+    pageCheck: false,
     openBrowser: false,
     root,
   });

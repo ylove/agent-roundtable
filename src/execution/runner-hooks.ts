@@ -74,6 +74,8 @@ export interface RunnerHooks {
    * started, a huddle concluded but not applied). Idempotent; its operations may repeat.
    */
   escalationPass?(ctx: RunnerContext): Promise<void | readonly ProcessOp[]>;
+  /** Routing an escalation kept failing: hand it to the human with this message. */
+  escalationGiveUp?(ctx: RunnerContext, escalationId: string, message: string): Promise<void>;
 }
 
 export const DEFAULT_HOOKS: RunnerHooks = {

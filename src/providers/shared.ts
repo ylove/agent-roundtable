@@ -15,6 +15,32 @@ export interface LLMCompletionResult {
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
   };
+  /** Tool-calling rounds only: the model asked for these calls instead of (or besides) answering. */
+  toolCalls?: ToolCallRequest[];
+  /** Tool-calling rounds only: the provider-native assistant turn to send back with the results. */
+  assistantTurn?: unknown;
+}
+
+/** A tool a seat may call, in the provider-neutral shape (JSON Schema input). */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface ToolCallRequest {
+  id: string;
+  name: string;
+  /** Parsed arguments; null when the provider sent arguments that were not valid JSON. */
+  input: unknown;
+}
+
+/** One request of a tool loop: the offered tools plus the provider-native turns exchanged so far. */
+export interface ToolRound {
+  tools: ToolSpec[];
+  turns: unknown[];
+  /** The call budget is spent: the model must answer in text. */
+  forbid?: boolean;
 }
 
 export interface LLMMessage {
@@ -29,6 +55,8 @@ export interface ProviderCallOptions {
   signal: AbortSignal;
   /** Only honoured by the openai_compatible provider: overrides OPENAI_COMPATIBLE_BASE_URL. */
   baseUrl?: string;
+  /** Set only by the tool loop (callLLMWithTools); absent for every other caller. */
+  toolRound?: ToolRound;
 }
 
 export type ProviderCall = (
@@ -50,14 +78,47 @@ export function assertNonEmpty(label: string, content: string, finishReason?: st
   );
 }
 
+export const PROVIDER_BODY_LIMIT = 8 * 1024 * 1024;
+class ResponseBodyLimitError extends Error {}
+
+/** Read response bytes incrementally and cancel the stream when the limit is exceeded. */
+export async function readBoundedText(response: Response, limit = PROVIDER_BODY_LIMIT): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > limit) {
+        void reader.cancel().catch(() => {});
+        throw new ResponseBodyLimitError(`Response body exceeds ${limit} byte limit`);
+      }
+      chunks.push(value);
+    }
+    return new TextDecoder().decode(Buffer.concat(chunks, bytes));
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /**
  * Success bodies are parsed strictly (a truncated or non-JSON 200 must reject). Error bodies are
  * best effort: a 502 HTML page is still an HTTP error, reported by its status rather than a parse error.
  */
 export async function readProviderJson(response: Response): Promise<Record<string, unknown>> {
-  if (response.ok) return (await response.json()) as Record<string, unknown>;
+  let text: string;
   try {
-    const parsed = (await response.json()) as unknown;
+    text = await readBoundedText(response);
+  } catch (error) {
+    if (response.ok || error instanceof ResponseBodyLimitError) throw error;
+    return {};
+  }
+  if (response.ok) return JSON.parse(text) as Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(text) as unknown;
     return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {};
@@ -85,5 +146,17 @@ export function assertNotRedirect(label: string, response: Response, requestUrl:
 
 /** Some open-weight reasoning models emit their reasoning inline as <think>...</think>. */
 export function stripThinkTags(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
+  const chunks: string[] = [];
+  let pos = 0;
+  for (;;) {
+    const start = text.indexOf("<think>", pos);
+    if (start < 0) break;
+    const end = text.indexOf("</think>", start + 7);
+    if (end < 0) break;
+    chunks.push(text.slice(pos, start));
+    pos = end + 8;
+    while (pos < text.length && /\s/.test(text[pos])) pos++;
+  }
+  chunks.push(text.slice(pos));
+  return chunks.join("");
 }

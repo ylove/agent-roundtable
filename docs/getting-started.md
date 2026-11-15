@@ -22,7 +22,7 @@ Then it runs the doctor, starts `roundtable serve --detach` if it is not already
 
 ## Setup
 
-Requires Node 22+.
+Requires Node 22.19+.
 
 ```sh
 git clone <repository-url> agent-roundtable

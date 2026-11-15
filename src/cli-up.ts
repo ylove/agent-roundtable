@@ -28,7 +28,7 @@ export interface Doctor { ok: boolean; checks: Check[] }
 export interface Probes {
   nodeVersion: string;
   bundledUndiciVersion?: string;
-  /** The package's `engines.node` range, for example ">=22". */
+  /** The package's `engines.node` range, for example ">=22.19.0". */
   engines: string;
   /** Provider ids that have credentials or an endpoint right now (read again after setup). */
   providers(): string[];
@@ -252,7 +252,7 @@ async function defaultProbes(): Promise<Probes> {
   const { findExecutable } = await import("./executables.js");
   const { runtimeRegistry } = await import("./runtimes/registry.js");
   const { findChrome } = await import("./prototypes/browser.js");
-  let engines = ">=22";
+  let engines = ">=22.19.0";
   let packageName: string | undefined;
   try {
     const pkg = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"));

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns";
 import { createServer } from "node:http";
+import { installHttpStack } from "../../dist/http/fetch.js";
 import { guardedDispatcher } from "../../dist/security/url-guard.js";
 import { callOpenAICompatible } from "../../dist/providers/openai-compatible.js";
 import { WebhookPublisher } from "../../dist/publishers/webhook.js";
@@ -18,6 +19,9 @@ async function server(t, handler) {
 
 const options = baseUrl => ({ baseUrl, model: "fixture", maxTokens: 8, signal: AbortSignal.timeout(5000) });
 const messages = [{ role: "user", content: "hello" }];
+
+// As at process startup: guarded dispatchers come from the pinned undici, so fetch must too.
+installHttpStack();
 
 test("a real request connects to the approved address when lookup answers change", async t => {
   let host;

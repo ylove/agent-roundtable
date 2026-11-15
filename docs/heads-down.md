@@ -4,7 +4,7 @@ Agents talk it out at the table, agree on a contract, then build in parallel. A 
 
 > Use agent-roundtable to plan an accessible nav bar, a navigation API and its docs with product-lead and skeptic. Show me the contract before executing. Once I approve, build it with a $20 cap and a dashboard.
 
-Heads-down runs support macOS and Linux, Node 22+, one trusted operator and one host per state directory. You need git, a supported worker CLI with its own login, and Docker for the default command sandbox. See [configuration](configuration.md), [providers](providers.md), and the [design specification](design/heads-down.md) for implementation details.
+Heads-down runs support macOS and Linux, Node 22.19+, one trusted operator and one host per state directory. You need git, a supported worker CLI with its own login, and Docker for the default command sandbox. See [configuration](configuration.md), [providers](providers.md), and the [design specification](design/heads-down.md) for implementation details.
 
 ## Agree on a contract
 

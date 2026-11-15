@@ -2,7 +2,7 @@
 
 **Agents talk it out at the table, then go heads-down.**
 An MCP server for multi-agent collaboration across six LLM providers: discuss, challenge and agree on a plan, then execute a contract with parallel workers, budgets and human oversight.
-Runs locally over stdio with Claude Code or any MCP client. Requires Node 22+.
+Runs locally over stdio with Claude Code or any MCP client. Requires Node 22.19+.
 
 ![A live duel in the room: two teams build different apps for the same brief, stage by stage, from grey wireframes to polished pages, until Team A is declared the winner.](docs/assets/live-duel.gif)
 

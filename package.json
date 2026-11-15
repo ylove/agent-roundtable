@@ -51,8 +51,8 @@
     "version": "node scripts/sync-version.mjs && git add server.json .claude-plugin plugins src/config.ts README.md docs/getting-started.md docs/distribution.md"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
-    "dotenv": "^18.0.8",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "dotenv": "^18.0.10",
     "undici": "7.30.1",
     "yaml": "^2.9.1"
   },

@@ -17,7 +17,7 @@ import type { PublicChannel } from "./public.js";
 import type { Meeting } from "./meetings.js";
 import type { LocalMeeting } from "./local-meetings.js";
 import type { Collaboration, CollaborationMessage } from "./collaborations.js";
-import type { Ultraplan, UltraplanEntry } from "./ultraplan.js";
+import type { Ultraplan, UltraplanEntry, UltraplanUsage } from "./ultraplan.js";
 
 export const SESSION_ARCHIVE_SCHEMA = "roundtable.session/1";
 
@@ -79,6 +79,8 @@ export interface ArchivedSession {
   dissentSummaries?: Array<{ agent: string; content: string }>;
   /** Ultraplans only. */
   document?: ArchivedUltraplanDocument;
+  /** Ultraplan metered spend, including the optional session cap. */
+  usage?: UltraplanUsage;
   /** Agent workshops only: the tool's structured result (without its public block). */
   result?: unknown;
   /** Public sessions: where the channel was published. */
@@ -237,7 +239,7 @@ function ultraplanPhase(entry: UltraplanEntry): string {
 /** An ultraplan at finalize (signed off or ended), with the document in structured form. */
 export function archiveUltraplan(
   u: Ultraplan,
-  final: { markdown: string; signedOff: boolean; version: number | null; signoffs: ArchivedUltraplanDocument["signoffs"]; tally: Record<string, number>; outcome: string }
+  final: { markdown: string; signedOff: boolean; version: number | null; signoffs: ArchivedUltraplanDocument["signoffs"]; tally: Record<string, number>; outcome: string; usage: UltraplanUsage }
 ): string | null {
   return attempt(u.id, () => ({
     id: u.id,
@@ -259,6 +261,7 @@ export function archiveUltraplan(
       };
     }),
     summary: final.outcome,
+    usage: final.usage,
     document: {
       markdown: final.markdown,
       signedOff: final.signedOff,

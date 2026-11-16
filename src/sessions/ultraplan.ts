@@ -2,19 +2,22 @@
 // Ultraplan: specialist input, independent reviews and final sign-offs
 // ============================================================================
 
-import { validateSessionCap, setSessionCap, stopCappedSession, clearSessionCap, sessionCapView } from "../usage/session-caps.js";
+import { validateSessionCap, setSessionCap, clearSessionCap, sessionCapView, sessionSpend } from "../usage/session-caps.js";
 import { prepareSeats } from "../table/seats.js";
 import { callSeat } from "../table/dispatch.js";
 import { checkSeatConnectorArgs, startSeatConnectors, withSeatConnectors, type SeatConnectorMap, type SeatConnectorSession } from "../table/seat-connectors.js";
 import type { Seat } from "../table/events.js";
-import { DEFAULT_MODELS, MAX_TOKENS, PARALLEL_TURNS, type LLMProvider } from "../config.js";
+import { DEFAULT_MODELS, MAX_TOKENS, PARALLEL_TURNS, PROVIDER_IDS, resolveAnthropicModel, type LLMProvider } from "../config.js";
 import { agentKey, loadAgentPromptWithPath } from "../agents.js";
 import { recordActivity } from "../activity.js";
 import { newId } from "../ids.js";
 import { SessionBusyError, isSessionBusy, lockSession, sessionBusyMessage } from "./lock.js";
 import { archiveUltraplan } from "./archive.js";
 import { callLLM } from "../providers/index.js";
-import { metered, stoppedOutcome, type StoppedInfo } from "../usage/session-scope.js";
+import { lineFor, metered, stoppedOutcome, type StoppedInfo } from "../usage/session-scope.js";
+import { activeUsageSink, withUsageSink } from "../providers/usage.js";
+import { isFreeProvider } from "../execution/pricing.js";
+import { estimateSessionCost, type SessionCostCall, type SessionCostEstimate } from "../usage/estimate.js";
 import { publicLabel } from "../publishers/index.js";
 import { openPublicChannel, publicDirectiveSuffix, formatPublicBlock, type PublicChannel } from "./public.js";
 import { mapLimit, notFoundError, runVerdictRound, truncate } from "./workshop.js";
@@ -59,6 +62,35 @@ export interface Ultraplan {
   connectors?: SeatConnectorSession;
   /** One line per connector call or notice. */
   toolNotes?: string[];
+  estimate?: SessionCostEstimate;
+  estimateNote?: string;
+  usage?: UltraplanUsage;
+}
+
+export interface UltraplanUsage {
+  spent_usd: number;
+  max_usd?: number;
+  cap_reached?: boolean;
+  estimated?: true;
+}
+
+export function formatUltraplanUsage(usage: UltraplanUsage): string {
+  return `Usage: ${usage.max_usd === undefined ? `$${usage.spent_usd.toFixed(4)}`
+    : `spent $${usage.spent_usd.toFixed(4)} of $${usage.max_usd} cap${usage.cap_reached ? " (stopped by spend cap)" : ""}`}${usage.estimated ? " (estimated)" : ""}`;
+}
+
+export function formatUltraplanEstimate(estimate: SessionCostEstimate): string {
+  // Round upwards so the displayed upper bound never understates the calculated amount.
+  const dollars = (usd: number) => (Math.ceil(usd * 100) / 100).toFixed(2);
+  const seats = estimate.perSeat.map(line => `${line.seat ? `${line.seat}: ` : ""}${line.provider}/${line.model} $${dollars(line.usd)}${line.estimated ? " (estimated)" : ""}`);
+  return `Estimated cost: up to $${dollars(estimate.usd)} (${estimate.calls} agent calls; ${seats.join(", ")})`;
+}
+
+function usageFor(u: Ultraplan): UltraplanUsage {
+  const cap = sessionCapView(u.id);
+  return { spent_usd: cap?.spentUsd ?? u.usage?.spent_usd ?? 0,
+    ...(cap && { max_usd: cap.maxUsd, cap_reached: cap.reached }),
+    ...(u.usage?.estimated && { estimated: true }) };
 }
 
 type Input = { agent: string; content: string };
@@ -66,6 +98,9 @@ type Verdict = Input & { verdict: string };
 type PlanVersion = Ultraplan["versions"][number];
 
 export interface UltraplanStepResult {
+  estimate?: SessionCostEstimate;
+  estimateNote?: string;
+  usage: UltraplanUsage;
   routing?: Seat[];
   ultraplanId: string;
   status: "awaiting_plan" | "awaiting_revision";
@@ -83,6 +118,9 @@ export interface UltraplanStepResult {
 }
 
 export interface UltraplanFinalResult {
+  estimate?: SessionCostEstimate;
+  estimateNote?: string;
+  usage: UltraplanUsage;
   routing?: Seat[];
   ultraplanId: string;
   status: "finalized";
@@ -97,6 +135,15 @@ export interface UltraplanFinalResult {
   publicBlock?: string;
   /** One line per connector call, when the ultraplan used connectors. */
   toolUses?: string[];
+}
+
+export interface UltraplanDryRunResult {
+  status: "dry_run";
+  dry_run: true;
+  estimate: SessionCostEstimate;
+  estimateNote: string;
+  usage: UltraplanUsage;
+  routing?: Seat[];
 }
 
 export const ultraplans = new Map<string, Ultraplan>();
@@ -248,6 +295,8 @@ export function renderUltraplanDocument(u: Ultraplan, signoffs: Verdict[], colle
     `# Ultraplan: ${title}`,
     `Planner: ${u.planner ? label(u, u.planner.name) : "orchestrator"} · Participants: ${u.agents.map((a) => label(u, a.name)).join(", ")} · Plan versions: ${u.versions.length} · ` +
       (collected ? `Sign-off: ${signoffCounts(tally)}${signedOff ? "" : " — not signed off"}` : "Not signed off"),
+    ...(u.estimate ? [formatUltraplanEstimate(u.estimate), u.estimateNote ?? ""] : []),
+    formatUltraplanUsage(usageFor(u)),
     latest ? `## ${signedOff ? "Final" : "Latest"} plan (v${latest.version})${signedOff ? "" : " — not signed off"}\n\n${latest.plan}`
       : "## Plan\n\nNo plan was submitted.",
     "## Sign-offs",
@@ -289,8 +338,21 @@ function dispatch(u: Ultraplan, agent: string, system: string, messages: Array<{
     agent, onModelFallback: model => { seat.model = model; },
   }) : callLLM(system, messages, { provider: u.provider, model: u.model, baseUrl: u.baseUrl });
 }
+/** Observe the same reports the ledger and cap receive, including under an outer execution sink. */
+function observeUsage<T>(u: Ultraplan, agent: string, run: () => Promise<T>): Promise<T> {
+  const ledger = activeUsageSink();
+  return withUsageSink(report => {
+    const line = lineFor({ session: u.id, kind: "ultraplan", agent }, report, "ultraplan");
+    const usage = u.usage ??= { spent_usd: 0 };
+    usage.spent_usd += sessionSpend(line);
+    if (!isFreeProvider(line.provider, { baseUrl: report.baseUrl }) && (line.tokens_prov === "estimated" || line.usd_prov !== "reported")) usage.estimated = true;
+    ledger?.(report);
+  }, run);
+}
+
 function ask(u: Ultraplan, agent: string, systemPrompt: string, prompt: string): Promise<string> {
-  return metered({ session: u.id, kind: "ultraplan", agent }, () => dispatch(u, agent, systemPrompt, [{ role: "user", content: prompt }]));
+  return metered({ session: u.id, kind: "ultraplan", agent }, () => observeUsage(u, agent,
+    () => dispatch(u, agent, systemPrompt, [{ role: "user", content: prompt }])));
 }
 
 function ownEntry(u: Ultraplan, phase: "input" | "review", index: number): string | undefined {
@@ -316,7 +378,7 @@ async function computePhase(u: Ultraplan, phase: "input" | "review" | "signoff",
   }, review ? "Verdict" : "Sign-off", {
     verdicts: review ? REVIEW_VERDICTS : SIGNOFF_VERDICTS,
     llm: { provider: u.provider, model: u.model, baseUrl: u.baseUrl },
-    ...(u.routing && { ask: (agent: Ultraplan["agents"][number], messages: Array<{ role: "user" | "assistant"; content: string }>) => dispatch(u, agent.name, agent.systemPrompt, messages) }),
+    ask: (agent, messages) => observeUsage(u, agent.name, () => dispatch(u, agent.name, agent.systemPrompt, messages)),
     limit: PARALLEL_TURNS,
     scope: (agent) => ({ session: u.id, kind: "ultraplan", agent: agent.name }),
   });
@@ -371,6 +433,7 @@ function stepResult(u: Ultraplan): UltraplanStepResult {
     ? [...u.versions].reverse().find((earlier) => earlier.version < v.version && latestReviews(u, earlier.version).length)
     : undefined;
   return {
+    estimate: u.estimate, estimateNote: u.estimateNote, usage: usageFor(u),
     ultraplanId: u.id,
     ...(u.routing && { routing: u.routing }),
     ...(v ? {
@@ -395,6 +458,7 @@ async function authorPlan(u: Ultraplan, prompt: string): Promise<void> {
 
 /** `collected`: sign-offs were asked for; signedOff then means none is OBJECT or UNCLEAR. */
 async function finalize(u: Ultraplan, signoffs: Verdict[], collected: boolean): Promise<UltraplanFinalResult> {
+  const usage = usageFor(u);
   const version = u.versions.at(-1)?.version ?? null;
   const tally = tallyVerdicts(signoffs.map((s) => s.verdict), SIGNOFF_VERDICTS);
   const signedOff = collected && isSignedOff(signoffs);
@@ -411,11 +475,11 @@ async function finalize(u: Ultraplan, signoffs: Verdict[], collected: boolean): 
     ...(u.origin !== undefined && { origin: u.origin }),
   });
   // Archived before it leaves the live map, so the session is always either live or archived.
-  const archived = archiveUltraplan(u, { markdown: document, signedOff, version, signoffs, tally, outcome }) !== null;
+  const archived = archiveUltraplan(u, { markdown: document, signedOff, version, signoffs, tally, outcome, usage }) !== null;
   ultraplans.delete(u.id);
   await u.connectors?.close();
   const publicBlock = u.publicChannel ? formatPublicBlock(u.publicChannel, await u.publicChannel.finalize({ summary: document })) : undefined;
-  return { ultraplanId: u.id, routing: u.routing, status: "finalized", signedOff, archived, version, finalPlan: document, signoffs, tally,
+  return { ultraplanId: u.id, routing: u.routing, status: "finalized", signedOff, archived, version, finalPlan: document, signoffs, tally, usage, estimate: u.estimate, estimateNote: u.estimateNote,
     ...(publicBlock !== undefined && { publicBlock }), ...(u.toolNotes?.length && { toolUses: u.toolNotes }) };
 }
 
@@ -430,19 +494,83 @@ function available(id: string): Ultraplan {
 // Public API: caller-owned or autonomous planner flow
 // ----------------------------------------------------------------------------
 
+/** Same clamped review limit as the autonomous planner loop. */
+function revisionLimit(requested?: number): number {
+  return Math.min(3, Math.max(1, Math.floor(Number(requested)) || 1));
+}
+
+/**
+ * Count every planned turn at its output ceiling. Known text uses one token per UTF-8 byte,
+ * plus framing allowance; generated input/review/plan text uses the producing seat's token ceiling.
+ * Caller-written future plans have a MAX_TOKENS allowance. Extra caller revisions and tool loops
+ * are outside this bounded planning pass.
+ */
+function estimateUltraplan(u: Ultraplan, draft: string | undefined, rounds: number): SessionCostEstimate {
+  const calls: SessionCostCall[] = [];
+  const seatFor = (name: string) => u.routing?.find(seat => seat.id === name);
+  const outputFor = (name: string) => Math.min(MAX_TOKENS, seatFor(name)?.maxOutputTokens ?? MAX_TOKENS);
+  const add = (agent: Ultraplan["agents"][number], prompt: string, generatedTokens = 0) => {
+    const seat = seatFor(agent.name);
+    calls.push({ seat: agent.key, provider: seat?.provider ?? u.provider, model: seat?.model ?? u.model,
+      ...(!seat && u.baseUrl !== undefined && { baseUrl: u.baseUrl }),
+      inputTokens: Buffer.byteLength(agent.systemPrompt, "utf8") + Buffer.byteLength(prompt, "utf8") + 512 + generatedTokens,
+      outputTokens: outputFor(agent.name) });
+  };
+  const names = u.agents.map(agent => label(u, agent.name));
+  const planner = u.planner;
+  const plannerIsApi = planner && (PROVIDER_IDS as readonly string[]).includes(seatFor(planner.name)?.provider ?? u.provider);
+  let planTokens = draft ? Buffer.byteLength(draft, "utf8") : planner ? outputFor(planner.name) : MAX_TOKENS;
+  if (!draft) {
+    for (const agent of u.agents) add(agent, buildInputPrompt(u.task, names, u.context));
+    if (plannerIsApi) add(planner, buildPlannerDraftPrompt(u.task, u.context, names,
+      u.agents.map(agent => ({ agent: label(u, agent.name), content: "" })), u.executionReady),
+    u.agents.reduce((total, agent) => total + outputFor(agent.name), 0));
+  }
+  for (let round = 0; round < rounds; round++) {
+    for (const agent of u.agents) add(agent,
+      buildReviewPrompt(u.task, u.context, "", round + 1, planner ? label(u, planner.name) : "orchestrator",
+        draft ? undefined : "", round ? "" : undefined),
+      planTokens + (draft ? 0 : outputFor(agent.name)) + (round ? outputFor(agent.name) : 0));
+    if (plannerIsApi) add(planner, buildPlannerRevisePrompt(u.task, "", round + 1,
+      u.agents.map(agent => ({ agent: label(u, agent.name), content: "", verdict: "APPROVE WITH CHANGES" })), u.context, u.executionReady),
+    planTokens + u.agents.reduce((total, agent) => total + outputFor(agent.name), 0));
+    planTokens = planner ? outputFor(planner.name) : Math.max(planTokens, MAX_TOKENS);
+  }
+  for (const agent of u.agents) add(agent,
+    buildSignoffPrompt(u.task, "", rounds + 1, draft ? undefined : "", u.context, u.executionReady),
+    planTokens + (draft ? 0 : outputFor(agent.name)));
+  return estimateSessionCost({ calls });
+}
+
+export interface UltraplanOptions {
+  maxUsd?: number; context?: string; draftPlan?: string; planner?: string; revisionRounds?: number; public?: boolean;
+  provider?: LLMProvider | "auto"; model?: string; baseUrl?: string; executionReady?: boolean; origin?: string;
+  /** Names of configured MCP connectors the agents may use as tools (see docs/connectors.md). */
+  connectors?: string[];
+  /** Limits an agent to some of those connectors (agent name to connector names). */
+  seatConnectors?: SeatConnectorMap; signal?: AbortSignal;
+  /** Resolve and estimate without provider calls or a live session. */
+  dryRun?: boolean;
+  /** Internal runners can display the estimate before dispatch without changing their lifecycle. */
+  onEstimate?: (estimate: SessionCostEstimate) => void;
+}
+
+export function startUltraplan(agents: string[], task: string, opts: UltraplanOptions & { dryRun: true }): Promise<UltraplanDryRunResult>;
+export function startUltraplan(agents: string[], task: string, opts?: UltraplanOptions & { dryRun?: false }): Promise<UltraplanStepResult | UltraplanFinalResult>;
+export function startUltraplan(agents: string[], task: string, opts: UltraplanOptions): Promise<UltraplanStepResult | UltraplanFinalResult | UltraplanDryRunResult>;
 export async function startUltraplan(
-  agents: string[], task: string,
-  opts: { maxUsd?: number; context?: string; draftPlan?: string; planner?: string; revisionRounds?: number; public?: boolean;
-    provider?: LLMProvider | "auto"; model?: string; baseUrl?: string; executionReady?: boolean; origin?: string;
-    /** Names of configured MCP connectors the agents may use as tools (see docs/connectors.md). */
-    connectors?: string[];
-    /** Limits an agent to some of those connectors (agent name to connector names). */
-    seatConnectors?: SeatConnectorMap; signal?: AbortSignal } = {}
-): Promise<UltraplanStepResult | UltraplanFinalResult> {
+  agents: string[], task: string, opts: UltraplanOptions = {}
+): Promise<UltraplanStepResult | UltraplanFinalResult | UltraplanDryRunResult> {
   validateSessionCap(opts.maxUsd);
   const id = newId("ultraplan");
   try {
     if ((opts.provider === undefined || opts.provider === "auto") && opts.baseUrl !== undefined) throw new Error("base_url requires explicit provider openai_compatible.");
+    if (opts.provider !== undefined && opts.provider !== "auto" && !(PROVIDER_IDS as readonly string[]).includes(opts.provider)) {
+      throw new Error(`Unknown provider "${opts.provider}". Valid providers: ${PROVIDER_IDS.join(", ")}`);
+    }
+    if (opts.baseUrl && opts.provider !== "openai_compatible") {
+      throw new Error(`base_url is only supported with provider "openai_compatible" (got "${opts.provider}")`);
+    }
     if (!Array.isArray(agents) || agents.length < 1) throw new Error("Ultraplan requires at least 1 agent");
     if (typeof task !== "string" || !task.trim()) throw new Error("task is required: describe what the plan is for");
     // An unknown connector fails here, before a session exists or any provider is called.
@@ -455,82 +583,112 @@ export async function startUltraplan(
     const participants = [];
     for (const name of agents) participants.push(await load(name, buildUltraplanParticipantDirective()));
     const planner = opts.planner !== undefined ? await load(opts.planner, buildUltraplanPlannerDirective()) : undefined;
-    const seats = opts.provider === undefined || opts.provider === "auto"
-      ? await prepareSeats({ agents: [...new Set([...agents, ...(opts.planner ? [opts.planner] : [])])], model: opts.model, tier: "judge" }) : undefined;
+    const automatic = opts.provider === undefined || opts.provider === "auto";
+    const seatOptions = { agents: [...new Set([...agents, ...(opts.planner ? [opts.planner] : [])])], model: opts.model, tier: "judge" as const };
+    // Resolve locally first. Even a health preflight must come after the estimate.
+    const seats = automatic ? await prepareSeats(seatOptions, { preflight: false }) : undefined;
+    const provider = (seats?.values().next().value?.provider ?? opts.provider) as LLMProvider;
+    const chosenModel = seats?.values().next().value?.model ?? opts.model ?? DEFAULT_MODELS[provider];
+    const u: Ultraplan = {
+      id, task, context: opts.context, agents: participants, planner, provider,
+      model: provider === "anthropic" ? resolveAnthropicModel(chosenModel) : chosenModel,
+      ...(seats && { routing: [...seats.values()] }),
+      ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }), status: "awaiting_plan",
+      versions: [], entries: [], startedAt: new Date(),
+      ...(opts.executionReady === true && { executionReady: true }),
+      ...(opts.origin !== undefined && { origin: opts.origin }),
+    };
+    const draft = opts.draftPlan?.trim() || undefined;
+    const rounds = planner ? revisionLimit(opts.revisionRounds) : 1;
+    const estimate = () => {
+      u.estimate = estimateUltraplan(u, draft, rounds);
+      u.estimateNote = `Upper bound for ${rounds} review round${rounds === 1 ? "" : "s"} and sign-off. Future caller plans allow ${MAX_TOKENS} tokens. Extra revisions, longer caller plans, tool loops, retries and health probes can add cost.` +
+        (opts.maxUsd !== undefined && u.estimate.usd > opts.maxUsd
+          ? ` The estimate exceeds the $${opts.maxUsd} cap. Starting is allowed; the cap still stops the session when reached.` : "");
+      opts.onEstimate?.(u.estimate);
+    };
+    estimate();
+    u.usage = { spent_usd: 0 };
+    if (opts.dryRun) return {
+      status: "dry_run", dry_run: true, estimate: u.estimate!, estimateNote: u.estimateNote!, routing: u.routing,
+      usage: { spent_usd: 0, ...(opts.maxUsd !== undefined && { max_usd: opts.maxUsd, cap_reached: false }) },
+    };
+    if (automatic) {
+      const prepared = await prepareSeats(seatOptions, { signal: opts.signal });
+      u.routing = [...prepared.values()];
+      u.provider = u.routing[0].provider as LLMProvider;
+      u.model = u.routing[0].model;
+      // Preflight can replace an unavailable provider or model.
+      if (JSON.stringify(estimateUltraplan(u, draft, rounds)) !== JSON.stringify(u.estimate)) estimate();
+    }
     const publicChannel = opts.public ? openPublicChannel(id, {
       mode: "ultraplan", participants: [...participants.map((a) => publicLabel(a.name)),
         planner ? `planner: ${publicLabel(planner.name)}` : "planner: orchestrator"], topic: task,
     }) : undefined;
+    u.publicChannel = publicChannel;
     const toolNotes: string[] = [];
-    let connectors: SeatConnectorSession | undefined;
     try {
-      connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: opts.signal, seatConnectors: checked.seatConnectors, onNote: use => toolNotes.push(use.note) }) : undefined;
+      u.connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: opts.signal, seatConnectors: checked.seatConnectors, onNote: use => toolNotes.push(use.note) }) : undefined;
+      if (u.connectors) u.toolNotes = toolNotes;
     } catch (e) {
       if (publicChannel) void publicChannel.finalize();
       throw e;
     }
-    const provider = (seats?.values().next().value?.provider ?? opts.provider) as LLMProvider;
-    const u: Ultraplan = {
-      id, task, context: opts.context, agents: participants, planner, provider, model: seats?.values().next().value?.model ?? opts.model ?? DEFAULT_MODELS[provider],
-      ...(seats && { routing: [...seats.values()] }),
-      ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }), status: "awaiting_plan",
-      versions: [], entries: [], startedAt: new Date(), ...(publicChannel && { publicChannel }),
-      ...(opts.executionReady === true && { executionReady: true }),
-      ...(opts.origin !== undefined && { origin: opts.origin }),
-      ...(connectors && { connectors, toolNotes }),
-    };
     setSessionCap(id, opts.maxUsd);
     ultraplans.set(id, u);
-    const release = lockSession(id, ultraplanBusy(id));
-    let step = "input";
-    try {
-      const draft = opts.draftPlan?.trim();
-      if (!draft) commitPhase(u, await computePhase(u, "input"));
-      if (!planner) {
-        if (draft) {
-          step = "review of v1";
-          const v = nextVersion(u, draft, "orchestrator");
-          const entries = await computePhase(u, "review", v);
-          commitPlan(u, v);
-          commitPhase(u, entries);
-        }
-        return stepResult(u);
-      }
-      if (!draft) {
-        step = "draft";
-        await authorPlan(u, buildPlannerDraftPrompt(task, u.context, participants.map((a) => label(u, a.name)), inputsFor(u), u.executionReady === true));
-      }
-      const rounds = Math.min(3, Math.max(1, Math.floor(Number(opts.revisionRounds)) || 1));
-      for (let round = 0; round < rounds; round++) {
-        const v = round === 0 && draft ? nextVersion(u, draft, "orchestrator") : u.versions.at(-1)!;
-        step = `review of v${v.version}`;
-        const entries = await computePhase(u, "review", v);
-        if (round === 0 && draft) commitPlan(u, v);
-        commitPhase(u, entries);
-        step = `revision to v${v.version + 1}`;
-        await authorPlan(u, buildPlannerRevisePrompt(task, v.plan, v.version, verdictsFor(u, entries), u.context, u.executionReady === true));
-      }
-      step = "sign-off";
-      const entries = await computePhase(u, "signoff", u.versions.at(-1)!);
-      commitPhase(u, entries);
-      return await finalize(u, verdictsFor(u, entries), true);
-    } catch (e) {
-      if (!u.entries.length && !u.stopped) {
-        ultraplans.delete(id);
-        await connectors?.close();
-        if (publicChannel) void publicChannel.finalize();
-        throw e;
-      }
-      if (!planner) throw e;
-      return {
-        ...stepResult(u), ...(u.versions.length && { plan: u.versions.at(-1)!.plan }),
-        error: buildPlannerStoppedError(step, e instanceof Error ? e.message : String(e)),
-      };
-    } finally {
-      release();
-    }
+    return await beginUltraplan(u, draft, rounds);
   } finally {
     if (!ultraplans.has(id) && !sessionCapView(id)?.reached) clearSessionCap(id);
+  }
+}
+
+async function beginUltraplan(u: Ultraplan, draft: string | undefined, rounds: number): Promise<UltraplanStepResult | UltraplanFinalResult> {
+  const { id, planner, task, agents: participants, connectors, publicChannel } = u;
+  const release = lockSession(id, ultraplanBusy(id));
+  let step = "input";
+  try {
+    if (!draft) commitPhase(u, await computePhase(u, "input"));
+    if (!planner) {
+      if (draft) {
+        step = "review of v1";
+        const v = nextVersion(u, draft, "orchestrator");
+        const entries = await computePhase(u, "review", v);
+        commitPlan(u, v);
+        commitPhase(u, entries);
+      }
+      return stepResult(u);
+    }
+    if (!draft) {
+      step = "draft";
+      await authorPlan(u, buildPlannerDraftPrompt(task, u.context, participants.map((a) => label(u, a.name)), inputsFor(u), u.executionReady === true));
+    }
+    for (let round = 0; round < rounds; round++) {
+      const v = round === 0 && draft ? nextVersion(u, draft, "orchestrator") : u.versions.at(-1)!;
+      step = `review of v${v.version}`;
+      const entries = await computePhase(u, "review", v);
+      if (round === 0 && draft) commitPlan(u, v);
+      commitPhase(u, entries);
+      step = `revision to v${v.version + 1}`;
+      await authorPlan(u, buildPlannerRevisePrompt(task, v.plan, v.version, verdictsFor(u, entries), u.context, u.executionReady === true));
+    }
+    step = "sign-off";
+    const entries = await computePhase(u, "signoff", u.versions.at(-1)!);
+    commitPhase(u, entries);
+    return await finalize(u, verdictsFor(u, entries), true);
+  } catch (e) {
+    if (!u.entries.length && !u.stopped) {
+      ultraplans.delete(id);
+      await connectors?.close();
+      if (publicChannel) void publicChannel.finalize();
+      throw e;
+    }
+    if (!planner) throw e;
+    return {
+      ...stepResult(u), ...(u.versions.length && { plan: u.versions.at(-1)!.plan }),
+      error: buildPlannerStoppedError(step, e instanceof Error ? e.message : String(e)),
+    };
+  } finally {
+    release();
   }
 }
 

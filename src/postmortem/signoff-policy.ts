@@ -1,12 +1,12 @@
 // ============================================================================
-// Lesson sign-off policy: ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI (#251)
+// Lesson sign-off policy: ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI and the dashboard form (#251)
 // ============================================================================
 
 import { clean } from "../table/text.js";
 
 let warnedInvalid = false;
 
-/** Read at call time. Invalid values require CLI sign-off and warn once per process. */
+/** Read at call time. Invalid values require CLI or dashboard sign-off and warn once per process. */
 export function lessonSignoffMode(): "any" | "human" {
   const raw = process.env.ROUNDTABLE_LESSON_SIGNOFF ?? "";
   const value = raw.trim().toLowerCase();

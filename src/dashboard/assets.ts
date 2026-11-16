@@ -84,6 +84,9 @@ dialog::backdrop{background:rgba(0,0,0,.45)}dialog h2{margin:0 0 8px}dialog p{ma
 @media (prefers-reduced-motion:no-preference){.agent-card{transition:border-color .2s}.pill.st-working{animation:breathe 2.4s ease-in-out infinite}@keyframes breathe{50%{opacity:.6}}}
 @media (max-width:480px){main{padding:12px 16px 40px}.hero-total .big{font-size:1.8rem}.legend div{grid-template-columns:1fr}.card-top{grid-template-columns:40px 1fr}.card-top .pill{grid-column:2}}
 .card-top .pill{justify-self:start}
+.pending-artifact{display:block;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:8px;overflow-wrap:anywhere}
+.artifact-text,.artifact-hash{display:block;white-space:pre-wrap;margin-top:6px}
+input[type=text]{font:inherit;max-width:100%;padding:5px;border:1px solid var(--line);border-radius:4px;background:var(--card);color:var(--fg)}
 .agent-card:focus-visible,.live:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 @media (prefers-color-scheme:dark){.avatar{background:hsl(var(--h) 60% 72%);color:#141416}}
 `;
@@ -97,6 +100,7 @@ dialog::backdrop{background:rgba(0,0,0,.45)}dialog h2{margin:0 0 8px}dialog p{ma
  *
  * The Usage page's Stop buttons open a native dialog (Cancel focused); confirming sends
  * POST <token>/agents/<agent>/stop with X-Roundtable-Action set to the nonce in the page's <meta>.
+ * Postmortems forms send selected ids and identity as JSON with that page's own nonce.
  * The script changes the page through textContent, class names and node moves only.
  */
 export const DASHBOARD_JS = `(function(){
@@ -127,8 +131,19 @@ say("This page follows the run as it happens. The Stop buttons are the one thing
 .catch(function(){say("Could not refresh this page. Reload it to see the latest.","gone")})
 .then(function(){refreshing=false;if(again){again=false;setTimeout(refresh,500)}})}
 function changed(s){s=Number(s);if(!(s>seq))return;if(swap){refresh();seq=s;return}seq=s;
-if(reload){if(!pending){pending=true;setTimeout(function(){location.reload()},Math.max(0,3000-(Date.now()-loaded)))}}
+if(reload){if(document.querySelector("[data-signoff]")){say("New activity. Reload the page after reviewing pending artifacts.","fresh");return}if(!pending){pending=true;setTimeout(function(){location.reload()},Math.max(0,3000-(Date.now()-loaded)))}}
 else say("New activity (event "+s+"). Reload the page to see it.","fresh")}
+document.addEventListener("submit",function(e){var form=e.target;if(!form||!form.matches("[data-signoff]"))return;e.preventDefault();
+var result=form.querySelector("[data-signoff-result]"),button=form.querySelector('button[type="submit"]'),by=form.querySelector('[name="by"]').value;
+var selected=form.querySelectorAll('[name="accept"]:checked'),accept=[];for(var i=0;i<selected.length;i++)accept.push(selected[i].value);
+if(!accept.length){result.textContent="Select at least one artifact.";return}
+var meta=document.querySelector('meta[name="roundtable-action"]');button.disabled=true;result.textContent="Signing off selected artifacts...";
+fetch(base+"postmortems/"+encodeURIComponent(form.getAttribute("data-signoff"))+"/signoff",{method:"POST",headers:{"X-Roundtable-Action":meta?meta.getAttribute("content"):"","Content-Type":"application/json"},body:JSON.stringify({by:by,accept:accept}),cache:"no-store",referrerPolicy:"no-referrer"})
+.then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})})
+.then(function(x){var j=x.j;if(!x.ok){result.textContent=(j.errors||["Sign-off was refused."]).join(" ");button.disabled=false;return}
+result.textContent="Applied: "+(j.applied.join(", ")||"none")+". Already signed off: "+(j.already_signed_off.join(", ")||"none")+". "+j.errors.join(" ");
+setTimeout(function(){location.assign(base+"postmortems")},1500)})
+.catch(function(){result.textContent="Sign-off could not be sent. Reload the page and review before retrying.";button.disabled=false})});
 var dlg=document.getElementById("stop-dialog"),who=null;
 function put(id,text){var e=document.getElementById(id);if(e)e.textContent=text}
 function stop(agent){var meta=document.querySelector('meta[name="roundtable-action"]');

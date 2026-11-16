@@ -2,6 +2,7 @@
 
 ## 2.1.0 (unreleased)
 
+- Add a loopback dashboard form for postmortem lesson sign-off, including human mode, with pending text and hashes, guarded JSON requests and the shared CLI audit checks (#268)
 - Count provider usage from rejected billable replies toward session spend caps and the usage ledger (#252)
 - Fix a lock that could stay held by a live process after it released it, when a contender clearing a dead lock moved it aside at the same moment (#265)
 - Add `ROUNDTABLE_LESSON_SIGNOFF=human` to limit persisted postmortem lesson sign-off to the CLI (#251)

@@ -3,8 +3,8 @@
 //
 // Every string that comes from the run (contract, notes, escalations, diffs, event payloads,
 // even ids) is redacted (secrets and personal data) and then HTML-escaped where it is inserted.
-// The Usage page (usage-page.ts) shares this frame; its Stop buttons are the dashboard's only
-// mutating control, and the per-start nonce they send is delivered only in that page's <meta>.
+// The Usage page's Stop buttons and the Postmortems sign-off forms mutate state. Each surface
+// receives its own per-start nonce only in that page's <meta>.
 // Pages carry no inline script, style or event handler: the stylesheet and the live-update
 // script are static routes (assets.ts), and links are built from validated ids only. Contract
 // markdown goes through a small converter that escapes everything and passes no raw HTML.
@@ -28,6 +28,8 @@ import { previewFramesHtml } from "../previews/embed.js";
 import type { PreviewRecord } from "../previews/store.js";
 import { moneyText, tokensShort, usd, useText } from "../usage/format.js";
 import { moneyTotal, tokenTotal, type UsageView } from "../usage/types.js";
+import { ARTIFACT_ID_RE, PM_ID_RE } from "../postmortem/types.js";
+import type { pendingPostmortems } from "../postmortem/store.js";
 
 /** Redacted text (secrets and personal data). */
 export const red = (s: unknown): string => redact(String(s ?? "")).text;
@@ -159,7 +161,7 @@ export interface PageContext {
   runner: RunnerHealth;
   /** Who is using what in this run (the Overview card and the Usage page). */
   usage?: UsageView;
-  /** The per-start nonce a stop request must carry (usage-visibility.md §7); only the Usage page prints it. */
+  /** The per-start action nonce for this surface; only Usage and Postmortems print one. */
   nonce?: string;
 }
 
@@ -221,12 +223,12 @@ export function frame(c: PageContext, page: PageKey, title: string, body: string
   ).join("");
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-    (page === "usage" && c.nonce ? `<meta name="roundtable-action" content="${escapeHtml(c.nonce)}">` : "") +
+    ((page === "usage" || page === "postmortems") && c.nonce ? `<meta name="roundtable-action" content="${escapeHtml(c.nonce)}">` : "") +
     `<title>${t(title)} · ${tc(runTitle, 80)}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head>` +
     `<body data-base="${b}" data-seq="${c.state.seq}" data-live="${LIVE[page]}"><main>` +
     `<nav>${c.indexBase ? `<a href="${escapeHtml(c.indexBase)}">All runs</a>` : ""}${nav}</nav>` +
     `<p class="meta" id="runmeta">${tc(runTitle, 160)} · ${t(c.state.execution)} · ${badge(c.state.status)} · event ${c.state.seq}</p>` +
-    `<p class="live" id="live" role="status" aria-live="polite">${page === "usage" ? "This page follows the run as it happens. The Stop buttons are the one thing it can change." : "Read-only. This page follows the run as it happens."}</p>` +
+    `<p class="live" id="live" role="status" aria-live="polite">${page === "usage" ? "This page follows the run as it happens. The Stop buttons are the one thing it can change." : page === "postmortems" ? "This page follows the run as it happens. Review pending artifacts before signing off." : "Read-only. This page follows the run as it happens."}</p>` +
     (LIVE[page] === "swap" ? `<div id="swap">${banner(c)}${body}</div>` : banner(c) + body) +
     after +
     `</main><script src="${b}static/dashboard.js"></script></body></html>`
@@ -428,6 +430,18 @@ export function renderEscalations(c: PageContext): string {
 export interface PostmortemRecordView {
   markdown?: string;
   error?: string;
+  pending?: ReturnType<typeof pendingPostmortems>;
+}
+
+function signoffForm(pm: string, pending: NonNullable<PostmortemRecordView["pending"]>): string {
+  if (!PM_ID_RE.test(pm) || !pending.length) return "";
+  return `<form data-signoff="${t(pm)}"><h3>Pending sign-off</h3>` +
+    pending.map(a => `<label class="pending-artifact">` +
+      (ARTIFACT_ID_RE.test(a.id) ? `<input type="checkbox" name="accept" value="${t(a.id)}"> ` : "") +
+      `<code>${t(a.id)}</code> (${t(a.kind)} → ${t(a.target)})<span class="artifact-text">${t(a.text)}</span>` +
+      `<span class="artifact-hash">Hash: <code>${t(a.hash)}</code></span></label>`).join("") +
+    `<p><label>Your identity <input type="text" name="by" required autocomplete="off"></label></p>` +
+    `<button type="submit">Sign off selected artifacts</button><p data-signoff-result role="status" aria-live="polite"></p></form>`;
 }
 
 /** Findings with their fix status, then each meeting: its dialogue, artifacts and their status (the record, redacted and escaped). */
@@ -456,12 +470,12 @@ export function renderPostmortems(c: PageContext, records: Record<string, Postmo
       (rec?.markdown !== undefined
         ? `<details open><summary>The full record: every turn, the artifacts and their status</summary><article class="contract">${markdownToHtml(red(rec.markdown))}</article></details>`
         : `<p class="empty">${t(rec?.error ?? (done ? "The record could not be read." : "The record appears once the meeting is concluded."))}</p>`) +
-      `</section>`
+      (done && rec?.pending ? signoffForm(id, rec.pending) : "") + `</section>`
     );
   });
   const body =
     `<h1>Postmortems</h1>` +
-    `<p class="meta">Read-only. The meeting has no seat for the human: nothing typed anywhere reaches it.</p>` +
+    `<p class="meta">The meeting has no seat for the human: nothing typed anywhere reaches it. Sign-off applies only the artifacts you select below.</p>` +
     `<h2>Findings</h2>` +
     (rows.length
       ? `<table><thead><tr><th>Id</th><th>Category</th><th>What went wrong</th><th>Caught by</th><th>Responsible</th><th>Task</th><th>Fix</th><th>Meeting</th></tr></thead><tbody>${rows.join("")}</tbody></table>`

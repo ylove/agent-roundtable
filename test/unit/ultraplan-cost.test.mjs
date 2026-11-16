@@ -285,3 +285,22 @@ test("a reached cap is reflected in the result, usage line and stopped archive",
   assert.deepEqual(archive.usage, start.usage);
   assert.match(archive.document.markdown, /Usage: .*\(stopped by spend cap\).*\(estimated\)/);
 });
+
+test("free compatible pricing applies to the configured endpoint, never to an ultraplan's own base_url (#273)", async t => {
+  env(t, "ROUNDTABLE_OPENAI_COMPATIBLE_FREE", "1");
+  env(t, "OPENAI_COMPATIBLE_BASE_URL", baseUrl);
+  const calls = fakeProvider(t);
+  const local = { provider: "openai_compatible", model: "local-model" };
+  const configured = await startUltraplan([cfo], "Plan", { ...local, dryRun: true });
+  assert.equal(configured.estimate.usd, 0);
+  assert.equal(configured.estimate.estimated, false);
+  const perCall = await startUltraplan([cfo], "Plan", { ...local, baseUrl, dryRun: true });
+  assert.ok(perCall.estimate.usd > 0, "a per-call base_url keeps the conservative rate");
+  assert.equal(perCall.estimate.estimated, true);
+  assert.ok(perCall.estimate.perSeat.every(line => !("baseUrl" in line)), "the URL is not echoed in estimate lines");
+  assert.equal(calls.length, 0);
+  const start = await startUltraplan([cfo], "Plan", { ...local, baseUrl });
+  assert.ok(start.usage.spent_usd > 0);
+  assert.equal(start.usage.estimated, true);
+  await endUltraplan(start.ultraplanId);
+});

@@ -345,7 +345,7 @@ function observeUsage<T>(u: Ultraplan, agent: string, run: () => Promise<T>): Pr
     const line = lineFor({ session: u.id, kind: "ultraplan", agent }, report, "ultraplan");
     const usage = u.usage ??= { spent_usd: 0 };
     usage.spent_usd += sessionSpend(line);
-    if (!isFreeProvider(line.provider) && (line.tokens_prov === "estimated" || line.usd_prov !== "reported")) usage.estimated = true;
+    if (!isFreeProvider(line.provider, { baseUrl: report.baseUrl }) && (line.tokens_prov === "estimated" || line.usd_prov !== "reported")) usage.estimated = true;
     ledger?.(report);
   }, run);
 }
@@ -512,6 +512,7 @@ function estimateUltraplan(u: Ultraplan, draft: string | undefined, rounds: numb
   const add = (agent: Ultraplan["agents"][number], prompt: string, generatedTokens = 0) => {
     const seat = seatFor(agent.name);
     calls.push({ seat: agent.key, provider: seat?.provider ?? u.provider, model: seat?.model ?? u.model,
+      ...(!seat && u.baseUrl !== undefined && { baseUrl: u.baseUrl }),
       inputTokens: Buffer.byteLength(agent.systemPrompt, "utf8") + Buffer.byteLength(prompt, "utf8") + 512 + generatedTokens,
       outputTokens: outputFor(agent.name) });
   };

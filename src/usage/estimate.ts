@@ -4,12 +4,14 @@ export interface SessionCostCall {
   /** Optional seat identity, so seats sharing a model can be reported separately. */
   seat?: string;
   provider: string;
+  /** A per-call endpoint (base_url). It never receives the operator's free price, and is not echoed in lines. */
+  baseUrl?: string;
   model: string;
   inputTokens: number;
   outputTokens: number;
 }
 
-export interface SessionCostLine extends SessionCostCall {
+export interface SessionCostLine extends Omit<SessionCostCall, "baseUrl"> {
   calls: number;
   usd: number;
   estimated: boolean;
@@ -29,9 +31,10 @@ export function estimateSessionCost({ calls }: { calls: SessionCostCall[] }): Se
     if (![call.inputTokens, call.outputTokens].every(n => Number.isSafeInteger(n) && n >= 0)) {
       throw new Error("Session cost token bounds must be nonnegative integers.");
     }
+    const { baseUrl, ...identity } = call;
     const key = JSON.stringify([call.seat, call.provider, call.model]);
-    const line = lines.get(key) ?? { ...call, inputTokens: 0, outputTokens: 0, calls: 0, usd: 0, estimated: false };
-    const cost = budgetEstimate(call.provider, call.model, call);
+    const line = lines.get(key) ?? { ...identity, inputTokens: 0, outputTokens: 0, calls: 0, usd: 0, estimated: false };
+    const cost = budgetEstimate(call.provider, call.model, call, undefined, { baseUrl });
     line.calls++;
     line.inputTokens += call.inputTokens;
     line.outputTokens += call.outputTokens;

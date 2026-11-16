@@ -64,18 +64,39 @@ export type ProviderCall = (
   options: ProviderCallOptions
 ) => Promise<LLMCompletionResult>;
 
+/** A provider reply that was rejected locally after the provider did the work. */
+export class BillableReplyError extends Error {
+  readonly model: string;
+  readonly usage: LLMCompletionResult["usage"];
+
+  constructor(message: string, reply: Pick<LLMCompletionResult, "model" | "usage">, options?: ErrorOptions) {
+    super(message, options);
+    this.model = reply.model;
+    this.usage = reply.usage;
+  }
+}
+
+/** Preserve usage if normalizing an otherwise successful reply fails, including malformed content. */
+export function parseBillableReply<T>(reply: Pick<LLMCompletionResult, "model" | "usage">, parse: () => T): T {
+  try {
+    return parse();
+  } catch (error) {
+    if (error instanceof BillableReplyError) throw error;
+    throw new BillableReplyError(error instanceof Error ? error.message : String(error), reply, { cause: error });
+  }
+}
+
 /**
  * A silent empty reply is worse than a loud error in a meeting transcript.
  */
-export function assertNonEmpty(label: string, content: string, finishReason?: string): string {
+export function assertNonEmpty(label: string, content: string, finishReason?: string, reply?: Pick<LLMCompletionResult, "model" | "usage">): string {
   if (content.trim()) return content;
   const hint =
     finishReason === "max_tokens" || finishReason === "length"
       ? " Thinking/reasoning tokens count against max_tokens; raise max_tokens or ROUNDTABLE_MAX_TOKENS."
       : "";
-  throw new Error(
-    `${label} returned no text${finishReason ? ` (finish reason: ${finishReason})` : ""}.${hint}`
-  );
+  const message = `${label} returned no text${finishReason ? ` (finish reason: ${finishReason})` : ""}.${hint}`;
+  throw reply ? new BillableReplyError(message, reply) : new Error(message);
 }
 
 export const PROVIDER_BODY_LIMIT = 8 * 1024 * 1024;

@@ -1,6 +1,6 @@
 // --- OpenAI-compatible chat completions (OpenAI, Together AI, any /v1/chat/completions server) ---
 import type { LLMCompletionResult, ProviderCall } from "./shared.js";
-import { assertNonEmpty, assertNotRedirect, readProviderJson, stripThinkTags } from "./shared.js";
+import { assertNonEmpty, assertNotRedirect, parseBillableReply, readProviderJson, stripThinkTags } from "./shared.js";
 import { providerHttpError, withRetry } from "./retry.js";
 import type { LLMProvider } from "../config.js";
 import { openAICompatibleTrustedOrigins, requireEnv } from "../config.js";
@@ -31,23 +31,27 @@ export function parseChatCompletions(
     const text = `${label} API error (${response.status}): ${scrubAndCap(String(message || response.statusText), 300)}`;
     throw response.ok ? new Error(text) : providerHttpError(text, response);
   }
-  const choice = result.choices?.[0];
-  const text = stripThinkTags(choice?.message?.content ?? "");
-  const rawCalls = allowToolCalls ? (choice?.message?.tool_calls ?? []).filter((c) => typeof c.id === "string" && typeof c.function?.name === "string") : [];
-  const toolCalls = rawCalls.map((c) => {
-    let input: unknown = null;
-    try { input = JSON.parse(c.function?.arguments || "{}"); } catch { /* the loop reports the bad arguments to the model */ }
-    return { id: c.id!, name: c.function!.name!, input };
+  const model = result.model || requestedModel;
+  const usage = result.usage
+    ? { inputTokens: result.usage.prompt_tokens, outputTokens: result.usage.completion_tokens }
+    : undefined;
+  return parseBillableReply({ model, usage }, () => {
+    const choice = result.choices?.[0];
+    const text = stripThinkTags(choice?.message?.content ?? "");
+    const rawCalls = allowToolCalls ? (choice?.message?.tool_calls ?? []).filter((c) => typeof c.id === "string" && typeof c.function?.name === "string") : [];
+    const toolCalls = rawCalls.map((c) => {
+      let input: unknown = null;
+      try { input = JSON.parse(c.function?.arguments || "{}"); } catch { /* the loop reports the bad arguments to the model */ }
+      return { id: c.id!, name: c.function!.name!, input };
+    });
+    return {
+      content: toolCalls.length ? text : assertNonEmpty(label, text, choice?.finish_reason, { model, usage }),
+      ...(toolCalls.length > 0 && { toolCalls, assistantTurn: { role: "assistant", content: choice?.message?.content ?? null, tool_calls: rawCalls } }),
+      model,
+      provider,
+      usage,
+    };
   });
-  return {
-    content: toolCalls.length ? text : assertNonEmpty(label, text, choice?.finish_reason),
-    ...(toolCalls.length > 0 && { toolCalls, assistantTurn: { role: "assistant", content: choice?.message?.content ?? null, tool_calls: rawCalls } }),
-    model: result.model || requestedModel,
-    provider,
-    usage: result.usage
-      ? { inputTokens: result.usage.prompt_tokens, outputTokens: result.usage.completion_tokens }
-      : undefined,
-  };
 }
 
 export interface OpenAICompatibleSpec {

@@ -122,6 +122,7 @@ export async function chatCompletion(
     withProviderOutcome(outcome, () => reportUsage({
       provider: result.provider,
       model: result.model,
+      ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
       ...(result.usage && { usage: result.usage }),
       chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: result.content.length },
     }));
@@ -135,7 +136,7 @@ export async function chatCompletion(
       failedOutcome = recordOutcome(provider, model, started, outcome, options.estimateUsageOnFailure === true, options.baseUrl);
     }
     if (dispatched && options.estimateUsageOnFailure) {
-      const report = () => reportUsage({ provider, model, chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });
+      const report = () => reportUsage({ provider, model, ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }), chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });
       if (failedOutcome) withProviderOutcome(failedOutcome, report); else report();
     }
     if (stop?.aborted) throw new StoppedError();

@@ -120,7 +120,7 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
     for (const [id, spec] of Object.entries(raw)) overrides.set(id, spec);
   }
   for (const id of overrides.keys()) if (!roster.some(s => s.id === id)) throw new SeatUsageError("Seat override names an agent outside the roster.");
-  const available = availableProviders(opts.env).filter(provider => !opts.excludeProviders?.includes(provider));
+  const available = availableProviders(opts.env, opts.routing?.ollama).filter(provider => !opts.excludeProviders?.includes(provider));
 
   if (opts.mix && !available.length) {
     try { routeProvider({ ...opts.routing, env: opts.env, excludeProviders: opts.excludeProviders }); }
@@ -150,7 +150,7 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
     if (runtime) {
       const model = override?.model ?? "";
       if (model && (!RUNTIME_MODEL.test(model) || !runtime.modelFlag)) throw new SeatUsageError("Invalid runtime model override.");
-      assertRoutingBudget(override!.provider!, model, { ...opts.routing, tier });
+      assertRoutingBudget(override!.provider!, model, { ...opts.routing, env, tier });
       out.set(id, { id, name: agentKey(id), ...(team && { team }), provider: override!.provider!, model, reason: "explicit runtime" });
       continue;
     }
@@ -161,7 +161,7 @@ export async function resolveSeats(opts: ResolveSeatsOptions): Promise<Map<strin
     if (typeof model !== "string" || !model.trim()) throw new SeatUsageError("Seat model must be a non-empty string.");
     if (!/^[\x21-\x7e]{1,200}$/.test(model.trim())) throw new SeatUsageError("Seat model must be 1 to 200 printable ASCII characters with no whitespace.");
     const finalModel = p === "anthropic" ? resolveAnthropicModel(model.trim()) : model.trim();
-    assertRoutingBudget(p, finalModel, { ...opts.routing, tier });
+    assertRoutingBudget(p, finalModel, { ...opts.routing, env, tier });
     if (fromFrontmatter !== undefined && model === fromFrontmatter) frontmatterPins.add(pinKey(id, p, finalModel));
     out.set(id, { id, name: agentKey(id), ...(team && { team }), provider: p, model: finalModel, ...(choice && { maxOutputTokens: choice.maxOutputTokens }), reason: choice?.reason.replace(`${p}/${choice.model}`, `${p}/${finalModel}`) ?? (explicit ? "explicit provider/model" : "healthy persona provider/model"), ...(typeof frontmatter.role === "string" && { role: frontmatter.role }) });
   }
@@ -220,6 +220,9 @@ export async function prepareSeats(opts: ResolveSeatsOptions, options: {
   preflight?: boolean; signal?: AbortSignal; report?: (message: string) => void;
 } = {}): Promise<Map<string, Seat>> {
   const env = opts.env ?? process.env;
+  const health = opts.routing?.health ?? providerHealth;
+  const ollama = opts.routing?.ollama ?? (options.preflight === false ? health.getOllama(env) : await health.discoverOllama(env));
+  opts = { ...opts, routing: { ...opts.routing, ollama } };
   const failed = new Set(opts.excludeProviders ?? []);
   const attempted = new Map<string, SeatPreflightResult>();
   for (let pass = 0; pass <= PROVIDER_IDS.length; pass++) {
@@ -249,7 +252,7 @@ export async function prepareSeats(opts: ResolveSeatsOptions, options: {
           const model = defaultModelFor(seat.provider as LLMProvider);
           const tier = routingTier(opts, seat);
           const outputTokens = Math.min(opts.routing?.outputTokens ?? (tier === "builder" ? PROVIDER_MAX_TOKENS[seat.provider] : MAX_TOKENS), seat.maxOutputTokens ?? Infinity);
-          assertRoutingBudget(seat.provider, model, { ...opts.routing, tier, outputTokens });
+          assertRoutingBudget(seat.provider, model, { ...opts.routing, env, tier, outputTokens });
           const message = `persona ${seat.name}: model ${seat.model} not available; using ${model}`;
           if (options.report) options.report(message); else process.stderr.write(`${message}\n`);
           forgetFrontmatterModel(id, seat.provider, seat.model);

@@ -100,7 +100,7 @@ function fold(u: AgentUsage | undefined, fallbackProvider?: string): { tokens: T
     models.push([name, m.usd.measured + m.usd.reported + m.usd.estimated + (m.tokens.input + m.tokens.output) / 1e12]);
   }
   if (tokenTotal(tokens) > 0 && moneyTotal(money) === 0) {
-    if (isFreeProvider(u?.provider ?? fallbackProvider)) money.free = true;
+    if (isFreeProvider(u?.provider ?? fallbackProvider, { endpoint: null })) money.free = true;
     else money.unpriced = true;
   }
   return { tokens, money, models: models.sort((a, b) => b[1] - a[1]).map(([n]) => n) };
@@ -240,7 +240,7 @@ function tableAgents(lines: TableLine[], live: LiveServer[], pending: Set<string
     const l = liveSessions.get(e.session);
     const wasStopped = stopped.has(e.session);
     if (tokenTotal(e.tokens) > 0 && moneyTotal(e.money) === 0) {
-      if (isFreeProvider(e.provider)) e.money.free = true;
+      if (isFreeProvider(e.provider, { endpoint: null }) || (e.provider === "openai_compatible" && e.priced)) e.money.free = true;
       else if (!e.priced) e.money.unpriced = true;
     }
     const models = [...e.models].sort((a, b) => b[1] - a[1]).map(([m]) => m);

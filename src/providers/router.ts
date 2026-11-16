@@ -3,10 +3,11 @@ import { join } from "node:path";
 import { DEFAULT_MODELS, resolveAnthropicModel, ROUNDTABLE_HOME, MAX_TOKENS } from "../config.js";
 import { PROVIDER_IDS, type LLMProvider } from "../provider-ids.js";
 import { readUserConfig, type RoutingConfig, type RoutingTier } from "../user-config.js";
-import { estimateUsd, type PricingTable } from "../execution/pricing.js";
+import { estimateUsd, type PricingContext, type PricingTable } from "../execution/pricing.js";
 import { day, readTableLines, tableWrites, type TableLine } from "../usage/table.js";
 import { availableProviders, credentialFingerprint, endpointFingerprint, providerHealth, trustedRoutingEndpoint, type ProviderHealthCache } from "./health.js";
 import { PROVIDER_MAX_TOKENS } from "./limits.js";
+import { modelIdSize, ollamaModel, type OllamaDiscovery } from "./local-models.js";
 
 export type { RoutingTier };
 export interface RoutingChoice { provider: LLMProvider; model: string; reason: string; maxOutputTokens: number }
@@ -19,6 +20,8 @@ export interface RoutingInputs {
   teamSeat?: boolean;
   /** A model supplied without a provider remains a pin across candidates. */
   model?: string;
+  /** Tags discovered by the asynchronous preparation step. Routing never probes. */
+  ollama?: OllamaDiscovery;
 }
 export function routingModels(provider: LLMProvider, tier: RoutingTier, config: RoutingConfig = {}): { model: string; reasoning: boolean; maxOutputTokens: number } {
   const override = config[provider]?.[tier];
@@ -90,8 +93,8 @@ export const ESTIMATED_RATE_PER_MTOK = { input: 15, output: 75 } as const;
  * Cost of one bounded call for the budget gate. A known price (price table or config override) is used as is;
  * an unpriced model is counted at a conservative token estimate and labelled estimated, never excluded outright.
  */
-export function budgetEstimate(provider: string, model: string, tokens: { inputTokens: number; outputTokens: number }, pricing?: PricingTable): { usd: number; estimated: boolean } {
-  const known = estimateUsd(model, tokens, { provider, table: pricing });
+export function budgetEstimate(provider: string, model: string, tokens: { inputTokens: number; outputTokens: number }, pricing?: PricingTable, context: PricingContext = {}): { usd: number; estimated: boolean } {
+  const known = estimateUsd(model, tokens, { ...context, provider, table: pricing });
   if (!known.estimated) return known;
   return { usd: Math.round((tokens.inputTokens * ESTIMATED_RATE_PER_MTOK.input + tokens.outputTokens * ESTIMATED_RATE_PER_MTOK.output) / 1e6 * 1e9) / 1e9, estimated: true };
 }
@@ -102,7 +105,7 @@ export function assertRoutingBudget(provider: string, model: string, inputs: Rou
   validateTokenBounds(inputs);
   const cap = PROVIDER_MAX_TOKENS[provider];
   const outputTokens = inputs.outputTokens ?? (inputs.tier === "builder" ? cap : MAX_TOKENS);
-  const estimate = budgetEstimate(provider, model, { inputTokens: inputs.inputTokens ?? 4096, outputTokens: Math.min(outputTokens, cap ?? MAX_TOKENS) }, inputs.pricing);
+  const estimate = budgetEstimate(provider, model, { inputTokens: inputs.inputTokens ?? 4096, outputTokens: Math.min(outputTokens, cap ?? MAX_TOKENS) }, inputs.pricing, { env: inputs.env });
   if (!Number.isFinite(inputs.remainingBudgetUsd) || inputs.remainingBudgetUsd < 0 || estimate.usd > inputs.remainingBudgetUsd) {
     throw new Error(`${provider}/${model}: exceeds remaining budget (${estimate.estimated ? "estimated " : ""}$${estimate.usd.toFixed(4)} > $${Math.max(0, inputs.remainingBudgetUsd).toFixed(4)}).`);
   }
@@ -116,8 +119,8 @@ export function routeProvider(inputs: RoutingInputs = {}): RoutingChoice {
   const health = inputs.health ?? providerHealth;
   const history = inputs.history ?? memoHistory(inputs.now);
   const now = inputs.now ?? Date.now();
-  const available = availableProviders(env), excluded: string[] = [];
-  const candidates: Array<RoutingChoice & { failureRate: number; failures: number; latency: number; reasoning: boolean; cost: number; priced: boolean; spread: number }> = [];
+  const available = availableProviders(env, inputs.ollama), excluded: string[] = [];
+  const candidates: Array<RoutingChoice & { failureRate: number; failures: number; latency: number; reasoning: boolean; cost: number; priced: boolean; spread: number; small: boolean; sizeText?: string }> = [];
   for (const provider of PROVIDER_IDS) {
     const capability = routingModels(provider, tier, config);
     const model = inputs.model ? (provider === "anthropic" ? resolveAnthropicModel(inputs.model) : inputs.model) : capability.model;
@@ -128,16 +131,21 @@ export function routeProvider(inputs: RoutingInputs = {}): RoutingChoice {
       : cached && !cached.ok ? cached.reason ?? "failed health check" : inputs.excludeProviders?.includes(provider) ? "failed preflight" : undefined;
     if (reject) { excluded.push(`${label}: ${reject}`); continue; }
     const outputTokens = Math.min(inputs.outputTokens ?? (tier === "builder" ? capability.maxOutputTokens : MAX_TOKENS), capability.maxOutputTokens);
-    const estimate = budgetEstimate(provider, model, { inputTokens: inputs.inputTokens ?? 4096, outputTokens }, inputs.pricing);
+    const estimate = budgetEstimate(provider, model, { inputTokens: inputs.inputTokens ?? 4096, outputTokens }, inputs.pricing, { env });
     if (inputs.remainingBudgetUsd !== undefined && (!Number.isFinite(inputs.remainingBudgetUsd) || inputs.remainingBudgetUsd < 0 || estimate.usd > inputs.remainingBudgetUsd)) {
       excluded.push(`${label}: exceeds remaining budget${estimate.estimated ? " (estimated cost)" : ""}`); continue;
     }
     const performance = recentPerformance(history, provider, model, endpointFingerprint(provider, env), credentialFingerprint(provider, env), now);
+    const local = provider === "ollama" || provider === "openai_compatible";
+    const detected = provider === "ollama" ? ollamaModel(inputs.ollama, model) : provider === "openai_compatible" ? modelIdSize(model) : undefined;
+    const size = config[provider]?.size ?? detected?.size ?? "unknown";
+    const small = local && size === "small" && tier !== "balanced" && !inputs.costBias;
+    const sizeText = local ? `${size} local model${config[provider]?.size ? ", operator override" : detected?.parameters ? `, ${detected.parameters}` : ""}` : undefined;
     candidates.push({ provider, model, reason: "", maxOutputTokens: capability.maxOutputTokens, failures: performance.failures,
       failureRate: performance.rate, latency: performance.medianMs, reasoning: capability.reasoning || /glm/i.test(model),
-      cost: estimate.usd, priced: !estimate.estimated, spread: inputs.used?.filter(p => p === provider).length ?? 0 });
+      cost: estimate.usd, priced: !estimate.estimated, spread: inputs.used?.filter(p => p === provider).length ?? 0, small, sizeText });
   }
-  if (tier === "builder" && candidates.some(c => !c.reasoning)) {
+  if (tier === "builder" && candidates.some(c => !c.reasoning && !c.small)) {
     for (let i = candidates.length - 1; i >= 0; i--) if (candidates[i].reasoning) {
       excluded.push(`${candidates[i].provider}/${candidates[i].model} excluded for build (reasoning model)`); candidates.splice(i, 1);
     }
@@ -148,16 +156,18 @@ export function routeProvider(inputs: RoutingInputs = {}): RoutingChoice {
   // A reasoning model is slow for live seats, so it ranks behind every non-reasoning provider (a penalty, not an
   // exclusion: it is still used when it is the only healthy choice). In a duel it counts as half a seat already used
   // instead, so the two teams still sit on different providers.
-  const load = (c: typeof candidates[number]): number => c.spread + (tier !== "builder" && c.reasoning ? (inputs.teamSeat ? 0.5 : 1e6) : 0);
+  const sizeLoad = (c: typeof candidates[number]): number => c.small ? 1e6 : 0;
+  const load = (c: typeof candidates[number]): number => sizeLoad(c) + c.spread + (tier !== "builder" && c.reasoning ? (inputs.teamSeat ? 0.5 : 1e6) : 0);
   const bySpread = (x: typeof candidates[number], y: typeof candidates[number]): number => load(x) - load(y);
   const mix = !!inputs.costBias;
-  candidates.sort((x, y) => x.failureRate - y.failureRate ||
+  candidates.sort((x, y) => sizeLoad(x) - sizeLoad(y) || x.failureRate - y.failureRate ||
     (mix ? bySpread(x, y) || byCost(x, y) : tier === "judge" ? byCost(x, y) || bySpread(x, y) : bySpread(x, y)) ||
     (tier === "builder" ? y.maxOutputTokens - x.maxOutputTokens : 0) ||
     x.latency - y.latency || PROVIDER_IDS.indexOf(x.provider) - PROVIDER_IDS.indexOf(y.provider));
   const chosen = candidates[0];
   if (!chosen) throw new Error(`No healthy provider found (legacy fallback anthropic unavailable). Tried ${excluded.join("; ")}.`);
   const exclusions = excluded.filter(s => !/: (not configured|model namespace)$/.test(s));
+  for (const c of candidates) if (c.small && c !== chosen) exclusions.push(`${c.provider}/${c.model} ranked behind hosted models for ${tier} (${c.sizeText})`);
   return { provider: chosen.provider, model: chosen.model, maxOutputTokens: chosen.maxOutputTokens,
-    reason: `${exclusions.length ? exclusions.join("; ") + "; " : ""}${chosen.provider}/${chosen.model} chosen: ${health.get(chosen.provider, env)?.ok ? "healthy" : "configured, awaiting preflight"}, ${chosen.reasoning ? "reasoning" : "non-reasoning"}, ${chosen.failures} recent failures${chosen.priced ? "" : ", price estimated"}` };
+    reason: `${exclusions.length ? exclusions.join("; ") + "; " : ""}${chosen.provider}/${chosen.model} chosen: ${health.get(chosen.provider, env)?.ok ? "healthy" : "configured, awaiting preflight"}, ${chosen.reasoning ? "reasoning" : "non-reasoning"}, ${chosen.failures} recent failures${chosen.priced ? "" : ", price estimated"}${chosen.sizeText ? ` (${chosen.sizeText})` : ""}` };
 }

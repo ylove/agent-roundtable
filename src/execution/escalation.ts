@@ -205,8 +205,8 @@ const blockedBy = (state: Readonly<BlackboardState>, esc: Escalation): boolean =
 // ============================================================================
 
 /** Conservative micro-huddle rates, including long-context and cache prompt charges. */
-function microRates(model: string, provider?: string): { input: number; output: number } {
-  if (provider === "ollama") return { input: 0, output: 0 };
+function microRates(model: string, provider?: string, baseUrl?: string): { input: number; output: number } {
+  if (isFreeProvider(provider, { baseUrl })) return { input: 0, output: 0 };
   const p = priceFor(model);
   return {
     input: Math.max(p?.input ?? 20, p?.long?.input ?? 0, p?.cache_read ?? 0, p?.long?.cache_read ?? 0, p?.cache_write ?? 0, p?.long?.cache_write ?? 0),
@@ -233,7 +233,7 @@ export class UsageMeter {
 
   constructor(readonly source: BudgetSource, readonly task?: string, readonly agent?: string, readonly bounded = false, private readonly lifecycle: MeterLifecycle = {}) {}
 
-  async run<T>(fn: () => Promise<T>, reservation?: { provider: string; model: string; usd: number }, usageOf?: (result: T) => UsageRecord | undefined): Promise<T> {
+  async run<T>(fn: () => Promise<T>, reservation?: { provider: string; model: string; usd: number; baseUrl?: string }, usageOf?: (result: T) => UsageRecord | undefined): Promise<T> {
     const signal = this.lifecycle.signal;
     signal?.throwIfAborted();
     const callId = this.bounded ? this.lifecycle.huddle ? `${this.lifecycle.huddle}:${++this.calls}` : newId("call") : undefined;
@@ -251,8 +251,8 @@ export class UsageMeter {
       // Replace the retained estimate without resuming discussion or holding up Stop.
       if (finished) void this.lifecycle.persist?.([{ ...current }]).catch((e) => console.error(`Micro-huddle usage settlement: ${errText(e)}`));
     };
-    if (this.bounded && reservation && !isFreeProvider(reservation.provider)) {
-      accept({ ...this.price({ provider: reservation.provider, model: reservation.model }, reservation.usd), reservation: true });
+    if (this.bounded && reservation && !isFreeProvider(reservation.provider, reservation)) {
+      accept({ ...this.price({ provider: reservation.provider, model: reservation.model, baseUrl: reservation.baseUrl }, reservation.usd), reservation: true });
       // Durable before dispatch: readers and a restarted runner retain the conservative charge.
       await this.lifecycle.persist?.([current!]);
     }
@@ -272,7 +272,7 @@ export class UsageMeter {
         const result = await fn();
         const u = usageOf?.(result);
         if (u) accept({ ...u, reservation: false, provenance: u.provenance ?? { tokens: "measured", usd: u.estimated ? "estimated" : "measured" },
-          ...(u.estimated && u.usd === 0 && reservation && !isFreeProvider(reservation.provider) ? { usd: reservation.usd, provenance: { tokens: u.provenance?.tokens ?? "measured", usd: "estimated" } } : {}) });
+          ...(u.estimated && u.usd === 0 && reservation && !isFreeProvider(reservation.provider, reservation) ? { usd: reservation.usd, provenance: { tokens: u.provenance?.tokens ?? "measured", usd: "estimated" } } : {}) });
         return result;
       });
       // A driver/provider that ignores abort must not leave the huddle hanging.
@@ -301,9 +301,9 @@ export class UsageMeter {
     if (r.usage?.cacheReadTokens !== undefined) tokens.cacheReadTokens = r.usage.cacheReadTokens;
     if (r.usage?.cacheWriteTokens !== undefined) tokens.cacheWriteTokens = r.usage.cacheWriteTokens;
     const model = r.model || "unknown";
-    const estimate = estimateUsd(model, tokens, { provider: r.provider });
-    const rates = this.bounded && estimate.estimated ? microRates(model, r.provider) : undefined;
-    const reserved = this.bounded && r.usage === undefined && r.provider !== "ollama" ? missingUsageUsd : undefined;
+    const estimate = estimateUsd(model, tokens, { provider: r.provider, baseUrl: r.baseUrl });
+    const rates = this.bounded && estimate.estimated ? microRates(model, r.provider, r.baseUrl) : undefined;
+    const reserved = this.bounded && r.usage === undefined && !isFreeProvider(r.provider, r) ? missingUsageUsd : undefined;
     return {
       source: this.source,
       ...(this.task !== undefined && { task: this.task }),
@@ -340,7 +340,7 @@ export async function askPersona(meter: UsageMeter, source: HuddleLLMSource, per
   const llm = resolveHuddleLLM(source);
   let maxTokens: number | undefined;
   if (allowance !== undefined) {
-    const { input: inputRate, output: outputRate } = microRates(llm.model, llm.provider);
+    const { input: inputRate, output: outputRate } = microRates(llm.model, llm.provider, llm.baseUrl);
     // UTF-8 bytes plus protocol overhead conservatively bound prompt tokens without a tokenizer.
     const inputCost = (Buffer.byteLength(system + prompt, "utf8") + 512) * inputRate / 1_000_000;
     const left = allowance - inputCost;
@@ -349,7 +349,7 @@ export async function askPersona(meter: UsageMeter, source: HuddleLLMSource, per
     if (maxTokens < 1) throw new Error("Micro-huddle budget is exhausted");
   }
   return meter.run(() => callLLM(system, [{ role: "user", content: prompt }], { ...callOptions(llm), ...(maxTokens !== undefined && { maxTokens }) }),
-    allowance === undefined ? undefined : { provider: llm.provider, model: llm.model, usd: allowance });
+    allowance === undefined ? undefined : { provider: llm.provider, model: llm.model, baseUrl: llm.baseUrl, usd: allowance });
 }
 
 // ============================================================================

@@ -36,11 +36,23 @@ The built-in role defaults are below. Environment model defaults still apply, ex
 
 Automatic choices preflight each selected provider/model pair and try another provider after a failure. Successful pairs and provider health are cached in the process for ten minutes, keyed by provider, endpoint identity and credential identity. Only actual call and preflight outcomes update health; tool arguments and ledger data cannot assert health. Changing a key or endpoint invalidates its cached health. `--no-preflight` skips probes but still respects known failures. If nothing remains, startup fails with every provider tried and its local reason, including the unavailable legacy `anthropic` fallback; it does not start a doomed session.
 
+When `OLLAMA_URL` is unset, seat preparation and the execution preflight look for Ollama at `http://localhost:11434`. One `GET /api/tags` request has a one-second timeout. Concurrent preparations share it. The process caches successful discovery and model sizes for ten minutes, and failures for one minute. An explicit `OLLAMA_URL` keeps its existing eligibility. `roundtable doctor` reports the URL, configured model and whether it is pulled. Model names match exactly; a bare name selects only its `:latest` tag.
+
+Any process listening on `localhost:11434` can receive prompts routed to discovered Ollama, including a process run by another user on a shared machine. Set `ROUNDTABLE_OLLAMA_DISCOVERY=off` to disable default discovery and require an explicit `OLLAMA_URL`. The values `0`, `false` and `no` also disable it; values are trimmed and case-insensitive.
+
+Ollama sizes come from `details.parameter_size` in that response. Small means below 30 billion parameters. Large means 30 billion or more. Missing or unparseable sizes are unknown. For `openai_compatible`, a whole size token in the model id supplies the size, such as `8b` in `llama-3.1-8b-instruct` or `32b` in `qwen2.5-32b`. Unknown sizes have no penalty, since a compatible service may host a frontier model.
+
+Small local models rank behind every healthy hosted candidate for judge and builder seats, including heads-down execution calls. This penalty comes before cost. It keeps a free model eligible when it is the only healthy choice. Balanced persona chat and cost-biased seats, including `--mix cheap`, have no size penalty and keep the usual spread rules. Explicit seats, persona pins and `ROUNDTABLE_EXECUTION_PROVIDER` retain their choices. A provider-level `size: "small"` or `size: "large"` routing override wins over detection.
+
 Recent call outcomes and latency are retained in the usage ledger without prompts or response bodies. The last 50 outcome-bearing calls per provider/model, from the last seven days, determine failure rate and median latency. Failures rank below successful alternatives; role capability, cost bias and spreading seats across providers guide the remaining choices. Final ties use provider identifier order. The two duel teams use different eligible providers where possible.
 
-With a remaining budget, a candidate's per-call cost must fit within it. A known price (the built-in table, or an override) is used as is. A provider with no known price (Together, Replicate, Ollama, `openai_compatible` and others) stays eligible: its cost is counted from a conservative token estimate (USD 15 per million input tokens and USD 75 per million output tokens), labelled "estimated" in the reason, the same provenance label the usage views use. A candidate is excluded only when its known or estimated cost exceeds the remaining budget. The estimate uses the requested input/output bounds, or a default input allowance and the role's output limit. Explicit and persona pins, and the persona missing-model fallback, pass the same budget gate before they are probed or accepted. Heads-down calls retain their existing per-call reservations and token bounds against the blackboard budget. Price overrides use the existing `ROUNDTABLE_PRICING_FILE`; routing configuration cannot change prices or health. A price from that file replaces the estimate.
+With a remaining budget, a candidate's per-call cost must fit within it. A known price (the built-in table, or an override) is used as is. Ollama costs $0 per token and its price is known. A provider with no known price (Together, Replicate, `openai_compatible` and others) stays eligible. Its cost uses a conservative estimate of USD 15 per million input tokens and USD 75 per million output tokens, labelled "estimated" in the reason. A candidate is excluded only when its known or estimated cost exceeds the remaining budget. The estimate uses the requested input/output bounds, or a default input allowance and the role's output limit. Explicit and persona pins, and the persona missing-model fallback, pass the same budget gate before they are probed or accepted. Heads-down calls retain their existing per-call reservations and token bounds against the blackboard budget. Price overrides use `ROUNDTABLE_PRICING_FILE`; routing configuration cannot change prices or health. A price from that file replaces the estimate.
 
-Ranking, in order: recent failure rate; a reasoning model ranks behind every non-reasoning provider on balanced and judge seats (slow for live turns; a penalty, not an exclusion, so it is still used when it is the only healthy choice), except on duel team seats, where it only counts as half a seat already used so the two teams stay on different providers; spreading seats across providers; then cost (known prices first, a provider with no known price is its own rank after them, not the budget estimate); then output capacity for builds, median latency and provider order. `--mix auto` and `--mix cheap` rank spread before cost, so four seats on four healthy providers land on four providers. A model given without a provider is only offered to providers that can serve it (a Claude id goes to `anthropic`, a `gpt-` id to `openai`).
+Set `ROUNDTABLE_OPENAI_COMPATIBLE_FREE=1` to price calls to the operator-configured `OPENAI_COMPATIBLE_BASE_URL` at $0 with a known price. This is off by default because a loopback endpoint may proxy a paid API. A per-call `base_url` never receives this free price, even when it names the same URL.
+
+An Ollama call is still an API call, metered in the ledger and counted toward caps at $0; a local meeting runs the `claude` CLI.
+
+After the size penalty, recent failure rate ranks first. Judge seats compare cost before spread. Other seats compare spread first. Reasoning models add a spread penalty on balanced and judge seats because they are slow for live turns. On duel team seats they count as half a seat already used. Known prices rank before unknown prices; unknown prices share a rank independent of the budget estimate. Remaining ties use output capacity for builds, median latency and provider order. `--mix auto` and `--mix cheap` compare spread before cost, so four seats on four healthy providers land on four providers. A model given without a provider is only offered to providers that can serve it. A Claude id goes to `anthropic`, and a `gpt-` id goes to `openai`.
 
 Failures count only for six hours, and only under the credential they happened with: the ledger stores a short hash of the key, never the key, so a rotated key starts clean. A timeout or rate limit excludes a provider from automatic choice for one minute; a rejected credential for ten.
 
@@ -66,12 +78,15 @@ Override models by provider and tier in `~/.agent-roundtable/config.json` (or un
     },
     "anthropic": {
       "judge": { "model": "claude-haiku-5-5" }
+    },
+    "ollama": {
+      "size": "large"
     }
   }
 }
 ```
 
-Only provider identifiers, the tiers `builder`, `judge`, `balanced`, and model entries containing `model`, optional boolean `reasoning`, and optional positive integer `maxOutputTokens` are accepted. Unknown routing fields are errors. No endpoint, health or budget override is accepted there.
+Each provider accepts an optional `size` of `"small"` or `"large"` next to the tiers `builder`, `judge` and `balanced`. Each tier accepts `model`, optional boolean `reasoning`, and optional positive integer `maxOutputTokens`. Unknown routing fields are errors. No endpoint, health or budget override is accepted there.
 
 ```sh
 roundtable duel "A short policy" --kind text --team-a editor --team-b reviewer --judges critic

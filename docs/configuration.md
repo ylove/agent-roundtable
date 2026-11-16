@@ -9,7 +9,9 @@
 | `OPENAI_COMPATIBLE_BASE_URL` | `openai_compatible` (unless `base_url` is passed) | — |
 | `OPENAI_COMPATIBLE_API_KEY` | optional | — |
 | `OPENAI_COMPATIBLE_MODEL` | `openai_compatible` | `default` |
+| `ROUNDTABLE_OPENAI_COMPATIBLE_FREE` | `1` prices the operator-configured compatible endpoint at $0 per token; per-call `base_url` values keep normal pricing | off |
 | `OLLAMA_URL` | `ollama` | `http://localhost:11434` |
+| `ROUNDTABLE_OLLAMA_DISCOVERY` | default-port Ollama discovery when `OLLAMA_URL` is unset; an explicit URL still counts | on (`0`, `false`, `no` or `off` disables; trimmed and case-insensitive) |
 | `ROUNDTABLE_AGENTS_DIR` | agent prompt lookup; also set from the `agentsDir` saved with `roundtable config`, or per command with `--agents-dir` | `.claude/agents` (relative to the server's working directory — use an absolute path) |
 | `ROUNDTABLE_SKILLS_DIR` | last skill lookup location after personal/project skills; new create skills and improve skills outside `.claude/agents` | `skills` beside the agents directory (normally `.claude/skills`) |
 | `ROUNDTABLE_WORKSPACE_DIR` | conversation grounding | project containing `.claude/agents`, otherwise server working directory |
@@ -70,6 +72,12 @@ roundtable config show
 Settings are saved as `{ "envFile": "…", "agentsDir": "…" }` in `~/.agent-roundtable/config.json`, or `ROUNDTABLE_HOME/config.json` when a state root is configured. Writes use mode 0600. `config show` prints `env-file: set|unset`, `agents-dir: set|unset`, secret names with backend ids, and connector names with env variable names; it never displays paths, locators or values.
 
 The same file can contain [runtime profiles and overrides](runtimes.md#configuration) under `runtimes`. Google Antigravity's built-in name is `agy`; it needs its own saved sign-in and no new login setting. JSON output accepts optional `output.status: { "path": "status", "success": "SUCCESS", "errorPath": "error" }` (`errorPath` is optional). Any other or missing status fails with a scrubbed, capped diagnostic, including in workers. This is agy's default; other runtimes keep their existing behavior. All paths are dotted own-property paths as described in the runtime reference.
+
+The file also accepts [routing overrides](providers.md#provider-judgment) under `routing`.
+
+| Saved key | Meaning | Default |
+| --- | --- | --- |
+| `routing.<provider>.size` | `"small"` or `"large"` beside the per-tier overrides; overrides detected model size for automatic routing | Detected size, otherwise unknown |
 
 `ROUNDTABLE_ENV_FILE` overrides the saved `envFile`. The target must be an absolute path to an accessible regular file. A file readable by group or world produces a warning without revealing its path. Restrict it to mode 0600. Invalid targets are skipped with a path-free warning.
 

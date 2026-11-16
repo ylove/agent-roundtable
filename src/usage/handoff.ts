@@ -73,7 +73,7 @@ export function buildRunHandoff(state: BlackboardState, now = new Date()): strin
   const { money, tokens } = spend(state);
   const budget = executionBudgetUsd(state);
   const providers = Object.values(state.budget.by_agent_usage ?? {}).map((u) => u.provider);
-  const free = tokenTotal(tokens) > 0 && providers.length > 0 && providers.every((p) => isFreeProvider(p));
+  const free = tokenTotal(tokens) > 0 && providers.length > 0 && providers.every((p) => isFreeProvider(p, { endpoint: null }));
   const used = moneyTotal(money) > 0 ? totalText(money) : free ? `${usd(0)} ${FREE_LABEL}` : tokenTotal(tokens) > 0 ? `${NO_PRICE_LABEL} known for the models used` : usd(0);
   out.push(`- Budget: ${used}${budget > 0 ? ` of ${usdBudget(budget)}` : ""}${state.budget.extensions_usd ? ` (including ${usd(state.budget.extensions_usd)} extended)` : ""}`);
   out.push("");

@@ -171,7 +171,7 @@ export function lineFor(scope: SessionScope, r: UsageReport, server: string, at 
     const est = estimateUsd(
       r.model,
       { inputTokens: tokens.input, outputTokens: tokens.output, cacheReadTokens: tokens.cache_read, cacheWriteTokens: tokens.cache_write },
-      { provider: r.provider }
+      { provider: r.provider, baseUrl: r.baseUrl }
     );
     // An unknown model has no price: leave the cost out rather than record a $0.00 that means nothing.
     if (!(est.estimated && est.usd === 0)) {

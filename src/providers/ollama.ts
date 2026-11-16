@@ -5,11 +5,14 @@ import { providerHttpError, withRetry } from "./retry.js";
 import { OLLAMA_URL } from "../config.js";
 import { describeUrl } from "../security/url-guard.js";
 import { scrubAndCap } from "../security/secrets.js";
+import { providerHealth } from "./health.js";
 
 /**
  * Check whether the configured Ollama server is reachable (GET /api/tags).
  */
 export async function isOllamaAvailable(timeoutMs: number = 1000): Promise<boolean> {
+  const cached = providerHealth.getOllama({ OLLAMA_URL });
+  if (cached) return cached.reachable;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {

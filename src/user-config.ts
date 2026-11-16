@@ -22,7 +22,7 @@ import { validateNotifyConfig, type NotifyConfig } from "./serve/config.js";
 
 export type RoutingTier = "builder" | "judge" | "balanced";
 export interface RoutingModel { model: string; reasoning?: boolean; maxOutputTokens?: number }
-export type RoutingConfig = Partial<Record<LLMProvider, Partial<Record<RoutingTier, RoutingModel>>>>;
+export type RoutingConfig = Partial<Record<LLMProvider, Partial<Record<RoutingTier, RoutingModel>> & { size?: "small" | "large" }>>;
 
 /** Operator configuration only: no endpoints, credentials, health or price overrides. */
 export function validateRoutingConfig(raw: unknown): RoutingConfig {
@@ -31,6 +31,10 @@ export function validateRoutingConfig(raw: unknown): RoutingConfig {
   for (const [provider, tiers] of Object.entries(raw)) {
     if (!(PROVIDER_IDS as string[]).includes(provider) || !record(tiers)) throw new Error("Invalid routing provider.");
     for (const [tier, spec] of Object.entries(tiers)) {
+      if (tier === "size") {
+        if (spec !== "small" && spec !== "large") throw new Error("Invalid routing size.");
+        continue;
+      }
       if (!["builder", "judge", "balanced"].includes(tier) || !record(spec) ||
           Object.keys(spec).some(k => !["model", "reasoning", "maxOutputTokens"].includes(k)) ||
           typeof spec.model !== "string" || !/^[\x21-\x7e]{1,200}$/.test(spec.model) ||

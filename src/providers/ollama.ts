@@ -1,6 +1,6 @@
 // --- Ollama (native /api/chat; optional, only when reachable) ---
 import type { ProviderCall } from "./shared.js";
-import { assertNonEmpty, assertNotRedirect, readProviderJson, stripThinkTags } from "./shared.js";
+import { assertNonEmpty, assertNotRedirect, parseBillableReply, readProviderJson, stripThinkTags } from "./shared.js";
 import { providerHttpError, withRetry } from "./retry.js";
 import { OLLAMA_URL } from "../config.js";
 import { describeUrl } from "../security/url-guard.js";
@@ -71,25 +71,28 @@ export const callOllama: ProviderCall = async (messages, o) => {
     }
     return parsed;
   }, { signal: o.signal, label: "Ollama" });
-  const text = stripThinkTags(result.message?.content ?? "");
-  // Ollama gives no call ids and sends arguments as an object; ids are made up here so results pair up by position.
-  const rawCalls = o.toolRound ? (result.message?.tool_calls ?? []).filter((c) => typeof c.function?.name === "string") : [];
-  const toolCalls = rawCalls.map((c, i) => {
-    const args = c.function!.arguments;
-    let input: unknown = null;
-    if (args && typeof args === "object") input = args;
-    else if (typeof args === "string") { try { input = JSON.parse(args || "{}"); } catch { /* the loop reports the bad arguments to the model */ } }
-    else if (args === undefined) input = {};
-    return { id: `call_${i}`, name: c.function!.name as string, input };
+  const model = result.model || o.model;
+  const usage = result.prompt_eval_count !== undefined && result.eval_count !== undefined
+    ? { inputTokens: result.prompt_eval_count, outputTokens: result.eval_count }
+    : undefined;
+  return parseBillableReply({ model, usage }, () => {
+    const text = stripThinkTags(result.message?.content ?? "");
+    // Ollama gives no call ids and sends arguments as an object; ids are made up here so results pair up by position.
+    const rawCalls = o.toolRound ? (result.message?.tool_calls ?? []).filter((c) => typeof c.function?.name === "string") : [];
+    const toolCalls = rawCalls.map((c, i) => {
+      const args = c.function!.arguments;
+      let input: unknown = null;
+      if (args && typeof args === "object") input = args;
+      else if (typeof args === "string") { try { input = JSON.parse(args || "{}"); } catch { /* the loop reports the bad arguments to the model */ } }
+      else if (args === undefined) input = {};
+      return { id: `call_${i}`, name: c.function!.name as string, input };
+    });
+    return {
+      content: toolCalls.length ? text : assertNonEmpty("Ollama", text, result.done_reason, { model, usage }),
+      ...(toolCalls.length > 0 && { toolCalls, assistantTurn: { role: "assistant", content: result.message?.content ?? "", tool_calls: rawCalls } }),
+      model,
+      provider: "ollama",
+      usage,
+    };
   });
-  return {
-    content: toolCalls.length ? text : assertNonEmpty("Ollama", text, result.done_reason),
-    ...(toolCalls.length > 0 && { toolCalls, assistantTurn: { role: "assistant", content: result.message?.content ?? "", tool_calls: rawCalls } }),
-    model: result.model || o.model,
-    provider: "ollama",
-    usage:
-      result.prompt_eval_count !== undefined && result.eval_count !== undefined
-        ? { inputTokens: result.prompt_eval_count, outputTokens: result.eval_count }
-        : undefined,
-  };
 };

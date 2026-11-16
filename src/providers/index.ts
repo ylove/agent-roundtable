@@ -21,6 +21,7 @@ function recordOutcome(provider: LLMProvider, model: string, started: number, ou
 // ============================================================================
 
 import type { LLMMessage, LLMCompletionResult, ProviderCall, ToolRound, ToolSpec } from "./shared.js";
+import { BillableReplyError } from "./shared.js";
 import { runToolLoop, toolResultTurns, type RunTool, type ToolLoopLimits, type ToolLoopResult } from "./tool-loop.js";
 import type { LLMProvider } from "../config.js";
 import {
@@ -128,15 +129,23 @@ export async function chatCompletion(
     }));
     return result;
   } catch (error) {
+    const reply = error instanceof BillableReplyError ? error : undefined;
+    const reportsUsage = dispatched && (!!reply?.usage || options.estimateUsageOnFailure === true);
     if (dispatched && !stop?.aborted) {
       const status = error instanceof ProviderHttpError ? error.status : undefined;
       const outcome = status === 401 || status === 403 ? "auth" : status === 429 ? "rate_limit" : error instanceof Error && /timeout|timed out|abort/i.test(error.name + error.message) ? "timeout" : "error";
       // Unknown persona models are handled by the existing model fallback, not provider exclusion.
       if (outcome === "auth" || outcome === "timeout" || outcome === "rate_limit") providerHealth.recordCall(provider, false, outcome === "auth" ? "auth failed" : outcome === "timeout" ? "request timed out" : "rate limited", process.env, options.baseUrl);
-      failedOutcome = recordOutcome(provider, model, started, outcome, options.estimateUsageOnFailure === true, options.baseUrl);
+      failedOutcome = recordOutcome(provider, model, started, outcome, reportsUsage, options.baseUrl);
     }
-    if (dispatched && options.estimateUsageOnFailure) {
-      const report = () => reportUsage({ provider, model, ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }), chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 } });
+    if (reportsUsage) {
+      const report = () => reportUsage({
+        provider,
+        model: reply?.model || model,
+        ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
+        ...(reply?.usage && { usage: reply.usage }),
+        chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 },
+      });
       if (failedOutcome) withProviderOutcome(failedOutcome, report); else report();
     }
     if (stop?.aborted) throw new StoppedError();

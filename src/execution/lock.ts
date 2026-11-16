@@ -2,13 +2,15 @@
 // Cross-process mkdir locks that are never taken from a live holder
 //
 // A lock is a directory created with mkdir (atomic on local filesystems) holding
-// owner.json {pid, host, token, at, started?}. A holder keeps the lock for as long as its process
-// lives, however long that is: a holder stalled by a GC pause, swap, SIGSTOP or a suspended
+// owner.json {pid, host, token, at, started?}. A live holder keeps the lock until it releases it,
+// however long that is: a holder stalled by a GC pause, swap, SIGSTOP or a suspended
 // laptop must never wake up next to a second writer, so waiters time out instead of stealing.
 //
 // A lock is cleared only when its owner is known to be gone:
 //  - its pid is dead on this host, or the pid is alive but belongs to another process (pid reuse,
 //    detected by comparing the process start time recorded in `started`); or
+//  - this module instance issued its exact token and has since released it, even if a contender
+//    temporarily moved the directory aside during release; or
 //  - owner.json is missing or unreadable after a grace period of staleMs (by directory mtime):
 //    its creator died between mkdir and publishing owner.json.
 // A lock owned by another host is never cleared: 1.0 supports one host per home directory.
@@ -71,6 +73,9 @@ function describeOwner(lockDir: string, o: LockOwner | null): string {
 
 const OWNER_FILE = "owner.json";
 const MAX_WAIT_MS = 5000;
+// Remember releases whose removal is unconfirmed, so a restored lock is not protected by our
+// live pid. Ordinary releases and successful clears discard their tokens to avoid accumulating them.
+const relinquishedTokens = new Set<string>();
 
 const errCode = (e: unknown) => (e as NodeJS.ErrnoException).code;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -205,6 +210,7 @@ function ownerGone(seen: Seen, staleMs: number, now: number): boolean {
   const o = seen.owner;
   if (!o) return now - seen.mtimeMs > staleMs;
   if (o.host !== hostname()) return false;
+  if (o.pid === process.pid && relinquishedTokens.has(o.token)) return true;
   if (!pidAlive(o.pid)) return true;
   // The pid is alive. It is the holder unless the pid was reused, which is checked (one ps spawn)
   // only once the lock is older than staleMs.
@@ -241,6 +247,7 @@ function clearIfGone(lockDir: string, staleMs: number): boolean {
   }
   rmSync(aside, { recursive: true, force: true });
   const o = seen.owner;
+  if (o) relinquishedTokens.delete(o.token);
   console.error(`[Lock] cleared dead lock ${lockDir}${o ? ` (pid ${o.pid}, taken ${o.at})` : " (no owner)"}`);
   return true;
 }
@@ -251,6 +258,9 @@ function makeRelease(lockDir: string, token: string): LockRelease {
   const release = () => {
     if (done) return false;
     done = true;
+    // A stale contender may have moved our live lock aside and be about to restore it. Giving
+    // up this token must survive a missing owner.json or a failed rename below.
+    relinquishedTokens.add(token);
     if (!held()) return false;
     // Rename first, so a contender racing this release cannot make us delete its lock.
     const aside = `${lockDir}.released.${rand()}`;
@@ -269,6 +279,7 @@ function makeRelease(lockDir: string, token: string): LockRelease {
       }
     }
     rmSync(aside, { recursive: true, force: true });
+    if (ours) relinquishedTokens.delete(token);
     return ours;
   };
   return Object.assign(release, { token, held }) as LockRelease;

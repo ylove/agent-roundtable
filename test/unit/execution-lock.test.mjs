@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -184,6 +184,34 @@ test("release removes the lock only while owner.json carries our token", async (
   assert.equal(readLockOwner(lockDir).token, "thief");
 });
 
+test("release while a contender has moved the lock aside does not orphan it", async (t) => {
+  const lockDir = join(freshDir(), "displaced.lock");
+  const options = { staleMs: 10_000, timeoutMs: 250 };
+  const release = await acquireLock(lockDir, options);
+  // A contender inspected a dead lock, then moved our replacement aside before checking its token.
+  const aside = `${lockDir}.stale.contender`;
+  renameSync(lockDir, aside);
+  assert.equal(release(), false, "release runs before the contender restores our live lock");
+  renameSync(aside, lockDir);
+  assert.equal(readLockOwner(lockDir).token, release.token);
+
+  // While the released token is still on disk, another active token with our pid stays protected.
+  const activeDir = join(freshDir(), "active.lock");
+  const active = await acquireLock(activeDir, options);
+  t.after(() => active());
+  await assert.rejects(acquireLock(activeDir, { ...options, timeoutMs: 50 }), LockTimeoutError);
+  assert.equal(active.held(), true);
+
+  const next = await acquireLock(lockDir, options);
+  try {
+    assert.notEqual(next.token, release.token);
+    assert.equal(release(), false, "releasing the old token again is a no-op");
+    assert.equal(next.held(), true);
+  } finally {
+    next();
+  }
+});
+
 test("withLock serializes critical sections and releases on throw", async () => {
   const lockDir = join(freshDir(), "with.lock");
   let active = 0;
@@ -240,14 +268,39 @@ test("processes racing to steal a dead pid's lock keep mutual exclusion", { time
     const closed = new Promise((resolve) => child.once("close", resolve));
     return { child, ready, done, closed, stderr: () => err };
   });
+  let completed = false;
   t.after(async () => {
-    for (const worker of workers) {
-      if (worker.child.exitCode === null && worker.child.signalCode === null) {
-        t.diagnostic(`stopping worker ${worker.child.pid}; stderr:\n${worker.stderr()}`);
+    const owner = readLockOwner(lockDir);
+    const states = workers.map(({ child }) => ({
+      pid: child.pid,
+      running: child.exitCode === null && child.signalCode === null,
+      code: child.exitCode,
+      signal: child.signalCode,
+    }));
+    for (const [i, worker] of workers.entries()) {
+      if (states[i].running) {
         worker.child.kill("SIGKILL");
       }
     }
     await Promise.all(workers.map((worker) => worker.closed));
+    if (!completed) {
+      // Keep the state from before cleanup, but wait for close to collect all stderr. The holder
+      // named in a worker's timeout may differ from the owner still on disk when this test fails.
+      const timeoutPids = new Set(workers.flatMap((worker) =>
+        Array.from(worker.stderr().matchAll(/held by pid (\d+)/g), (match) => Number(match[1]))
+      ));
+      const holderPids = new Set([...timeoutPids, ...(owner ? [owner.pid] : [])]);
+      t.diagnostic(`race lock owner before cleanup: ${owner ? JSON.stringify(owner) : "none"}`);
+      for (const pid of timeoutPids) t.diagnostic(`LockTimeoutError reported holder pid ${pid}`);
+      for (const pid of holderPids) {
+        if (!states.some((state) => state.pid === pid)) {
+          t.diagnostic(`holder pid ${pid} is not a race worker; running state and stderr unavailable`);
+        }
+      }
+      for (const [i, state] of states.entries()) {
+        t.diagnostic(`worker ${i} (pid ${state.pid}${holderPids.has(state.pid) ? ", lock holder" : ""}): running before cleanup=${state.running}, exit=${state.code}, signal=${state.signal}; stderr:\n${workers[i].stderr()}`);
+      }
+    }
   });
   await Promise.all([
     Promise.all(workers.map((worker) => worker.ready)).then(() =>
@@ -259,4 +312,5 @@ test("processes racing to steal a dead pid's lock keep mutual exclusion", { time
   ]);
   assert.equal(readFileSync(counter, "utf8"), "100");
   assert.deepEqual(readdirSync(dir).sort(), ["counter"], "no lock or stale leftovers remain");
+  completed = true;
 });

@@ -6,7 +6,7 @@
 // keys the model declares, create a prediction, and poll it to a terminal state.
 import { setTimeout as sleep } from "node:timers/promises";
 import type { LLMMessage, ProviderCall } from "./shared.js";
-import { assertNonEmpty, assertNotRedirect, readProviderJson, stripThinkTags } from "./shared.js";
+import { BillableReplyError, assertNonEmpty, assertNotRedirect, parseBillableReply, readProviderJson, stripThinkTags } from "./shared.js";
 import { isRateLimited, providerHttpError, withRetry } from "./retry.js";
 import { requireEnv } from "../config.js";
 import { scrubAndCap } from "../security/secrets.js";
@@ -248,17 +248,17 @@ export function buildReplicateInput(
 export function normalizeReplicateOutput(output: unknown, ref: string): string {
   if (Array.isArray(output)) {
     const text = output.map(String).join("");
-    if (!text) throw new Error(`Replicate returned no text for model ${ref}`);
+    if (!text) throw new BillableReplyError(`Replicate returned no text for model ${ref}`, { model: ref });
     return text;
   }
   if (typeof output === "string") {
-    if (!output) throw new Error(`Replicate returned no text for model ${ref}`);
+    if (!output) throw new BillableReplyError(`Replicate returned no text for model ${ref}`, { model: ref });
     return output;
   }
   if (output === null || output === undefined) {
-    throw new Error(`Replicate returned no text for model ${ref}`);
+    throw new BillableReplyError(`Replicate returned no text for model ${ref}`, { model: ref });
   }
-  throw new Error(`Replicate returned unexpected output type ${typeof output} for model ${ref}`);
+  throw new BillableReplyError(`Replicate returned unexpected output type ${typeof output} for model ${ref}`, { model: ref });
 }
 
 interface ReplicatePrediction {
@@ -325,7 +325,7 @@ export function createReplicateCall({
     }, { signal: o.signal, label: "Replicate create", retryIf: isRateLimited });
 
     const terminal = (p: ReplicatePrediction): string | undefined => {
-      if (p.status === "succeeded") return normalizeReplicateOutput(p.output, refText);
+      if (p.status === "succeeded") return parseBillableReply({ model: refText }, () => normalizeReplicateOutput(p.output, refText));
       if (p.status === "failed" || p.status === "canceled") {
         throw new Error(
           `Replicate prediction ${p.status} for model ${refText}: ${p.error ? scrubAndCap(String(p.error), 300) : "no error detail"}`
@@ -373,7 +373,7 @@ export function createReplicateCall({
     }
 
     return {
-      content: assertNonEmpty("Replicate", stripThinkTags(text)),
+      content: assertNonEmpty("Replicate", stripThinkTags(text), undefined, { model: refText }),
       model: refText,
       provider: "replicate",
       usage: undefined,

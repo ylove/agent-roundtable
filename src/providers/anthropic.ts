@@ -1,6 +1,6 @@
 // --- Anthropic (raw Messages API) ---
 import type { ProviderCall } from "./shared.js";
-import { assertNonEmpty, assertNotRedirect, readProviderJson } from "./shared.js";
+import { assertNonEmpty, assertNotRedirect, parseBillableReply, readProviderJson } from "./shared.js";
 import { providerHttpError, withRetry } from "./retry.js";
 import { requireEnv } from "../config.js";
 import { scrubAndCap } from "../security/secrets.js";
@@ -61,30 +61,33 @@ export const callAnthropic: ProviderCall = async (messages, o) => {
     return parsed;
   }, { signal: o.signal, label: "Anthropic" });
 
-  // Join ALL text blocks: with adaptive thinking the first block may be a "thinking" block.
-  const text = (result.content ?? [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text ?? "")
-    .join("");
-
   const u = result.usage;
-  const toolCalls = o.toolRound
-    ? (result.content ?? []).filter((b) => b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string")
-        .map((b) => ({ id: b.id!, name: b.name!, input: b.input ?? {} }))
-    : [];
-  return {
-    // A reply that only asks for tools carries no text.
-    content: toolCalls.length ? text : assertNonEmpty("Anthropic", text, result.stop_reason),
-    ...(toolCalls.length > 0 && { toolCalls, assistantTurn: { role: "assistant", content: result.content } }),
-    model: result.model || o.model,
-    provider: "anthropic",
-    usage: u
-      ? {
-          inputTokens: u.input_tokens,
-          outputTokens: u.output_tokens,
-          ...(typeof u.cache_read_input_tokens === "number" && { cacheReadTokens: u.cache_read_input_tokens }),
-          ...(typeof u.cache_creation_input_tokens === "number" && { cacheWriteTokens: u.cache_creation_input_tokens }),
-        }
-      : undefined,
-  };
+  const model = result.model || o.model;
+  const usage = u
+    ? {
+        inputTokens: u.input_tokens,
+        outputTokens: u.output_tokens,
+        ...(typeof u.cache_read_input_tokens === "number" && { cacheReadTokens: u.cache_read_input_tokens }),
+        ...(typeof u.cache_creation_input_tokens === "number" && { cacheWriteTokens: u.cache_creation_input_tokens }),
+      }
+    : undefined;
+  return parseBillableReply({ model, usage }, () => {
+    // Join ALL text blocks: with adaptive thinking the first block may be a "thinking" block.
+    const text = (result.content ?? [])
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("");
+    const toolCalls = o.toolRound
+      ? (result.content ?? []).filter((b) => b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string")
+          .map((b) => ({ id: b.id!, name: b.name!, input: b.input ?? {} }))
+      : [];
+    return {
+      // A reply that only asks for tools carries no text.
+      content: toolCalls.length ? text : assertNonEmpty("Anthropic", text, result.stop_reason, { model, usage }),
+      ...(toolCalls.length > 0 && { toolCalls, assistantTurn: { role: "assistant", content: result.content } }),
+      model,
+      provider: "anthropic",
+      usage,
+    };
+  });
 };

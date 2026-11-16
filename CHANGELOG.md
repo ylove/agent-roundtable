@@ -2,6 +2,7 @@
 
 ## 2.1.0 (unreleased)
 
+- Count provider usage from rejected billable replies toward session spend caps and the usage ledger (#252)
 - Fix a lock that could stay held by a live process after it released it, when a contender clearing a dead lock moved it aside at the same moment (#265)
 - Add `ROUNDTABLE_LESSON_SIGNOFF=human` to limit persisted postmortem lesson sign-off to the CLI (#251)
 - **Preview display modes (#246, WS35d).** Add `live`, `click` and `screenshot` via CLI `--display`, tool `display` and `ROUNDTABLE_PREVIEW_DISPLAY`. The CLI defaults to `live` from an interactive terminal and `click` otherwise; worker and execution starts default to `click`. Rooms show the recorded mode, and screenshot cards use the latest page-check image. See [previews](docs/previews.md).

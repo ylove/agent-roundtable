@@ -620,11 +620,12 @@ export const deliberationTools: ToolDefinition[] = [
     precheck: args => validateProviderOptions(args.provider as LLMProvider | "auto" | undefined, args.base_url as string | undefined, true),
     annotations: { title: "Start ultraplan", ...SESSION_TURN },
     description:
-      "Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: \"plan\" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. The final result ends with a JSON trailer {ultraplan_id, archived, tally}; signed off means no OBJECT and no UNCLEAR sign-off. With execution_ready: true, plans end with a roundtable-tasks block and sign-offs check it, so propose_contract { from_session: ultraplan_id } can build a contract from it. Public runs post the task and phase outputs, never context.",
+      "Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. Call with dry_run: true first to get the cost estimate without calling any agent; when it is above $0, show it to the person before starting. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: \"plan\" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. The final result ends with a JSON trailer {ultraplan_id, archived, tally, usage}; signed off means no OBJECT and no UNCLEAR sign-off. With execution_ready: true, plans end with a roundtable-tasks block and sign-offs check it, so propose_contract { from_session: ultraplan_id } can build a contract from it. Public runs post the task and phase outputs, never context.",
     inputSchema: {
       type: "object",
       properties: {
         max_usd: { type: "number", exclusiveMinimum: 0, description: "Optional positive finite session spend cap in USD. Stops the session when metered spend reaches the cap." },
+        dry_run: { type: "boolean", description: "Resolve seats and return the cost estimate with no provider calls or live session. Default false." },
         agents: { type: "array", items: { type: "string" }, minItems: 1, description: "Specialists contributing input, independent reviews and sign-offs. A planner may also be a participant." },
         task: { type: "string", description: "What the plan must accomplish; required and non-empty.", "x-nonblank": true, "x-hint": "describe what the plan is for" },
         context: { type: "string", description: "Optional background shared with the agents; never posted publicly." },
@@ -648,7 +649,7 @@ export const deliberationTools: ToolDefinition[] = [
     modes: ORCHESTRATOR_ONLY,
     annotations: { title: "Submit plan", ...SESSION_TURN },
     description:
-      "Submit a full next plan version, or omit plan to review or sign off the latest version as-is without creating a version. This also recovers a stopped planner run with phase: \"plan\". If no version exists yet, pass plan. You write revised plans from agent input/reviews; tag contributing agents on steps and explain which amendments you accepted or rejected and why. Default final: false collects independent reviews and leaves the session awaiting_revision. Set final: true to collect sign-offs, close, and return the final markdown document; with a supplied plan this is allowed straight after input without a review. Show that final document to the user verbatim, including input and sign-offs. A failed phase leaves the previous state intact so you can retry.",
+      "Submit a full next plan version, or omit plan to review or sign off the latest version as-is without creating a version. This also recovers a stopped planner run with phase: \"plan\". If no version exists yet, pass plan. You write revised plans from agent input/reviews; tag contributing agents on steps and explain which amendments you accepted or rejected and why. Default final: false collects independent reviews and leaves the session awaiting_revision. Set final: true to collect sign-offs, close, and return the final markdown document; with a supplied plan this is allowed straight after input without a review. Show that final document to the user verbatim, including input and sign-offs. A failed phase preserves the plan and phase state so you can retry. Completed calls still add to spend.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1061,8 +1062,9 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
 
     // === Ultraplan Tools ===
     case START_ULTRAPLAN: {
-      const { max_usd, agents, task, context: given, draft_plan, planner, revision_rounds, execution_ready, repo_dir, duel, duel_source, connectors, seat_connectors, public: isPublic, provider, model, base_url } = (args ?? {}) as {
+      const { max_usd, dry_run, agents, task, context: given, draft_plan, planner, revision_rounds, execution_ready, repo_dir, duel, duel_source, connectors, seat_connectors, public: isPublic, provider, model, base_url } = (args ?? {}) as {
         max_usd?: number;
+        dry_run?: boolean;
         agents: string[];
         connectors?: string[];
         seat_connectors?: SeatConnectorMap;
@@ -1085,6 +1087,7 @@ export async function handleDeliberationTool(name: string, args: ToolArgs, ctx?:
       const context = withDuelFocus([given, lessons].filter((x) => x?.trim()).join("\n\n") || undefined, duel, duel_source !== false) || undefined;
       const result = await startUltraplan(agents, task, {
         maxUsd: max_usd,
+        dryRun: dry_run === true,
         context,
         draftPlan: draft_plan,
         planner,

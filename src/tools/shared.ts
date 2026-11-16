@@ -6,7 +6,7 @@ import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/
 import type { LLMProvider } from "../config.js";
 import { PROVIDER_IDS, MODEL_PARAM_DESCRIPTION } from "../config.js";
 import { MEETING_MODES } from "../sessions/modes.js";
-import type { UltraplanStepResult, UltraplanFinalResult } from "../sessions/ultraplan.js";
+import { formatUltraplanEstimate, formatUltraplanUsage, type UltraplanStepResult, type UltraplanFinalResult, type UltraplanDryRunResult } from "../sessions/ultraplan.js";
 import type { AgentWorkshopResult } from "../sessions/agent-creation.js";
 import type { JsonSchema } from "../validate.js";
 
@@ -167,11 +167,15 @@ export function validateProviderOptions(provider: LLMProvider | "auto" = "anthro
 
 /**
  * A step as JSON; a finished ultraplan as its document (and public block), then a fenced JSON trailer
- * {ultraplan_id, archived, tally} so the caller can hand the session to propose_contract.
+ * {ultraplan_id, archived, tally, usage} so the caller can hand the session to propose_contract.
  */
-export function formatUltraplanResult(result: UltraplanStepResult | UltraplanFinalResult): string {
-  if (result.status !== "finalized") return JSON.stringify(result, null, 2);
-  const trailer = { routing: result.routing, ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally };
+export function formatUltraplanResult(result: UltraplanStepResult | UltraplanFinalResult | UltraplanDryRunResult): string {
+  // Preserve the step's JSON shape for existing orchestrators, with readable cost and usage lines.
+  if (result.status !== "finalized") return JSON.stringify({ ...result,
+    ...(result.estimate && { estimate_line: formatUltraplanEstimate(result.estimate) }),
+    usage_line: formatUltraplanUsage(result.usage),
+  }, null, 2);
+  const trailer = { routing: result.routing, ultraplan_id: result.ultraplanId, archived: result.archived === true, tally: result.tally, usage: result.usage };
   const uses = result.toolUses?.length ? `\n\nConnector use:\n${result.toolUses.map((n) => `- ${n}`).join("\n")}` : "";
   return result.finalPlan + uses + (result.publicBlock ? `\n\n${result.publicBlock}` : "") +
     "\n\n```json\n" + JSON.stringify(trailer, null, 2) + "\n```";

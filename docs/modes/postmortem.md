@@ -62,7 +62,7 @@ The orchestrator then closes the meeting with `hold_postmortem(action: "conclude
 
 Persisted lessons need a person's sign-off. This covers `rule`, `agent_rule`, `contract_rule`, `persona_addendum` and `memory`. In `any` mode, supply `orchestrator` (the human-supplied identity, non-blank after scrubbing and at most 200 characters) and an explicit `accept` list when concluding. For an execution, the identity must equal the frozen contract's `scope.orchestrator`; at the table, any non-blank identity is accepted and recorded. `fix` and `dissent_score` keep their existing checks.
 
-Set `ROUNDTABLE_LESSON_SIGNOFF=human` to limit sign-off to the CLI. This stops sign-off through MCP tool calls, including prompt-injected ones. Concluding a meeting leaves persisted artifacts pending even if an identity is supplied. Pending lists and records remain available. The default is `any`, which keeps the existing behavior. Values are trimmed and case-insensitive; unset or empty means `any`. Any other value uses `human` and writes one warning to stderr per process. This is not a sandbox. An agent with shell access can still run the CLI.
+Set `ROUNDTABLE_LESSON_SIGNOFF=human` to limit sign-off to the CLI and the dashboard form. This stops sign-off through MCP tool calls, including prompt-injected ones. Concluding a meeting leaves persisted artifacts pending even if an identity is supplied. Pending lists and records remain available. The default is `any`, which keeps the existing behavior. Values are trimmed and case-insensitive; unset or empty means `any`. Any other value uses `human` and writes one warning to stderr per process.
 
 Without that identity, the listed persisted artifacts stay **pending sign-off** in the concluded record. Their full text and hash remain visible under **Pending sign-off**, including on the dashboard. They write no lesson, persona addendum or memory file and never enter plan, contract, card or ultraplan prompts. Flags still record findings; their clearer wording comes only from signed-off artifacts.
 
@@ -80,6 +80,10 @@ roundtable postmortem signoff pm-00000001 --by main a1 a3
 ```
 
 Both commands support `--json`; pending defaults to the current project. Unlisted ids stay pending. Empty lists, unknown ids and ids that are not pending are refused before applying any item. Already signed-off ids are reported without reapplying them. The record and each new lesson carry `signoff: {by, at}`; audit details carry `signed_off_by`, `signed_off_at` and the artifact hash. Secret scrubbing and the 600-character artifact cap still apply.
+
+The dashboard's Postmortems page is a second way to sign off in both `any` and `human` modes. Review each pending artifact's text and hash, select its checkbox, enter your identity and submit. No boxes start selected. The form uses the same sign-off and audit checks as the CLI. It accepts only meetings from that run and only loopback connections. A dashboard bound to a tailnet address refuses all sign-off requests. Use the CLI in that case.
+
+The route is a CSRF target. A per-start nonce in a custom header forces a CORS preflight that the server never approves. This is not a sandbox. An agent with shell access and the dashboard URL can fetch the nonce and post, just as it can run the CLI. This matches the CLI's strength. The `execute` and `execution_status` MCP tools can return the dashboard URL, including its capability token, to agents.
 
 **Migration:** lessons accepted by older versions **keep flowing into prompts** to preserve the project's established lessons. They are marked **accepted before sign-off** (`accepted_before_signoff: true` in the lessons action), and older record entries have the same label. `doctor` and `up` show an informational review notice for projects with these lessons or pending items, suggesting `roundtable postmortem pending` and `postmortem(action: "lessons")`. The notice does not change exit status. Flags do not require sign-off.
 

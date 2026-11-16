@@ -180,12 +180,14 @@ Look and feel:
 - Empty states with warm copy ("No usage yet. Agents will show up here as soon as they start.").
 - Light and dark from `prefers-color-scheme`, WCAG AA contrast, visible focus rings, keyboard reachable, `aria-live` for status changes, no layout jump on update, works at 360 px wide.
 
-Security (the dashboard gains its **first mutating route**; heads-down.md §14 is updated in the same PR):
-- `POST <token>/agents/<agent>/stop` only. The shared secure server's GET/HEAD-only rule gains an explicit per-route method allowlist; every other route stays GET/HEAD.
+Stop route security (see heads-down.md §14):
+- `POST <token>/agents/<agent>/stop` uses an explicit per-route method allowlist. The Postmortems form adds the other mutating route, `POST <token>/postmortems/<pm>/signoff`. Other routes stay GET/HEAD.
 - CSRF: the request must carry `X-Roundtable-Action: <nonce>`, where the nonce is a second `randomBytes(18)` value generated per dashboard start, delivered only inside the page as a `<meta>` element and compared with `timingSafeEqual` on digests. A custom header forces a CORS preflight that the server never approves, so no cross-origin page can send it. `Origin`, when present, must equal the dashboard's own origin; `Sec-Fetch-Site`, when present, must be `same-origin`. Bodies are refused (`Content-Length` must be 0).
 - `form-action 'none'` stays in the CSP; the button uses `fetch` from the static script (`connect-src 'self'`). No inline script or handler.
 - The agent id must match the id pattern and name a registered agent; the response is a small JSON status. At most 10 stop requests per minute per dashboard.
 - The nonce and token are never logged.
+
+The Postmortems form has its own per-start nonce. Sign-off checks the action header, Origin and Sec-Fetch-Site, JSON content type, a 16 KiB declared and streamed body cap, loopback bind and peer, 10 requests a minute, and exactly `{by, accept}` with a valid identity and at most 20 artifact ids. These checks precede state reads. The meeting must belong to this run. It uses the CLI's sign-off and audit logic and works in `human` mode. Tailnet binds refuse all sign-off requests and say to use the CLI. The nonce and custom header force a CORS preflight that the server never approves. An agent with shell access and the dashboard URL can post just as it can run the CLI. This is not a sandbox.
 
 ## 8. Tool and CLI surface
 

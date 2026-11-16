@@ -2,6 +2,7 @@
 
 ## 2.1.0 (unreleased)
 
+- Add a loopback dashboard form for postmortem lesson sign-off, including human mode, with pending text and hashes, guarded JSON requests and the shared CLI audit checks (#268)
 - Add `ROUNDTABLE_LESSON_SIGNOFF=human` to limit persisted postmortem lesson sign-off to the CLI (#251)
 - **Preview display modes (#246, WS35d).** Add `live`, `click` and `screenshot` via CLI `--display`, tool `display` and `ROUNDTABLE_PREVIEW_DISPLAY`. The CLI defaults to `live` from an interactive terminal and `click` otherwise; worker and execution starts default to `click`. Rooms show the recorded mode, and screenshot cards use the latest page-check image. See [previews](docs/previews.md).
 - **Live duel GIF (#229).** A recorded promotional GIF of the room at the top of the README, made by the reproducible `scripts/record-duel.mjs` from a redesigned demo fixture (a coin game against a pocket planner, with per-turn usage). The room now shows each app as a scaled desktop preview, and its footer spend never reads below the pane metrics. See [recording the duel GIF](docs/demo.md#recording-the-duel-gif).

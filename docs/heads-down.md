@@ -53,11 +53,13 @@ A successful call returns the execution id, runner pid, optional dashboard URL a
 
 Choose explicitly, or set `ROUNDTABLE_DEFAULT_VISIBILITY`:
 
-- `visibility: {dashboard: true}`: a loopback dashboard with capability URL, task DAG, contract, checks, diffs, budget, a Usage page (who is spending what, with a Stop button per agent), events and human-action banners. Keep the returned URL private: anyone who holds it can read the run and stop its agents. Steering stays in MCP tools.
+- `visibility: {dashboard: true}`: a loopback dashboard with capability URL, task DAG, contract, checks, diffs, budget, a Usage page (who is spending what, with a Stop button per agent), events and human-action banners. Keep the returned URL private: anyone who holds it can read the run, stop its agents and sign off pending postmortem artifacts. Steering stays in MCP tools.
 - `visibility: {github: {repo: "owner/name", create_project: true}}`: optional parent/task issues, project status, progress and `needs-human` labels/comments through the installed GitHub CLI. This needs login, repository write access and the `repo`/`project` scopes. The sync redacts text and excludes diffs/command output; remote visibility can degrade without blocking work.
 - `visibility: {chat_only: true}`: follow progress in chat without either UI. Use this alone; dashboard and GitHub can instead be combined with each other.
 
 GitHub options include an existing `project_number` and `project_owner`, or `create_project`; `pr: true` requests publication of the integration branch and a PR at completion. The runner never pushes to the base branch or auto-merges. Human review remains the final merge step. Public sessions at the table use a separate [publishing mechanism](modes/public-sessions.md).
+
+The Postmortems form adds a second mutating dashboard route: `POST <token>/postmortems/<pm>/signoff`. It works in `human` mode. Before reading state, the route checks its per-start action nonce, Origin and Sec-Fetch-Site, JSON content type, a 16 KiB body limit, loopback bind and peer, a rate limit of 10 requests a minute, and the exact body fields, identity and artifact ids. It then requires a meeting from this run and applies the CLI's sign-off checks. Tailnet binds refuse every sign-off request and direct you to the CLI. Each action nonce appears only in its own page's meta element. The nonce and custom header force a CORS preflight that the server never approves. This is not a sandbox. An agent with shell access and the dashboard URL can post, just as it can run the CLI.
 
 ## Watch and status
 

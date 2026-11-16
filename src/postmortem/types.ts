@@ -11,6 +11,8 @@ export const CATEGORIES: readonly PostmortemCategory[] = ["prompt_misread", "pro
 export const FLAG_CATEGORIES: readonly PostmortemCategory[] = ["prompt_misread", "project_misread", "contract_ambiguity"];
 
 export const PM_ID_RE = /^pm-[0-9a-hjkmnp-tv-z]{8}$/;
+/** Sequential ids assigned by parseArtifactBlock, bounded like the tool's artifact ids. */
+export const ARTIFACT_ID_RE = /^a[1-9][0-9]{0,14}$/;
 export const PROJECT_KEY_RE = /^[0-9a-f]{16}$/;
 export const FINDING_ID_RE = /^pmf-[0-9a-z]{8,16}$/;
 

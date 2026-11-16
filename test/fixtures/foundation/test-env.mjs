@@ -27,4 +27,6 @@ process.env.ROUNDTABLE_PROVIDER_RETRIES = "0";
 process.env.ROUNDTABLE_AGENT_PATHS = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // execute probes its provider once; offline tests skip that call (the preflight test turns it back on).
 process.env.ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT = "1";
+// Never probe a developer's real Ollama on localhost:11434; local-models tests turn discovery on where they test it.
+process.env.ROUNDTABLE_OLLAMA_DISCOVERY = "off";
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));

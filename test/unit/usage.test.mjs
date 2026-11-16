@@ -65,7 +65,8 @@ test("the chat_completion tool reports through the sink too, exactly once per ca
   assert.ok(!r.isError, r.content[0].text);
   assert.equal(seen.length, 1);
   const { chars, ...report } = seen[0];
-  assert.deepEqual(report, { provider: "openai_compatible", agent: "chat_completion", model: "served-0", usage: { inputTokens: 10, outputTokens: 0 } });
+  // The per-call base_url rides along for pricing only (#273); lineFor never copies it into the ledger.
+  assert.deepEqual(report, { provider: "openai_compatible", agent: "chat_completion", model: "served-0", baseUrl: llm.baseUrl, usage: { inputTokens: 10, outputTokens: 0 } });
   assert.ok(chars.input > 0 && chars.output > 0, "the lengths of the request and the reply ride along (never the text)");
   const viaCallLLM = [];
   await withUsageSink((u) => viaCallLLM.push(u), () => callLLMDetailed("s", user, llm));

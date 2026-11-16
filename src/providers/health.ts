@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import { PROVIDER_IDS, type LLMProvider } from "../provider-ids.js";
+import { ollamaDiscoveryEnabled } from "../config.js";
+import { DEFAULT_OLLAMA_URL, parseParameterSize, type OllamaDiscovery } from "./local-models.js";
+import { readProviderJson } from "./shared.js";
 
 export const HEALTH_TTL_MS = 10 * 60_000;
 /** A timeout, rate limit or other transient failure excludes a provider briefly; only a rejected credential keeps the full TTL. */
@@ -7,10 +10,11 @@ export const TRANSIENT_HEALTH_TTL_MS = 60_000;
 export const PROVIDER_KEYS: Partial<Record<LLMProvider, string>> = {
   anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", together: "TOGETHER_API_KEY", replicate: "REPLICATE_API_TOKEN",
 };
-export function availableProviders(env: NodeJS.ProcessEnv = process.env): LLMProvider[] {
+export function availableProviders(env: NodeJS.ProcessEnv = process.env, ollama?: OllamaDiscovery): LLMProvider[] {
   return PROVIDER_IDS.filter(p => {
     const key = PROVIDER_KEYS[p];
-    return key ? !!env[key]?.trim() : p === "openai_compatible" ? !!env.OPENAI_COMPATIBLE_BASE_URL?.trim() : !!env.OLLAMA_URL?.trim();
+    return key ? !!env[key]?.trim() : p === "openai_compatible" ? !!env.OPENAI_COMPATIBLE_BASE_URL?.trim()
+      : !!env.OLLAMA_URL?.trim() || (ollamaDiscoveryEnabled(env) && ollama?.reachable === true);
   });
 }
 
@@ -18,7 +22,7 @@ export function availableProviders(env: NodeJS.ProcessEnv = process.env): LLMPro
 export function trustedRoutingEndpoint(provider: LLMProvider, env: NodeJS.ProcessEnv): boolean {
   if (provider !== "openai_compatible" && provider !== "ollama") return true;
   try {
-    const u = new URL((provider === "ollama" ? env.OLLAMA_URL : env.OPENAI_COMPATIBLE_BASE_URL) ?? "");
+    const u = new URL((provider === "ollama" ? env.OLLAMA_URL?.trim() || DEFAULT_OLLAMA_URL : env.OPENAI_COMPATIBLE_BASE_URL) ?? "");
     return !u.username && !u.password && !u.search && !u.hash &&
       (u.protocol === "https:" || (u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname)));
   } catch { return false; }
@@ -30,7 +34,7 @@ export function trustedRoutingEndpoint(provider: LLMProvider, env: NodeJS.Proces
  */
 export function endpointFingerprint(provider: string, env: NodeJS.ProcessEnv = process.env, baseUrl?: string): string | undefined {
   if (provider !== "openai_compatible" && provider !== "ollama") return undefined;
-  const raw = provider === "openai_compatible" ? baseUrl ?? env.OPENAI_COMPATIBLE_BASE_URL : env.OLLAMA_URL;
+  const raw = provider === "openai_compatible" ? baseUrl ?? env.OPENAI_COMPATIBLE_BASE_URL : env.OLLAMA_URL?.trim() || DEFAULT_OLLAMA_URL;
   try {
     const u = new URL(raw ?? "");
     return createHash("sha256").update(`${u.origin}${u.pathname.replace(/\/+$/, "")}`).digest("hex").slice(0, 16);
@@ -52,9 +56,11 @@ export interface ProviderHealth { ok: boolean; at: number; reason?: string; ttl?
 export class ProviderHealthCache {
   private entries = new Map<string, ProviderHealth>();
   private models = new Map<string, number>();
+  private ollama = new Map<string, { at: number; result: OllamaDiscovery }>();
+  private ollamaPending = new Map<string, Promise<OllamaDiscovery>>();
   constructor(private clock: () => number = () => Date.now(), private ttl = HEALTH_TTL_MS) {}
   private key(provider: LLMProvider, env: NodeJS.ProcessEnv, baseUrl?: string): string {
-    const rawEndpoint = baseUrl ?? (provider === "openai_compatible" ? env.OPENAI_COMPATIBLE_BASE_URL : provider === "ollama" ? env.OLLAMA_URL : provider);
+    const rawEndpoint = baseUrl ?? (provider === "openai_compatible" ? env.OPENAI_COMPATIBLE_BASE_URL : provider === "ollama" ? env.OLLAMA_URL?.trim() || DEFAULT_OLLAMA_URL : provider);
     let endpoint = rawEndpoint;
     try { endpoint = new URL(rawEndpoint ?? "").href.replace(/\/+$/, ""); } catch { /* Fixed provider identifier. */ }
     const credential = env[PROVIDER_KEYS[provider] ?? (provider === "openai_compatible" ? "OPENAI_COMPATIBLE_API_KEY" : "")];
@@ -76,6 +82,45 @@ export class ProviderHealthCache {
     const at = this.models.get(`${this.key(provider, env)}:${model}`);
     return this.get(provider, env)?.ok === true && at !== undefined && this.clock() >= at && this.clock() - at < this.ttl;
   }
-  clear(): void { this.entries.clear(); this.models.clear(); }
+  getOllama(env: NodeJS.ProcessEnv = process.env): OllamaDiscovery | undefined {
+    if (!env.OLLAMA_URL?.trim() && !ollamaDiscoveryEnabled(env)) return undefined;
+    const key = this.key("ollama", env), hit = this.ollama.get(key);
+    const age = hit ? this.clock() - hit.at : -1;
+    if (hit && age >= 0 && age < (hit.result.reachable ? this.ttl : Math.min(this.ttl, TRANSIENT_HEALTH_TTL_MS))) return hit.result;
+    this.ollama.delete(key);
+    return undefined;
+  }
+  /** One bounded tags request per endpoint and TTL, including failures and concurrent callers. */
+  async discoverOllama(env: NodeJS.ProcessEnv = process.env, timeoutMs = 1000): Promise<OllamaDiscovery> {
+    if (!env.OLLAMA_URL?.trim() && !ollamaDiscoveryEnabled(env)) return { reachable: false, models: [] };
+    const cached = this.getOllama(env);
+    if (cached) return cached;
+    const key = this.key("ollama", env), pending = this.ollamaPending.get(key);
+    if (pending) return pending;
+    const probe = async (): Promise<OllamaDiscovery> => {
+      let result: OllamaDiscovery = { reachable: false, models: [] };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        // This is the operator's URL, as in the native provider. Automatic routing separately
+        // applies trustedRoutingEndpoint; discovery must also work for explicitly pinned LAN servers.
+        const url = env.OLLAMA_URL?.trim() || DEFAULT_OLLAMA_URL;
+        const response = await fetch(`${url.replace(/\/+$/, "")}/api/tags`, { method: "GET", redirect: "manual", signal: controller.signal });
+        if (response.ok) {
+          const body = await readProviderJson(response) as { models?: Array<{ name?: unknown; details?: { parameter_size?: unknown } }> };
+          if (Array.isArray(body?.models)) result = { reachable: true, models: body.models.flatMap(model =>
+            model && typeof model.name === "string" ? [{ name: model.name, ...parseParameterSize(model.details?.parameter_size) }] : []) };
+        } else await response.body?.cancel();
+      } catch { /* Absence and invalid responses are cached too. */ }
+      finally { clearTimeout(timer); }
+      this.ollama.set(key, { at: this.clock(), result });
+      return result;
+    };
+    const request = probe();
+    this.ollamaPending.set(key, request);
+    try { return await request; }
+    finally { this.ollamaPending.delete(key); }
+  }
+  clear(): void { this.entries.clear(); this.models.clear(); this.ollama.clear(); this.ollamaPending.clear(); }
 }
 export const providerHealth = new ProviderHealthCache();

@@ -123,6 +123,7 @@ export async function chatCompletion(
     withProviderOutcome(outcome, () => reportUsage({
       provider: result.provider,
       model: result.model,
+      ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
       ...(result.usage && { usage: result.usage }),
       chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: result.content.length },
     }));
@@ -141,6 +142,7 @@ export async function chatCompletion(
       const report = () => reportUsage({
         provider,
         model: reply?.model || model,
+        ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
         ...(reply?.usage && { usage: reply.usage }),
         chars: { input: messages.reduce((n, m) => n + m.content.length, 0), output: 0 },
       });

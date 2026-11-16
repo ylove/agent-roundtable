@@ -203,7 +203,7 @@ test("lesson sign-off mode is read at call time, defaults to any, and trims case
     assert.equal(lessonSignoffMode(), expected, JSON.stringify(value));
   }
   assert.equal(warnings.mock.callCount(), 0);
-  assert.match(postmortemTools[0].description, /ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI\./);
+  assert.match(postmortemTools[0].description, /ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI and the dashboard form\./);
 });
 
 test("human mode refuses MCP sign-off before store access and leaves pending items and effects unchanged", async (t) => {
@@ -227,7 +227,7 @@ test("human mode refuses MCP sign-off before store access and leaves pending ite
     syncBuiltinESMExports();
   }
   assert.equal(result.isError, true);
-  assert.equal(result.content[0].text, `Error: postmortem: ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI. Ask the person to run roundtable postmortem signoff ${pm} --by <identity> <artifact-id>... themselves.`);
+  assert.equal(result.content[0].text, `Error: postmortem: ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI and the dashboard form. Ask the person to run roundtable postmortem signoff ${pm} --by <identity> <artifact-id>... themselves, or use the dashboard Postmortems form.`);
   assert.doesNotMatch(result.content[0].text, /DO_NOT_ECHO/);
   assert.equal(readFileSync(recordPath(project, pm), "utf8"), recordBefore);
   assert.equal(readFileSync(recordPath(project, pm, "md"), "utf8"), markdownBefore);
@@ -244,7 +244,7 @@ test("human mode's refusal uses a placeholder for pm values outside PM_PATTERN",
   process.env.ROUNDTABLE_LESSON_SIGNOFF = "human";
   for (const pm of [undefined, "pm-00000001; injected", "pm-00000001\n", "DO_NOT_ECHO_PM", { toString: () => "pm-00000001" }]) {
     await assert.rejects(handlePostmortemTool("postmortem", { action: "signoff", pm, orchestrator: "DO_NOT_ECHO_SIGNER", accept: ["DO_NOT_ECHO_ID"] }), {
-      message: "postmortem: ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI. Ask the person to run roundtable postmortem signoff <pm> --by <identity> <artifact-id>... themselves.",
+      message: "postmortem: ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI and the dashboard form. Ask the person to run roundtable postmortem signoff <pm> --by <identity> <artifact-id>... themselves, or use the dashboard Postmortems form.",
     });
   }
 });
@@ -307,7 +307,7 @@ test("invalid lesson sign-off values fail closed and warn exactly once per proce
   assert.equal(any, "any", "a previous invalid value must not freeze the mode");
   for (const result of results) {
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /limits sign-off to the CLI/);
+    assert.match(result.content[0].text, /limits sign-off to the CLI and the dashboard form/);
   }
   assert.equal(existsSync(lessonsPath(project)), false);
   assert.deepEqual(await ok({ action: "pending", project: repo.root }), before);

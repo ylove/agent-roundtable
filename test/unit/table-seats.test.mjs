@@ -9,7 +9,8 @@ import { providerHealth } from '../../dist/providers/health.js';
 beforeEach(() => providerHealth.clear());
 import { stubFetch, json } from './helpers.mjs';
 const resolveSeats = opts => resolveSeatsRaw({ routing: { config: {}, history: [] }, ...opts });
-const prepareSeats = (opts, checks) => prepareSeatsRaw({ routing: { config: {}, history: [] }, ...opts }, checks);
+// Discovery has its own tests; these fixtures describe an absent local server.
+const prepareSeats = (opts, checks) => prepareSeatsRaw({ ...opts, routing: { config: {}, history: [], ollama: { reachable: false, models: [] }, ...opts.routing } }, checks);
 const metadata = { designer: { provider: 'openai', model: 'fixture-model' }, builder: {} };
 const load = async id => ({ frontmatter: metadata[id] ?? {} });
 const env = { ANTHROPIC_API_KEY: 'fixture-key', OPENAI_API_KEY: 'fixture-key', TOGETHER_API_KEY: 'fixture-key' };

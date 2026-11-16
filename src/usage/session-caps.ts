@@ -54,9 +54,12 @@ export function sessionSpend(line: TableLine): number {
   if (line.usd !== undefined && (line.usd_prov === "reported" || !t)) return line.usd;
   if (!t) return 0;
   const tokens = { inputTokens: t.input + t.cache_read + t.cache_write, outputTokens: t.output };
-  const conservative = budgetEstimate(line.provider ?? "", line.model ?? "", tokens).usd;
+  // A recorded zero proves pricing ran at the call boundary. An unpriced per-call endpoint must
+  // never acquire the operator's free policy when its cap is recomputed, even at the same URL.
+  const context = { endpoint: line.usd === 0 ? line.endpoint ?? null : null };
+  const conservative = budgetEstimate(line.provider ?? "", line.model ?? "", tokens, undefined, context).usd;
   if (line.usd === undefined) return conservative;
-  const partial = estimateUsd(line.model ?? "", { inputTokens: t.input, outputTokens: t.output, cacheReadTokens: t.cache_read, cacheWriteTokens: t.cache_write }, { provider: line.provider }).estimated;
+  const partial = estimateUsd(line.model ?? "", { inputTokens: t.input, outputTokens: t.output, cacheReadTokens: t.cache_read, cacheWriteTokens: t.cache_write }, { provider: line.provider, ...context }).estimated;
   return partial ? Math.max(line.usd, conservative) : line.usd;
 }
 

@@ -14,6 +14,7 @@
 import { closeSync } from "node:fs";
 import { openRegularFile, readDescriptor, RegularFileError } from "../security/fs-safe.js";
 import type { TokenUsage } from "./types.js";
+import { endpointFingerprint } from "../providers/health.js";
 
 // ---------------------------------------------------------------------------
 // Table
@@ -79,8 +80,20 @@ export const BUILTIN_PRICING: PricingTable = Object.freeze({
 /** Providers that bill nothing per token (local inference). */
 const FREE_PROVIDERS: ReadonlySet<string> = new Set(["ollama"]);
 
-export function isFreeProvider(provider: string | undefined): boolean {
-  return provider !== undefined && FREE_PROVIDERS.has(provider);
+export interface PricingContext {
+  env?: NodeJS.ProcessEnv;
+  /** Any per-call URL opts out, even when it names the configured endpoint. */
+  baseUrl?: string;
+  /** Ledger callers supply their recorded endpoint identity, or null when it is unknown. */
+  endpoint?: string | null;
+}
+export function isFreeProvider(provider: string | undefined, context: PricingContext = {}): boolean {
+  if (provider !== undefined && FREE_PROVIDERS.has(provider)) return true;
+  const env = context.env ?? process.env;
+  return provider === "openai_compatible" && env.ROUNDTABLE_OPENAI_COMPATIBLE_FREE === "1" &&
+    !!env.OPENAI_COMPATIBLE_BASE_URL?.trim() && context.baseUrl === undefined &&
+    endpointFingerprint(provider, env) !== "invalid" &&
+    (context.endpoint === undefined || context.endpoint === endpointFingerprint(provider, env));
 }
 
 // ---------------------------------------------------------------------------
@@ -206,9 +219,9 @@ export interface UsdEstimate {
 export function estimateUsd(
   model: string,
   tokens: TokenUsage,
-  opts: { provider?: string; table?: PricingTable } = {}
+  opts: PricingContext & { provider?: string; table?: PricingTable } = {}
 ): UsdEstimate {
-  if (opts.provider !== undefined && FREE_PROVIDERS.has(opts.provider)) return { usd: 0, estimated: false };
+  if (isFreeProvider(opts.provider, opts)) return { usd: 0, estimated: false };
   const price = priceFor(model, opts.table ?? loadPricing());
   const counts: Record<(typeof RATE_KEYS)[number], number> = {
     input: tokens.inputTokens || 0,

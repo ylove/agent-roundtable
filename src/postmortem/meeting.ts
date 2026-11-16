@@ -261,7 +261,7 @@ export async function holdPostmortem(i: HoldInput): Promise<HoldResult> {
     next:
       `Read the transcript, then close the meeting with your own words: hold_postmortem { "action": "conclude", "pm": "${view.pm}", "closing": "…", "accept": [artifact ids], "reject": [{ "id", "why" }] }. ` +
       (lessonSignoffMode() === "human"
-        ? `Persisted kinds stay pending until the person runs roundtable postmortem signoff ${view.pm} --by <identity> <artifact-id>... themselves. `
+        ? `Persisted kinds stay pending until the person runs roundtable postmortem signoff ${view.pm} --by <identity> <artifact-id>... themselves, or uses the dashboard Postmortems form. `
         : "Persisted kinds need a person’s sign-off: pass orchestrator (the human-supplied identity) and explicit accept ids, otherwise they stay pending. ") +
       "For dissent_score, pass the contract’s orchestrator identity. Only signed-off persisted artifacts take effect. Tell the human the meeting happened; they can read every turn with postmortem(action: \"read\").",
   };
@@ -301,7 +301,7 @@ export interface ConcludeResult {
 function resultOf(r: PostmortemRecord, warnings: string[], lessonsAdded: number, already = false): ConcludeResult {
   const accepted = r.accepted ?? [];
   const signoffNext = !r.pending?.length ? "" : lessonSignoffMode() === "human"
-    ? ` Persisted artifacts await a person's sign-off. Ask the person to review with postmortem(action: "pending") or roundtable postmortem pending, then run roundtable postmortem signoff ${r.pm} --by <identity> <artifact-id>... themselves.`
+    ? ` Persisted artifacts await a person's sign-off. Ask the person to review with postmortem(action: "pending") or roundtable postmortem pending, then run roundtable postmortem signoff ${r.pm} --by <identity> <artifact-id>... themselves, or use the dashboard Postmortems form.`
     : " Persisted artifacts await a person’s sign-off; review with postmortem(action: \"pending\") and apply explicit ids with postmortem(action: \"signoff\", pm, orchestrator, accept).";
   return {
     status: "concluded", pm: r.pm, ...(already && { already_concluded: true as const }), record: recordPath(r.project, r.pm, "md"),
@@ -316,10 +316,16 @@ function resultOf(r: PostmortemRecord, warnings: string[], lessonsAdded: number,
 
 const LESSON_KIND: Partial<Record<PostmortemArtifactKind, NewLesson["kind"]>> = { rule: "rule", agent_rule: "agent_rule", contract_rule: "contract_rule" };
 
-async function validateSignoff(rec: PostmortemRecord, proj: ProjectRef, identity: string): Promise<string> {
+/** Identity syntax shared by CLI sign-off and the dashboard; requires no state reads. */
+export function validateSignoffIdentity(identity: string): string {
   if (typeof identity !== "string") throw new Error("orchestrator is required for sign-off");
   const by = scrub(identity).trim();
   if (!by || by.length > 200) throw new Error("orchestrator must be non-blank and at most 200 characters after scrubbing");
+  return by;
+}
+
+async function validateSignoff(rec: PostmortemRecord, proj: ProjectRef, identity: string): Promise<string> {
+  const by = validateSignoffIdentity(identity);
   if (rec.scope.execution_id !== undefined) {
     let expected = rec.contract_orchestrator;
     if (expected === undefined) {

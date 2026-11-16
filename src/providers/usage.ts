@@ -19,6 +19,8 @@ export interface UsageReport {
   agent?: string;
   /** The model the provider reports having used (falls back to the requested one). */
   model: string;
+  /** Explicit compatible endpoint, used only for pricing; never written to the ledger. */
+  baseUrl?: string;
   /** Absent when the provider reported none (Replicate, some local servers). */
   usage?: LLMCompletionResult["usage"];
   /** A driver may report a measured cost along with provider token usage. */

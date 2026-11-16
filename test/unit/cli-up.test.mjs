@@ -37,6 +37,64 @@ test("doctor passes with the essentials and names keys without values", async ()
   assert.doesNotMatch(text, /\/bin\/x|\/chrome/);
 });
 
+test("doctor counts default Ollama as a provider and reports the configured model's pull status", async () => {
+  for (const pulled of [true, false]) {
+    const result = await runDoctor(probes({ providers: () => [], ollama: async () => ({ url: 'http://localhost:11434', model: 'qwen3:14b', reachable: true, pulled }) }));
+    assert.equal(result.ok, true);
+    assert.match(result.checks.find(c => c.id === 'keys').detail, /available: ollama/);
+    const check = result.checks.find(c => c.id === 'ollama');
+    assert.equal(check.ok, pulled);
+    assert.equal(check.detail, `found at http://localhost:11434; model qwen3:14b: ${pulled ? 'pulled' : 'not pulled'}`);
+  }
+  const absent = await runDoctor(probes({ providers: () => [], ollama: async () => ({ url: 'http://localhost:11434', model: 'qwen3:14b', reachable: false, pulled: false }) }));
+  assert.equal(absent.ok, false);
+  assert.match(absent.checks.find(c => c.id === 'ollama').detail, /not reachable/);
+});
+
+test('doctor discovers default-port Ollama and checks exact configured model names through the CLI', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rt-doctor-ollama-'));
+  try {
+    for (const [model, names, pulled] of [
+      ['qwen3:14b', ['qwen3:14b-extra', 'qwen3:latest'], false],
+      ['qwen3:14b', ['qwen3:14b'], true],
+      ['qwen3', ['qwen3:14b'], false],
+      ['qwen3', ['qwen3:latest'], true],
+    ]) {
+      const env = { ...process.env, PATH: root, ROUNDTABLE_HOME: join(root, 'state'), ROUNDTABLE_DOTENV: 'off',
+        ROUNDTABLE_OLLAMA_DISCOVERY: 'on', ROUNDTABLE_OLLAMA_MODEL: model, ROUNDTABLE_TEST_OLLAMA_TAGS: JSON.stringify({ models: names.map(name => ({ name })) }) };
+      delete env.OLLAMA_URL;
+      const result = spawnSync(process.execPath, ['--import', new URL('../fixtures/foundation/offline-fetch.mjs', import.meta.url).pathname,
+        new URL('../../dist/index.js', import.meta.url).pathname, 'doctor', '--json'], { env, encoding: 'utf8', timeout: 20_000 });
+      assert.ok(result.status === 0 || result.status === 1, result.stderr);
+      const checks = JSON.parse(result.stdout).checks;
+      assert.match(checks.find(c => c.id === 'keys').detail, /ollama/);
+      const check = checks.find(c => c.id === 'ollama');
+      assert.equal(check.ok, pulled);
+      assert.equal(check.detail, `found at http://localhost:11434; model ${model}: ${pulled ? 'pulled' : 'not pulled'}`);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('doctor respects the discovery off switch and still checks an explicit Ollama URL', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rt-doctor-no-discovery-'));
+  try {
+    for (const explicit of [false, true]) {
+      const env = { ...process.env, PATH: root, ROUNDTABLE_HOME: join(root, 'state'), ROUNDTABLE_DOTENV: 'off',
+        ROUNDTABLE_OLLAMA_DISCOVERY: ' OFF ', ROUNDTABLE_OLLAMA_MODEL: 'qwen3:14b',
+        ROUNDTABLE_TEST_OLLAMA_TAGS: JSON.stringify({ models: [{ name: 'qwen3:14b' }] }) };
+      for (const name of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'TOGETHER_API_KEY', 'REPLICATE_API_TOKEN', 'OPENAI_COMPATIBLE_BASE_URL', 'OLLAMA_URL']) delete env[name];
+      if (explicit) env.OLLAMA_URL = 'http://localhost:11434';
+      const result = spawnSync(process.execPath, ['--import', new URL('../fixtures/foundation/offline-fetch.mjs', import.meta.url).pathname,
+        new URL('../../dist/index.js', import.meta.url).pathname, 'doctor', '--json'], { env, encoding: 'utf8', timeout: 20_000 });
+      assert.ok(result.status === 0 || result.status === 1, result.stderr);
+      const checks = JSON.parse(result.stdout).checks;
+      assert.equal(checks.find(c => c.id === 'keys').ok, explicit);
+      assert.equal(checks.find(c => c.id === 'ollama').detail, explicit
+        ? 'found at http://localhost:11434; model qwen3:14b: pulled' : 'default discovery disabled');
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("roundtable bin advice covers this package, another package and no PATH entry", async () => {
   for (const [bin, ok, detail] of [
     [{ path: "/bin/roundtable", ours: true }, true, "this package"],
@@ -81,7 +139,7 @@ test("doctor checks the first PATH bin through symlinks and the nearest package 
       [[dirs[1], dirs[0]].join(delimiter), false, "another package"],
       [dirs[2], true, "not on PATH"],
     ]) {
-      const result = spawnSync(process.execPath, [new URL("../../dist/index.js", import.meta.url).pathname, "doctor", "--json"], {
+      const result = spawnSync(process.execPath, ["--import", new URL("../fixtures/foundation/offline-fetch.mjs", import.meta.url).pathname, new URL("../../dist/index.js", import.meta.url).pathname, "doctor", "--json"], {
         env: { ...process.env, PATH: path, ROUNDTABLE_HOME: join(root, "state"), ROUNDTABLE_DOTENV: "off" }, encoding: "utf8", timeout: 20_000,
       });
       assert.ok(result.status === 0 || result.status === 1, result.stderr);

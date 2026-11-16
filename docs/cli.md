@@ -78,6 +78,8 @@ See [configuration](configuration.md), [contracts and execution](heads-down.md),
 
 ## Postmortem review
 
+`ROUNDTABLE_LESSON_SIGNOFF=human` limits sign-off to the CLI. The CLI works in both `any` and `human` modes. This stops MCP sign-off, including prompt-injected calls. It is not a sandbox; agents with shell access can still run the CLI.
+
 `roundtable postmortem pending [--project <dir>] [--json]` lists the current project's pending artifact ids, kinds, targets, text and hashes. A project key also works for `--project`.
 
 `roundtable postmortem signoff <pm> --by <identity> <artifact-id>... [--json]` signs off the explicit pending ids, leaving the rest pending. The identity comes from the person accepting the lessons and must match the frozen contract's orchestrator for an execution. Repeated signed-off ids are reported without reapplying them. Exit codes are 0 for success, 1 for refusal or a failed application, and 2 for usage errors. See [persisted lesson sign-off](modes/postmortem.md#signing-off-persisted-lessons).

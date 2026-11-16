@@ -1,13 +1,16 @@
 // Persisted lessons need a person's sign-off; pending text stays reviewable in the record.
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { makeRepo } from "../fixtures/execution/git-fixture.mjs";
 import { makeRun, runner } from "../fixtures/workers/run.mjs";
 
 const { handleToolCall } = await import("../../dist/tools.js");
+const { handlePostmortemTool, postmortemTools } = await import("../../dist/tools/postmortem.js");
+const { lessonSignoffMode } = await import("../../dist/postmortem/signoff-policy.js");
 const { concludePostmortem, signOffPostmortem } = await import("../../dist/postmortem/meeting.js");
 const { addLessons, activeLessons, isLegacyLesson, contractLessons, cardSection, ultraplanSection } = await import("../../dist/postmortem/lessons.js");
 const { loadLessons, pendingPostmortems, loadRecord, saveRecord, lessonsPath, memoryPath, recordPath } = await import("../../dist/postmortem/store.js");
@@ -17,6 +20,17 @@ const { newId } = await import("../../dist/ids.js");
 const { AGENTS_DIR, AUDIT_DIR } = await import("../../dist/config.js");
 const { runDoctor, formatDoctor } = await import("../../dist/cli-up.js");
 const entry = new URL("../../dist/index.js", import.meta.url).pathname;
+const cliOptions = () => ({ encoding: "utf8", env: { ...process.env, ROUNDTABLE_DOTENV: "off" } });
+const cli = (...args) => JSON.parse(execFileSync(process.execPath, [entry, "postmortem", ...args, "--json"], cliOptions()));
+let previousSignoffMode;
+beforeEach(() => {
+  previousSignoffMode = process.env.ROUNDTABLE_LESSON_SIGNOFF;
+  delete process.env.ROUNDTABLE_LESSON_SIGNOFF;
+});
+afterEach(() => {
+  if (previousSignoffMode === undefined) delete process.env.ROUNDTABLE_LESSON_SIGNOFF;
+  else process.env.ROUNDTABLE_LESSON_SIGNOFF = previousSignoffMode;
+});
 const ok = async (args) => {
   const result = await handleToolCall("postmortem", args);
   assert.equal(result.isError, undefined, result.content[0].text);
@@ -72,6 +86,7 @@ test("unsigned persisted kinds stay pending, write no effects and never enter pl
 });
 
 test("sign-off applies exactly selected ids, records signer and time, and retries do not reapply", async () => {
+  assert.equal(process.env.ROUNDTABLE_LESSON_SIGNOFF, undefined);
   const { project, pm, agent, repo, persona } = await held();
   await concludePostmortem({ pm, closing: "Review", accept: ["a1", "a2", "a3", "a4", "a5"] });
   for (const accept of [[], ["missing"], ["a1", "a6"]]) {
@@ -172,11 +187,128 @@ test("legacy lessons keep flowing, are marked in views, and doctor suggests an i
 test("CLI pending and signoff review and apply explicit ids, with usage and refusal exit codes", async () => {
   const { repo, project, pm } = await held();
   await concludePostmortem({ pm, closing: "Review", accept: ["a1", "a2"] });
-  const cli = (...args) => JSON.parse(execFileSync(process.execPath, [entry, "postmortem", ...args, "--json"], { encoding: "utf8" }));
   assert.equal(cli("pending", "--project", repo.root).pending.length, 2);
   assert.deepEqual(cli("signoff", pm, "--by", "CLI reviewer", "a1").pending, ["a2"]);
   assert.equal(loadLessons(project)[0].signoff.by, "CLI reviewer");
   assert.equal(cli("signoff", pm, "a1", "--by", "CLI reviewer").already_signed_off[0], "a1");
-  assert.equal(spawnSync(process.execPath, [entry, "postmortem", "signoff", pm], { encoding: "utf8" }).status, 2);
-  assert.equal(spawnSync(process.execPath, [entry, "postmortem", "signoff", pm, "--by", "CLI reviewer", "a99"], { encoding: "utf8" }).status, 1);
+  assert.equal(spawnSync(process.execPath, [entry, "postmortem", "signoff", pm], cliOptions()).status, 2);
+  assert.equal(spawnSync(process.execPath, [entry, "postmortem", "signoff", pm, "--by", "CLI reviewer", "a99"], cliOptions()).status, 1);
+});
+
+test("lesson sign-off mode is read at call time, defaults to any, and trims case-insensitive values", (t) => {
+  const warnings = t.mock.method(process.stderr, "write", () => true);
+  assert.equal(lessonSignoffMode(), "any");
+  for (const [value, expected] of [["", "any"], [" \t\n", "any"], ["any", "any"], [" AnY ", "any"], ["human", "human"], [" HuMaN \t", "human"]]) {
+    process.env.ROUNDTABLE_LESSON_SIGNOFF = value;
+    assert.equal(lessonSignoffMode(), expected, JSON.stringify(value));
+  }
+  assert.equal(warnings.mock.callCount(), 0);
+  assert.match(postmortemTools[0].description, /ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI\./);
+});
+
+test("human mode refuses MCP sign-off before store access and leaves pending items and effects unchanged", async (t) => {
+  const { repo, project, pm, agent, persona } = await held();
+  await concludePostmortem({ pm, closing: "Review", accept: ["a1", "a2", "a3", "a4", "a5"] });
+  const pendingBefore = await ok({ action: "pending", project: repo.root });
+  const recordBefore = readFileSync(recordPath(project, pm), "utf8");
+  const markdownBefore = readFileSync(recordPath(project, pm, "md"), "utf8");
+  const personaBefore = readFileSync(persona, "utf8");
+  process.env.ROUNDTABLE_LESSON_SIGNOFF = "human";
+  const reads = t.mock.method(fs, "readFileSync");
+  const listings = t.mock.method(fs, "readdirSync");
+  syncBuiltinESMExports();
+  let result;
+  try {
+    result = await handleToolCall("postmortem", { action: "signoff", pm, orchestrator: "DO_NOT_ECHO_SIGNER", accept: ["DO_NOT_ECHO_ID"] });
+    assert.equal(reads.mock.callCount(), 0, "refusal must precede reading postmortem state");
+    assert.equal(listings.mock.callCount(), 0, "refusal must precede searching the postmortem store");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.equal(result.isError, true);
+  assert.equal(result.content[0].text, `Error: postmortem: ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI. Ask the person to run roundtable postmortem signoff ${pm} --by <identity> <artifact-id>... themselves.`);
+  assert.doesNotMatch(result.content[0].text, /DO_NOT_ECHO/);
+  assert.equal(readFileSync(recordPath(project, pm), "utf8"), recordBefore);
+  assert.equal(readFileSync(recordPath(project, pm, "md"), "utf8"), markdownBefore);
+  assert.equal(readFileSync(persona, "utf8"), personaBefore);
+  assert.equal(existsSync(lessonsPath(project)), false);
+  assert.equal(existsSync(memoryPath(project, agent)), false);
+  assert.equal(existsSync(join(repo.root, ".claude", "agent-memory")), false);
+  assert.deepEqual(auditFor(pm), []);
+  assert.deepEqual(await ok({ action: "pending", project: repo.root }), pendingBefore);
+  assert.equal(pendingBefore.pending.length, 5);
+});
+
+test("human mode's refusal uses a placeholder for pm values outside PM_PATTERN", async () => {
+  process.env.ROUNDTABLE_LESSON_SIGNOFF = "human";
+  for (const pm of [undefined, "pm-00000001; injected", "pm-00000001\n", "DO_NOT_ECHO_PM", { toString: () => "pm-00000001" }]) {
+    await assert.rejects(handlePostmortemTool("postmortem", { action: "signoff", pm, orchestrator: "DO_NOT_ECHO_SIGNER", accept: ["DO_NOT_ECHO_ID"] }), {
+      message: "postmortem: ROUNDTABLE_LESSON_SIGNOFF=human limits sign-off to the CLI. Ask the person to run roundtable postmortem signoff <pm> --by <identity> <artifact-id>... themselves.",
+    });
+  }
+});
+
+test("human mode concludes with CLI instructions and cannot sign off persisted artifacts with an identity", async () => {
+  const { repo, project, pm, agent, persona } = await held();
+  const before = readFileSync(persona, "utf8");
+  process.env.ROUNDTABLE_LESSON_SIGNOFF = "human";
+  const response = await handleToolCall("hold_postmortem", { action: "conclude", pm, closing: "Review", orchestrator: "Reviewer", accept: ["a1", "a2", "a3", "a4", "a5", "a6"] });
+  assert.equal(response.isError, undefined, response.content[0].text);
+  const result = JSON.parse(response.content[0].text);
+  assert.deepEqual(result.pending, ["a1", "a2", "a3", "a4", "a5"]);
+  assert.equal(result.lessons_added, 0);
+  assert.equal(existsSync(lessonsPath(project)), false);
+  assert.equal(readFileSync(persona, "utf8"), before);
+  assert.equal(existsSync(memoryPath(project, agent)), false);
+  assert.equal(existsSync(join(repo.root, ".claude", "agent-memory")), false);
+  assert.match(result.tell_the_human, /postmortem\(action: "pending"\)/);
+  assert.ok(result.tell_the_human.includes(`roundtable postmortem signoff ${pm} --by <identity> <artifact-id>...`));
+  assert.doesNotMatch(result.tell_the_human, /postmortem\(action: "signoff"/);
+  assert.deepEqual(auditFor(pm).map((a) => a.details.kind), ["fix"]);
+  assert.deepEqual((await concludePostmortem({ pm, closing: "Retry" })).pending, result.pending);
+});
+
+test("human mode keeps CLI pending and sign-off working for every persisted kind", async () => {
+  const { repo, project, pm, agent, persona } = await held();
+  process.env.ROUNDTABLE_LESSON_SIGNOFF = "human";
+  await concludePostmortem({ pm, closing: "Review", accept: ["a1", "a2", "a3", "a4", "a5"] });
+  assert.equal(cli("pending", "--project", repo.root).pending.length, 5);
+  assert.deepEqual(cli("signoff", pm, "--by", "CLI reviewer", "a1", "a3").pending, ["a2", "a4", "a5"]);
+  assert.deepEqual(loadLessons(project).map((l) => l.kind).sort(), ["contract_rule", "rule"]);
+  assert.deepEqual(cli("signoff", pm, "--by", "CLI reviewer", "a2", "a4", "a5").pending, []);
+  assert.ok(loadLessons(project).every((l) => l.signoff.by === "CLI reviewer"));
+  assert.match(readFileSync(persona, "utf8"), /Review persona_addendum text/);
+  assert.match(readFileSync(memoryPath(project, agent), "utf8"), /Review memory text/);
+  assert.match(readFileSync(join(repo.root, ".claude", "agent-memory", agent, "MEMORY.md"), "utf8"), /Review memory text/);
+  assert.deepEqual((await ok({ action: "pending", project: repo.root })).pending, []);
+});
+
+test("invalid lesson sign-off values fail closed and warn exactly once per process with bounded inert text", async () => {
+  const { repo, project, pm } = await held();
+  await concludePostmortem({ pm, closing: "Review", accept: ["a1", "a2"] });
+  const before = await ok({ action: "pending", project: repo.root });
+  const invalid = "BaD\n\t\x1b[31m\x7f\x80\u202e" + "x".repeat(60);
+  const source = `
+    import { handleToolCall } from ${JSON.stringify(new URL("../../dist/tools.js", import.meta.url).href)};
+    import { lessonSignoffMode } from ${JSON.stringify(new URL("../../dist/postmortem/signoff-policy.js", import.meta.url).href)};
+    const args = ${JSON.stringify({ action: "signoff", pm, orchestrator: "Reviewer", accept: ["a1"] })};
+    const results = [await handleToolCall("postmortem", args), await handleToolCall("postmortem", args)];
+    process.env.ROUNDTABLE_LESSON_SIGNOFF = "any";
+    const any = lessonSignoffMode();
+    process.env.ROUNDTABLE_LESSON_SIGNOFF = "another-invalid-value";
+    results.push(await handleToolCall("postmortem", args));
+    process.stdout.write(JSON.stringify({ results, any }));
+  `;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", source], { encoding: "utf8", env: { ...process.env, ROUNDTABLE_LESSON_SIGNOFF: invalid } });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stderr, `[Roundtable] ROUNDTABLE_LESSON_SIGNOFF=${("BaD" + "x".repeat(60)).slice(0, 32)} is not "any" or "human"; treating it as "human".\n`);
+  const { results, any } = JSON.parse(child.stdout);
+  assert.equal(any, "any", "a previous invalid value must not freeze the mode");
+  for (const result of results) {
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /limits sign-off to the CLI/);
+  }
+  assert.equal(existsSync(lessonsPath(project)), false);
+  assert.deepEqual(await ok({ action: "pending", project: repo.root }), before);
 });

@@ -7,12 +7,15 @@ roundtable serve
 # Or let it outlive this terminal:
 roundtable serve --detach
 roundtable serve status
-roundtable serve stop
+roundtable down
+# Also available as: roundtable serve stop
 ```
 
-One local process per `ROUNDTABLE_HOME` keeps watch after the chat closes. Its private index lists executions, completion, spending, human decisions, runner health, last event times, live and archived duels, and the latest casting report. Execution overview and escalation pages reuse the dashboard. Every index route is read-only. Pages refresh every 15 seconds.
+One local process per `ROUNDTABLE_HOME` keeps watch after the chat closes. The private index opens on Overview, with active and interrupted runs, decisions awaiting you, recent duels, the latest casting report and live previews. Runs shows progress, spending and local activity times, newest first. Escalations collects questions needing a person across all runs, with resolved decisions collapsed below. Run titles link to their overview and escalation pages. Drafts stay hidden until you choose to show them. Every index route is read-only. Pages refresh every 15 seconds, except while a preview iframe is loaded.
 
-The URL contains a capability token. `serve` and `serve status` display it only when stdout is a terminal. Open it yourself; do not paste it into logs or public channels. Detached output goes to `ROUNDTABLE_HOME/serve/serve.log` (0600). `serve.json` stores process identity and the URL privately (0600); a clean stop removes it. The service uses the same dead-process lock recovery as executions and refuses another host's lock. `stop` signals only a process whose host and start identity match the service lock.
+Running means the runner is alive. A stale heartbeat is called out separately; a frozen run without a live runner is Interrupted, with its `roundtable run <id>` command shown. Runs without a frozen contract are Drafts. Stop the local service with `roundtable down`, an alias of `roundtable serve stop` with the same output.
+
+The URL contains a capability token. `serve` and `serve status` display it only when stdout is a terminal. Open it yourself; do not paste it into logs or public channels. Detached output goes to `ROUNDTABLE_HOME/serve/serve.log` (0600). `serve.json` stores process identity and the URL privately (0600); a clean stop removes it. The service uses the same dead-process lock recovery as executions and refuses another host's lock. `down` signals only a process whose host and start identity match the service lock.
 
 ## Keeping runners alive
 

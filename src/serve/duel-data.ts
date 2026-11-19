@@ -41,10 +41,10 @@ export function turnKind(round: string): { order: number; label: string } {
   if (/tool|interact/i.test(round)) return { order: 35, label: "Tool interaction" };
   if (/revision|^R3\b/i.test(round)) return { order: 300, label: "Revision" };
   if (/closing|^R4\b/i.test(round)) return { order: 400, label: "Closing statement" };
-  if (/critique|^R1c\b/i.test(round)) return { order: 20, label: "Critique" };
-  if (/build|^R1b\b/i.test(round)) return { order: 30, label: "Build" };
-  if (/judg|^R2\b/i.test(round)) return { order: 200, label: "Judging" };
-  if (/^R1\b|concept/i.test(round)) return { order: 10, label: "Concept" };
+  if (/critique/i.test(round) || /^R1c\b/i.test(round)) return { order: 20, label: "Critique" };
+  if (/build/i.test(round) || /^R1b\b/i.test(round)) return { order: 30, label: "Build" };
+  if (/judg/i.test(round) || /^R2\b/i.test(round)) return { order: 200, label: "Judging" };
+  if (/^R1\b/i.test(round) || /concept/i.test(round)) return { order: 10, label: "Concept" };
   const n = /^R(\d+)/i.exec(round);
   return { order: n ? Number(n[1]) * 100 : 500, label: "Contribution" };
 }

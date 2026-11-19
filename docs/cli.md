@@ -15,6 +15,7 @@ The `agent-roundtable` binary is `dist/index.js`. With no arguments it starts th
 | `usage` | `[--json] [--watch]` | Who is using what, on which platform, with measured / reported / estimated labels. `--watch` refreshes every 2 s. |
 | `stop` | `<agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent: a heads-down worker or an at-the-table session. |
 | `serve` | `[--detach] [--no-keep-runners] [--bind loopback\|tailnet]`, `status`, `stop`, `--print-service launchd\|systemd` | Local supervisor and read-only index. [Long-running runs](long-running.md). |
+| `down` | none | Stop the local service. Alias of `serve stop`, with the same output. |
 | `notify` | `init ntfy`, `test` | Set up and test private check-in channels. [Setup](long-running.md#private-check-in-channels). |
 | `runtimes` | `[--json]` | List installed CLI runtimes, paths and versions. See [CLI runtimes](runtimes.md). |
 | `agents` | `[--json]`, `import <absolute file\|dir>`, `starter`, or `--open [--no-hold]` | Browse and import personas or open the local drop zone. See [agents library](agents-library.md). |

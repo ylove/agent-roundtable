@@ -415,6 +415,7 @@ export async function runUpCli(command: "up" | "doctor", args: string[], io: UpI
         if (state.url && showUrl) out(`Index: ${state.url}`);
         else out("Index: run roundtable serve status in a terminal to see its private URL.");
         if (flags.open && state.url) (deps.open ?? ((u: string) => { void import("./prototypes/board.js").then(m => m.openInBrowser(u)); }))(state.url);
+        out("Stop it with: roundtable down");
       } catch (error) {
         out(`Service: not started. ${clean(error instanceof Error ? error.message : "failed")}`);
       }

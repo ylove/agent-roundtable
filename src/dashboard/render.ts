@@ -13,6 +13,9 @@
 import { humanTime } from "./time.js";
 import { describeEvent, taskTitle } from "./event-labels.js";
 import { siteHeader } from "./shell.js";
+import { displayState } from "./display-state.js";
+import { runnerLiveness } from "../execution/runner-launch.js";
+import { EXECUTION_ID_RE } from "../ids.js";
 import { escapeHtml } from "../http/secure-server.js";
 import { redact } from "../publishers/redact.js";
 import { ID_RE } from "../execution/events.js";
@@ -158,6 +161,8 @@ export interface PageContext {
   /** "/<token>/" */
   base: string;
   runner: RunnerHealth;
+  /** Timestamp of the latest event, when supplied by the index. */
+  lastEvent?: string;
   /** Who is using what in this run (the Overview card and the Usage page). */
   usage?: UsageView;
   /** The per-start action nonce for this surface; only Usage and Postmortems print one. */
@@ -232,7 +237,7 @@ function eventCards(c: PageContext, events: AnyEvent[]): string {
   return `<ol class="event-list">${events.map(ev => {
     const task = eventTask(ev, c.state);
     return `<li id="activity-${ev.seq}"><p>${t(eventSummary(ev, 1200, c.state))}</p>` +
-      `<div class="event-meta">${humanTime(ev.ts)} · ${t(ev.source.kind)} ${t(ev.source.id)}${task ? ` · ${taskLink(c.base, task, c.state)}` : ""} ` +
+      `<div class="event-meta">${humanTime(ev.ts)} · ${sourceText(ev.source)}${task ? ` · ${taskLink(c.base, task, c.state)}` : ""} ` +
       `<a class="event-seq" href="${escapeHtml(c.base)}events?before=${ev.seq + 1}#event-${ev.seq}">#${ev.seq}</a></div></li>`;
   }).join("")}</ol>`;
 }
@@ -249,21 +254,44 @@ function banner(c: PageContext): string {
   return `<section class="banner"><h2>A human is needed</h2><ul>${items.join("")}</ul></section>`;
 }
 
+/** "agent w2", or "runner" alone when the source's id just repeats its kind. */
+function sourceText(source: { kind: string; id: string }): string {
+  return source.id && source.id !== source.kind ? `${t(source.kind)} ${t(source.id)}` : t(source.kind);
+}
+
+/** The run's state as people should read it: a stored "running" with no live runner is Interrupted. */
+function runDisplayState(c: PageContext) {
+  return displayState(c.state, EXECUTION_ID_RE.test(c.state.execution) ? runnerLiveness(c.state.execution) : undefined);
+}
+function runStatePill(c: PageContext): string {
+  const state = runDisplayState(c);
+  return `<span class="pill st-${state.kind}" title="${t(state.detail)}">${state.label}</span>`;
+}
+
 export function frame(c: PageContext, page: PageKey, title: string, body: string, after = ""): string {
   const b = escapeHtml(c.base);
   const runTitle = c.state.contract?.title?.trim() || "Untitled run";
   const nav = NAV.filter(([key]) => c.indexBase || key !== "postmortems" || page === "postmortems" || hasPostmortems(c.state)).map(
-    ([key, label, path]) => `<a href="${b}${path}"${key === page || (page === "task" && key === "tasks") ? ` class="here"` : ""}>${label}</a>`
+    ([key, label, path]) => `<a${key === page || (page === "task" && key === "tasks") ? ` aria-current="page"` : ""} href="${b}${path}"${key === page || (page === "task" && key === "tasks") ? ` class="here"` : ""}>${label}</a>`
   ).join("");
+  const state = runDisplayState(c);
+  // Overview already supplies the run heading. Move it into the shared chrome without changing its renderer.
+  const overviewHeading = page === "overview" ? /^<h1>[\s\S]*?<\/h1>/.exec(body)?.[0] : undefined;
+  const heroTitled = page === "overview" && body.startsWith('<section class="run-hero">');
+  const heading = heroTitled ? "" : overviewHeading ?? `<h1>${tc(runTitle, 200)}</h1>`;
+  const content = overviewHeading ? body.slice(overviewHeading.length) : body;
+  const runMeta = `<header class="run-heading">${heading}<p class="meta run-meta" id="runmeta"><code>${t(c.state.execution)}</code>` +
+    `<span class="pill st-${state.kind}" title="${t(state.detail)}">${state.label}</span>` +
+    `<span>Last event ${c.lastEvent ? humanTime(c.lastEvent) : `#${c.state.seq} (time unavailable)`}</span></p></header>`;
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
     ((page === "usage" || page === "postmortems") && !c.indexBase && c.nonce ? `<meta name="roundtable-action" content="${escapeHtml(c.nonce)}">` : "") +
     `<title>${t(title)} · ${tc(runTitle, 80)}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head>` +
     `<body class="run-page" data-base="${b}" data-seq="${c.state.seq}" data-live="${LIVE[page]}">${c.indexBase ? siteHeader(c.indexBase, "runs") : ""}<main>` +
     `<nav class="run-nav" aria-label="This run">${nav}</nav>` +
-    `<p class="meta" id="runmeta">${tc(runTitle, 160)} · ${t(c.state.execution)} · ${badge(c.state.status)} · event ${c.state.seq}</p>` +
+    runMeta +
     `<p class="live" id="live" role="status" aria-live="polite">${c.indexBase ? "Read-only run record. Refreshes every 15 seconds." : page === "usage" ? "This page follows the run as it happens. The Stop buttons are the one thing it can change." : page === "postmortems" ? "This page follows the run as it happens. Review pending artifacts before signing off." : "Read-only. This page follows the run as it happens."}</p>` +
-    (LIVE[page] === "swap" ? `<div id="swap">${banner(c)}${body}</div>` : banner(c) + body) +
+    (LIVE[page] === "swap" ? `<div id="swap">${banner(c)}${content}</div>` : banner(c) + content) +
     after +
     `</main><script src="${b}static/dashboard.js"></script></body></html>`
   );
@@ -285,7 +313,7 @@ export function renderOverview(c: PageContext): string {
     `<p class="meta">Started ${humanTime(c.header.created)} · <a href="${escapeHtml(c.base)}contract">Read the contract</a></p></section>` +
     `<div class="cards">` +
     `<div class="card"><h3>Progress</h3><p class="run-metric">${accepted} of ${done.total} tasks done</p><div class="big">${done.percent}%</div>` +
-    `<progress max="100" value="${done.percent}" aria-label="Task completion">${done.percent}%</progress><p class="meta">${badge(s.status)} · <a href="${escapeHtml(c.base)}tasks">See every task</a></p>` +
+    `<progress max="100" value="${done.percent}" aria-label="Task completion">${done.percent}%</progress><p class="meta">${runStatePill(c)} · <a href="${escapeHtml(c.base)}tasks">See every task</a></p>` +
     (s.paused_tasks.length ? `<p>Paused: ${s.paused_tasks.map(x => taskLink(c.base, x, s)).join(", ")}</p>` : "") + `</div>` +
     `<div class="card"><h3>Budget used</h3><div class="big">${money(budget.spent)}</div><p>${budget.limit !== undefined ? `of ${money(budget.limit)}` : "No budget limit was recorded."}${budget.estimated ? " · partly estimated" : ""}</p></div>` +
     usageCard(c) +
@@ -615,7 +643,7 @@ export function renderEvents(c: PageContext, f: EventFilter, page: AnyEvent[], m
       .map((id) => `<a href="${eventsHref(c.base, { type: f.type, task: id })}"${here({ type: f.type, task: id })}>${t(taskTitle(c.state, id))} <small class="task-id">${t(id)}</small></a>`)
       .join("");
   const rows = page.map(ev => `<tr><td class="num">${ev.seq}</td><td id="event-${ev.seq}"><p class="event-sentence">${t(eventSummary(ev, 1200, c.state))}</p>` +
-    `<p class="event-meta">${humanTime(ev.ts)} · ${t(ev.source.kind)} ${t(ev.source.id)} ` +
+    `<p class="event-meta">${humanTime(ev.ts)} · ${sourceText(ev.source)} ` +
     `<a class="event-seq" href="${eventsHref(c.base, { before: ev.seq + 1 })}#event-${ev.seq}">#${ev.seq}</a></p>` +
     (eventTask(ev, c.state) ? `<p>${taskLink(c.base, eventTask(ev, c.state)!, c.state)}</p>` : "") +
     `<details><summary>Technical details: ${t(ev.type)}</summary><pre>${t(JSON.stringify(ev.payload, null, 2))}</pre></details></td></tr>`);

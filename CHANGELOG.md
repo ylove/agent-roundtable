@@ -2,6 +2,7 @@
 
 ## 2.1.0 (unreleased)
 
+- Present archived duels and casting reports as readable pages, with agent figures, linked team turns, judging, dissents, isolated web prototypes and redacted JSON downloads (#280)
 - Add ultraplan cost estimates, a zero-call dry run, and spend in results and archives (#274)
 - Discover default-port Ollama with an off switch, rank small local models behind hosted models on demanding seats, and add opt-in free pricing for configured compatible endpoints (#273)
 - Add a loopback dashboard form for postmortem lesson sign-off, including human mode, with pending text and hashes, guarded JSON requests and the shared CLI audit checks (#268)

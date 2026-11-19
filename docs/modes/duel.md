@@ -99,6 +99,8 @@ Concept, judging and closing calls time out after 90 seconds (set with `--turn-t
 
 Archives live at `ROUNDTABLE_HOME/duels/<id>.json` with mode 0600. They contain the event list and the artifact files as text, including revisions. The start event also records `kind`, `criteria` and `teams`; archives from before these fields existed were all web and still replay. The temporary sandbox is removed when the runner returns; winning files are saved separately before cleanup, and the room retains its recorded versions in memory. Real archives belong in local state and must stay out of the repository.
 
+Open Duels in the `roundtable serve` index to read an archived duel as a page: agents sit at a table with their roles and models, and linked turn cards follow each team's ideas, critiques and revisions. Select an agent to filter the flow. Prototypes keep code collapsed; Run opens saved web HTML in an isolated frame on a separate loopback origin, with network resources blocked and no index token in the artifact URL. Run is available when viewing the index locally; other artifact kinds show source only. Judgments, dissents and usage follow the builds, and the full redacted archive is available under Raw archive (JSON) or as a download.
+
 Usage updates include per-seat token totals and estimated spend throughout the run. Estimates use the existing pricing table; tokens from models without rates are reported as unpriced rather than presented as free. Configure `ROUNDTABLE_PRICING_FILE` to provide rates for those models before recording a cost comparison.
 
 ```sh

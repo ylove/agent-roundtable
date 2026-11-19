@@ -18,6 +18,7 @@ import { livePreviews, previewFramesHtml, previewOrigins, previewScreenshotRoute
 import { PREVIEW_JS } from "../previews/assets.js";
 import type { PreviewRecord } from "../previews/store.js";
 import { persistedLiveDuels, type LiveDuel } from "../table/live-duels.js";
+import { duelPageRoutes } from "./duel-pages.js";
 
 export const INDEX_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 // A page with a live preview does not reload: that would restart the previewed app every 15 seconds.
@@ -88,18 +89,7 @@ export function indexRoutes(): Route[] {
       const context = { state: await store.state(), header: store.header(), base: `${c.base}x/${id}/`, indexBase: c.base, runner: indexRunnerHealth(runnerLiveness(id)) };
       c.html(200, page === "escalations" ? renderEscalations(context) : renderOverview(context), INDEX_CSP);
     } },
-    { path: /^\/duels\/([^/]+)$/, handler(c) {
-      const id = c.match![1];
-      if (!ID_RE.test(id)) return c.notFound();
-      let archive;
-      try { archive = jsonFile(join(ROUNDTABLE_HOME, "duels", `${id}.json`)); } catch { return c.notFound(); }
-      c.html(200, indexFrame(c.base, id, `<h1>${t(id)}</h1><pre>${t(JSON.stringify(archive, null, 2))}</pre>`), INDEX_CSP);
-    } },
-    { path: "/casting", handler(c) {
-      const report = castingReport();
-      if (!report) return c.notFound();
-      c.html(200, indexFrame(c.base, "Casting", `<h1>Latest casting report</h1><pre>${t(report)}</pre>`), INDEX_CSP);
-    } },
+    ...duelPageRoutes(INDEX_CSP),
   ];
 }
 

@@ -12,6 +12,8 @@ roundtable serve stop
 
 One local process per `ROUNDTABLE_HOME` keeps watch after the chat closes. Its private index lists executions, completion, spending, human decisions, runner health, last event times, live and archived duels, and the latest casting report. Execution overview and escalation pages reuse the dashboard. Every index route is read-only. Pages refresh every 15 seconds.
 
+Duels and casting reports have readable pages in the index; these reading pages stay open without automatic refreshes.
+
 The URL contains a capability token. `serve` and `serve status` display it only when stdout is a terminal. Open it yourself; do not paste it into logs or public channels. Detached output goes to `ROUNDTABLE_HOME/serve/serve.log` (0600). `serve.json` stores process identity and the URL privately (0600); a clean stop removes it. The service uses the same dead-process lock recovery as executions and refuses another host's lock. `stop` signals only a process whose host and start identity match the service lock.
 
 ## Keeping runners alive

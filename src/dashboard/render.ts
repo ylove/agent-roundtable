@@ -278,7 +278,9 @@ export function frame(c: PageContext, page: PageKey, title: string, body: string
   // Overview already supplies the run heading. Move it into the shared chrome without changing its renderer.
   const overviewHeading = page === "overview" ? /^<h1>[\s\S]*?<\/h1>/.exec(body)?.[0] : undefined;
   const heroTitled = page === "overview" && body.startsWith('<section class="run-hero">');
-  const heading = heroTitled ? "" : overviewHeading ?? `<h1>${tc(runTitle, 200)}</h1>`;
+  // A page with its own <h1> keeps it as the only page title; the run name above it is a label.
+  const runName = /<h1[ >]/.test(body) ? `<p class="run-title">${tc(runTitle, 200)}</p>` : `<h1>${tc(runTitle, 200)}</h1>`;
+  const heading = heroTitled ? "" : overviewHeading ?? runName;
   const content = overviewHeading ? body.slice(overviewHeading.length) : body;
   const runMeta = `<header class="run-heading">${heading}<p class="meta run-meta" id="runmeta"><code>${t(c.state.execution)}</code>` +
     `<span class="pill st-${state.kind}" title="${t(state.detail)}">${state.label}</span>` +

@@ -10,6 +10,7 @@
 // markdown goes through a small converter that escapes everything and passes no raw HTML.
 // ============================================================================
 
+import { siteHeader } from "./shell.js";
 import { escapeHtml } from "../http/secure-server.js";
 import { redact } from "../publishers/redact.js";
 import { ID_RE } from "../execution/events.js";
@@ -225,8 +226,8 @@ export function frame(c: PageContext, page: PageKey, title: string, body: string
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
     ((page === "usage" || page === "postmortems") && c.nonce ? `<meta name="roundtable-action" content="${escapeHtml(c.nonce)}">` : "") +
     `<title>${t(title)} · ${tc(runTitle, 80)}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head>` +
-    `<body data-base="${b}" data-seq="${c.state.seq}" data-live="${LIVE[page]}"><main>` +
-    `<nav>${c.indexBase ? `<a href="${escapeHtml(c.indexBase)}">All runs</a>` : ""}${nav}</nav>` +
+    `<body data-base="${b}" data-seq="${c.state.seq}" data-live="${LIVE[page]}">${c.indexBase ? siteHeader(c.indexBase, "runs") : ""}<main>` +
+    `<nav class="run-nav" aria-label="This run">${nav}</nav>` +
     `<p class="meta" id="runmeta">${tc(runTitle, 160)} · ${t(c.state.execution)} · ${badge(c.state.status)} · event ${c.state.seq}</p>` +
     `<p class="live" id="live" role="status" aria-live="polite">${page === "usage" ? "This page follows the run as it happens. The Stop buttons are the one thing it can change." : page === "postmortems" ? "This page follows the run as it happens. Review pending artifacts before signing off." : "Read-only. This page follows the run as it happens."}</p>` +
     (LIVE[page] === "swap" ? `<div id="swap">${banner(c)}${body}</div>` : banner(c) + body) +

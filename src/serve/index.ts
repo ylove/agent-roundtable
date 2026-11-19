@@ -12,6 +12,7 @@ import { listExecutions, openExecutionStore } from "../execution/store.js";
 import { runnerLiveness, type RunnerLiveness } from "../execution/runner-launch.js";
 import { renderOverview, renderEscalations, t, type RunnerHealth } from "../dashboard/render.js";
 import { DASHBOARD_CSS } from "../dashboard/assets.js";
+import { sitePage, type SiteSection } from "../dashboard/shell.js";
 import { SecureServer, escapeHtml, type Route } from "../http/secure-server.js";
 import { livePreviews, previewFramesHtml, previewOrigins, previewScreenshotRoute, withFrameSrc } from "../previews/embed.js";
 import { PREVIEW_JS } from "../previews/assets.js";
@@ -24,9 +25,9 @@ const POLL_JS = PREVIEW_JS + '\ninitPreviewCards();\nsetInterval(() => { if (!do
 export interface IndexRun { report: ExecutionStatusReport; lastEvent?: string }
 export interface ArchiveSummary { id: string; topic: string; winner: string }
 
-export function indexFrame(base: string, title: string, body: string): string {
-  const b = escapeHtml(base);
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${t(title)}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head><body><main><nav><a href="${b}">All runs</a></nav>${body}</main><script src="${b}static/dashboard.js"></script></body></html>`;
+/** An index page in the shared site shell. New pages should call sitePage directly to set the active section. */
+export function indexFrame(base: string, title: string, body: string, active?: SiteSection): string {
+  return sitePage({ base, title, body, ...(active && { active }) });
 }
 
 export function renderIndex(base: string, runs: IndexRun[], duels: ArchiveSummary[] = [], live: Array<LiveDuel & { host: string }> = [], casting?: string, previews: PreviewRecord[] = []): string {

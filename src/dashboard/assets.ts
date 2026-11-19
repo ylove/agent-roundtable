@@ -15,6 +15,23 @@ export const DASHBOARD_CSS = `
 @media (prefers-color-scheme:dark){:root{--bg:#141416;--fg:#ececef;--muted:#9a9aa2;--card:#1d1d21;--line:#2e2e34;
 --accent:#7aa7ff;--ok:#5fd08e;--warn:#e3a54a;--bad:#ff8a80;--busy:#c3a1ff;--code:#25252a;--banner:#3a1f1d;--chip-bg:#26262b;
 --meas-fg:#8ee0cf;--meas-bg:#14332d;--meas-line:#2f7f70;--rep-fg:#a9c7ff;--rep-bg:#172743;--rep-line:#3c609f;--est-fg:#ffd28a;--est-bg:#3a2a0c;--est-line:#a67a28}}
+/* Site shell (header band and top nav), shared by every index page */
+:root{--header-bg:#16181d;--header-fg:#f4f5f7;--header-muted:#aab0bc;--header-mark:#8fb0ff;
+--team-a:#2f6fde;--team-b:#d9711c;--team-c:#2e9e6a;--team-d:#9b4fd0;
+--role-builder:#2f6fde;--role-designer:#c2418f;--role-judge:#7a5af5;--role-critic:#d9711c;--role-other:#6b6b70}
+@media (prefers-color-scheme:dark){:root{--header-bg:#0b0c10;--team-a:#7aa7ff;--team-b:#ffa45c;--team-c:#5fd08e;--team-d:#c99bff;
+--role-builder:#7aa7ff;--role-designer:#f28cc4;--role-judge:#b8a6ff;--role-critic:#ffa45c;--role-other:#9a9aa2}}
+.site-header{background:var(--header-bg);color:var(--header-fg);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.site-inner{max-width:1400px;margin:0 auto;padding:0 16px;min-height:56px;display:flex;align-items:center;gap:28px}
+.brand{display:inline-flex;align-items:center;gap:10px;color:var(--header-fg);text-decoration:none;font-weight:650;font-size:1.05rem;letter-spacing:.01em}
+.brand .mark{color:var(--header-mark)}
+nav.site-nav{border:0;padding:0;gap:4px;flex-wrap:nowrap;overflow-x:auto}
+nav.site-nav a{color:var(--header-muted);padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:500;white-space:nowrap}
+nav.site-nav a:hover{color:var(--header-fg);background:rgba(255,255,255,.08)}
+nav.site-nav a.here{color:var(--header-fg);background:rgba(255,255,255,.14)}
+.site-header a:focus-visible{outline-color:var(--header-mark)}
+time .ago,.muted{color:var(--muted)}
+@media (max-width:640px){.site-inner{gap:12px}.brand span{display:none}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:1400px;margin:0 auto;padding:16px 16px 48px}h1{font-size:1.4rem;margin:8px 0 4px}h2{font-size:1.1rem;margin:24px 0 8px}
 h3{font-size:1rem;margin:16px 0 6px}a{color:var(--accent)}.meta,.empty{color:var(--muted)}.meta{margin:0 0 12px}

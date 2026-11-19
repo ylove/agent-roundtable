@@ -131,6 +131,7 @@ No arguments starts the orchestrator MCP server. The binary has **15 subcommands
 | `usage [--json] [--watch]` | Who is using what, on which platform, measured or estimated. |
 | `stop <agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent, heads-down or at the table. |
 | `serve` / `notify` | Keep runs alive, browse the private index and configure [check-ins](docs/long-running.md). |
+| `down` | Stop the local service, the same as `serve stop`. |
 | `runtimes [--json]` | Detect installed [CLI runtimes](docs/runtimes.md). |
 | [`agents [--json]`](docs/agents-library.md) | List or import personas, install the starter pack, open the library. |
 | `help` | Print usage. |

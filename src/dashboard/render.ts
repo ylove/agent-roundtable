@@ -10,6 +10,11 @@
 // markdown goes through a small converter that escapes everything and passes no raw HTML.
 // ============================================================================
 
+import { siteHeader } from "./shell.js";
+import { displayState } from "./display-state.js";
+import { humanTime } from "./time.js";
+import { runnerLiveness } from "../execution/runner-launch.js";
+import { EXECUTION_ID_RE } from "../ids.js";
 import { escapeHtml } from "../http/secure-server.js";
 import { redact } from "../publishers/redact.js";
 import { ID_RE } from "../execution/events.js";
@@ -159,6 +164,8 @@ export interface PageContext {
   /** "/<token>/" */
   base: string;
   runner: RunnerHealth;
+  /** Timestamp of the latest event, when supplied by the index. */
+  lastEvent?: string;
   /** Who is using what in this run (the Overview card and the Usage page). */
   usage?: UsageView;
   /** The per-start action nonce for this surface; only Usage and Postmortems print one. */
@@ -217,19 +224,27 @@ function banner(c: PageContext): string {
 
 export function frame(c: PageContext, page: PageKey, title: string, body: string, after = ""): string {
   const b = escapeHtml(c.base);
-  const runTitle = c.state.contract?.title ?? c.state.execution;
+  const runTitle = c.state.contract?.title || "Untitled run";
   const nav = NAV.filter(([key]) => !c.indexBase || key === "overview" || key === "escalations").filter(([key]) => key !== "postmortems" || page === "postmortems" || hasPostmortems(c.state)).map(
-    ([key, label, path]) => `<a href="${b}${path}"${key === page || (page === "task" && key === "tasks") ? ` class="here"` : ""}>${label}</a>`
+    ([key, label, path]) => `<a${key === page || (page === "task" && key === "tasks") ? ` aria-current="page"` : ""} href="${b}${path}"${key === page || (page === "task" && key === "tasks") ? ` class="here"` : ""}>${label}</a>`
   ).join("");
+  const state = displayState(c.state, EXECUTION_ID_RE.test(c.state.execution) ? runnerLiveness(c.state.execution) : undefined);
+  // Overview already supplies the run heading. Move it into the shared chrome without changing its renderer.
+  const overviewHeading = page === "overview" ? /^<h1>[\s\S]*?<\/h1>/.exec(body)?.[0] : undefined;
+  const heading = overviewHeading ?? `<h1>${tc(runTitle, 200)}</h1>`;
+  const content = overviewHeading ? body.slice(overviewHeading.length) : body;
+  const runMeta = `<header class="run-heading">${heading}<p class="meta run-meta" id="runmeta"><code>${t(c.state.execution)}</code>` +
+    `<span class="pill st-${state.kind}" title="${t(state.detail)}">${state.label}</span>` +
+    `<span>Last event ${c.lastEvent ? humanTime(c.lastEvent) : `#${c.state.seq} (time unavailable)`}</span></p></header>`;
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
     ((page === "usage" || page === "postmortems") && c.nonce ? `<meta name="roundtable-action" content="${escapeHtml(c.nonce)}">` : "") +
     `<title>${t(title)} · ${tc(runTitle, 80)}</title><link rel="stylesheet" href="${b}static/dashboard.css"></head>` +
-    `<body data-base="${b}" data-seq="${c.state.seq}" data-live="${LIVE[page]}"><main>` +
-    `<nav>${c.indexBase ? `<a href="${escapeHtml(c.indexBase)}">All runs</a>` : ""}${nav}</nav>` +
-    `<p class="meta" id="runmeta">${tc(runTitle, 160)} · ${t(c.state.execution)} · ${badge(c.state.status)} · event ${c.state.seq}</p>` +
+    `<body data-base="${b}" data-seq="${c.state.seq}" data-live="${LIVE[page]}">${c.indexBase ? siteHeader(c.indexBase, "runs") : ""}<main>` +
+    `<nav class="run-nav" aria-label="This run">${nav}</nav>` +
+    runMeta +
     `<p class="live" id="live" role="status" aria-live="polite">${page === "usage" ? "This page follows the run as it happens. The Stop buttons are the one thing it can change." : page === "postmortems" ? "This page follows the run as it happens. Review pending artifacts before signing off." : "Read-only. This page follows the run as it happens."}</p>` +
-    (LIVE[page] === "swap" ? `<div id="swap">${banner(c)}${body}</div>` : banner(c) + body) +
+    (LIVE[page] === "swap" ? `<div id="swap">${banner(c)}${content}</div>` : banner(c) + content) +
     after +
     `</main><script src="${b}static/dashboard.js"></script></body></html>`
   );

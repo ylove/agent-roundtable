@@ -53,6 +53,7 @@ export const USAGE = [
   "  roundtable postmortem signoff <pm> --by <identity> <artifact-id>... [--json]",
   "  roundtable --version | -v | version",
   "  roundtable serve [--detach] [--no-keep-runners] [--bind loopback|tailnet] | serve status|stop",
+  "  roundtable down                               stop the local service (alias of serve stop)",
   "  roundtable serve --print-service launchd|systemd",
   "  roundtable preview start <exe> <task> | --prototype <dir> [--script dev|start|preview] [--port <n>] [--display live|click|screenshot]",
   "  roundtable preview list [--json] | preview stop <id>",
@@ -303,9 +304,12 @@ export async function runCli(argv: string[]): Promise<void> {
       process.exitCode = await runPreviewCli(rest);
       return;
     }
+    case "down":
+      if (rest.length) return usage("down accepts no arguments");
+      // Fall through to the same implementation and output as serve stop.
     case "serve": {
       const { runServeCli } = await import("./cli-serve.js");
-      process.exitCode = await runServeCli(rest);
+      process.exitCode = await runServeCli(command === "down" ? ["stop"] : rest);
       return;
     }
     case "notify": {

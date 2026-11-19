@@ -138,7 +138,9 @@ test("index routes read fixture runs, hide drafts, name decisions and escape all
   await runRoute.handler({ base: "/cap/", match: runRoute.path.exec(`/x/${pending.id}/`), html(status, html) { assert.equal(status, 200); runHtml = html; } });
   assert.match(runHtml, /<nav class="run-nav"/);
   assert.match(runHtml, /Last event <time/);
-  assert.match(runHtml, /<header class="run-heading"><h1>Review &lt;script&gt;/);
+  // The overview hero carries the title (#279); the shared run heading keeps the id, state and last event.
+  assert.match(runHtml, /<section class="run-hero">[\s\S]*?<h1>Review &lt;script&gt;/);
+  assert.equal((runHtml.match(/<h1>/g) ?? []).length, 1, "one page title");
   assert.match(runHtml, /class="pill st-interrupted"/);
   assert.deepEqual(inlineProblems(runHtml), []);
 });

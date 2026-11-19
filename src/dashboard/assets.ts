@@ -106,6 +106,31 @@ dialog::backdrop{background:rgba(0,0,0,.45)}dialog h2{margin:0 0 8px}dialog p{ma
 input[type=text]{font:inherit;max-width:100%;padding:5px;border:1px solid var(--line);border-radius:4px;background:var(--card);color:var(--fg)}
 .agent-card:focus-visible,.live:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 @media (prefers-color-scheme:dark){.avatar{background:hsl(var(--h) 60% 72%);color:#141416}}
+/* Run pages (#279): scoped to the per-run frame. */
+.run-page main{max-width:1200px;min-width:0;overflow-wrap:anywhere}
+.run-page .run-hero,.run-page .run-section,.run-page .card,.run-page .banner{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:0 2px 8px rgba(0,0,0,.035)}
+.run-page .run-hero{padding:28px;margin:18px 0 20px;border-top:3px solid var(--accent)}
+.run-page .run-hero h1{font-size:clamp(1.6rem,3vw,2.25rem);line-height:1.2;letter-spacing:-.025em;max-width:36ch}
+.run-page .run-hero h2{font-size:.85rem;color:var(--muted);margin:20px 0 4px}
+.run-page .run-goal{font-size:1.15rem;max-width:72ch;margin:14px 0}
+.run-page .eyebrow{font-size:.75rem;text-transform:uppercase;letter-spacing:.09em;font-weight:650;color:var(--muted);margin:0 0 10px}
+.run-page .card{padding:20px;min-width:0}.run-page .cards{grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:16px}
+.run-page .run-section{padding:22px;margin:18px 0;min-width:0}.run-page .run-section>h2:first-child{margin-top:0}
+.run-page .run-columns,.run-page .run-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.run-page .run-columns>.run-section{margin:18px 0 0}
+.run-page .run-metric{font-size:1.15rem;font-weight:650;margin:8px 0}.run-page .run-copy{white-space:pre-wrap}
+.run-page .task-id{font:12px ui-monospace,SFMono-Regular,monospace;color:var(--muted);font-weight:400}.run-page .task-id a{color:inherit}
+.run-page .task-ref{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}.run-page .task-ref>a{font-weight:600}
+.run-page .event-list{list-style:none;padding:0;margin:0}.run-page .event-list>li{padding:16px 0;border-bottom:1px solid var(--line)}.run-page .event-list>li:last-child{border:0}
+.run-page .event-list p,.run-page .event-sentence{margin:0 0 6px}.run-page .event-meta{font-size:.82rem;color:var(--muted)}.run-page .event-seq{font-size:.75rem;color:var(--muted)}
+.run-page details{margin:10px 0}.run-page summary{cursor:pointer;color:var(--accent);font-weight:500}.run-page .run-legend{font-size:.85rem}.run-page .run-legend dl{margin-top:12px}
+.run-page .tablewrap{max-width:100%;overflow-x:auto}.run-page table{border:0}.run-page th,.run-page td{padding:12px}.run-page .event-table td.num{color:var(--muted);font-size:.75rem}
+.run-page pre{max-width:100%;margin:10px 0}.run-page .contract{overflow-x:auto}.run-page .banner{border-left:4px solid var(--warn);padding:18px 22px}.run-page .banner h2{color:var(--warn)}
+.run-page .st-running,.run-page .st-alive{color:var(--accent)}.run-page .st-interrupted,.run-page .st-stale{color:var(--warn)}.run-page .st-paused{color:var(--busy)}.run-page .st-aborted{color:var(--muted)}
+.run-page .dagwrap{max-width:100%;border:0}.run-page .dag text{font-weight:600}.run-page .dag text.sub{font-weight:400}.run-page .dag a:focus-visible rect{stroke:var(--accent);stroke-width:4px}
+.run-page .dag .st-in_progress rect,.run-page .dag .st-claimed rect{stroke:var(--accent)}.run-page .dag .st-paused rect{stroke:var(--busy)}
+.run-page .contract pre{display:block}.run-page .run-section table{min-width:0}
+@media(max-width:700px){.run-page .run-columns,.run-page .run-grid{grid-template-columns:minmax(0,1fr);gap:0}.run-page .run-hero{padding:20px}.run-page .run-section{padding:16px}.run-page dl{grid-template-columns:minmax(0,1fr)}.run-page dd{margin-bottom:8px}.run-page .tablewrap table{min-width:600px}.run-page .event-table{min-width:0!important}.run-page .dag{max-width:none}}
+
 /* Index overview, run cards and the global decision queue */
 .page-heading{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px 24px;margin:4px 0 28px}
 .page-heading h1{font-size:2rem;margin:4px 0 8px}.eyebrow{font-size:.73rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:650;margin:0}

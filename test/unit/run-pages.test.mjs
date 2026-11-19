@@ -92,6 +92,7 @@ test("index run pages: every page and every same-site run link resolves, includi
       assert.deepEqual(inlineProblems(r.body), [], href);
       assert.ok(r.body.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), href);
       assert.doesNotMatch(r.body, /<script>alert|<form\b|roundtable-action|data-stop=/, href);
+      assert.equal((r.body.match(/<h1[ >]/g) ?? []).length, 1, `one page title on ${href}`);
     }
     for (const [, raw] of r.body.matchAll(/(?:href|src)="([^"]+)"/g)) {
       const link = new URL(raw.replaceAll("&amp;", "&"), `http://fixture.test${href}`);

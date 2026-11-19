@@ -59,6 +59,8 @@ Choose explicitly, or set `ROUNDTABLE_DEFAULT_VISIBILITY`:
 
 GitHub options include an existing `project_number` and `project_owner`, or `create_project`; `pr: true` requests publication of the integration branch and a PR at completion. The runner never pushes to the base branch or auto-merges. Human review remains the final merge step. Public sessions at the table use a separate [publishing mechanism](modes/public-sessions.md).
 
+Every run page is also reachable from the local index under `x/<execution-id>/`: tasks and their details, events, the contract, graph, dissents, postmortems and usage. The index stays read-only, with no Stop buttons or sign-off forms. Each escalation has a detail page at `x/<execution-id>/escalations/<escalation-id>` with its request, evidence, related events and resolution instructions. Task pages show recorded worker output when available and explain when no log was stored.
+
 The Postmortems form adds a second mutating dashboard route: `POST <token>/postmortems/<pm>/signoff`. It works in `human` mode. Before reading state, the route checks its per-start action nonce, Origin and Sec-Fetch-Site, JSON content type, a 16 KiB body limit, loopback bind and peer, a rate limit of 10 requests a minute, and the exact body fields, identity and artifact ids. It then requires a meeting from this run and applies the CLI's sign-off checks. Tailnet binds refuse every sign-off request and direct you to the CLI. Each action nonce appears only in its own page's meta element. The nonce and custom header force a CORS preflight that the server never approves. This is not a sandbox. An agent with shell access and the dashboard URL can post, just as it can run the CLI.
 
 ## Watch and status

@@ -2,6 +2,7 @@
 
 ## 2.1.0 (unreleased)
 
+- Make every run page reachable from the read-only index, with titled tasks, human event summaries, worker activity and escalation details with resolution instructions (#279)
 - Add the shared index shell, Overview, Runs and global Escalations pages, truthful runner states, and `roundtable down` (#278)
 - Present archived duels and casting reports as readable pages, with agent figures, linked team turns, judging, dissents, isolated web prototypes and redacted JSON downloads (#280)
 - Add ultraplan cost estimates, a zero-call dry run, and spend in results and archives (#274)

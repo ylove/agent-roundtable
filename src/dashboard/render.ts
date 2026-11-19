@@ -315,7 +315,9 @@ export function renderOverview(c: PageContext): string {
     `<div class="card"><h3>Progress</h3><p class="run-metric">${accepted} of ${done.total} tasks done</p><div class="big">${done.percent}%</div>` +
     `<progress max="100" value="${done.percent}" aria-label="Task completion">${done.percent}%</progress><p class="meta">${runStatePill(c)} · <a href="${escapeHtml(c.base)}tasks">See every task</a></p>` +
     (s.paused_tasks.length ? `<p>Paused: ${s.paused_tasks.map(x => taskLink(c.base, x, s)).join(", ")}</p>` : "") + `</div>` +
-    `<div class="card"><h3>Budget used</h3><div class="big">${money(budget.spent)}</div><p>${budget.limit !== undefined ? `of ${money(budget.limit)}` : "No budget limit was recorded."}${budget.estimated ? " · partly estimated" : ""}</p></div>` +
+    `<div class="card"><h3>Budget used</h3><div class="big">${money(budget.spent)}</div><p>${budget.limit !== undefined ? `of ${money(budget.limit)}${budget.pct !== undefined ? ` (${budget.pct}%)` : ""}` : "No budget limit was recorded."}${budget.estimated ? " · partly estimated" : ""}</p>` +
+    (s.budget.thresholds_crossed.length ? `<p class="meta">Passed ${s.budget.thresholds_crossed.map(p => `${p}%`).join(", ")} of the budget</p>` : "") +
+    (s.contract ? `<p class="meta">Swarm limits: max agents ${t(s.contract.budget.max_agents ?? "unset (swarms disabled)")} · max subtasks ${t(s.contract.budget.max_subtasks ?? 16)}</p>` : "") + `</div>` +
     usageCard(c) +
     `<div class="card"><h3>Runner</h3><div class="big">${badge(c.runner.status, c.runner.detail)}</div><p>${t(c.runner.detail)}</p>` +
     `<details class="run-legend"><summary>What runner states mean</summary><dl>` +

@@ -7,16 +7,17 @@
 // inline, as an image or opened on its own. Every label is escaped (and redacted).
 // ============================================================================
 
+import { ID_RE } from "../execution/events.js";
 import { escapeHtml } from "../http/secure-server.js";
 import { redact } from "../publishers/redact.js";
 import type { BlackboardState, TaskRuntime, TaskState } from "../execution/types.js";
 
-const NODE_W = 196;
-const NODE_H = 46;
+const NODE_W = 244;
+const NODE_H = 64;
 const GAP_X = 64;
 const GAP_Y = 18;
 const PAD = 16;
-const LABEL_CHARS = 26;
+const LABEL_CHARS = 31;
 
 /** [fill, stroke] per task state. */
 export const STATE_COLORS: Readonly<Record<TaskState, readonly [string, string]>> = {
@@ -126,11 +127,11 @@ export function renderDagSvg(state: BlackboardState, opts: DagSvgOptions = {}): 
     const pct = typeof rt.percent === "number" && Number.isFinite(rt.percent) ? ` · ${Math.round(Math.min(100, Math.max(0, rt.percent)))}%` : "";
     const dash = rt.state === "cancelled" ? ` stroke-dasharray="4 3"` : "";
     const inner =
-      `<title>${text(`${id}: ${rt.spec.title} (${rt.state})`)}</title>` +
+      `<title>${text(`${rt.spec.title?.trim() || "untitled task"} (${id}): ${rt.state}`)}</title>` +
       `<rect x="${x}" y="${y}" width="${NODE_W}" height="${NODE_H}" rx="8" fill="${fill}" stroke="${stroke}" stroke-width="1.5"${dash}/>` +
-      `<text x="${x + 10}" y="${y + 19}" fill="#1d1d1f">${text(id, LABEL_CHARS)}</text>` +
-      `<text class="sub" x="${x + 10}" y="${y + 36}" fill="#55555a">${text(rt.spec.title, LABEL_CHARS - 6)} · ${text(rt.state.replace(/_/g, " "))}${pct}</text>`;
-    const node = opts.base ? `<a href="${escapeHtml(`${opts.base}tasks/${encodeURIComponent(id)}`)}">${inner}</a>` : inner;
+      `<text x="${x + 10}" y="${y + 19}" fill="#1d1d1f">${text(rt.spec.title?.trim() || "untitled task", LABEL_CHARS)}</text>` +
+      `<text class="sub" x="${x + 10}" y="${y + 36}" fill="#55555a">${text(id, 20)} · ${text(rt.state.replace(/_/g, " "))}${pct}</text>`;
+    const node = opts.base && ID_RE.test(id) ? `<a href="${escapeHtml(`${opts.base}tasks/${encodeURIComponent(id)}`)}">${inner}</a>` : inner;
     return `<g class="node st-${escapeHtml(rt.state)}">${node}</g>`;
   });
 

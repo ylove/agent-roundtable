@@ -1,0 +1,112 @@
+// Sentences for the complete execution event catalog. Adding an event requires a label here.
+import type { AnyEvent, BlackboardState, EventPayloads, EventType } from "../execution/types.js";
+
+export function taskTitle(state: BlackboardState | undefined, id: string): string {
+  return state && Object.hasOwn(state.tasks, id) ? state.tasks[id].spec.title?.trim() || "untitled task" : "untitled task";
+}
+
+export function describeEvent(ev: AnyEvent, state?: BlackboardState): string {
+  const task = (id?: string) => id ? `${taskTitle(state, id)} (${id})` : "integration";
+  const why = (reason?: string) => reason ? `: ${reason}` : "";
+  const usd = (n: number) => `$${(Number.isFinite(n) ? n : 0).toFixed(2)}`;
+  const labels: { [K in EventType]: (p: EventPayloads[K]) => string } = {
+    "execution.created": p => `Run created for contract ${p.contract}, version ${p.contract_version}`,
+    "execution.started": p => `Run started with a ${usd(p.budget.usd)} budget and ${p.lead} leading`,
+    "execution.paused": p => `Run paused${why(p.reason)}`,
+    "execution.resumed": p => `Run resumed${why(p.reason)}`,
+    "execution.steered": p => `Instructions sent to ${p.targets.join(", ") || "all workers"}: ${p.message}`,
+    "execution.mode_changed": p => `Run changed from ${p.from} to ${p.to}${why(p.reason)}`,
+    "execution.completed": p => `Run completed at commit ${p.integration_sha}${p.pr_url ? `; pull request ${p.pr_url}` : ""}`,
+    "execution.failed": p => `Run failed${why(p.reason)}`,
+    "execution.aborted": p => `Run aborted${why(p.reason)}`,
+    "contract.proposed": p => `Contract ${p.contract}, version ${p.version}, proposed${why(p.reason)}`,
+    "contract.consent_requested": p => `Agreement requested on contract ${p.contract} from ${p.participants.join(", ")}`,
+    "contract.consent_recorded": p => `${p.agent} recorded ${p.verdict} on contract ${p.contract}${why(p.reason)}`,
+    "contract.objection_resolved": p => `${p.agent}'s objection to ${p.contract} was ${p.how}${why(p.reason)}`,
+    "contract.frozen": p => `Contract ${p.contract}, version ${p.version}, approved for execution by ${p.by}`,
+    "contract.amended": p => `Contract ${p.contract} amended to version ${p.version}${why(p.reason)}`,
+    "contract.superseded": p => `Contract ${p.contract} replaced by ${p.by_contract}`,
+    "runner.started": p => `Scheduler process ${p.pid} started`,
+    "runner.takeover": p => `Scheduler took over from process ${p.previous_pid}`,
+    "runner.stopped": p => `Scheduler stopped${why(p.reason)}`,
+    "agent.registered": p => `Worker ${p.agent} registered with runtime ${p.driver} as ${p.persona}`,
+    "agent.spawned": p => `Worker ${p.agent} started on task ${task(p.task)} (attempt ${p.attempt})`,
+    "agent.attested": p => `Worker ${p.agent} ${p.ok ? "passed" : "failed"} its tool access check`,
+    "agent.exited": p => `Worker ${p.agent} exited${p.task ? ` on task ${task(p.task)}` : ""}: ${p.reason}${p.code !== null ? ` (exit ${p.code})` : ""}`,
+    "agent.left": p => `Worker ${p.agent} left${why(p.reason)}`,
+    "agent.stop_requested": p => `${p.by} requested a stop for worker ${p.agent}${why(p.reason)}`,
+    "agent.stopped": p => `Worker ${p.agent} stopped${p.task ? ` on task ${task(p.task)}` : ""}`,
+    "task.ready": p => `Task ${task(p.task)} is ready for a worker`,
+    "task.claimed": p => `Task ${task(p.task)} claimed by worker ${p.agent} (attempt ${p.attempt})`,
+    "task.released": p => `Task ${task(p.task)} released by worker ${p.agent}${why(p.note)}`,
+    "task.progress": p => `Task ${task(p.task)}${p.percent !== undefined ? ` reached ${p.percent}%` : " reported progress"}${why(p.note)}`,
+    "task.submitted": p => `Task ${task(p.task)} submitted for review${why(p.summary ?? p.stat)}`,
+    "task.checks_passed": p => `Task ${task(p.task)} passed checks: ${p.commands.join(", ")}`,
+    "task.rejected": p => `Task ${task(p.task)} returned for changes: ${p.reasons.join("; ")}`,
+    "task.merged": p => `Task ${task(p.task)} merged into integration at ${p.integration_sha}`,
+    "task.accepted": p => `Task ${task(p.task)} completed and accepted`,
+    "task.blocked": p => `Task ${task(p.task)} blocked${p.escalation ? ` by escalation ${p.escalation}` : p.deps?.length ? ` waiting for ${p.deps.map(task).join(", ")}` : ": waiting for help"}`,
+    "task.unblocked": p => `Task ${task(p.task)} can continue`,
+    "task.retried": p => `Task ${task(p.task)} retried (attempt ${p.attempt})${why(p.why)}`,
+    "task.reassigned": p => `Task ${task(p.task)} reassigned from ${p.from} to ${p.to}`,
+    "task.split": p => `Task ${task(p.task)} split into ${p.into.map(t => `${t.title?.trim() || "untitled task"} (${t.id})`).join(", ")}`,
+    "task.spawned": p => `Task ${task(p.task)} delegated ${p.into.length} subtasks by ${p.by}`,
+    "task.subtasks_awaited": p => `Task ${task(p.task)} is waiting for its subtasks`,
+    "task.subtasks_joined": p => `Task ${task(p.task)} combined completed subtasks: ${p.children.map(task).join(", ")}`,
+    "task.failed": p => `Task ${task(p.task)} failed${why(p.why)}`,
+    "task.cancelled": p => `Task ${task(p.task)} cancelled${why(p.why)}`,
+    "lease.granted": p => `Write access granted to ${p.lease.agent} for task ${task(p.lease.task)}: ${p.lease.paths.join(", ")}`,
+    "lease.queued": p => `File access queued for ${p.request.agent} on task ${task(p.request.task)}: ${p.request.paths.join(", ")}`,
+    "lease.released": p => `File access reservation ${p.lease_id} released`,
+    "lease.expired": p => `File access reservation ${p.lease_id} expired`,
+    "lease.revoked": p => `File access reservation ${p.lease_id} revoked by ${p.by}${why(p.reason)}`,
+    "lease.violation": p => `Worker ${p.agent} wrote outside task ${task(p.task)}'s allowed paths: ${p.paths.join(", ")}`,
+    "artifact.published": p => `${p.kind} artifact ${p.name} published by task ${task(p.task)}`,
+    "artifact.changed": p => `Artifact ${p.name} updated to version ${p.version}`,
+    "dependency.requested": p => `Task ${task(p.task)} needs ${p.need.kind} ${p.need.ref}`,
+    "dependency.satisfied": p => `Task ${task(p.task)} received ${p.need.kind} ${p.need.ref}`,
+    "check.started": p => `Check ${p.command_id} started on ${p.task ? `task ${task(p.task)}` : "integration"}`,
+    "check.passed": p => `Check ${p.command_id} passed on ${p.task ? `task ${task(p.task)}` : "integration"} (${(p.duration_ms / 1000).toFixed(1)} seconds)`,
+    "check.failed": p => `Check ${p.command_id} failed on ${p.task ? `task ${task(p.task)}` : "integration"} (exit ${p.exit ?? "unknown"})`,
+    "check.timed_out": p => `Check ${p.command_id} timed out on ${p.task ? `task ${task(p.task)}` : "integration"}`,
+    "command.completed": p => `Command ${p.argv.join(" ")} finished on task ${task(p.task)} (exit ${p.exit ?? "unknown"})`,
+    "merge.succeeded": p => `Task ${task(p.task)} merged successfully at ${p.sha}`,
+    "merge.conflicted": p => `Task ${task(p.task)} has merge conflicts in ${p.files.join(", ")}`,
+    "note.posted": p => `Note on ${p.topic}: ${p.text}`,
+    "decision.recorded": p => `${p.decision.by} decided: ${p.decision.text}`,
+    "directive.issued": p => `Instruction ${p.id} sent to ${p.to.join(", ")}: ${p.text}`,
+    "directive.acknowledged": p => `${p.agent} acknowledged instruction ${p.id}`,
+    "dissent.tripwire_fired": p => `Concern ${p.dissent_id} matched recorded evidence${p.task ? ` on task ${task(p.task)}` : ""}: ${p.evidence}`,
+    "dissent.scored": p => `Concern ${p.dissent_id} assessed as ${p.outcome}`,
+    "escalation.raised": p => `${p.escalation.emergency === "money" ? "Budget extension requested" : "Help requested"}${p.escalation.task ? ` for task ${task(p.escalation.task)}` : ""}: ${p.escalation.summary}`,
+    "escalation.routed": p => `Escalation ${p.id} sent to ${p.to}`,
+    "escalation.auto_resolved": p => `Escalation ${p.id} resolved automatically${why(p.rule)}`,
+    "escalation.resolved": p => `Escalation ${p.id} resolved by ${p.by} (${p.action}): ${p.decision}`,
+    "escalation.awaiting_human": p => `Escalation ${p.id} needs a human: ${p.message}`,
+    "escalation.withdrawn": p => `Escalation ${p.id} withdrawn${why(p.reason)}`,
+    "huddle.started": p => `Discussion ${p.id} started for escalation ${p.escalation} with ${p.seats.join(", ")}`,
+    "huddle.turn": p => `${p.seat} spoke in discussion ${p.id}`,
+    "huddle.concluded": p => `Discussion ${p.id} concluded: ${p.outcome.replace(/_/g, " ").toLowerCase()}${why(p.decision)}`,
+    "budget.usage_recorded": p => `${usd(p.usd)} ${p.estimated ? "estimated" : "recorded"} for ${p.agent ?? p.source}${p.task ? ` on task ${task(p.task)}` : ""}`,
+    "budget.threshold_crossed": p => `Budget reached ${p.pct}%: ${usd(p.spent_usd)} used of ${usd(p.budget_usd)}`,
+    "budget.exhausted": p => `Budget exhausted for ${p.scope}${p.ref ? ` ${p.scope === "task" ? task(p.ref) : p.ref}` : ""}`,
+    "budget.extended": p => `Budget increased by ${usd(p.usd)} by ${p.by}`,
+    "watchdog.action": p => `Run monitor applied ${p.action.replace(/_/g, " ")} to ${p.target}${why(p.rule)}`,
+    "watchdog.circuit_opened": p => `Runtime ${p.driver} temporarily suspended after repeated failures${why(p.reason)}`,
+    "watchdog.circuit_closed": p => `Runtime ${p.driver} can accept work again`,
+    "watchdog.deadlock_detected": p => `Tasks are waiting on one another: ${p.cycle.map(task).join(", ")}`,
+    "watchdog.stall_detected": p => `Worker ${p.agent} stopped making progress${p.task ? ` on task ${task(p.task)}` : ""}`,
+    "sandbox.degraded": p => `Sandbox ${p.backend} has reduced isolation${why(p.reason)}`,
+    "postmortem.finding_recorded": p => `Review finding ${p.id} recorded: ${p.summary}`,
+    "postmortem.fix_updated": p => `Review finding ${p.id} marked ${p.status}${p.by ? ` by ${p.by}` : ""}`,
+    "postmortem.started": p => `Retrospective ${p.id} started with ${p.seats.join(", ")}`,
+    "postmortem.concluded": p => `Retrospective ${p.id} concluded with ${p.flagged} artifacts flagged for review`,
+  };
+  if (Object.hasOwn(labels, ev.type)) {
+    // The discriminated event union binds each payload to its own catalog entry.
+    return (labels[ev.type] as (p: AnyEvent["payload"]) => string)(ev.payload);
+  }
+  const fields = Object.entries(ev.payload).filter(([k, v]) => !/token|secret|blob/i.test(k) && ["string", "number", "boolean"].includes(typeof v))
+    .slice(0, 5).map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`).join("; ");
+  return `${String(ev.type).replace(/[._]/g, " ")}${fields ? `: ${fields}` : " recorded"}`;
+}

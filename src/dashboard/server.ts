@@ -19,44 +19,34 @@
 // <token>/state.json, a redacted subset of the blackboard.
 // ============================================================================
 
-import { lstatSync, readFileSync, rmSync, statSync } from "node:fs";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import type { IncomingMessage } from "node:http";
 import { openExecutionStore } from "../execution/store.js";
-import { EVENT_TYPES, type AnyEvent, type BlackboardState, type EventType, type ExecutionStore } from "../execution/types.js";
+import type { BlackboardState, ExecutionStore } from "../execution/types.js";
 import { hasBody, newCapabilityToken, sameOriginProblem, SecureServer, tokenMatches, type ResponseStream, type RouteContext } from "../http/secure-server.js";
 import { livePreviews, previewOrigins, previewScreenshotRoute, withFrameSrc } from "../previews/embed.js";
 import type { PreviewRecord } from "../previews/store.js";
 import { collectUsage } from "../usage/model.js";
 import { requestAgentStop, StopRefusal, stopper } from "../usage/stop.js";
-import { readRegularFile, writeFileAtomic } from "../security/fs-safe.js";
+import { writeFileAtomic } from "../security/fs-safe.js";
 import { signOffPostmortem, validateSignoffIdentity } from "../postmortem/meeting.js";
-import { pendingPostmortems, projectKeyOf } from "../postmortem/store.js";
 import { ARTIFACT_ID_RE, LIMITS, PM_ID_RE } from "../postmortem/types.js";
+import { runPage, loadTaskDetail, eventsPage, contractPage, postmortemsPage, runnerHealth } from "./data.js";
+export { capAtLine } from "./data.js";
 import { STATIC_ASSETS } from "./assets.js";
 import { renderDagSvg } from "./dag-svg.js";
 import { renderUsage, usageSpendSeries, type SpendSeries } from "./usage-page.js";
 import {
-  contractMarkdown,
-  eventMatches,
-  eventTask,
-  EVENTS_PAGE_SIZE,
-  parseEventFilter,
   publicState,
-  renderContract,
   renderDagPage,
   renderDissents,
   renderEscalations,
-  renderEvents,
-  renderOverview,
-  renderPostmortems,
   renderTaskDetail,
   renderTasks,
   type PageContext,
-  type PostmortemRecordView,
   type RunnerHealth,
-  type TaskDetail,
 } from "./render.js";
 
 /** Every dashboard page. No inline script or style anywhere, nothing from outside 'self'. */
@@ -64,15 +54,9 @@ export const DASHBOARD_CSP =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; " +
   "frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
-/** Most bytes of a diff shown on a task page, and of a failing check's output. */
-const DIFF_CAP_BYTES = 512 * 1024;
-const OUTPUT_CAP_BYTES = 64 * 1024;
-const RECORD_CAP_BYTES = 256 * 1024;
 /** Most concurrent event streams; more get 503 and the page falls back to polling. */
 const MAX_STREAMS = 32;
 const KEEPALIVE_MS = 15_000;
-/** A runner whose heartbeat is older than this is stale (heads-down.md §2). */
-const RUNNER_STALE_MS = 30_000;
 /** The header an action request must carry, with its surface's per-start nonce. */
 export const ACTION_HEADER = "x-roundtable-action";
 /** Most stop requests a dashboard accepts a minute. */
@@ -132,15 +116,6 @@ export async function startDashboard(executionId: string, opts: DashboardOptions
   return { url: d.url, close: () => d.close() };
 }
 
-/** Cut text to at most `max` bytes at a line boundary, so redaction never sees half a secret. */
-export function capAtLine(text: string, max: number): { text: string; truncated: boolean } {
-  if (Buffer.byteLength(text, "utf8") <= max) return { text, truncated: false };
-  let cut = Buffer.from(text, "utf8").subarray(0, max).toString("utf8");
-  const nl = cut.lastIndexOf("\n");
-  if (nl > 0) cut = cut.slice(0, nl);
-  return { text: cut, truncated: true };
-}
-
 interface Client {
   stream: ResponseStream;
   seq: number;
@@ -185,7 +160,7 @@ class DashboardServer {
       name: "Dashboard",
       routes: [
         previewScreenshotRoute(() => livePreviews(r => r.source.execution === this.store.id)),
-        { path: "/", handler: page(async () => renderOverview({ ...(await this.context()), usage: await this.usage() })) },
+        { path: "/", handler: page(async () => (await runPage(this.store, await this.context(), ""))!) },
         { path: "/tasks", handler: page(async () => renderTasks(await this.context())) },
         { path: "/usage", handler: page(() => this.usagePage()) },
         { path: /^\/agents\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/stop$/, methods: ["POST"], handler: (c) => this.stopAgent(c) },
@@ -197,6 +172,7 @@ class DashboardServer {
           if (html === undefined) return c.notFound();
           c.html(200, html, withFrameSrc(DASHBOARD_CSP, previewOrigins(previews)));
         } },
+        { path: /^\/escalations\/([^/]+)$/, handler: page(async c => runPage(this.store, await this.context(), `escalations/${c.match![1]}`)) },
         { path: "/escalations", handler: page(async () => renderEscalations(await this.context())) },
         { path: "/dissents", handler: page(async () => renderDissents(await this.context())) },
         { path: "/events", handler: page((c) => this.eventsPage(c.query)) },
@@ -345,109 +321,16 @@ class DashboardServer {
     }
   }
 
-  /** From runner.json, which the runner rewrites every 5 s ({pid, heartbeatAt}). */
-  private runnerHealth(): RunnerHealth {
-    let raw: { pid?: unknown; heartbeatAt?: unknown };
-    try {
-      raw = JSON.parse(readFileSync(join(this.store.dir, "runner.json"), "utf8"));
-    } catch {
-      return { status: "unknown", detail: "No runner heartbeat yet (runner.json is missing)." };
-    }
-    const at = typeof raw?.heartbeatAt === "string" ? Date.parse(raw.heartbeatAt) : NaN;
-    const pid = Number.isSafeInteger(raw?.pid) ? ` ${raw.pid}` : "";
-    if (!Number.isFinite(at)) return { status: "unknown", detail: `Runner${pid}: no heartbeat time recorded.` };
-    const age = Math.max(0, Math.round((Date.now() - at) / 1000));
-    return age * 1000 > RUNNER_STALE_MS
-      ? { status: "stale", detail: `Runner${pid}: last heartbeat ${age} s ago (stale after 30 s).` }
-      : { status: "alive", detail: `Runner${pid}: heartbeat ${age} s ago.` };
-  }
-
-  private async blobText(ref: string, max: number): Promise<{ text: string; truncated: boolean }> {
-    const buf = await this.store.getBlob(ref);
-    return capAtLine(buf.toString("utf8"), max);
-  }
+  private runnerHealth(): RunnerHealth { return runnerHealth(this.store); }
 
   private async taskPage(id: string, previews: PreviewRecord[] = []): Promise<string | undefined> {
-    const state = await this.store.state();
-    if (!Object.hasOwn(state.tasks, id)) return undefined;
-    const detail: TaskDetail = { events: [], outputs: {}, previews };
-    detail.events = (await this.store.events()).filter((ev) => eventTask(ev) === id).slice(-50);
-    const diff = Object.hasOwn(state.diffs, id) ? state.diffs[id] : undefined;
-    if (diff) {
-      try {
-        detail.diff = { stat: diff.stat, commit: diff.commit, ...(await this.blobText(diff.blob, DIFF_CAP_BYTES)) };
-      } catch (e) {
-        detail.diff = { stat: diff.stat, commit: diff.commit, error: `The diff cannot be read: ${e instanceof Error ? e.message : String(e)}` };
-      }
-    }
-    for (const [key, ch] of Object.entries(state.checks.task)) {
-      if (!key.startsWith(`${id}/`) || ch.status !== "failed" || !ch.blob) continue;
-      try {
-        detail.outputs[key] = (await this.blobText(ch.blob, OUTPUT_CAP_BYTES)).text;
-      } catch {
-        /* output not stored or unreadable: the signature still shows */
-      }
-    }
-    return renderTaskDetail(await this.context(state), id, detail);
+    const detail = await loadTaskDetail(this.store, id, previews);
+    return detail ? renderTaskDetail(await this.context(), id, detail) : undefined;
   }
 
-  private async eventsPage(query: URLSearchParams): Promise<string> {
-    const state = await this.store.state();
-    const f = parseEventFilter(query);
-    let found: AnyEvent[];
-    if (!f.type && !f.task) {
-      // Unfiltered: read only the page's window of the log.
-      const top = Math.min(state.seq, (f.before ?? state.seq + 1) - 1);
-      found = await this.store.events({ sinceSeq: Math.max(0, top - EVENTS_PAGE_SIZE - 1), limit: EVENTS_PAGE_SIZE + 1 });
-    } else {
-      const types = f.type ? (EVENT_TYPES.filter((x) => x === f.type || x.startsWith(`${f.type}.`)) as EventType[]) : undefined;
-      found = await this.store.events(types ? { types } : {});
-    }
-    const matches = found.filter((ev) => ev.seq <= state.seq && eventMatches(ev, f));
-    const more = matches.length > EVENTS_PAGE_SIZE || (!f.type && !f.task && matches.length > 0 && matches[0].seq > 1);
-    return renderEvents(await this.context(state), f, matches.slice(-EVENTS_PAGE_SIZE).reverse(), more);
-  }
-
-  private async contractPage(): Promise<string> {
-    const state = await this.store.state();
-    const c = state.contract;
-    let md: string | undefined;
-    let source = "";
-    if (c) {
-      md = contractMarkdown(c);
-      source = `Generated from the frozen contract, version ${c.version}.`;
-      const written = this.contractFile(c.id);
-      if (written !== undefined) md += `\n\n---\n\n# CONTRACT.md\n\n${written}`;
-    }
-    return renderContract(await this.context(state), md, source);
-  }
-
-  /** Findings, and each concluded meeting's record from its blob (the record is redacted and escaped at render). */
-  private async postmortemsPage(): Promise<string> {
-    const state = await this.store.state();
-    const records: Record<string, PostmortemRecordView> = {};
-    const pending = pendingPostmortems(projectKeyOf(this.store.header().repo_root));
-    for (const [id, m] of Object.entries(state.postmortem?.meetings ?? {})) {
-      if (!m.concluded) continue;
-      try {
-        Object.defineProperty(records, id, { value: { markdown: (await this.blobText(m.concluded.record, RECORD_CAP_BYTES)).text, pending: pending.filter(a => a.pm === id) }, enumerable: true });
-      } catch (e) {
-        Object.defineProperty(records, id, { value: { error: `The record cannot be read: ${e instanceof Error ? e.message : String(e)}`, pending: pending.filter(a => a.pm === id) }, enumerable: true });
-      }
-    }
-    return renderPostmortems({ ...(await this.context(state)), nonce: this.signoffNonce }, records);
-  }
-
-  /** contracts/<ctr>/CONTRACT.md as the contract tools wrote it, when present (a regular file up to 1 MiB). */
-  private contractFile(ctr: string): string | undefined {
-    if (!/^[a-z0-9][a-z0-9._-]{0,80}$/.test(ctr) || ctr.includes("..")) return undefined;
-    const path = join(this.store.dir, "contracts", ctr, "CONTRACT.md");
-    try {
-      return readRegularFile(path, { noFollow: true, maxBytes: 1024 * 1024 }).data.toString("utf8");
-    } catch {
-      return undefined;
-    }
-  }
+  private async eventsPage(query: URLSearchParams): Promise<string> { return eventsPage(this.store, await this.context(), query); }
+  private async contractPage(): Promise<string> { return contractPage(this.store, await this.context()); }
+  private async postmortemsPage(): Promise<string> { return postmortemsPage(this.store, { ...(await this.context()), nonce: this.signoffNonce }); }
 
   private async dagSvg(c: RouteContext): Promise<void> {
     const state = await this.store.state();

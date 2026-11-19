@@ -10,7 +10,10 @@ import { ID_RE } from "../execution/events.js";
 import { executionStatus, type ExecutionStatusReport } from "../execution/run-admin.js";
 import { listExecutions, openExecutionStore } from "../execution/store.js";
 import { runnerLiveness, type RunnerLiveness } from "../execution/runner-launch.js";
-import { renderOverview, renderEscalations, t, type RunnerHealth } from "../dashboard/render.js";
+import { t, type RunnerHealth } from "../dashboard/render.js";
+import { runPage, runnerHealth } from "../dashboard/data.js";
+import { renderDagSvg } from "../dashboard/dag-svg.js";
+import { publicState } from "../dashboard/render.js";
 import { DASHBOARD_CSS } from "../dashboard/assets.js";
 import { sitePage, type SiteSection } from "../dashboard/shell.js";
 import { SecureServer, escapeHtml, type Route } from "../http/secure-server.js";
@@ -80,13 +83,17 @@ export function indexRoutes(): Route[] {
       const previews = livePreviews();
       c.html(200, renderIndex(c.base, runs, archives(), persistedLiveDuels(), castingReport(), previews), withFrameSrc(INDEX_CSP, previewOrigins(previews)));
     } },
-    { path: /^\/x\/([^/]+)\/(|escalations|static\/dashboard\.(?:css|js))$/, async handler(c) {
-      const id = c.match![1], page = c.match![2];
+    { path: /^\/x\/([^/]+)\/(.*)$/, async handler(c) {
+      const id = c.match![1], path = c.match![2];
       if (!EXECUTION_ID_RE.test(id) || !(await listExecutions()).some(h => h.id === id)) return c.notFound();
       const store = await openExecutionStore(id);
-      if (page.startsWith("static/")) return c.send(200, page.endsWith("css") ? DASHBOARD_CSS : POLL_JS, page.endsWith("css") ? "text/css" : "text/javascript");
-      const context = { state: await store.state(), header: store.header(), base: `${c.base}x/${id}/`, indexBase: c.base, runner: indexRunnerHealth(runnerLiveness(id)) };
-      c.html(200, page === "escalations" ? renderEscalations(context) : renderOverview(context), INDEX_CSP);
+      if (path === "static/dashboard.css" || path === "static/dashboard.js") return c.send(200, path.endsWith("css") ? DASHBOARD_CSS : POLL_JS, path.endsWith("css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8");
+      const context = { state: await store.state(), header: store.header(), base: `${c.base}x/${id}/`, indexBase: c.base, runner: runnerHealth(store) };
+      if (path === "dag.svg") return c.send(200, renderDagSvg(context.state, { base: context.base, standalone: true }), "image/svg+xml; charset=utf-8");
+      if (path === "state.json") return c.json(200, publicState(context.state, context.runner));
+      const html = await runPage(store, context, path, c.query);
+      if (html === undefined) return c.notFound();
+      c.html(200, html, INDEX_CSP);
     } },
     { path: /^\/duels\/([^/]+)$/, handler(c) {
       const id = c.match![1];

@@ -1,6 +1,6 @@
 # Security policy
 
-This policy covers agent-roundtable 2.0.0 and the maintained 2.x release line.
+This policy covers agent-roundtable 2.1.0 and the maintained 2.x release line.
 
 | Version | Security fixes |
 | --- | --- |

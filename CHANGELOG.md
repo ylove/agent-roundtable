@@ -1,7 +1,10 @@
 # Changelog
 
-## 2.1.0 (unreleased)
+## 2.1.0 (2026-11-27)
 
+The first release on npm, as `agent-roundtable`.
+
+- Publish the package to npm as `agent-roundtable`, so the plugin's pinned `npx` command resolves to this project (#284)
 - Make every run page reachable from the read-only index, with titled tasks, human event summaries, worker activity and escalation details with resolution instructions (#279)
 - Add the shared index shell, Overview, Runs and global Escalations pages, truthful runner states, and `roundtable down` (#278)
 - Present archived duels and casting reports as readable pages, with agent figures, linked team turns, judging, dissents, isolated web prototypes and redacted JSON downloads (#280)
@@ -20,7 +23,7 @@
 - Add Google Antigravity (`agy`) as an explicit seat runtime and opt-in heads-down worker, with JSON status checks, reported token usage and driver-side submission (#230, WS33).
 - **Live duel engine (#227).** Independent staged builds, live process metrics, private stop/resume checkpoints, optional human judging, and a saved chosen artifact (`--out` to export). Adds `--stages`, `--resume`, `--human-judge`, and `--layout`, MCP stages/metrics/artifact metadata, and a staged promotional demo with backward-compatible replay. See [duel](docs/modes/duel.md).
 
-## 2.0.0 (not yet published to npm)
+## 2.0.0 (not published to npm; ships with 2.1.0)
 
 - **Node 22.19 or later.** The pinned HTTP client moves to undici 8, which requires Node 22.19.0; `engines`, the doctor's Node check and the docs follow.
 - **Distribution controls (#231).** Plugin-root package resolution, version-pinned npx commands, CLI bin advice, digest-pinned sandbox images, private state-home creation, explicit container build scripts, extended CodeQL queries, and a protected release publish job with SBOM attachments.

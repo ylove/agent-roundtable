@@ -1,13 +1,13 @@
 # Distribution
 
-Four ways to get Roundtable. Until the package is published, the npm, `npx`, plugin and registry paths below do not resolve; a source checkout works today (see [getting started](getting-started.md)).
+Ways to get Roundtable. The npm, `npx` and plugin paths use the [`agent-roundtable`](https://www.npmjs.com/package/agent-roundtable) package on npm, published from 2.1.0. A source checkout also works (see [getting started](getting-started.md)).
 
 | Path | Command | Status |
 | --- | --- | --- |
-| npm | `npm install -g agent-roundtable` | once published |
-| `npx` | `claude mcp add --scope user roundtable -- npx -y agent-roundtable@2.0.0 mcp` | once published |
+| npm | `npm install -g agent-roundtable` | published |
+| `npx` | `claude mcp add --scope user roundtable -- npx -y agent-roundtable@2.1.0 mcp` | published |
 | Docker | `docker run -i --rm -e ANTHROPIC_API_KEY agent-roundtable mcp` | build from the `Dockerfile`; no image is published |
-| Claude Code plugin | `claude plugin marketplace add ylove/agent-roundtable`, then `claude plugin install agent-roundtable@agent-roundtable` | the plugin runs the npm package, so it works once published |
+| Claude Code plugin | `claude plugin marketplace add ylove/agent-roundtable`, then `claude plugin install agent-roundtable@agent-roundtable` | runs the published npm package |
 | MCP registry | listed as `io.github.ylove/agent-roundtable` | once the owner publishes `server.json` |
 
 ## Docker
@@ -38,13 +38,13 @@ The Docker build installs dependencies with `npm ci --ignore-scripts`, then runs
 
 ## Claude Code plugin
 
-`.claude-plugin/marketplace.json` lists one plugin, in `plugins/agent-roundtable/`. Its `.mcp.json` runs `npx --prefix "${CLAUDE_PLUGIN_ROOT}" -y agent-roundtable@2.0.0 mcp`, pinned to the plugin version. Claude Code expands `${CLAUDE_PLUGIN_ROOT}` in plugin MCP configuration. The absolute plugin prefix selects package resolution independently of the opened project; the server keeps that project as its working directory. The plugin carries no keys: provider keys come from your environment or from `roundtable config set env-file <path>`. The `.mcp.json` lives inside the plugin directory, not the repository root, so opening this repository registers no server.
+`.claude-plugin/marketplace.json` lists one plugin, in `plugins/agent-roundtable/`. Its `.mcp.json` runs `npx --prefix "${CLAUDE_PLUGIN_ROOT}" -y agent-roundtable@2.1.0 mcp`, pinned to the plugin version. Claude Code expands `${CLAUDE_PLUGIN_ROOT}` in plugin MCP configuration. The absolute plugin prefix selects package resolution independently of the opened project; the server keeps that project as its working directory. The plugin carries no keys: provider keys come from your environment or from `roundtable config set env-file <path>`. The `.mcp.json` lives inside the plugin directory, not the repository root, so opening this repository registers no server.
 
 Manual resolution check (requires registry access and a published version): open a directory with a `node_modules/agent-roundtable` package of the same version as the plugin. Give that local package's bin a distinctive marker, start the plugin, and call an MCP tool. The marker must not appear and the plugin must run the published package. Also confirm that project-relative agent paths still resolve from the opened directory. This check is manual because the offline tests assert the command structure without fetching npm packages.
 
 ## CLI bin check
 
-`roundtable doctor` and `roundtable up` report a non-essential `bin` check, labelled "roundtable on PATH". It compares the first executable's realpath with this package's bin, then checks the nearest package manifest name for another installation of the same package. An absent PATH entry is fine for npx or direct Node usage. If another package supplies the first `roundtable`, the advice is to uninstall it, reorder PATH, use `npx -y agent-roundtable@2.0.0`, or invoke this package's bin by absolute path.
+`roundtable doctor` and `roundtable up` report a non-essential `bin` check, labelled "roundtable on PATH". It compares the first executable's realpath with this package's bin, then checks the nearest package manifest name for another installation of the same package. An absent PATH entry is fine for npx or direct Node usage. If another package supplies the first `roundtable`, the advice is to uninstall it, reorder PATH, use `npx -y agent-roundtable@2.1.0`, or invoke this package's bin by absolute path.
 
 ## MCP registry
 

@@ -231,7 +231,7 @@ test("review and sign-off tallies include UNCLEAR, bold verdicts and every zero 
     { APPROVE: 1, "APPROVE WITH CHANGES": 0, OBJECT: 0, UNCLEAR: 2 });
 });
 
-test("failed review and sign-off leave the entire session unchanged and retries do not duplicate versions", async (t) => {
+test("failed review and sign-off preserve phase state, retain spend and retry without duplicate versions", async (t) => {
   let failing;
   responses(t, (d) => d.agent === "skeptic" && d.phase === failing ? failure() : undefined);
   const first = await startUltraplan([cfo, skeptic], "Atomic phases", opts);
@@ -240,7 +240,8 @@ test("failed review and sign-off leave the entire session unchanged and retries 
     failing = phase;
     const before = structuredClone(u);
     await assert.rejects(submitPlan(u.id, "  Candidate  ", phase === "signoff"), { message: errMessage });
-    assert.deepEqual(u, before);
+    assert.deepEqual({ ...u, usage: undefined }, { ...before, usage: undefined });
+    assert.ok(u.usage.spent_usd > before.usage.spent_usd, "completed calls in a failed phase still cost money");
     failing = undefined;
     const expectedVersion = before.versions.length + 1;
     const result = await submitPlan(u.id, "  Candidate  ", phase === "signoff");
@@ -420,7 +421,9 @@ test("a failed phase waits for all in-flight calls before releasing the guard", 
   assert.deepEqual(ultraplans.get(first.ultraplanId), before);
   release.resolve();
   await rejected;
-  assert.deepEqual(ultraplans.get(first.ultraplanId), before);
+  const after = ultraplans.get(first.ultraplanId);
+  assert.deepEqual({ ...after, usage: undefined }, { ...before, usage: undefined });
+  assert.ok(after.usage.spent_usd > before.usage.spent_usd, "the settled call's spend is retained");
   await endUltraplan(first.ultraplanId);
 });
 
@@ -747,7 +750,7 @@ test("absent and invalid plans give actionable errors without changing session",
   await endUltraplan(u.id);
 });
 
-test("failed no-plan phases are atomic and repeated reviews use latest verdict per agent index", async (t) => {
+test("failed no-plan phases preserve phase state and spend, and repeated reviews use latest verdict per agent index", async (t) => {
   let fail;
   let latest = false;
   responses(t, d => {
@@ -761,7 +764,8 @@ test("failed no-plan phases are atomic and repeated reviews use latest verdict p
     fail = phase;
     const before = structuredClone(u);
     await assert.rejects(submitPlan(u.id, undefined, phase === "signoff"), { message: errMessage });
-    assert.deepEqual(u, before);
+    assert.deepEqual({ ...u, usage: undefined }, { ...before, usage: undefined });
+    assert.ok(u.usage.spent_usd > before.usage.spent_usd, "completed calls in a failed phase still cost money");
     fail = undefined;
     latest = true;
     const result = await submitPlan(u.id, undefined, phase === "signoff");
@@ -868,7 +872,7 @@ test("execution_ready with the orchestrator writing: next asks for the block; th
   const text = formatUltraplanResult(final);
   assert.ok(text.startsWith(final.finalPlan + "\n\n```json\n"));
   const trailer = JSON.parse(/```json\n([\s\S]*)\n```$/.exec(text)[1]);
-  assert.deepEqual(trailer, { ultraplan_id: final.ultraplanId, archived: true, tally: final.tally });
+  assert.deepEqual(trailer, { ultraplan_id: final.ultraplanId, archived: true, tally: final.tally, usage: final.usage });
 });
 
 test("one OBJECT sign-off means signedOff is false, and every finalized result ends with the trailer", async (t) => {

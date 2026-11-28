@@ -90,8 +90,8 @@ test("usage page: cards, provenance chips with words, legend, platform table; no
   assert.match(r.body, /<button type="button" id="stop-cancel" autofocus>Cancel<\/button>/);
   assert.match(r.body, /<div id="announce" class="sr-only" aria-live="polite"><\/div>/);
   assert.match(r.body, /<p class="live" id="live" role="status" aria-live="polite">/);
-  assert.match(r.body, /<nav>.*Overview.*Tasks.*>Usage<.*Graph.*Escalations.*>Dissents<.*Events.*Contract/);
-  assert.match(r.body, /body data-base="[^"]+" data-seq="\d+" data-live="swap"/);
+  assert.match(r.body, /<nav class="run-nav"[^>]*>.*Overview.*Tasks.*>Usage<.*Graph.*Escalations.*>Dissents<.*Events.*Contract/);
+  assert.match(r.body, /body(?: class="run-page")? data-base="[^"]+" data-seq="\d+" data-live="swap"/);
 });
 
 test("usage page: the nonce is delivered only inside the Usage page", async (t) => {

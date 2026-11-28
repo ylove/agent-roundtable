@@ -53,11 +53,15 @@ A successful call returns the execution id, runner pid, optional dashboard URL a
 
 Choose explicitly, or set `ROUNDTABLE_DEFAULT_VISIBILITY`:
 
-- `visibility: {dashboard: true}`: a loopback dashboard with capability URL, task DAG, contract, checks, diffs, budget, a Usage page (who is spending what, with a Stop button per agent), events and human-action banners. Keep the returned URL private: anyone who holds it can read the run and stop its agents. Steering stays in MCP tools.
+- `visibility: {dashboard: true}`: a loopback dashboard with capability URL, task DAG, contract, checks, diffs, budget, a Usage page (who is spending what, with a Stop button per agent), events and human-action banners. Keep the returned URL private: anyone who holds it can read the run, stop its agents and sign off pending postmortem artifacts. Steering stays in MCP tools.
 - `visibility: {github: {repo: "owner/name", create_project: true}}`: optional parent/task issues, project status, progress and `needs-human` labels/comments through the installed GitHub CLI. This needs login, repository write access and the `repo`/`project` scopes. The sync redacts text and excludes diffs/command output; remote visibility can degrade without blocking work.
 - `visibility: {chat_only: true}`: follow progress in chat without either UI. Use this alone; dashboard and GitHub can instead be combined with each other.
 
 GitHub options include an existing `project_number` and `project_owner`, or `create_project`; `pr: true` requests publication of the integration branch and a PR at completion. The runner never pushes to the base branch or auto-merges. Human review remains the final merge step. Public sessions at the table use a separate [publishing mechanism](modes/public-sessions.md).
+
+Every run page is also reachable from the local index under `x/<execution-id>/`: tasks and their details, events, the contract, graph, dissents, postmortems and usage. The index stays read-only, with no Stop buttons or sign-off forms. Each escalation has a detail page at `x/<execution-id>/escalations/<escalation-id>` with its request, evidence, related events and resolution instructions. Task pages show recorded worker output when available and explain when no log was stored.
+
+The Postmortems form adds a second mutating dashboard route: `POST <token>/postmortems/<pm>/signoff`. It works in `human` mode. Before reading state, the route checks its per-start action nonce, Origin and Sec-Fetch-Site, JSON content type, a 16 KiB body limit, loopback bind and peer, a rate limit of 10 requests a minute, and the exact body fields, identity and artifact ids. It then requires a meeting from this run and applies the CLI's sign-off checks. Tailnet binds refuse every sign-off request and direct you to the CLI. Each action nonce appears only in its own page's meta element. The nonce and custom header force a CORS preflight that the server never approves. This is not a sandbox. An agent with shell access and the dashboard URL can post, just as it can run the CLI.
 
 ## Watch and status
 
@@ -149,6 +153,12 @@ A local backend requires `ROUNDTABLE_ALLOW_LOCAL_SANDBOX=1` or the human's expli
 ## Runtime workers
 
 A contract can also name a [runtime profile](runtimes.md#as-heads-down-workers) as the worker driver: `workers.driver: "runtime:gemini"` (or `runtime:hermes`, `runtime:openclaw`, or a profile you configured), or `execute(worker_driver: "runtime:gemini")`. They are off unless `ROUNDTABLE_ALLOW_RUNTIME_WORKERS=1`; an unknown runtime or a missing opt-in fails at contract validation, not at launch. They run under the same controls as the Codex driver: the task worktree, an allowlisted environment, leases enforced at submit, scrubbed relayed output, usage priced from the table when the runtime reports none, and the usual timeout and stop handling. Connector contracts are refused.
+
+Google Antigravity (`agy`) is available beside the Gemini CLI: use `workers.driver: "runtime:agy"` with `workers.model: "gemini-3.8-flash-medium"` and the same opt-in. Its worker flags are `--mode accept-edits --sandbox --disable-slash-commands`; the sandbox restricts terminal commands. agy 1.4.7 cannot inject or allowlist MCP servers or skip plugins for a single run, so this profile has no roundtable MCP tools and uses driver-side submit. **The owner's own agy MCP servers and plugins load in the worker.** Roundtable leaves agy's global configuration alone and never passes `--dangerously-skip-permissions`. It uses agy's own sign-in, with no API-key variable even under `ROUNDTABLE_WORKER_AUTH=api_key`.
+
+agy must exit 0, report JSON `status: "SUCCESS"`, and return a nonempty `response` before the driver submits; a failed or empty result, or any non-empty `denied_actions` list, submits nothing. Reported usage counts `usage.input_tokens` and `usage.output_tokens`. Separate `thinking_tokens` are not folded into output (usage path arrays select alternatives rather than add them). Antigravity reports credits rather than USD cost; roundtable does not convert credits to dollars. Missing dollar costs can only be estimated through the usual pricing table, so configure pricing if the model is otherwise unpriced. Prompts travel on argv and are visible in the local process list; argv size limits apply. This driver cannot request additional leases and a resumed task starts a fresh invocation.
+
+At the table, the corresponding seat is `--seat x=agy:gemini-3.8-flash-medium`, with `--mode plan --disable-slash-commands` and JSON output. In agy 1.4.7 slash disabling makes plan mode a no-op and produces a harmless stderr warning; seats rely on headless permission denial for read-only behavior. See [runtime profiles](runtimes.md) for usage accounting, process limits and the opt-in live smoke.
 
 ## Codex opt-in
 

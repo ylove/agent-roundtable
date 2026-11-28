@@ -11,7 +11,7 @@ import { refreshPreviews, startPreview, stopPreview, type StartInput } from "../
 import { PREVIEW_ID_RE } from "../previews/args.js";
 import { PREVIEW_SCRIPTS, PreviewError } from "../previews/scripts.js";
 import { previewLabel } from "../previews/embed.js";
-import type { PreviewRecord } from "../previews/store.js";
+import { PREVIEW_DISPLAYS, type PreviewRecord } from "../previews/store.js";
 import { LIST_PREVIEWS, START_PREVIEW, STOP_PREVIEW } from "./names.js";
 import { ORCHESTRATOR_ONLY, READ_ONLY_LOCAL, type ToolArgs, type ToolDefinition } from "./shared.js";
 
@@ -24,7 +24,7 @@ export const previewTools: ToolDefinition[] = [
       "Preview a web app live: run a heads-down task's dev server (execution_id and task_id) or a duel prototype directory (prototype) in a locked-down Docker container, published on 127.0.0.1 only (no tunnel, never 0.0.0.0). " +
       "It runs the package's dev, start or preview script (script picks one) as `npm run <script>`; the server must listen on 0.0.0.0 and honour PORT. " +
       "When the source has no installed packages the dependencies are installed inside the container, through a proxy that allows only the npm registry, with lifecycle scripts off. " +
-      "Returns the preview id and its http://127.0.0.1:<port> url, and the page check. The dashboard task page, the duel room and the serve index embed it. Idle previews stop after 30 minutes; at most 3 run at once.",
+      "Returns the preview id, display mode, its http://127.0.0.1:<port> url, and the page check. Display is live (auto-framed), click (Load preview), or screenshot (page-check image and new-tab link). Explicit display overrides ROUNDTABLE_PREVIEW_DISPLAY; otherwise tool starts default to click. Idle previews stop after 30 minutes; at most 3 run at once.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -34,6 +34,7 @@ export const previewTools: ToolDefinition[] = [
         prototype: { type: "string", maxLength: 1024, description: "Instead of a task: an absolute prototype directory under the prototype root (a duel team's version)." },
         script: { type: "string", enum: [...PREVIEW_SCRIPTS], description: "The package script to run (default: the first of dev, start, preview that exists)." },
         port: { type: "integer", minimum: 1024, maximum: 65535, description: "The port the dev server listens on in the container (default: the usual port of the package's dev server, else 3000)." },
+        display: { type: "string", enum: [...PREVIEW_DISPLAYS], description: "How rooms display this preview. Overrides ROUNDTABLE_PREVIEW_DISPLAY; default: click." },
       },
     },
   },
@@ -61,7 +62,7 @@ export const previewTools: ToolDefinition[] = [
 const render = (body: Record<string, unknown>): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify(body, null, 2) }] });
 
 const view = (r: PreviewRecord) => ({
-  preview_id: r.id, url: `${r.origin}/`, shows: previewLabel(r), script: r.script, container_port: r.container_port,
+  preview_id: r.id, url: `${r.origin}/`, display: r.display, shows: previewLabel(r), script: r.script, container_port: r.container_port,
   started_at: r.started_at, idle_ttl_min: Math.round(r.ttl_ms / 60_000), ...(r.check && { page_check: r.check }),
 });
 
@@ -73,6 +74,7 @@ export function startInput(a: Record<string, unknown>): StartInput {
   if (a.prototype !== undefined) input.prototype = a.prototype as string;
   if (a.script !== undefined) input.script = a.script as string;
   if (a.port !== undefined) input.port = a.port as number;
+  if (a.display !== undefined) input.display = a.display as string;
   return input;
 }
 

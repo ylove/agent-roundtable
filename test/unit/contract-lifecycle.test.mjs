@@ -1197,7 +1197,7 @@ test("verdicts are stored as own properties, whatever the agent name", async () 
   const { ROUNDTABLE_HOME, AGENTS_DIR } = await import("../../dist/config.js");
   mkdirSync(AGENTS_DIR, { recursive: true });
   writeFileSync(join(AGENTS_DIR, "duel-skeptic.md"), "---\nname: The Skeptic\ndescription: test persona\n---\nYou are a skeptic.\n");
-  const demo = JSON.parse(readFileSync(fileURLToPath(new URL("../../examples/duel/demo.json", import.meta.url)), "utf8"));
+  const demo = JSON.parse(readFileSync(fileURLToPath(new URL("../fixtures/duel-v1.json", import.meta.url)), "utf8"));
   const saveDuel = (id, edit = (a) => a) => {
     mkdirSync(join(ROUNDTABLE_HOME, "duels"), { recursive: true });
     writeFileSync(join(ROUNDTABLE_HOME, "duels", `${id}.json`), JSON.stringify(edit(JSON.parse(JSON.stringify(demo).replaceAll("marketer", "duel-skeptic")))));

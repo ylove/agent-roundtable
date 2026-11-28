@@ -12,7 +12,10 @@ import { detachServe, printService, serveStatus, startServe, stopServe } from ".
 function printStatus(): void {
   const status = serveStatus();
   if (status.remote) console.log("Service record is on another host.");
-  else if (status.running) console.log(process.stdout.isTTY ? `Running: ${status.info!.url}` : "Running. Run roundtable serve status in a terminal to see its private URL.");
+  else if (status.running) {
+    console.log(process.stdout.isTTY ? `Running: ${status.info!.url}` : "Running. Run roundtable serve status in a terminal to see its private URL.");
+    console.log("Stop it with: roundtable down");
+  }
   else console.log("Service is not running.");
 }
 

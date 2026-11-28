@@ -21,6 +21,7 @@ export const CASTING_CALL_SCHEMA: JsonSchema & { type: "object" } = {
     seat_connectors: SEAT_CONNECTORS_PROP,
     mix: { type: "string", enum: ["auto", "cheap"], description: "Prefer lower-cost providers using the table's routing judgment." },
     turn_timeout_s: { ...START_DUEL_SCHEMA.properties!.turn_timeout_s, description: "Seconds per turn; default 90." },
+    max_usd: { type: "number", exclusiveMinimum: 0, description: "Optional positive finite session spend cap in USD. Stops the casting call and archives available results when metered spend reaches the cap." },
     max_seconds: { ...START_DUEL_SCHEMA.properties!.max_seconds, description: "Whole-run deadline; default 300 seconds. Stops new calls and archives available results." },
   },
   required: ["brief"],
@@ -30,7 +31,7 @@ export const CASTING_CALL_DESCRIPTION = "Audition 2 to 24 personas for any brief
 export async function castingCallTool(args: Record<string, unknown>, ctx?: ToolCallContext): Promise<CallToolResult> {
   args = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== null));
   const opts: CastingOptions = {
-    brief: args.brief as string, agents: args.agents as string[] | undefined, agentsDir: args.agents_dir as string | undefined,
+    maxUsd: args.max_usd as number | undefined, brief: args.brief as string, agents: args.agents as string[] | undefined, agentsDir: args.agents_dir as string | undefined,
     seats: args.seats as number | undefined, examine: args.examine as boolean | undefined, dryRun: args.dry_run as boolean | undefined,
     provider: args.provider as CastingOptions["provider"], model: args.model as string | undefined, seat: args.seat as CastingOptions["seat"], mix: args.mix as CastingOptions["mix"],
     ...((args.connectors as string[] | undefined)?.length && { connectors: args.connectors as string[] }),

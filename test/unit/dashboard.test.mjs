@@ -122,7 +122,7 @@ test("dashboard: every page escapes and redacts hostile run content, with no inl
   assert.match(seen["dag"], /<svg class="dag"/);
   // Overview numbers: a submitted (0.8), b blocked and c pending (0).
   assert.match(seen[""], /<div class="big">27%<\/div>/);
-  assert.match(seen[""], /<progress max="100" value="27">/);
+  assert.match(seen[""], /<progress max="100" value="27"[ >]/);
   assert.match(seen["tasks"], /<a href="\/[A-Za-z0-9_-]{24}\/tasks\/a">a<\/a>/);
   assert.match(seen["events?task=a"], /task\.progress/);
   assert.doesNotMatch(seen["events?task=a"], /note\.posted<\/code>/);

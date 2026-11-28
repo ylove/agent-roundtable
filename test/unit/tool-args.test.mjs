@@ -6,7 +6,7 @@ const { checkArgs, handleToolCall, formatAgentWorkshopResult, tools } = await im
 const fields = {
   start_ultraplan: {
     string: ["task", "context", "duel", "draft_plan", "planner", "repo_dir", "provider", "model", "base_url"],
-    array: ["agents", "connectors"], number: ["revision_rounds"], boolean: ["public", "execution_ready", "duel_source"], object: ["seat_connectors"],
+    array: ["agents", "connectors"], number: ["revision_rounds"], usd: ["max_usd"], boolean: ["public", "execution_ready", "duel_source", "dry_run"], object: ["seat_connectors"],
   },
   submit_plan: { string: ["ultraplan_id", "plan"], boolean: ["final"] },
   end_ultraplan: { string: ["ultraplan_id"] },
@@ -41,7 +41,7 @@ const fields = {
     resolution: ["action"], format: ["format"], array: ["participants"], object: ["amendment"],
   },
   postmortem: {
-    string: ["project", "work", "reason", "finding_id"], exe: ["execution_id"], pmAction: ["action"], pmId: ["pm"],
+    string: ["project", "work", "reason", "finding_id", "orchestrator"], array: ["accept"], exe: ["execution_id"], pmAction: ["action"], pmId: ["pm"],
     pmFinding: ["finding"], pmFix: ["fix"],
   },
   hold_postmortem: {

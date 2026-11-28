@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CONNECTOR_NAME, MCP_TOOL_NAME, type ConnectorSpec } from "../connectors/config.js";
+import { acceptConnectorTools, sanitizeDescription, sanitizeInputSchema, type ListedConnectorTool } from "../connectors/pin.js";
 import { agentKey } from "../agents.js";
 import { isExecutableFile } from "../executables.js";
 import { MAX_TOOL_CALLS, MAX_TOOL_RESULT_BYTES, capBytes, type RunTool, type ToolOutcome } from "../providers/tool-loop.js";
@@ -99,18 +100,17 @@ export function parseSeatConnectorsFlag(value: string): SeatConnectorMap {
   return { ...out };
 }
 
-interface AnnotatedTool { name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: { readOnlyHint?: boolean } }
-
 /** The tools of one connector a seat may call: read-only by annotation, plus the config's explicit list. */
-export function allowedTools(connector: string, spec: Pick<ConnectorSpec, "tools">, listed: readonly AnnotatedTool[]): { spec: ToolSpec; tool: string }[] {
+export function allowedTools(connector: string, spec: Pick<ConnectorSpec, "tools">, listed: readonly ListedConnectorTool[]): { spec: ToolSpec; tool: string }[] {
   const out: { spec: ToolSpec; tool: string }[] = [];
   for (const t of listed) {
     if (typeof t.name !== "string" || !MCP_TOOL_NAME.test(t.name)) continue;
     const full = `${connector}__${t.name}`;
     if (full.length > 64) continue;
     if (!(t.annotations?.readOnlyHint === true || spec.tools?.includes(t.name))) continue;
-    const schema = t.inputSchema && typeof t.inputSchema === "object" && t.inputSchema.type === "object" ? t.inputSchema : { type: "object", properties: {} };
-    out.push({ tool: t.name, spec: { name: full, description: scrubAndCap(String(t.description ?? ""), 500), inputSchema: schema } });
+    const schema = sanitizeInputSchema(t.inputSchema && typeof t.inputSchema === "object" && t.inputSchema.type === "object" ? t.inputSchema : { type: "object", properties: {} });
+    if (!schema) continue;
+    out.push({ tool: t.name, spec: { name: full, description: sanitizeDescription(t.description), inputSchema: schema } });
     if (out.length >= MAX_TOOLS_PER_CONNECTOR) break;
   }
   return out;
@@ -168,22 +168,23 @@ export async function startSeatConnectors(names: readonly string[], options: Sta
       live.set(name, { client, tools: new Map() });
       const timeout = AbortSignal.timeout(START_TIMEOUT_MS);
       const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+      const tools: ListedConnectorTool[] = [];
       try {
         await client.connect(transport, { signal });
-        const tools: AnnotatedTool[] = [];
         let cursor: string | undefined;
         do {
           const page = await client.listTools(cursor ? { cursor } : undefined, { signal });
-          tools.push(...(page.tools as AnnotatedTool[]));
+          tools.push(...(page.tools as ListedConnectorTool[]));
           cursor = page.nextCursor;
         } while (cursor && tools.length < 512);
-        for (const { tool, spec: toolSpec } of allowedTools(name, spec, tools)) {
-          offered.set(toolSpec.name, { connector: name, tool, spec: toolSpec });
-          live.get(name)!.tools.set(toolSpec.name, tool);
-        }
       } catch (error) {
         if (options.signal?.aborted) throw error;
         throw new Error(`Connector ${name} is unavailable.`);
+      }
+      acceptConnectorTools(name, spec, tools, options.home);
+      for (const { tool, spec: toolSpec } of allowedTools(name, spec, tools)) {
+        offered.set(toolSpec.name, { connector: name, tool, spec: toolSpec });
+        live.get(name)!.tools.set(toolSpec.name, tool);
       }
     }
   } catch (error) {

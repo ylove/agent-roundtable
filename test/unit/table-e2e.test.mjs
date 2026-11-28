@@ -81,7 +81,7 @@ test('duel end to end against a scripted OpenAI-compatible server streams NDJSON
   const types = list.map(e => e.type);
   assert.equal(types[0], 'start');
   assert.equal(types.at(-1), 'end');
-  assert.equal(types.filter(x => x === 'prototype').length, 2);
+  assert.equal(types.filter(x => x === 'prototype').length, 8);
   assert.equal(types.filter(x => x === 'assessment').length, 4);
   assert.equal(types.filter(x => x === 'dissent').length, 2);
   assert.ok(types.lastIndexOf('prototype') < types.indexOf('assessment'), 'prototypes precede assessments');
@@ -103,5 +103,5 @@ test('duel --dry-run --json --no-hold replays the synthetic duel with no keys', 
   const types = events(out).map(e => e.type);
   assert.equal(types[0], 'start');
   assert.equal(types.at(-1), 'end');
-  assert.equal(types.filter(x => x === 'prototype').length, 2);
+  assert.equal(types.filter(x => x === 'prototype').length, 8);
 });

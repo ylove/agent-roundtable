@@ -12,6 +12,8 @@
 //   usage [--json] [--watch]                                            who is using what, on which platform
 //   stop <agent> [--execution <exe> | --session <id>] [--reason <text>] stop one agent (heads-down or at the table)
 //   preview start|list|stop                                             Docker dev-server previews on 127.0.0.1
+//   postmortem pending|signoff                                         review and sign off persisted lessons
+//   connectors trust <name>                                             accept a connector's tools on its next start
 //   up / doctor                                                         set up, check and start the local service
 //   --version | -v | version                                            print the version
 //   help                                                                this text
@@ -41,15 +43,19 @@ export const USAGE = [
   "  agent-roundtable usage [--json] [--watch]       who is using what, on which platform, measured or estimated",
   "  agent-roundtable stop <agent> [--execution <exe> | --session <id>] [--reason <text>]",
   "                                                  stop one agent (a heads-down worker or an at-the-table session)",
-  "  roundtable cast <brief> [--agents a,b,... | --agents-dir <abs-path>] [--seats n] [--dry-run] [--json]",
-  "  roundtable duel <brief> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--kind web|code|diagram|text] [--criteria a,b] [--open]",
-  "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2]",
+  "  roundtable cast <brief> [--agents a,b,... | --agents-dir <abs-path>] [--seats n] [--max-usd n] [--dry-run] [--json]",
+  "  roundtable duel <brief> --team-a <designer,builder> --team-b <marketer,skeptic> --judges <cfo> [--kind web|code|diagram|text] [--criteria a,b] [--stages 1-4] [--human-judge] [--out dir] [--layout auto|split|stack] [--max-usd n] [--open]",
+  "  roundtable duel --resume <duel-id> [--max-usd n] [--out dir] [--open]",
+  "  roundtable debate|waffle|meeting <topic> --agents <designer,skeptic> [--rounds 2] [--max-usd n]",
   "  roundtable up [--setup] [--no-input] [--no-serve] [--open] [--check-keys]",
   "  roundtable doctor [--json] [--check-keys]",
+  "  roundtable postmortem pending [--project <dir>] [--json]",
+  "  roundtable postmortem signoff <pm> --by <identity> <artifact-id>... [--json]",
   "  roundtable --version | -v | version",
   "  roundtable serve [--detach] [--no-keep-runners] [--bind loopback|tailnet] | serve status|stop",
+  "  roundtable down                               stop the local service (alias of serve stop)",
   "  roundtable serve --print-service launchd|systemd",
-  "  roundtable preview start <exe> <task> | --prototype <dir> [--script dev|start|preview] [--port <n>]",
+  "  roundtable preview start <exe> <task> | --prototype <dir> [--script dev|start|preview] [--port <n>] [--display live|click|screenshot]",
   "  roundtable preview list [--json] | preview stop <id>",
   "  roundtable notify init ntfy | notify test",
   "  roundtable config set notify.<key> <value>",
@@ -59,6 +65,7 @@ export const USAGE = [
   "  roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>",
   "  roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=value]",
   "  roundtable config unset connector <name> | secrets check",
+  "  roundtable connectors trust <name>",
   "  agent-roundtable help                           this text",
 ].join("\n");
 
@@ -297,14 +304,22 @@ export async function runCli(argv: string[]): Promise<void> {
       process.exitCode = await runPreviewCli(rest);
       return;
     }
+    case "down":
+      if (rest.length) return usage("down accepts no arguments");
+      // Fall through to the same implementation and output as serve stop.
     case "serve": {
       const { runServeCli } = await import("./cli-serve.js");
-      process.exitCode = await runServeCli(rest);
+      process.exitCode = await runServeCli(command === "down" ? ["stop"] : rest);
       return;
     }
     case "notify": {
       const { runNotifyCli } = await import("./cli-serve.js");
       process.exitCode = await runNotifyCli(rest);
+      return;
+    }
+    case "postmortem": {
+      const { runPostmortemCli } = await import("./cli-postmortem.js");
+      process.exitCode = await runPostmortemCli(rest);
       return;
     }
     case "agents": {
@@ -331,6 +346,7 @@ export async function runCli(argv: string[]): Promise<void> {
     case "waffle":
     case "meeting":
     case "secrets":
+    case "connectors":
     case "config": {
       const { runTableCli } = await import("./cli-table.js");
       process.exitCode = await runTableCli(command, rest);

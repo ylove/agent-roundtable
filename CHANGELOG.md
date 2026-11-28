@@ -1,6 +1,29 @@
 # Changelog
 
-## 2.0.0 (not yet published to npm)
+## 2.1.0 (2026-11-27)
+
+The first release on npm, as `agent-roundtable`.
+
+- Publish the package to npm as `agent-roundtable`, so the plugin's pinned `npx` command resolves to this project (#284)
+- Make every run page reachable from the read-only index, with titled tasks, human event summaries, worker activity and escalation details with resolution instructions (#279)
+- Add the shared index shell, Overview, Runs and global Escalations pages, truthful runner states, and `roundtable down` (#278)
+- Present archived duels and casting reports as readable pages, with agent figures, linked team turns, judging, dissents, isolated web prototypes and redacted JSON downloads (#280)
+- Add ultraplan cost estimates, a zero-call dry run, and spend in results and archives (#274)
+- Discover default-port Ollama with an off switch, rank small local models behind hosted models on demanding seats, and add opt-in free pricing for configured compatible endpoints (#273)
+- Add a loopback dashboard form for postmortem lesson sign-off, including human mode, with pending text and hashes, guarded JSON requests and the shared CLI audit checks (#268)
+- Count provider usage from rejected billable replies toward session spend caps and the usage ledger (#252)
+- Fix a lock that could stay held by a live process after it released it, when a contender clearing a dead lock moved it aside at the same moment (#265)
+- Add `ROUNDTABLE_LESSON_SIGNOFF=human` to limit persisted postmortem lesson sign-off to the CLI (#251)
+- **Preview display modes (#246, WS35d).** Add `live`, `click` and `screenshot` via CLI `--display`, tool `display` and `ROUNDTABLE_PREVIEW_DISPLAY`. The CLI defaults to `live` from an interactive terminal and `click` otherwise; worker and execution starts default to `click`. Rooms show the recorded mode, and screenshot cards use the latest page-check image. See [previews](docs/previews.md).
+- **Live duel GIF (#229).** A recorded promotional GIF of the room at the top of the README, made by the reproducible `scripts/record-duel.mjs` from a redesigned demo fixture (a coin game against a pocket planner, with per-turn usage). The room now shows each app as a scaled desktop preview, and its footer spend never reads below the pane metrics. See [recording the duel GIF](docs/demo.md#recording-the-duel-gif).
+- **Connector metadata controls (#245).** Bound and scrub seat connector metadata, mark descriptions as untrusted text, pin raw tool lists per configuration, and add `roundtable connectors trust <name>` for renewed acceptance.
+- Persisted lessons need a person’s sign-off, with pending review in the postmortem tool, CLI and dashboard record, signer/time audit and lineage, and informational review notices for legacy lessons (#243).
+- Add optional `--max-usd` / `max_usd` spend caps, cumulative cap displays, higher-cap duel resume, and `ROUNDTABLE_MAX_LIVE_SESSIONS` (default 4) for concurrent self-running sessions (duels, casting calls) (#244, WS35b).
+- **Live duel room (#228).** Side-by-side staged apps, Harness transcripts, live version swaps, metrics, stop/resume and human judging controls, plus split and stack terminal layouts. See [the duel room](docs/modes/duel-room.md).
+- Add Google Antigravity (`agy`) as an explicit seat runtime and opt-in heads-down worker, with JSON status checks, reported token usage and driver-side submission (#230, WS33).
+- **Live duel engine (#227).** Independent staged builds, live process metrics, private stop/resume checkpoints, optional human judging, and a saved chosen artifact (`--out` to export). Adds `--stages`, `--resume`, `--human-judge`, and `--layout`, MCP stages/metrics/artifact metadata, and a staged promotional demo with backward-compatible replay. See [duel](docs/modes/duel.md).
+
+## 2.0.0 (not published to npm; ships with 2.1.0)
 
 - **Node 22.19 or later.** The pinned HTTP client moves to undici 8, which requires Node 22.19.0; `engines`, the doctor's Node check and the docs follow.
 - **Distribution controls (#231).** Plugin-root package resolution, version-pinned npx commands, CLI bin advice, digest-pinned sandbox images, private state-home creation, explicit container build scripts, extended CodeQL queries, and a protected release publish job with SBOM attachments.

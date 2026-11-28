@@ -39,6 +39,7 @@ function agentBlock(a: UsageAgent, paint: Paint, cols: number): string[] {
   const head = `  ${padTo(stateText(a, paint), 12)} ${paint(BOLD, cut(name, 28))}${platform ? paint(DIM, `  ${cut(platform, Math.max(12, cols - 60))}`) : ""}`;
   const where = a.where === "host" ? "host agent, figures reported by the host" : `${WHERE[a.where]} · ${a.where === "heads-down" ? `exe-${a.scope.slice(-6)}` : a.scope}`;
   const detail: string[] = [where];
+  if (a.max_usd !== undefined) detail.push(`spent $${(a.spent_usd ?? 0).toFixed(4)} of $${a.max_usd} cap`);
   if (a.task) detail.push(`task ${a.task}`);
   if (a.budget_share !== undefined) detail.push(`${Math.round(a.budget_share * 100)}% of the budget`);
   const io = a.tokens.input + a.tokens.output > 0 ? `${tokensShort(a.tokens.input)} in, ${tokensShort(a.tokens.output)} out${a.tokens.cache_read ? `, ${tokensShort(a.tokens.cache_read)} cached` : ""}` : "";

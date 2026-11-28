@@ -3,7 +3,7 @@
 // ============================================================================
 //
 // Supported keywords: type (string, number, integer, boolean, array, object), enum, required, items,
-// properties, additionalProperties: false, minLength/maxLength, pattern, minimum/maximum, maxItems.
+// properties, additionalProperties: false, minLength/maxLength, pattern, minimum/maximum, exclusiveMinimum, maxItems.
 // Anything else (description, minItems, ...) is ignored. Messages name the full path of the field,
 // e.g. "visibility.github.repo" or "messages[0].role".
 //
@@ -35,6 +35,7 @@ export interface JsonSchema {
   maxLength?: number;
   pattern?: string;
   minimum?: number;
+  exclusiveMinimum?: number;
   maximum?: number;
   minItems?: number;
   maxItems?: number;
@@ -127,6 +128,7 @@ function constraintProblem(schema: JsonSchema, value: unknown, path: string): st
     }
   }
   if (typeof value === "number") {
+    if (schema.exclusiveMinimum !== undefined && value <= schema.exclusiveMinimum) return fail(path, `must be greater than ${schema.exclusiveMinimum}`, hint);
     if (schema.minimum !== undefined && value < schema.minimum) return fail(path, `must be at least ${schema.minimum}`, hint);
     if (schema.maximum !== undefined && value > schema.maximum) return fail(path, `must be at most ${schema.maximum}`, hint);
   }

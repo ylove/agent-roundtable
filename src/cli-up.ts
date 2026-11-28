@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import { parseFlags } from "./cli.js";
 import { bundledUndiciNeedsUpdate } from "./http/fetch.js";
 import { VERSION } from "./config.js";
+import { activeLessons, isLegacyLesson } from "./postmortem/lessons.js";
+import { listProjectKeys, pendingPostmortems } from "./postmortem/store.js";
 import { scrub } from "./security/secrets.js";
 import { loadUserEnvironment, readUserConfig, setNotifyConfig, setUserConfig, userConfigHome } from "./user-config.js";
 
@@ -32,6 +34,8 @@ export interface Probes {
   engines: string;
   /** Provider ids that have credentials or an endpoint right now (read again after setup). */
   providers(): string[];
+  /** Cached tags discovery, independent of the optional paid key checks. */
+  ollama?(): Promise<{ url: string; model: string; reachable: boolean; pulled: boolean; discoveryDisabled?: boolean }>;
   /** The environment variable that holds each provider's key (by name only). */
   keyNames: Record<string, string>;
   findExecutable(name: string): string | null;
@@ -103,7 +107,12 @@ export async function runDoctor(probes: Probes, options: { checkKeys?: boolean }
   const git = probes.findExecutable("git");
   add({ id: "git", label: "git", essential: true, ok: !!git, detail: git ? "found" : "not found", fix: "Install git; heads-down runs and worktrees need it." });
   add(checkRoundtableBin(probes.roundtableBin()));
-  const keyed = probes.providers();
+  const ollama = await probes.ollama?.();
+  const keyed = [...new Set([...probes.providers(), ...(ollama?.reachable ? ["ollama"] : [])])];
+  if (ollama) add({ id: "ollama", label: "Ollama", essential: false, ok: ollama.discoveryDisabled || (ollama.reachable && ollama.pulled),
+    detail: ollama.discoveryDisabled ? "default discovery disabled"
+      : ollama.reachable ? `found at ${ollama.url}; model ${ollama.model}: ${ollama.pulled ? "pulled" : "not pulled"}` : `not reachable at ${ollama.url}`,
+    fix: ollama.reachable ? `Run ollama pull ${ollama.model}.` : "Start Ollama, or set OLLAMA_URL, if you want free local models." });
   const missing = Object.entries(probes.keyNames).filter(([p]) => !keyed.includes(p)).map(([, name]) => name);
   add({
     id: "keys", label: "Provider keys", essential: true, ok: keyed.length > 0,
@@ -129,6 +138,16 @@ export async function runDoctor(probes: Probes, options: { checkKeys?: boolean }
   add({ id: "docker", label: "Docker", essential: false, ok: docker.ok, detail: docker.ok ? "daemon running" : (docker.reason ?? "not running"), fix: "Start Docker; it is the default sandbox for heads-down checks." });
   const chrome = probes.chrome();
   add({ id: "chrome", label: "Chrome", essential: false, ok: !!chrome, detail: chrome ? "found" : "not found", fix: "Install Chrome or Chromium, or set ROUNDTABLE_CHROME_PATH, for page checks and screenshots." });
+  for (const key of listProjectKeys()) {
+    try {
+      const legacy = activeLessons(key).filter(isLegacyLesson).length;
+      const pending = pendingPostmortems(key).length;
+      if (legacy || pending) add({
+        id: `postmortem-${key}`, label: `Postmortem review (${key})`, essential: false, ok: true,
+        detail: `${legacy} accepted before sign-off; ${pending} pending. Review with roundtable postmortem pending --project ${key} and postmortem(action: "lessons").`,
+      });
+    } catch { /* A review notice does not affect setup checks. */ }
+  }
   return { ok: checks.filter(c => c.essential).every(c => c.ok), checks };
 }
 
@@ -248,7 +267,10 @@ git and a provider key are present. Exit codes: 0 ok, 1 an essential check faile
 
 async function defaultProbes(): Promise<Probes> {
   const { PROVIDER_IDS } = await import("./provider-ids.js");
-  const { PROVIDER_KEYS, availableProviders } = await import("./providers/health.js");
+  const { PROVIDER_KEYS, availableProviders, providerHealth } = await import("./providers/health.js");
+  const { DEFAULT_OLLAMA_URL, ollamaModel } = await import("./providers/local-models.js");
+  const { DEFAULT_MODELS, ollamaDiscoveryEnabled } = await import("./config.js");
+  const { describeUrl } = await import("./security/url-guard.js");
   const { findExecutable } = await import("./executables.js");
   const { runtimeRegistry } = await import("./runtimes/registry.js");
   const { findChrome } = await import("./prototypes/browser.js");
@@ -266,6 +288,13 @@ async function defaultProbes(): Promise<Probes> {
   }
   return {
     nodeVersion: process.version, bundledUndiciVersion: process.versions.undici, engines, providers: () => availableProviders(process.env), keyNames,
+    ollama: async () => {
+      const discovery = await providerHealth.discoverOllama();
+      const model = process.env.ROUNDTABLE_OLLAMA_MODEL?.trim() || DEFAULT_MODELS.ollama;
+      return { url: describeUrl(process.env.OLLAMA_URL?.trim() || DEFAULT_OLLAMA_URL), model,
+        reachable: discovery.reachable, pulled: !!ollamaModel(discovery, model),
+        discoveryDisabled: !process.env.OLLAMA_URL?.trim() && !ollamaDiscoveryEnabled() };
+    },
     findExecutable: name => findExecutable(name),
     roundtableBin: () => {
       const path = findExecutable("roundtable");
@@ -386,6 +415,7 @@ export async function runUpCli(command: "up" | "doctor", args: string[], io: UpI
         if (state.url && showUrl) out(`Index: ${state.url}`);
         else out("Index: run roundtable serve status in a terminal to see its private URL.");
         if (flags.open && state.url) (deps.open ?? ((u: string) => { void import("./prototypes/board.js").then(m => m.openInBrowser(u)); }))(state.url);
+        out("Stop it with: roundtable down");
       } catch (error) {
         out(`Service: not started. ${clean(error instanceof Error ? error.message : "failed")}`);
       }

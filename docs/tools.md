@@ -14,6 +14,7 @@ Audition 2 to 24 personas for any brief, cross-examine them through a neutral ca
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `brief` | string | yes | Brief of 1 to 4000 characters. |
 | `agents` | array of string | no | 2 to 24 persona identifiers; default every persona in the directory. |
 | `agents_dir` | string | no | Absolute persona directory. |
@@ -44,6 +45,7 @@ Start a meeting with an agent. Returns a meeting ID for follow-up messages. Use 
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `agent` | string | yes | Agent identifier or path to prompt file. Examples: "cfo", "fpa", "product" |
 | `agenda` | string | yes | The topic, question, or task to discuss with the agent. |
 | `context` | string | no | Optional additional context, document content, or data to share. |
@@ -123,6 +125,7 @@ Start a LOCAL meeting with an agent using the installed Claude CLI. This uses yo
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `agent` | string | yes | Agent identifier or path to prompt file. Examples: "cfo", "fpa", "product" |
 | `agenda` | string | yes | The topic, question, or task to discuss with the agent. |
 | `context` | string | no | Optional additional context, document content, or data to share. |
@@ -200,6 +203,7 @@ Start a collaboration where agents take turns responding; returns a collaboratio
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `agents` | array of string | yes | Array of agent identifiers. Examples: ["cfo", "fpa"], ["product", "engineering", "design"] minItems: `2`. |
 | `seats` | object | no | Optional assignments keyed by exact agent identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (an API provider or explicit [CLI runtime](runtimes.md) name) and model. |
 | `topic` | string | no | Required except in conversation mode, where it is an optional loose theme, not an agenda. |
@@ -235,10 +239,11 @@ Example: `start_collaboration`
 
 Omitting `provider`, or passing `"provider": "auto"`, routes eligible seats automatically. The result includes `routing`, an array of seat identifiers, providers, models and short `reason` strings. Explicit seat assignments take priority; runtime seats stay explicit. Caller `base_url` requires an explicit compatible provider. See [Provider judgment](providers.md#provider-judgment).
 
-Run a duel and return its result: two teams each build an artifact for the same brief (a web page, code, a Mermaid diagram or a text document), judges assess both against a rubric, and the losing side files dissents. The call runs the whole duel, which can take several minutes. The result has the duel id, winner, tally, each team's artifact title, kind and ok flag, the judges' verdicts, the dissents, a usage summary and the archive id (duels/<id>.json, replayable with roundtable duel --replay). It never includes artifact source. The tool sends an MCP progress notification on every turn, artifact and verdict, so a host must either allow a long request timeout (default 600 seconds of duel, more for large teams) or reset its timeout on progress; a client with a fixed 60-second timeout will cancel the duel. No room is opened. Orchestrator server only. See [duel](modes/duel.md).
+Run a duel and return its result: two teams each build an artifact for the same brief (a web page, code, a Mermaid diagram or a text document), judges assess both against a rubric, and the losing side files dissents. The call runs the whole duel, which can take several minutes. The result has the duel id, winner, tally, each team's artifact title, kind and ok flag, the judges' verdicts, the dissents, a usage summary and the archive id (duels/<id>.json, replayable with roundtable duel --replay). It includes per-team `metrics` and `chosen: {team, version, dir, files}` for an A/B winner, with `dir` relative to `ROUNDTABLE_HOME`; ties choose nothing. It never includes artifact source. `human_judge` and `resume` are deliberately absent from the MCP schema: use the CLI for those interactive flows; this tool runs a whole duel at once. The tool sends an MCP progress notification on every turn, artifact and verdict, so a host must either allow a long request timeout (default 1050 seconds for a four-stage web duel, more for large teams) or reset its timeout on progress; a client with a fixed 60-second timeout will cancel the duel. No room is opened. Orchestrator server only. See [duel](modes/duel.md).
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
 | `provider` | string | no | Omit or use `auto` for [provider judgment](providers.md#provider-judgment). Explicit providers retain their defaults. Values: `auto`, `anthropic`, `openai`, `together`, `replicate`, `ollama`, `openai_compatible`. |
 | `model` | string | no | Optional explicit model pin. |
 | `topic` | string | yes | The brief both teams answer, for example a landing page for a product, a module with a given interface, or a written policy. maxLength: `4000`. |
@@ -246,11 +251,12 @@ Run a duel and return its result: two teams each build an artifact for the same 
 | `team_b` | array of string | yes | Team B personas, 1 to 4. Same roles as team_a. No persona may appear twice across both teams and the judges. |
 | `judges` | array of string | yes | Judge personas, 1 to 5. |
 | `kind` | string | no | What the teams build: web (a self-contained index.html, inline CSS, optional inline JS; default), code (source files, shown as read-only text and never executed), diagram (Mermaid source) or text (markdown or plain text). Values: `web`, `code`, `diagram`, `text`. |
-| `criteria` | array of string | no | Judging rubric. Default: fit to the brief, quality, usability and accessibility, and risk or safety within the judge's own remit. maxItems: `8`; each item up to 120 characters. |
+| `criteria` | array of string | no | Judging rubric. Default: fit to the brief, quality, usability and accessibility, risk or safety within the judge's own remit, and process efficiency (tokens, time, rewrites and errors). maxItems: `8`; each item up to 120 characters. |
+| `stages` | integer | no | Build stages per team, 1–4; default 4 for web and 1 for other kinds. |
 | `rounds` | number | no | 1 (default) judges once; 2 lets a team the judges did not approve revise once and keeps the original tally. minimum: `1`, maximum: `2`. |
 | `seats` | object | no | Optional assignments keyed by exact persona identifier: {"designer":{"provider":"anthropic","model":"sonnet"}}. Each entry accepts agent, provider (an API provider or explicit [CLI runtime](runtimes.md) name) and model. |
 | `turn_timeout_s` | number | no | Seconds allowed for each turn. Default 90 (builds get at least 240). maximum: `3600`. |
-| `max_seconds` | number | no | Time limit for the whole duel before it moves to closings. Default 600, plus 120 per member beyond two on the larger team. minimum: `1`, maximum: `3600`. |
+| `max_seconds` | number | no | Time limit for the whole duel before it moves to closings. Default 600, plus 150 per extra stage and 120 per member beyond two on the larger team, capped at 3600. minimum: `1`, maximum: `3600`. |
 
 Example: `start_duel`
 
@@ -369,10 +375,12 @@ Example: `list_collaborations`
 
 Omitting `provider`, or passing `"provider": "auto"`, routes eligible seats automatically. The result includes `routing`, an array of seat identifiers, providers, models and short `reason` strings. Explicit seat assignments take priority; runtime seats stay explicit. Caller `base_url` requires an explicit compatible provider. See [Provider judgment](providers.md#provider-judgment).
 
-Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: "plan" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. The final result ends with a JSON trailer {ultraplan_id, archived, tally}; signed off means no OBJECT and no UNCLEAR sign-off. With execution_ready: true, plans end with a roundtable-tasks block and sign-offs check it, so propose_contract { from_session: ultraplan_id } can build a contract from it. Public runs post the task and phase outputs, never context.
+Plan with specialist agents: you (the orchestrator) own and write the plan; agents give input before the draft, review each version, then sign off. Call with dry_run: true first to get the cost estimate without calling any agent; when it is above $0, show it to the person before starting. With no draft_plan, returns input and awaiting_plan: write v1 with contributor tags such as [cfo], then call submit_plan. With draft_plan, reviews it as v1 and returns awaiting_revision. Revise in response to amendments, explaining rejected advice; call submit_plan with final: true to collect sign-offs and close. Alternatively set planner to a persona to draft/revise/sign off server-side in one call. If that run returns a step with error, the session remains open. A step with phase: "plan" returns the unreviewed latest version and previousReviews when an earlier version was reviewed. Continue with submit_plan: omit plan to review or sign off that version as-is, or pass a full revised plan; or close with end_ultraplan. Show the final document to the user verbatim, including every agent's input and sign-off. The final result ends with a JSON trailer {ultraplan_id, archived, tally, usage}; signed off means no OBJECT and no UNCLEAR sign-off. With execution_ready: true, plans end with a roundtable-tasks block and sign-offs check it, so propose_contract { from_session: ultraplan_id } can build a contract from it. Public runs post the task and phase outputs, never context.
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
+| `max_usd` | number | no | Positive finite session spend cap in USD, checked after every metered call. Includes estimates for unpriced tokens; known free models cost zero. |
+| `dry_run` | boolean | no | Resolve seats and return the cost estimate with no provider calls or live session. Default false. |
 | `agents` | array of string | yes | Specialists contributing input, independent reviews and sign-offs. A planner may also be a participant. minItems: `1`. |
 | `task` | string | yes | What the plan must accomplish; required and non-empty. |
 | `context` | string | no | Optional background shared with the agents; never posted publicly. |
@@ -404,7 +412,7 @@ Example: `start_ultraplan`
 
 ### submit_plan
 
-Submit a full next plan version, or omit plan to review or sign off the latest version as-is without creating a version. This also recovers a stopped planner run with phase: "plan". If no version exists yet, pass plan. You write revised plans from agent input/reviews; tag contributing agents on steps and explain which amendments you accepted or rejected and why. Default final: false collects independent reviews and leaves the session awaiting_revision. Set final: true to collect sign-offs, close, and return the final markdown document; with a supplied plan this is allowed straight after input without a review. Show that final document to the user verbatim, including input and sign-offs. A failed phase leaves the previous state intact so you can retry.
+Submit a full next plan version, or omit plan to review or sign off the latest version as-is without creating a version. This also recovers a stopped planner run with phase: "plan". If no version exists yet, pass plan. You write revised plans from agent input/reviews; tag contributing agents on steps and explain which amendments you accepted or rejected and why. Default final: false collects independent reviews and leaves the session awaiting_revision. Set final: true to collect sign-offs, close, and return the final markdown document; with a supplied plan this is allowed straight after input without a review. Show that final document to the user verbatim, including input and sign-offs. A failed phase preserves the plan and phase state so you can retry. Completed calls still add to spend.
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
@@ -820,7 +828,7 @@ Orchestrator server only. A task's build or a duel prototype runs its dev server
 
 ### start_preview
 
-Runs `npm run <script>` (`dev`, `start` or `preview`; never a free-form command) for a task's worktree (`execution_id` and `task_id`) or a prototype directory under the prototype root (`prototype`, absolute). Installs dependencies in a container, with scripts off and only the npm registry reachable, when the source has no installed `node_modules` directory. Returns `preview_id`, `url`, `shows`, `script`, `container_port`, `started_at`, `idle_ttl_min` and the `page_check` record.
+Runs `npm run <script>` (`dev`, `start` or `preview`; never a free-form command) for a task's worktree (`execution_id` and `task_id`) or a prototype directory under the prototype root (`prototype`, absolute). Installs dependencies in a container, with scripts off and only the npm registry reachable, when the source has no installed `node_modules` directory. Returns `preview_id`, `url`, `display`, `shows`, `script`, `container_port`, `started_at`, `idle_ttl_min` and the `page_check` record.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -828,6 +836,7 @@ Runs `npm run <script>` (`dev`, `start` or `preview`; never a free-form command)
 | `task_id` | string | The task whose worktree to preview. |
 | `prototype` | string | Instead of a task: an absolute prototype directory. |
 | `script` | `dev` \| `start` \| `preview` | Default: the first the package defines. |
+| `display` | `live` \| `click` \| `screenshot` | Auto-frame, load on click, or page-check image with a new-tab link. Overrides `ROUNDTABLE_PREVIEW_DISPLAY`; otherwise defaults to `click`. See [display modes](previews.md#display-modes). |
 | `port` | integer 1024–65535 | Container port; default the dev server's usual port, else 3000. |
 
 ```json
@@ -888,11 +897,13 @@ Stop an agent and write a handoff:
 
 ### postmortem
 
-Postmortem mode: while testing sends fixers back, you keep a running draft of every finding; when all fixers are done the agents that did the work meet with you (hold_postmortem) and leave actionable artifacts, kept per project and read back before the next plan. Off by default: action enable turns it on for a project ONLY when the human asked for postmortem meetings, retrospectives, or agents improving themselves or each other; reason quotes their words verbatim (recorded in the project's log and the audit log). Nothing infers it. A heads-down run inherits it from its contract (propose_contract sets it); the runner then records a finding by itself when a submission is sent back after testing. disable turns it off and keeps stored postmortems. record adds a finding to the draft of a scope (execution_id for a run, or work for at-the-table work): {summary, detected_by, responsible[] (persona names, or "orchestrator"), category, task?, evidence[] (refs only: sha256: blob refs, event ids, commit shas, paths)}. fix sets a finding's fix {status: pending|fixed|abandoned, by?, ref?}; in a run, retries, merges and failures update fixes by themselves. draft returns the findings, what is still pending and whether the meeting can be held. lessons returns the active lessons of a project (always, whether or not the mode is on); list shows its drafts and postmortems; read returns a postmortem's full record (every turn) for you to show the human verbatim.
+`ROUNDTABLE_LESSON_SIGNOFF=human` limits sign-off to the CLI. This stops MCP sign-off, including prompt-injected calls. It is not a sandbox; agents with shell access can still run the CLI.
+
+Postmortem mode: while testing sends fixers back, you keep a running draft of every finding; when all fixers are done the agents that did the work meet with you (hold_postmortem) and leave actionable artifacts, kept per project and read back before the next plan. Off by default: action enable turns it on for a project ONLY when the human asked for postmortem meetings, retrospectives, or agents improving themselves or each other; reason quotes their words verbatim (recorded in the project's log and the audit log). Nothing infers it. A heads-down run inherits it from its contract (propose_contract sets it); the runner then records a finding by itself when a submission is sent back after testing. disable turns it off and keeps stored postmortems. record adds a finding to the draft of a scope (execution_id for a run, or work for at-the-table work): {summary, detected_by, responsible[] (persona names, or "orchestrator"), category, task?, evidence[] (refs only: sha256: blob refs, event ids, commit shas, paths)}. fix sets a finding's fix {status: pending|fixed|abandoned, by?, ref?}; in a run, retries, merges and failures update fixes by themselves. draft returns the findings, what is still pending and whether the meeting can be held. Persisted kinds need a person’s sign-off. pending (project required) lists pending items across concluded records: pm, id, kind, target, text and hash. signoff requires pm, orchestrator (the human-supplied identity) and explicit accept[]; it applies only selected pending ids and reports already signed-off ids without reapplying. lessons returns a pending count and marks legacy lessons accepted_before_signoff: true; legacy lessons keep flowing into prompts. lessons returns the active lessons of a project (always, whether or not the mode is on); list shows its drafts and postmortems; read returns a postmortem's full record (every turn) for you to show the human verbatim.
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
-| `action` | string | yes | enable, disable, record, fix, draft, lessons, list or read. Values: `enable`, `disable`, `record`, `fix`, `draft`, `lessons`, `list`, `read`. |
+| `action` | string | yes | enable, disable, record, fix, draft, lessons, list, read, pending or signoff. Values: `enable`, `disable`, `record`, `fix`, `draft`, `lessons`, `list`, `read`, `pending`, `signoff`. |
 | `project` | string | no | The project: a directory inside its git repository (resolved with git rev-parse --show-toplevel; refused outside a git work tree or with submodules), or a project key returned earlier. maxLength: `1000`. |
 | `execution_id` | string | no | The heads-down run (exe-…) the draft belongs to. Give this or work. pattern: `^exe-[0-9a-hjkmnp-tv-z]{16}$`. |
 | `work` | string | no | A short label for at-the-table work (for example "checkout redesign") when there is no run. Give this or execution_id. maxLength: `200`. |
@@ -909,7 +920,9 @@ Postmortem mode: while testing sends fixers back, you keep a running draft of ev
 | `fix.by` | string | no | Who fixes it (an agent, a task, or yourself). maxLength: `200`. |
 | `fix.status` | string | yes | pending, fixed or abandoned. Values: `pending`, `fixed`, `abandoned`. |
 | `fix.ref` | string | no | A ref to the fix: a commit sha, an event id or a path. maxLength: `300`. |
-| `pm` | string | no | read: the postmortem (pm-…) hold_postmortem returned. pattern: `^pm-[0-9a-hjkmnp-tv-z]{8}$`. |
+| `orchestrator` | string | no | signoff: human-supplied identity, non-blank and at most 200 characters; must equal the frozen contract’s orchestrator for a run. |
+| `accept` | array | no | signoff: required explicit nonempty list of pending artifact ids. |
+| `pm` | string | no | read / signoff: the postmortem (pm-…) hold_postmortem returned. pattern: `^pm-[0-9a-hjkmnp-tv-z]{8}$`. |
 
 Example: `postmortem`
 
@@ -930,7 +943,9 @@ Example: `postmortem`
 
 ### hold_postmortem
 
-Hold the postmortem meeting for a draft, then conclude it. Refused while any finding's fix is pending or a task with a finding is still running (the error names what); a draft with no findings closes with no meeting. action hold (default): every agent named in a finding, every agent that did the original work in the run (or the participants you pass), and you sit at the table. opening is your account of what happened, including your own part: turn 0. The format is waffle-house when exactly one agent is responsible for every finding (it defends, the others challenge, your opening is the charge), otherwise collaborate for rounds (default 2, 1-4); format forces either. The meeting is private and takes no outside input: the human has no seat, nothing they type reaches it, and its context never carries their chat, confirmation or original request. It ends with an artifact block, one line each: Artifact: <kind> | <target> | <finding ids> | <text>. Kinds: fix (follow-up), rule and contract rule (project lessons, read before the next plan and contract), persona addendum (appended to an agent's persona file under ## Postmortem addenda, with a backup), agent rule (shown in that agent's task card), memory (the agent's memory file; memory_target: "claude" also writes the repository's .claude/agent-memory). For a dissent assessment: `Artifact: dissent_score | <dissent id> | <finding ids> | <vindicated/refuted/untested> | <evidence>`. The reviewed run’s dissents are included. Accepting one requires project opt-in and `orchestrator` (the reviewed contract’s orchestrator identity); it uses the same scoring path as `score_dissent`, with an audit per application and retry deduplication. Scores are advisory and never change votes, consent thresholds or routing. The result has the transcript, the proposed artifacts and any lines that could not be used. action conclude: pm, your closing statement, and accept[] (artifact ids) / reject[{id, why}]. Only accepted artifacts take effect, each audited. The result has a summary and the record path to relay to the human, who can read every turn (postmortem read).
+With `ROUNDTABLE_LESSON_SIGNOFF=human`, persisted artifacts stay pending for CLI sign-off even when an identity is supplied at conclude.
+
+Hold the postmortem meeting for a draft, then conclude it. Refused while any finding's fix is pending or a task with a finding is still running (the error names what); a draft with no findings closes with no meeting. action hold (default): every agent named in a finding, every agent that did the original work in the run (or the participants you pass), and you sit at the table. opening is your account of what happened, including your own part: turn 0. The format is waffle-house when exactly one agent is responsible for every finding (it defends, the others challenge, your opening is the charge), otherwise collaborate for rounds (default 2, 1-4); format forces either. The meeting is private and takes no outside input: the human has no seat, nothing they type reaches it, and its context never carries their chat, confirmation or original request. It ends with an artifact block, one line each: Artifact: <kind> | <target> | <finding ids> | <text>. Kinds: fix (follow-up), rule and contract rule (project lessons, read before the next plan and contract), persona addendum (appended to an agent's persona file under ## Postmortem addenda, with a backup), agent rule (shown in that agent's task card), memory (the agent's memory file; memory_target: "claude" also writes the repository's .claude/agent-memory). For a dissent assessment: `Artifact: dissent_score | <dissent id> | <finding ids> | <vindicated/refuted/untested> | <evidence>`. The reviewed run’s dissents are included. Accepting one requires project opt-in and `orchestrator` (the reviewed contract’s orchestrator identity); it uses the same scoring path as `score_dissent`, with an audit per application and retry deduplication. Scores are advisory and never change votes, consent thresholds or routing. The result has the transcript, the proposed artifacts and any lines that could not be used. action conclude: pm, your closing statement, and accept[] (artifact ids) / reject[{id, why}]. Persisted kinds (rule, agent_rule, contract_rule, persona_addendum, memory) need a person’s sign-off: supply orchestrator (the human-supplied identity) plus explicit accept ids, otherwise they remain pending in the record and excluded from prompts. The identity must match a run’s frozen contract orchestrator. Each applied persisted artifact records the signer and time in the record, lesson and hash audit. Review with postmortem pending and apply selected ids with postmortem signoff. The result has a summary and the record path to relay to the human, who can read every turn (postmortem read).
 
 | Argument | Type | Required | Meaning and constraints |
 | --- | --- | --- | --- |
@@ -944,7 +959,7 @@ Hold the postmortem meeting for a draft, then conclude it. Refused while any fin
 | `rounds` | integer | no | hold: rounds (default 2). minimum: `1`. maximum: `4`. |
 | `memory_target` | string | no | hold: with "claude", accepted memory artifacts are also appended to `<repo>/.claude/agent-memory/<agent>/MEMORY.md` (refused through symlinks). Values: `claude`. |
 | `pm` | string | no | conclude: the postmortem (pm-…) hold returned. pattern: `^pm-[0-9a-hjkmnp-tv-z]{8}$`. |
-| `orchestrator` | string | conditional | conclude: required when accepting `dissent_score` artifacts; the reviewed contract’s orchestrator identity, as for `score_dissent`. |
+| `orchestrator` | string | conditional | conclude: human-supplied sign-off identity for persisted kinds, non-blank and at most 200 characters; must equal the frozen contract’s orchestrator for a run. Also required for `dissent_score`, as for `score_dissent`. |
 | `closing` | string | no | conclude: your closing statement, the last turn of the record. maxLength: `4000`. |
 | `accept` | array of string | no | conclude: ids of the artifacts to apply (a1, a2, …). maxItems: `20`. |
 | `reject` | array of object | no | conclude: artifacts you turn down, each with why. maxItems: `20`. |
@@ -1422,3 +1437,5 @@ improve_agent { "agent": "cfo", "with": ["product-lead"], "include_self": false,
 ### Page-check option
 
 `start_duel`, `start_collaboration`, `start_meeting`, `start_ultraplan` and the casting call accept `connectors: ["name", ...]`, configured MCP connectors every seat may call as tools (read-only tools unless the connector config lists more; unknown names are refused before any provider call; see [connectors at the table](connectors.md#at-the-table)). They also accept `seat_connectors: {"seat": ["name", ...]}` to limit a seat to some of those connectors (seats not listed get all; see [limiting a seat](connectors.md#limiting-a-seat)). `start_local_meeting` takes neither: it runs the Claude CLI with its own tools. `start_duel` accepts `page_check: false` to skip headless checks of web builds and revisions (default on when Chrome/Chromium exists). Prototype-mode `start_collaboration`, `start_meeting` and `start_local_meeting` accept the same option alongside `prototype: true`. Check metadata includes load status, capped/scrubbed console errors and exceptions, failed-request count and an optional reason. No browser means not checked, never a failed artifact. Duel results include each team's check and the version of each verdict; screenshots stay local and outside the result/archive.
+
+Session spend caps stop meetings, local meetings, collaborations and ultraplans through the normal session stop path, with `by: "spend cap"`. A capped duel saves a checkpoint; resume with `roundtable duel --resume <id> --max-usd <higher-cap>`. Casting archives available results. The process admits at most `ROUNDTABLE_MAX_LIVE_SESSIONS` (default 4) concurrent self-running sessions. Only sessions that run model turns on their own count: duels (including resume) and casting calls, plus a collaboration while it auto-runs rounds inside its start call. Meetings, local meetings, collaborations and ultraplans that advance one tool call per step are not counted (their `max_usd` cap still applies); replays and dry runs are excluded. The slot is released when the run finishes, stops or fails.

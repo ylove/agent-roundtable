@@ -2,12 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readdirSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import { SecureServer } from "../../dist/http/secure-server.js";
+import { inlineProblems } from "./helpers.mjs";
+import { startInput, previewTools } from "../../dist/tools/previews.js";
 import { PROTOTYPE_DIR, WORKTREES_DIR } from "../../dist/config.js";
 import { buildForwarderCreateArgs, buildForwarderNetworkCreateArgs, forwarderNetworkName, buildInstallRunArgs, buildNetworkCreateArgs, buildPreviewRunArgs, forwarderName, previewContainerName, previewNetworkName } from "../../dist/previews/args.js";
 import { defaultPort, parsePackageJson, pickScript, previewArgv, validatePort, viteHostFlag } from "../../dist/previews/scripts.js";
-import { ORIGIN_RE, parseRecord, previewsDir, readRecords, writeRecord } from "../../dist/previews/store.js";
+import { ORIGIN_RE, parseRecord, previewsDir, readRecords, readPreviewScreenshot, writePreviewScreenshot, writeRecord } from "../../dist/previews/store.js";
 import { livePreviews, previewFramesHtml, previewOrigins, withFrameSrc } from "../../dist/previews/embed.js";
-import { defaultDeps, createPreviewNetwork, parsePublishedPort, previewSettings, refreshPreviews, resolveSource, startPreview, stopAllPreviews, stopExecutionPreviews, stopPreview, sweepPreviews } from "../../dist/previews/manager.js";
+import { defaultDeps, createPreviewNetwork, parsePublishedPort, previewCliStarter, previewDisplay, previewSettings, refreshPreviews, resolveSource, startPreview, stopAllPreviews, stopExecutionPreviews, stopPreview, sweepPreviews } from "../../dist/previews/manager.js";
 import { parsePreviewArgs } from "../../dist/cli-preview.js";
 import { renderIndex, INDEX_CSP } from "../../dist/serve/index.js";
 import { DASHBOARD_CSP } from "../../dist/dashboard/server.js";
@@ -18,6 +22,27 @@ import { duelPreviewsOf, startRoom } from "../../dist/table/room.js";
 const limits = { memory: "2g", cpus: "2", pids: 512 };
 const ID = "prv-0123456z";
 const EXE = "exe-0123456789abcdef";
+
+// Exercise the real HTTP dispatcher in memory, without opening a listener.
+async function roomHarness(t) {
+  let server;
+  t.mock.method(SecureServer, "start", async opts => {
+    server = new SecureServer(opts, { close(done) { done?.(); }, closeAllConnections() {} });
+    server.port = 23456;
+    return server;
+  });
+  const room = await startRoom({ open: false, hold: false });
+  t.after(() => room.close());
+  return { room, fetch: async url => {
+    const req = Readable.from([]);
+    req.url = new URL(url).pathname;
+    req.method = "GET";
+    req.headers = { host: "127.0.0.1:23456" };
+    let status, headers, body;
+    await server.route(req, { writeHead(s, h) { status = s; headers = h; }, end(b) { body = b; }, destroy() {} });
+    return new Response(body, { status, headers });
+  } };
+}
 
 // ---- scripts -------------------------------------------------------------
 
@@ -172,6 +197,35 @@ test("settings: defaults and environment overrides; bad values fall back", t => 
   assert.equal(previewSettings({ ROUNDTABLE_PREVIEW_TTL_MIN: "soon" }).ttlMs, 30 * 60_000);
 });
 
+test("display defaults by starter, with explicit option then environment precedence", t => {
+  t.mock.method(console, "error", () => {});
+  const settings = previewSettings({});
+  const tty = { stdin: true, stdout: true };
+  assert.equal(previewDisplay({ starter: previewCliStarter({}, tty) }, settings), "live", "interactive terminal");
+  assert.equal(previewDisplay({ starter: previewCliStarter({}, { stdin: false, stdout: true }) }, settings), "click", "piped stdin");
+  assert.equal(previewDisplay({ starter: previewCliStarter({}, { stdin: true, stdout: false }) }, settings), "click", "piped stdout");
+  assert.equal(previewDisplay({ starter: previewCliStarter({}, {}) }, settings), "click", "no terminal");
+  for (const env of [{ ROUNDTABLE_EXECUTION_ID: EXE }, { ROUNDTABLE_AGENT_ID: "builder" }]) {
+    assert.equal(previewDisplay({ starter: previewCliStarter(env, tty) }, settings), "click", "agent marker beats a terminal");
+  }
+  assert.equal(previewDisplay({}, settings), "click", "MCP and execution starts default to click");
+  for (const display of ["live", "click", "screenshot"]) {
+    const configured = previewSettings({ ROUNDTABLE_PREVIEW_DISPLAY: display });
+    for (const starter of ["cli", "agent"]) {
+      assert.equal(previewDisplay({ starter }, configured), display);
+      assert.equal(previewDisplay({ starter, display: "screenshot" }, configured), "screenshot");
+    }
+    assert.equal(parsePreviewArgs(["start", "--prototype", "/p", "--display", display]).input.display, display);
+    assert.equal(previewDisplay(startInput({ prototype: "/p", display }), settings), display);
+  }
+  assert.equal(previewDisplay({}, previewSettings({ ROUNDTABLE_PREVIEW_DISPLAY: "unknown" })), "click");
+  for (const display of ["unknown", "", false, 1]) {
+    assert.throws(() => previewDisplay(startInput({ display }), settings), /display must be/);
+  }
+  assert.throws(() => parsePreviewArgs(["start", "--prototype", "/p", "--display", "unknown"]), /--display/);
+  assert.deepEqual(previewTools.find(t => t.name === "start_preview").inputSchema.properties.display.enum, ["live", "click", "screenshot"]);
+});
+
 // ---- sources -------------------------------------------------------------
 
 function prototypeDir(name, pkg = { scripts: { dev: "node server.js" } }, modules = true) {
@@ -270,6 +324,27 @@ async function clean() {
   const { stopAllPreviews: _ } = await import("../../dist/previews/manager.js");
   await stopAllPreviews({ docker: fakeDocker() });
 }
+
+test("start records the chosen display and keeps page-check PNGs separate from metadata", async () => {
+  await clean();
+  const docker = fakeDocker();
+  const png = Buffer.from("page-check PNG");
+  const { deps } = makeDeps(docker, { pageCheck: async () => ({ loaded: true, consoleErrors: [], exceptions: [], failedRequests: 0, screenshot: png }) });
+  for (const [input, settings, expected] of [
+    [{}, {}, "click"], [{ starter: "agent" }, {}, "click"], [{ starter: "cli" }, {}, "live"],
+    [{ starter: "cli" }, { display: "click" }, "click"], [{ display: "screenshot" }, { display: "live" }, "screenshot"],
+    [{ display: "live" }, { display: "screenshot" }, "live"],
+  ]) {
+    const r = await startPreview({ prototype: prototypeDir("display"), ...input }, { ...deps, settings: { ...deps.settings, ...settings } });
+    assert.equal(r.display, expected);
+    assert.equal(readRecords().find(x => x.id === r.id).display, expected);
+    assert.equal(r.check.screenshot, undefined);
+    assert.deepEqual(readPreviewScreenshot(r.id), png);
+    await stopPreview(r.id, { docker });
+    assert.equal(readPreviewScreenshot(r.id), undefined);
+  }
+  await assert.rejects(startPreview({ display: "unknown" }, deps), /display must be/);
+});
 
 test("start: snapshot, port read-back on loopback, readiness, page check, record, no network install when node_modules exist", async () => {
   await clean();
@@ -427,6 +502,9 @@ test("records: only exactly-shaped files are trusted", async () => {
   const good = { id: ID, container: "rt-preview-0123456z", origin: "http://127.0.0.1:4000", host_port: 4000, container_port: 3000, script: "dev",
     source: { kind: "prototype", prototype: "P1" }, started_at: "2026-01-01T00:00:00Z", last_seen: "2026-01-01T00:00:00Z", ttl_ms: 1000, host: hostname() };
   assert.ok(parseRecord(good));
+  assert.equal(parseRecord(good).display, "live", "legacy records retain their display");
+  for (const display of ["live", "click", "screenshot"]) assert.equal(parseRecord({ ...good, display }).display, display);
+  for (const display of ["unknown", null, false, 1]) assert.equal(parseRecord({ ...good, display }), undefined);
   for (const bad of [{ ...good, origin: "http://0.0.0.0:4000" }, { ...good, origin: "http://127.0.0.1:4000/x" }, { ...good, origin: "https://127.0.0.1:4000" },
     { ...good, origin: "http://127.0.0.1:4000 http://evil.example" }, { ...good, host_port: 4001 }, { ...good, id: "prv-x" }, { ...good, container: "evil" }, { ...good, source: { kind: "x" } }, null, "x"]) {
     assert.equal(parseRecord(bad), undefined);
@@ -490,7 +568,7 @@ test("duel previews carry the duel id: the source, and the room shows only the c
   assert.deepEqual(duelPreviewsOf(undefined, [mine]), []);
   assert.deepEqual(duelPreviewsOf(duelId, [mine, theirs, none]).map(x => x.id), ["prv-0000000a"]);
   // The room: previews.json and the CSP follow the duel that is running.
-  const room = await startRoom({ open: false, hold: false });
+  const { room, fetch } = await roomHarness(t);
   t.after(async () => { await room.close(); await clean(); });
   const base = new URL(room.url);
   writeRecord({ ...mine, id: "prv-0000000a", container: "rt-preview-0000000a", host_port: 4010, origin: "http://127.0.0.1:4010" });
@@ -530,7 +608,7 @@ test("CSP: frame-src gets exactly the previews' loopback origins; nothing else c
 });
 
 function record(extra = {}) {
-  return { id: ID, container: "rt-preview-0123456z", origin: "http://127.0.0.1:4000", host_port: 4000, container_port: 3000, script: "dev",
+  return { id: ID, display: "live", container: "rt-preview-0123456z", origin: "http://127.0.0.1:4000", host_port: 4000, container_port: 3000, script: "dev",
     source: { kind: "task", execution: EXE, task: "t1" }, started_at: "2026-01-01T00:00:00Z", last_seen: "2026-01-01T00:00:00Z", ttl_ms: 1000, host: hostname(), ...extra };
 }
 
@@ -547,6 +625,32 @@ test("frames: sandboxed without allow-same-origin; text is escaped and redacted"
   assert.doesNotMatch(secret, /abcdefghijklmnopqrstuvwxyz0123456789/);
 });
 
+test("display cards: click creates no frame; screenshot uses only a stored image and a new-tab link", async t => {
+  await clean();
+  t.after(clean);
+  const click = previewFramesHtml([record({ display: "click" })]);
+  assert.match(click, /Load preview/);
+  assert.match(click, /task t1/);
+  assert.match(click, /http:\/\/127\.0\.0\.1:4000/);
+  assert.doesNotMatch(click, /<iframe|<img/);
+  const r = record({ display: "screenshot" });
+  writeRecord(r);
+  let html = previewFramesHtml([r], "/cap/");
+  assert.match(html, /No page-check screenshot yet/);
+  assert.doesNotMatch(html, /<iframe|<img|Load preview/);
+  writePreviewScreenshot(ID, Buffer.from("latest PNG"));
+  html = previewFramesHtml([r], "/cap/");
+  assert.match(html, /<img class="preview-shot" src="\/cap\/preview-shots\/prv-0123456z.png"/);
+  assert.match(html, /target="_blank" rel="noopener noreferrer">Open in a new tab/);
+  assert.doesNotMatch(html, /<iframe|Load preview/);
+  assert.deepEqual(inlineProblems(click + html), []);
+  assert.deepEqual(previewOrigins([
+    record({ display: "live" }), record({ display: "click", origin: "http://127.0.0.1:4001" }),
+    record({ display: "screenshot", origin: "http://127.0.0.1:4002" }),
+  ]), ["http://127.0.0.1:4000", "http://127.0.0.1:4001"]);
+  assert.doesNotMatch(withFrameSrc(ROOM_CSP, previewOrigins([r])), /127\.0\.0\.1:4000/);
+});
+
 test("serve index shows running previews in sandboxed frames and stops reloading itself", () => {
   const page = renderIndex("/tok/", [], [], [], undefined, [record()]);
   assert.match(page, /sandbox="allow-scripts allow-forms"/);
@@ -556,7 +660,7 @@ test("serve index shows running previews in sandboxed frames and stops reloading
 
 test("the room serves previews.json and adds frame-src only for running previews", async t => {
   await clean();
-  const room = await startRoom({ open: false, hold: false });
+  const { room, fetch } = await roomHarness(t);
   t.after(async () => { await room.close(); await clean(); });
   const base = new URL(room.url);
   let page = await fetch(base);
@@ -569,9 +673,40 @@ test("the room serves previews.json and adds frame-src only for running previews
   assert.match(csp, /frame-src 'self' http:\/\/127\.0\.0\.1:4000;/);
   assert.match(csp, /default-src 'none'; script-src 'self'/);
   const list = await (await fetch(new URL("previews.json", base))).json();
-  assert.deepEqual(list, [{ id: ID, origin: "http://127.0.0.1:4000", label: "prototype P1v1" }]);
+  assert.deepEqual(list, [{ id: ID, origin: "http://127.0.0.1:4000", label: "prototype P1v1", display: "live" }]);
   assert.match(await (await fetch(new URL("room.js", base))).text(), /allow-scripts allow-forms/);
   assert.doesNotMatch(await (await fetch(new URL("room.js", base))).text(), /allow-same-origin/);
+});
+
+test("room JSON carries display and screenshot; CSP omits screenshot origins and images are duel scoped", async t => {
+  await clean();
+  const { room, fetch } = await roomHarness(t);
+  t.after(clean);
+  const base = new URL(room.url);
+  await room.observer.onEvent({ type: "start", id: "duel-display", topic: "t", mode: "duel", seats: [], startedAt: new Date().toISOString() });
+  for (const [index, display] of ["live", "click", "screenshot"].entries()) {
+    const id = `prv-0000000${index}`;
+    writeRecord(record({ id, container: `rt-preview-0000000${index}`, display, host_port: 4010 + index, origin: `http://127.0.0.1:${4010 + index}`, source: { kind: "prototype", prototype: "p", duel: "duel-display" } }));
+    writePreviewScreenshot(id, Buffer.from(`PNG${index}`));
+  }
+  const list = await (await fetch(new URL("previews.json", base))).json();
+  assert.deepEqual(list.map(r => r.display), ["live", "click", "screenshot"]);
+  assert.equal(list[2].screenshot, "preview-shots/prv-00000002.png");
+  const page = await fetch(base);
+  const csp = page.headers.get("content-security-policy");
+  assert.match(csp, /frame-src 'self' http:\/\/127\.0\.0\.1:4010 http:\/\/127\.0\.0\.1:4011;/);
+  assert.doesNotMatch(csp, /127\.0\.0\.1:4012/);
+  assert.match(await page.text(), /name="roundtable-preview-origins" content="http:\/\/127\.0\.0\.1:4010 http:\/\/127\.0\.0\.1:4011"/);
+  let shot = await fetch(new URL(list[2].screenshot, base));
+  assert.equal(shot.headers.get("content-type"), "image/png");
+  assert.equal(await shot.text(), "PNG2");
+  writePreviewScreenshot("prv-00000002", Buffer.from("latest PNG"));
+  shot = await fetch(new URL(list[2].screenshot, base));
+  assert.equal(await shot.text(), "latest PNG");
+  writeRecord(record({ source: { kind: "prototype", prototype: "other", duel: "duel-other" } }));
+  writePreviewScreenshot(ID, Buffer.from("other duel"));
+  assert.equal((await fetch(new URL(`preview-shots/${ID}.png`, base))).status, 404);
+  assert.equal((await fetch(new URL("preview-shots/prv-99999999.png", base))).status, 404);
 });
 
 // ---- CLI -----------------------------------------------------------------

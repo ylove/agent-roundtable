@@ -32,7 +32,7 @@ import { scrubAndCap } from "../security/secrets.js";
 import { buildForwarderCreateArgs, buildForwarderNetworkCreateArgs, buildInstallRunArgs, buildNetworkCreateArgs, buildPreviewRunArgs, forwarderName, forwarderNetworkName, installContainerName, PREVIEW_HOST_LABEL, PREVIEW_ID_RE, PREVIEW_LABEL, PREVIEW_NET_LABEL, previewContainerName, previewNetworkName } from "./args.js";
 import { realDocker, type PreviewDocker } from "./docker-io.js";
 import { defaultPort, parsePackageJson, pickScript, PreviewError, viteHostFlag, type PackageLike } from "./scripts.js";
-import { previewsDir, readRecord, readRecords, removeRecord, touchRecord, writeRecord, type PreviewRecord, type PreviewSource } from "./store.js";
+import { isPreviewDisplay, previewsDir, readRecord, readRecords, removeRecord, touchRecord, writeRecord, writePreviewScreenshot, type PreviewDisplay, type PreviewRecord, type PreviewSource } from "./store.js";
 
 const execFileP = promisify(execFile);
 
@@ -44,6 +44,7 @@ export const PREVIEW_ENV = {
   TTL_MIN: "ROUNDTABLE_PREVIEW_TTL_MIN",
   MAX: "ROUNDTABLE_PREVIEW_MAX",
   READY_TIMEOUT_SEC: "ROUNDTABLE_PREVIEW_READY_TIMEOUT_SEC",
+  DISPLAY: "ROUNDTABLE_PREVIEW_DISPLAY",
 } as const;
 export const DEFAULT_TTL_MIN = 30;
 export const DEFAULT_MAX_PREVIEWS = 3;
@@ -66,13 +67,17 @@ function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number, min:
 }
 
 export interface PreviewSettings {
+  display?: PreviewDisplay;
   ttlMs: number;
   maxPreviews: number;
   readyTimeoutMs: number;
 }
 
 export function previewSettings(env: NodeJS.ProcessEnv = process.env): PreviewSettings {
+  const display = env[PREVIEW_ENV.DISPLAY]?.trim();
+  if (display && !isPreviewDisplay(display)) console.error(`[Preview] ignoring ${PREVIEW_ENV.DISPLAY}: expected live, click or screenshot`);
   return {
+    ...(isPreviewDisplay(display) && { display }),
     ttlMs: intFromEnv(env, PREVIEW_ENV.TTL_MIN, DEFAULT_TTL_MIN, 1, 24 * 60) * 60_000,
     maxPreviews: intFromEnv(env, PREVIEW_ENV.MAX, DEFAULT_MAX_PREVIEWS, 1, 20),
     readyTimeoutMs: intFromEnv(env, PREVIEW_ENV.READY_TIMEOUT_SEC, DEFAULT_READY_TIMEOUT_SEC, 5, 1800) * 1000,
@@ -84,6 +89,9 @@ export function previewSettings(env: NodeJS.ProcessEnv = process.env): PreviewSe
 // ============================================================================
 
 export interface StartInput {
+  /** Internal caller context; the MCP tool and programmatic starts default to agent. */
+  starter?: "cli" | "agent";
+  display?: string;
   /** A heads-down task's worktree. */
   execution?: string;
   task?: string;
@@ -93,6 +101,16 @@ export interface StartInput {
   script?: string;
   /** Container port (default: the usual port of the package's dev server). */
   port?: number;
+}
+
+/** The CLI starts as a person only at an interactive terminal with no agent marker; workers never have one. */
+export function previewCliStarter(env: NodeJS.ProcessEnv = process.env, tty: { stdin?: boolean; stdout?: boolean } = { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY }): "cli" | "agent" {
+  return !env.ROUNDTABLE_EXECUTION_ID && !env.ROUNDTABLE_AGENT_ID && tty.stdin && tty.stdout ? "cli" : "agent";
+}
+
+export function previewDisplay(input: StartInput, settings: PreviewSettings): PreviewDisplay {
+  if (input.display !== undefined && !isPreviewDisplay(input.display)) throw new PreviewError("display must be live, click or screenshot");
+  return input.display ?? settings.display ?? (input.starter === "cli" ? "live" : "click");
 }
 
 export interface ResolvedSource {
@@ -168,7 +186,7 @@ export interface PreviewDeps {
   /** An HTTP GET to the published port; any response counts as ready. */
   probe: (url: string) => Promise<boolean>;
   /** The WS26a page check against the preview. */
-  pageCheck: (url: string) => Promise<PageCheck>;
+  pageCheck: (url: string) => Promise<PageCheck & { screenshot?: Buffer }>;
   ensureImage: (image: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   egress: () => Promise<Pick<EgressNetwork, "network" | "proxyUrl" | "teardown">>;
   /** Write the tar of `dir` to `out` (never .git or .env files; node_modules only when `modules`). */
@@ -217,7 +235,7 @@ export function defaultDeps(env: NodeJS.ProcessEnv = process.env): PreviewDeps {
     },
     pageCheck: async (url) => {
       if (pageChecksOff()) return { loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "disabled" };
-      return pageCheckRecord(await checkPage(url, { preview: true, timeoutMs: 20_000 }));
+      return checkPage(url, { preview: true, timeoutMs: 20_000 });
     },
     ensureImage: async (img) => new DockerBackend({ image: img, env }).prepare(img),
     egress: () => ensureEgressNetwork({ executionTag: `pv${Math.random().toString(36).slice(2, 8)}`, allowlist: [NPM_REGISTRY_HOST], env }),
@@ -268,6 +286,7 @@ async function removeContainers(docker: PreviewDocker, names: string[]): Promise
 // ============================================================================
 
 export async function startPreview(input: StartInput, deps: PreviewDeps = defaultDeps()): Promise<PreviewRecord> {
+  const display = previewDisplay(input, deps.settings);
   const { dir, source } = resolveSource(input);
   const pkg = readPackage(dir);
   const script = pickScript(pkg, input.script);
@@ -343,11 +362,12 @@ export async function startPreview(input: StartInput, deps: PreviewDeps = defaul
         : `the dev server did not answer on port ${port} within ${Math.round(readyTimeoutMs / 1000)}s (it must listen on 0.0.0.0 and honour PORT)`);
     }
 
-    const check = await deps.pageCheck(url).catch((): PageCheck => ({ loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "page check unavailable" }));
+    const check = await deps.pageCheck(url).catch((): PageCheck & { screenshot?: Buffer } => ({ loaded: false, consoleErrors: [], exceptions: [], failedRequests: 0, reason: "page check unavailable" }));
+    if (check.screenshot) writePreviewScreenshot(id, check.screenshot);
     const stamp = new Date(deps.now()).toISOString();
     const record: PreviewRecord = {
-      id, container, origin: `http://127.0.0.1:${hostPort}`, host_port: hostPort, container_port: port, script,
-      source, started_at: stamp, last_seen: stamp, ttl_ms: ttlMs, host: hostname(), check,
+      id, display, container, origin: `http://127.0.0.1:${hostPort}`, host_port: hostPort, container_port: port, script,
+      source, started_at: stamp, last_seen: stamp, ttl_ms: ttlMs, host: hostname(), check: pageCheckRecord(check),
     };
     writeRecord(record);
     return record;

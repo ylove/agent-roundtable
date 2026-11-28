@@ -1,0 +1,25 @@
+#!/usr/bin/env node
+// No real agy or credentials: exercise its argv contract and exit-0 JSON results.
+const args = process.argv.slice(2);
+if (args.includes('--version')) {
+  console.log('agy fixture 1.4.7');
+  process.exit(0);
+}
+const promptAt = args.indexOf('-p');
+if (promptAt < 0 || args[promptAt + 1] === undefined) process.exit(2);
+const prompt = args[promptAt + 1];
+let stdin = '';
+for await (const chunk of process.stdin) stdin += chunk;
+if (args.includes('plan')) console.error('warning: --mode plan has no effect while slash command expansion is disabled.');
+const failed = prompt.includes('FAIL_ME');
+const denied = prompt.includes('DENY_ME');
+console.log(JSON.stringify({
+  conversation_id: 'fixture-conversation',
+  status: failed ? 'ERROR' : 'SUCCESS',
+  response: failed || denied ? '' : prompt.includes('CHECK_ARGV') ? JSON.stringify({ args, stdin, cwd: process.cwd() }) : 'ok\n',
+  duration_seconds: 2.1,
+  num_turns: 1,
+  usage: { input_tokens: 7709, output_tokens: 1, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 7710 },
+  ...(failed && { error: `boom ${prompt}` }),
+  ...(denied && { denied_actions: [{ action: 'write_file', display_name: 'WriteFile' }] }),
+}));

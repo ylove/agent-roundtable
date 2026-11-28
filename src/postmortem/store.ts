@@ -186,6 +186,12 @@ export function listRecords(key: string): PostmortemRecord[] {
   });
 }
 
+/** Pending text is reviewable here, never in lessons.json or prompt sections. */
+export function pendingPostmortems(key: string) {
+  return listRecords(key).filter((r) => r.status === "concluded").flatMap((r) =>
+    r.proposed.filter((a) => r.pending?.includes(a.id)).map(({ id, kind, target, text, hash }) => ({ pm: r.pm, id, kind, target, text, hash })));
+}
+
 /** Every project key in the store. */
 export function listProjectKeys(): string[] {
   try {

@@ -5,6 +5,18 @@ export const BUILTIN_RUNTIMES: Readonly<Record<string, RuntimeSpec>> = {
   hermes: { argv: ["hermes", "chat", "-q", "{prompt}"], output: { mode: "text", stripDecoration: true }, modelFlag: "--model", versionArgv: ["--version"] },
   openclaw: { argv: ["openclaw", "agent", "--message", "{prompt}"], output: { mode: "text" }, modelFlag: "--model", versionArgv: ["--version"] },
   gemini: { argv: ["gemini", "-p", "{prompt}", "--output-format", "json"], output: { mode: "json", path: "response" }, modelFlag: "--model", usage: { inputTokens: ["stats.tokens.input", "stats.models.*.tokens.input", "stats.models.*.tokens.prompt"], outputTokens: ["stats.tokens.output", "stats.models.*.tokens.candidates"], costUsd: "stats.cost" }, versionArgv: ["--version"] },
+  agy: {
+    // In agy 1.4.7 plan is a no-op with slash expansion disabled (the stderr warning is harmless).
+    // Headless print mode's default permission denial keeps seats from editing; never bypass it.
+    // -p requires its next argv element; raw stdin is not supported (only NDJSON envelopes are).
+    argv: ["agy", "-p", "{prompt}", "--output-format", "json", "--mode", "plan", "--disable-slash-commands"],
+    output: { mode: "json", path: "response", status: { path: "status", success: "SUCCESS", errorPath: "error", deniedPath: "denied_actions" } },
+    modelFlag: "--model",
+    // Usage path arrays are alternatives, not sums: keep thinking_tokens separate from output_tokens.
+    // Antigravity bills credits and reports no USD cost, so no cost path is configured.
+    usage: { inputTokens: "usage.input_tokens", outputTokens: "usage.output_tokens" },
+    versionArgv: ["--version"],
+  },
   codex: {
     argv: ["codex", "exec", "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "-c", 'approval_policy="never"', "-c", "shell_environment_policy.inherit=core", "-"],
     output: { mode: "jsonl", path: "item.text", filter: { type: "item.completed", "item.type": ["agent_message", "assistant_message"] } },

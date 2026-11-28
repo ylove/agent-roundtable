@@ -61,6 +61,10 @@ export interface UsageAgent {
   task?: string;
   /** Heads-down: the agent's money as a fraction (0-1) of the run's budget. */
   budget_share?: number;
+  /** Session-wide spend cap and cumulative spend, including unpriced token estimates. */
+  max_usd?: number;
+  spent_usd?: number;
+  cap_reached?: boolean;
   last_at?: string;
   /** Calls charged to this identity, with their source and dissent provenance when applicable. */
   calls?: UsageCall[];

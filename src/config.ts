@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 // Version (also reported by debug_env and the startup banner)
-export const VERSION = "2.0.0";
+export const VERSION = "2.1.0";
 
 // Agent meetings
 // The default is relative to the server process's cwd (whatever directory the MCP host launched it
@@ -54,6 +54,11 @@ export const PARALLEL_TURNS = Math.max(1, parseInt(process.env.ROUNDTABLE_PARALL
 export const MAX_TOKENS = parseInt(process.env.ROUNDTABLE_MAX_TOKENS || "8192", 10);
 export const LLM_TIMEOUT_MS = parseInt(process.env.ROUNDTABLE_LLM_TIMEOUT_MS || "600000", 10);
 export const OLLAMA_URL = (process.env.OLLAMA_URL || "http://localhost:11434").replace(/\/+$/, "");
+
+/** Default-port discovery is on unless disabled. An explicit OLLAMA_URL remains available. */
+export function ollamaDiscoveryEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !/^(0|false|no|off)$/i.test((env.ROUNDTABLE_OLLAMA_DISCOVERY || "").trim());
+}
 
 // Text LLM providers
 export { PROVIDER_IDS, type LLMProvider } from "./provider-ids.js";

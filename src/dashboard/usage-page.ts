@@ -16,7 +16,8 @@ import { createHash } from "node:crypto";
 import { escapeHtml } from "../http/secure-server.js";
 import { FREE_LABEL, MEANING, moneyParts, NO_PRICE_LABEL, tokensShort, usd, usdBudget } from "../usage/format.js";
 import { moneyTotal, tokenTotal, type Money, type Provenance, type Tokens, type UsageAgent, type UsageView } from "../usage/types.js";
-import { frame, t, tc, type PageContext } from "./render.js";
+import { humanTime } from "./time.js";
+import { frame, taskLink, t, tc, type PageContext } from "./render.js";
 
 /** One point of an agent's spend: cumulative US dollars at a time. */
 export interface SpendPoint {
@@ -123,7 +124,7 @@ function stopControl(a: UsageAgent): string {
   return `<button type="button" class="stop" data-stop="${escapeHtml(a.id)}">Stop<span class="sr-only"> ${t(a.id)}</span></button>`;
 }
 
-function card(a: UsageAgent, series: SpendSeries, budget: number | undefined): string {
+function card(a: UsageAgent, series: SpendSeries, budget: number | undefined, c: PageContext): string {
   const name = a.label ?? a.id;
   // Provider and model are separate chips, so a long model id wraps between them instead of being cut.
   const platform = [a.provider, a.model].filter(Boolean).map((x) => `<span class="chip platform">${tc(x, 60)}</span>`).join(" ");
@@ -133,9 +134,9 @@ function card(a: UsageAgent, series: SpendSeries, budget: number | undefined): s
   const points = series[a.id] ?? [];
   const note =
     a.state === "stopped"
-      ? `Stopped. ${a.task ? `Task ${tc(a.task, 64)} waits for the orchestrator.` : ""}`
+      ? `Stopped. ${a.task ? `Task ${taskLink(c.base, a.task, c.state)} waits for the orchestrator.` : ""}`
       : a.task
-        ? `Working on ${tc(a.task, 64)}`
+        ? `Working on ${taskLink(c.base, a.task, c.state)}`
         : a.label
           ? "Orchestration, not an agent"
           : "";
@@ -144,13 +145,14 @@ function card(a: UsageAgent, series: SpendSeries, budget: number | undefined): s
     `<div class="card-top"><span class="avatar ${avatarClass(a.id)}" aria-hidden="true">${escapeHtml(initials(name))}</span>` +
     `<div class="who"><h3>${t(name)}</h3>${platform}</div>${pill(a)}</div>` +
     `<div class="money">${moneyHtml(a.money, a.tokens)}</div>` +
+    (a.max_usd !== undefined ? `<div class="session-cap">spent $${(a.spent_usd ?? 0).toFixed(4)} of $${a.max_usd} cap</div>` : "") +
     `<div class="tokens">${tokensHtml(a.tokens)}</div>` +
-    ((a.calls?.length ?? 0) > 0 ? `<ul class="call-ledger">${a.calls!.map((r) => `<li>${t(r.source)}${r.dissent_id ? ` · dissent ${t(r.dissent_id)}` : ""} · ${t(r.execution)}${r.task ? ` · task ${t(r.task)}` : ""} · charged to ${t(r.agent ?? a.id)} · ${t(r.provider ?? "unknown")} · ${t(r.model)} · ${escapeHtml(usd(r.usd))} ${t(r.provenance.usd)}${r.reservation ? " · outstanding reservation" : ""}</li>`).join("")}</ul>` : "") +
+    ((a.calls?.length ?? 0) > 0 ? `<ul class="call-ledger">${a.calls!.map((r) => `<li>${t(r.source)}${r.dissent_id ? ` · dissent ${t(r.dissent_id)}` : ""} · ${t(r.execution)}${r.task ? ` · task ${taskLink(c.base, r.task, c.state)}` : ""} · charged to ${t(r.agent ?? a.id)} · ${t(r.provider ?? "unknown")} · ${t(r.model)} · ${escapeHtml(usd(r.usd))} ${t(r.provenance.usd)}${r.reservation ? " · outstanding reservation" : ""}</li>`).join("")}</ul>` : "") +
     (share !== undefined && budget
       ? `<div class="share"><progress max="100" value="${share}" aria-label="Share of the budget">${shareText}</progress><span>${shareText} of the budget</span></div>`
       : `<div class="share none"><span class="empty">${a.money.free ? "A local model costs nothing, so it has no share of the budget" : unpriced ? "No price is known for this model, so it has no share of the budget" : "Its share of the budget appears with its first spend"}</span></div>`) +
     sparkline(points, `${name}: spend over time`) +
-    `<div class="card-foot"><span class="note">${note}</span>${stopControl(a)}</div>` +
+    `<div class="card-foot"><span class="note">${note}</span>${c.indexBase ? "" : stopControl(a)}</div>` +
     `</li>`
   );
 }
@@ -178,7 +180,7 @@ function legend(): string {
 
 function stopsList(v: UsageView): string {
   if (!v.stops.length) return "";
-  const rows = v.stops.slice(0, 5).map((s) => `<li><strong>${t(s.agent)}</strong> · ${escapeHtml(s.status)}${s.by ? ` · by ${tc(s.by, 80)}` : ""} · <time datetime="${escapeHtml(s.at)}">${escapeHtml(s.at.slice(11, 19))}</time></li>`);
+  const rows = v.stops.slice(0, 5).map((s) => `<li><strong>${t(s.agent)}</strong> · ${escapeHtml(s.status)}${s.by ? ` · by ${tc(s.by, 80)}` : ""} · ${humanTime(s.at)}</li>`);
   return `<section aria-labelledby="recent-stops"><h2 id="recent-stops">Recent stops</h2><ul class="stops">${rows.join("")}</ul></section>`;
 }
 
@@ -207,7 +209,7 @@ export function renderUsage(c: PageContext, v: UsageView, series: SpendSeries): 
 
   const cards = v.agents.filter((a) => a.where !== "host");
   const body = hasUsage
-    ? `<section aria-labelledby="agents-title"><h2 id="agents-title">Agents</h2><ul class="agent-cards">${cards.map((a) => card(a, series, budget)).join("")}</ul></section>` +
+    ? `<section aria-labelledby="agents-title"><h2 id="agents-title">Agents</h2><ul class="agent-cards">${cards.map((a) => card(a, series, budget, c)).join("")}</ul></section>` +
       platformTable(v) +
       stopsList(v)
     : `<section class="empty-state"><p class="lead">No usage yet.</p><p class="empty">Agents will show up here as soon as they start.</p></section>`;
@@ -217,7 +219,7 @@ export function renderUsage(c: PageContext, v: UsageView, series: SpendSeries): 
     "usage",
     "Usage",
     `${hero}${body}`,
-    `<div id="announce" class="sr-only" aria-live="polite"></div>` +
+    c.indexBase ? "" : `<div id="announce" class="sr-only" aria-live="polite"></div>` +
       `<dialog id="stop-dialog" aria-labelledby="stop-title" aria-describedby="stop-text">` +
       `<h2 id="stop-title">Stop <span id="stop-name"></span>?</h2>` +
       `<p id="stop-text">Its task will pause and the orchestrator will be asked to rework or write a handoff.</p>` +

@@ -10,7 +10,7 @@ import { readTableLines } from "../../dist/usage/table.js";
 import { abortSession } from "../../dist/usage/session-scope.js";
 import { json, stubFetch } from "./helpers.mjs";
 
-const options = { topic: "60-second budgeting game", teamA: ["designer", "builder"], teamB: ["marketer", "skeptic"], judges: ["cfo", "safety-reviewer"] };
+const options = { stages: 1, topic: "60-second budgeting game", teamA: ["designer", "builder"], teamB: ["marketer", "skeptic"], judges: ["cfo", "safety-reviewer"] };
 const seats = [
   ["designer", "A", "designer"], ["builder", "A", "builder"],
   ["marketer", "B", "designer"], ["skeptic", "B", "builder"],
@@ -239,13 +239,14 @@ test("per-call timeouts settle turns and still archive", async t => {
   assert.equal(events.at(-1).type, "end");
 });
 
-test("an already aborted duel archives an aborted outcome with no calls", async t => {
+test("an already aborted duel checkpoints without an end event or calls", async t => {
   const controller = new AbortController(); controller.abort();
   const { calls, result, events } = await run(t, {}, {}, controller.signal);
   assert.equal(calls.length, 0);
   assert.equal(result.aborted, true);
-  assert.equal(events.at(-1).aborted, true);
-  assert.ok(result.archivePath);
+  assert.equal(result.resumable, true);
+  assert.ok(!events.some(e => e.type === "end"));
+  assert.equal(events.at(-1).action, "stopped");
 });
 
 test("session-level aborts cancel the duel through the shared meter", async t => {
@@ -258,7 +259,8 @@ test("session-level aborts cancel the duel through the shared meter", async t =>
   assert.equal(calls.length, 0);
   assert.equal(result.aborted, true);
   assert.equal(result.winner, "none");
-  assert.equal(events.at(-1).aborted, true);
+  assert.equal(result.resumable, true);
+  assert.ok(!events.some(e => e.type === "end"));
 });
 
 test("verdict parser fails closed for missing, quoted, fenced, or ambiguous verdicts", () => {
@@ -395,6 +397,6 @@ test("--no-page-check and MCP page_check opt out; old archives still replay with
     { resolveSeats: () => seats, checkPage: async () => { throw new Error("checker must not run"); }, startRoom: async () => { throw new Error("room must not start"); } });
   assert.ok(events.filter(e => e.type === "prototype").every(e => e.check.reason === "disabled"));
   const replayed = [];
-  await replayDuel(new URL("../../examples/duel/demo.json", import.meta.url).pathname, { onEvent(e) { replayed.push(e); } }, { speed: 100000 });
+  await replayDuel(new URL("../fixtures/duel-v1.json", import.meta.url).pathname, { onEvent(e) { replayed.push(e); } }, { speed: 100000 });
   assert.ok(replayed.filter(e => e.type === "prototype").every(e => e.check === undefined));
 });

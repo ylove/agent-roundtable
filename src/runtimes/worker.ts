@@ -60,6 +60,8 @@ export interface RuntimeWorkerProfile {
   mcp: boolean;
   /** Flags placed right after the binary (approvals, the runtime's own sandbox, MCP server selection). */
   args: string[];
+  /** Seat option/value pairs to remove before adding worker flags (also accepts --option=value). */
+  omitSeatOptions?: string[];
   /** The runtime confines its commands with its own sandbox flag (named in `args`). */
   sandboxed: boolean;
   /** Env names ROUNDTABLE_WORKER_AUTH=api_key may pass; none by default (the CLI's own login is used). */
@@ -80,6 +82,15 @@ export const WORKER_PROFILES: Readonly<Record<string, RuntimeWorkerProfile>> = {
     sandboxed: true,
     apiKeyEnv: [...RUNTIME_WORKER_API_KEYS],
   },
+  agy: {
+    // agy 1.4.7 has no per-run MCP injection/allowlist or plugin isolation; global config is untouched.
+    // --disable-slash-commands is inherited from the seat argv; --sandbox restricts terminal commands.
+    mcp: false,
+    args: ["--mode", "accept-edits", "--sandbox"],
+    omitSeatOptions: ["--mode"],
+    sandboxed: true,
+    apiKeyEnv: [], // agy's own sign-in; no documented API-key login.
+  },
 };
 
 export function workerProfile(name: string): RuntimeWorkerProfile {
@@ -96,7 +107,9 @@ export const GEMINI_SETTINGS_ENV = "GEMINI_CLI_SYSTEM_SETTINGS_PATH";
  */
 export function buildRuntimeWorkerArgv(spec: RuntimeSpec, profile: RuntimeWorkerProfile, model?: string): string[] {
   const [binary, ...rest] = spec.argv;
-  const args = [...profile.args, ...rest];
+  const seatArgs = rest.filter((arg, i) => !profile.omitSeatOptions?.some(option =>
+    arg === option || arg.startsWith(`${option}=`) || (i > 0 && rest[i - 1] === option)));
+  const args = [...profile.args, ...seatArgs];
   if (model !== undefined) {
     if (!RUNTIME_MODEL.test(model)) throw new Error("Invalid runtime model; use a model identifier beginning with a letter or digit.");
     if (!spec.modelFlag) throw new Error("This runtime does not support a model override.");

@@ -54,7 +54,7 @@ test("room keeps versions, serves only their recorded files and shots, and compu
 
 test("room version controls keep the strict CSP and use no inline script or HTML sinks", () => {
   assert.equal(ROOM_CSP, "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
-  assert.deepEqual(inlineProblems(ROOM_HTML), []); assert.doesNotMatch(ROOM_JS, /innerHTML|outerHTML|insertAdjacentHTML/);
+  assert.deepEqual(inlineProblems(ROOM_HTML), []); assert.doesNotMatch(ROOM_JS, /innerHTML|outerHTML|insertAdjacentHTML|\.on\w+\s*=|\.style\b/);
   assert.match(ROOM_JS, /Current vs proposed/); assert.match(ROOM_JS, /not checked/); assert.match(ROOM_HTML, /Shared browser/);
   assert.doesNotThrow(() => new Function(ROOM_JS));
   assert.deepEqual(lineDiff("old\nkeep\nlast", "new\nkeep\nnext").map(l => l.kind), ["remove", "add", "same", "remove", "add"]);

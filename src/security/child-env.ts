@@ -58,6 +58,7 @@ const RUNNER_CONFIG = [
   "ROUNDTABLE_PUBLIC_TOPIC_PREFIX", "ROUNDTABLE_TRANSCRIPTS_DIR", "ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS",
   "ROUNDTABLE_PROTOTYPE_DIR", "ROUNDTABLE_PROTOTYPE_TTL_MS", "ROUNDTABLE_PROTOTYPE_OPEN",
   "ROUNDTABLE_CHROME_PATH", "ROUNDTABLE_PROTOTYPE_SCREENSHOTS", "ROUNDTABLE_PAGE_CHECKS",
+  "ROUNDTABLE_PREVIEW_DISPLAY",
 ];
 
 /** The key variables a runtime worker's CLI may be handed with ROUNDTABLE_WORKER_AUTH=api_key (its own login is used otherwise). */
@@ -102,7 +103,7 @@ const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: s
   connector: () => ({ pass: BASE, set: {} }),
   runtime: () => ({ pass: ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TMPDIR", ...PROXY, "ALL_PROXY", "all_proxy", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"], set: { TERM: "dumb", NO_COLOR: "1" } }),
   "claude-worker": (s) => ({
-    pass: claudeCliNames(s),
+    pass: [...claudeCliNames(s), "ROUNDTABLE_PREVIEW_DISPLAY"],
     set: { TERM: "dumb", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1", MCP_TOOL_TIMEOUT: "1200000" },
   }),
   "local-meeting": (s) => ({
@@ -110,11 +111,11 @@ const PROFILES: Record<ChildEnvProfile, (source: NodeJS.ProcessEnv) => { pass: s
     set: { TERM: "dumb", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1" },
   }),
   "codex-worker": (s) => ({
-    pass: [...BASE, ...PROXY, "CODEX_HOME", ...(cliUsesApiKey(s) ? ["OPENAI_API_KEY"] : [])],
+    pass: [...BASE, ...PROXY, "CODEX_HOME", "ROUNDTABLE_PREVIEW_DISPLAY", ...(cliUsesApiKey(s) ? ["OPENAI_API_KEY"] : [])],
     set: { TERM: "dumb", NO_COLOR: "1" },
   }),
   // A runtime worker: the core environment only. Its profile's own variables and the api-key set above are added by the driver.
-  "runtime-worker": () => ({ pass: [...BASE, ...PROXY], set: { TERM: "dumb", NO_COLOR: "1" } }),
+  "runtime-worker": () => ({ pass: [...BASE, ...PROXY, "ROUNDTABLE_PREVIEW_DISPLAY"], set: { TERM: "dumb", NO_COLOR: "1" } }),
   git: () => ({
     pass: [...BASE, ...PROXY, "SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_CONFIG_NOSYSTEM"],
     set: { GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },

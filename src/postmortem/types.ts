@@ -5,11 +5,14 @@
 import type { DissentRuntime, PostmortemArtifactKind, PostmortemCategory, PostmortemFinding, PostmortemFormat } from "../execution/types.js";
 
 export const ARTIFACT_KINDS: readonly PostmortemArtifactKind[] = ["fix", "rule", "persona_addendum", "agent_rule", "contract_rule", "memory", "dissent_score"];
+export const PERSISTED_KINDS: readonly PostmortemArtifactKind[] = ["rule", "agent_rule", "contract_rule", "persona_addendum", "memory"];
 export const CATEGORIES: readonly PostmortemCategory[] = ["prompt_misread", "project_misread", "contract_ambiguity", "implementation", "test_gap", "process"];
 /** Findings in these categories are flagged: the meeting records what was misread (§6). */
 export const FLAG_CATEGORIES: readonly PostmortemCategory[] = ["prompt_misread", "project_misread", "contract_ambiguity"];
 
 export const PM_ID_RE = /^pm-[0-9a-hjkmnp-tv-z]{8}$/;
+/** Sequential ids assigned by parseArtifactBlock, bounded like the tool's artifact ids. */
+export const ARTIFACT_ID_RE = /^a[1-9][0-9]{0,14}$/;
 export const PROJECT_KEY_RE = /^[0-9a-f]{16}$/;
 export const FINDING_ID_RE = /^pmf-[0-9a-z]{8,16}$/;
 
@@ -73,7 +76,13 @@ export interface Artifact {
   hash: string;
 }
 
+export interface Signoff {
+  by: string;
+  at: string;
+}
+
 export interface AppliedArtifact {
+  signoff?: Signoff;
   id: string;
   kind: PostmortemArtifactKind;
   target: string;
@@ -90,7 +99,7 @@ export interface FlagRecord {
   category: PostmortemCategory;
   /** What was misread: the finding's summary. */
   misread: string;
-  /** The clearer wording the meeting proposed, from the accepted artifacts that name the finding. */
+  /** The clearer wording the meeting proposed, from signed-off artifacts that name the finding. */
   clearer?: string;
 }
 
@@ -121,6 +130,10 @@ export interface PostmortemRecord {
   proposed: Artifact[];
   rejected_lines: string[];
   accepted?: string[];
+  /** Persisted artifacts waiting for a person’s explicit sign-off. */
+  pending?: string[];
+  /** The reviewed contract's orchestrator identity, kept so sign-off still validates after the run is purged. */
+  contract_orchestrator?: string;
   rejected?: Array<{ id: string; why: string }>;
   applied?: AppliedArtifact[];
   flagged?: FlagRecord[];
@@ -130,6 +143,7 @@ export interface PostmortemRecord {
 export type LessonKind = "rule" | "agent_rule" | "contract_rule" | "flag";
 
 export interface Lesson {
+  signoff?: Signoff;
   id: string;
   kind: LessonKind;
   /** "project", or the agent an agent_rule is scoped to. */

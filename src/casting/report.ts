@@ -8,7 +8,7 @@ export interface CastingReport {
     strengths: string[]; risks: string[]; overlapsWith: string[]; lint: LintIssue[] }>;
   redundancy: Redundancy[]; gaps: string[];
   recommended: { seats: string[]; teamA?: string[]; teamB?: string[]; judges?: string[] };
-  usage?: { totalCostUsd: number; estimated?: boolean; unpricedTokens?: number };
+  usage?: { capUsd?: number; spentUsd?: number; capReached?: boolean; totalCostUsd: number; estimated?: boolean; unpricedTokens?: number };
 }
 
 const quote = (text: string): string => `'${text.replace(/'/g, "'\\''")}'`;
@@ -30,7 +30,7 @@ export function renderRoster(report: CastingReport, agentsDir?: string): string 
 }
 
 const md = (text: string): string => clean(text).replace(/[\\`*_{}\[\]<>|]/g, "\\$&").replace(/\s+/g, " ");
-const usageLine = (report: CastingReport): string => `Usage: $${(report.usage?.totalCostUsd ?? 0).toFixed(4)}${report.usage?.unpricedTokens ? ` (+${report.usage.unpricedTokens} tokens unpriced)` : ""}${report.usage?.estimated ? " (estimated)" : ""}`;
+const usageLine = (report: CastingReport): string => `Usage: ${report.usage?.capUsd !== undefined ? `spent $${(report.usage.spentUsd ?? 0).toFixed(4)} of $${report.usage.capUsd} cap${report.usage.capReached ? " (stopped by spend cap)" : ""}` : `$${(report.usage?.totalCostUsd ?? 0).toFixed(4)}`}${report.usage?.unpricedTokens ? ` (+${report.usage.unpricedTokens} tokens unpriced)` : ""}${report.usage?.estimated ? " (estimated)" : ""}`;
 export function renderCastingMarkdown(report: CastingReport, agentsDir?: string): string {
   const lines = [`## Casting Call${report.dryRun ? " (dry run)" : ""}`, "", ...(report.note ? [`**Note: ${md(report.note)}**`, ""] : []), md(report.brief), "", "| Persona | Verdict | Role | Overlaps |", "| --- | --- | --- | --- |",
     ...report.agents.map(a => `| ${md(a.key)} | ${a.verdict} | ${md(a.role ?? "")} | ${a.overlapsWith.map(md).join(", ")} |`)];

@@ -11,6 +11,8 @@
 //   - the next tool call that names a stopped session answers {status: "stopped", …} (tools.ts).
 // ============================================================================
 
+import { setCapStopper, sessionCapView, sweepSessionCaps } from "./session-caps.js";
+import { activeLiveSessionIds } from "./live-limit.js";
 import { liveDuels } from "../table/live-duels.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { agentKey } from "../agents.js";
@@ -90,7 +92,7 @@ export function findSession(id: string): LiveInfo | undefined {
 /** The live sessions for usage/live/<server-id>.json. */
 export function liveSessions(): LiveSession[] {
   const busy = busySessions();
-  return sessions().map((s) => ({ id: s.id, kind: s.kind, agents: s.agents.slice(0, 32), started: s.started, ...((busy.has(s.id) || isSessionBusy(s.id)) && { busy: true }) }));
+  return sessions().map((s) => ({ id: s.id, kind: s.kind, agents: s.agents.slice(0, 32), started: s.started, ...(sessionCapView(s.id) ?? {}), ...((busy.has(s.id) || isSessionBusy(s.id)) && { busy: true }) }));
 }
 
 export interface SessionStop {
@@ -149,6 +151,8 @@ export async function stopSession(req: SessionStopRequest, home = ROUNDTABLE_HOM
   return { status: "stopped", session: info.id, kind: info.kind, agent, by: stopped.by, at: stopped.at };
 }
 
+setCapStopper(id => stopSession({ session: id, by: "spend cap", surface: "tool", reason: "Spend cap reached" }));
+
 export interface TableService {
   readonly serverId: string;
   /** Stop the timers and remove this server's live file. Idempotent. */
@@ -175,7 +179,9 @@ export function startTableService(o: TableServiceOptions = {}): TableService {
     try {
       const live = liveSessions();
       writeLiveFile(serverId, { pid: process.pid, started, sessions: live }, home);
-      sweepControllers(new Set(live.map((s) => s.id)));
+      const active = activeLiveSessionIds();
+      sweepControllers(active);
+      sweepSessionCaps(active);
       warned = false;
     } catch (e) {
       if (!warned) console.error(`[Usage] live file not written: ${e instanceof Error ? e.message : String(e)}`);

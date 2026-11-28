@@ -3,7 +3,7 @@
 //
 // Served by the runner on the shared secure server (src/http/secure-server.ts): 127.0.0.1, a
 // capability token in every URL, Host check, GET and HEAD, strict headers. Steering, pausing and
-// resolving stay in the orchestrator's tools. The one mutating route is the Usage page's Stop button:
+// resolving stay in the orchestrator's tools. One mutating route is the Usage page's Stop button:
 // POST <token>/agents/<agent>/stop (usage-visibility.md §7, heads-down.md §14). Because the page is
 // served from this origin, it is protected as a CSRF target: the request must carry
 // X-Roundtable-Action: <nonce>, a second random value made per dashboard start and delivered only
@@ -11,47 +11,42 @@
 // approves, so no other origin can send it. Origin and Sec-Fetch-Site, when present, must say
 // same-origin; a body is refused; at most 10 stops a minute. Pages read the run through the execution
 // store (lock-free reads) and are rendered on the server with every run-derived string redacted and
-// escaped (render.ts).
+// escaped (render.ts). The Postmortems page also accepts lesson sign-off, with its own action
+// nonce, bounded JSON, loopback-only access and the shared CLI sign-off checks (signoff below).
 //
 // Live updates: GET <token>/stream?since=<seq> is a server-sent event stream that sends
 // "rev" {seq} whenever the event log grows; the page script falls back to polling
 // <token>/state.json, a redacted subset of the blackboard.
 // ============================================================================
 
-import { lstatSync, readFileSync, rmSync, statSync } from "node:fs";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import type { IncomingMessage } from "node:http";
 import { openExecutionStore } from "../execution/store.js";
-import { EVENT_TYPES, type AnyEvent, type BlackboardState, type EventType, type ExecutionStore } from "../execution/types.js";
+import type { BlackboardState, ExecutionStore } from "../execution/types.js";
 import { hasBody, newCapabilityToken, sameOriginProblem, SecureServer, tokenMatches, type ResponseStream, type RouteContext } from "../http/secure-server.js";
-import { livePreviews, previewOrigins, withFrameSrc } from "../previews/embed.js";
+import { livePreviews, previewOrigins, previewScreenshotRoute, withFrameSrc } from "../previews/embed.js";
 import type { PreviewRecord } from "../previews/store.js";
 import { collectUsage } from "../usage/model.js";
 import { requestAgentStop, StopRefusal, stopper } from "../usage/stop.js";
-import { readRegularFile, writeFileAtomic } from "../security/fs-safe.js";
+import { writeFileAtomic } from "../security/fs-safe.js";
+import { signOffPostmortem, validateSignoffIdentity } from "../postmortem/meeting.js";
+import { ARTIFACT_ID_RE, LIMITS, PM_ID_RE } from "../postmortem/types.js";
+import { runPage, loadTaskDetail, eventsPage, contractPage, postmortemsPage, runnerHealth } from "./data.js";
+export { capAtLine } from "./data.js";
 import { STATIC_ASSETS } from "./assets.js";
 import { renderDagSvg } from "./dag-svg.js";
 import { renderUsage, usageSpendSeries, type SpendSeries } from "./usage-page.js";
 import {
-  contractMarkdown,
-  eventMatches,
-  eventTask,
-  EVENTS_PAGE_SIZE,
-  parseEventFilter,
   publicState,
-  renderContract,
   renderDagPage,
   renderDissents,
   renderEscalations,
-  renderEvents,
-  renderOverview,
-  renderPostmortems,
   renderTaskDetail,
   renderTasks,
   type PageContext,
-  type PostmortemRecordView,
   type RunnerHealth,
-  type TaskDetail,
 } from "./render.js";
 
 /** Every dashboard page. No inline script or style anywhere, nothing from outside 'self'. */
@@ -59,19 +54,41 @@ export const DASHBOARD_CSP =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; " +
   "frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
-/** Most bytes of a diff shown on a task page, and of a failing check's output. */
-const DIFF_CAP_BYTES = 512 * 1024;
-const OUTPUT_CAP_BYTES = 64 * 1024;
-const RECORD_CAP_BYTES = 256 * 1024;
 /** Most concurrent event streams; more get 503 and the page falls back to polling. */
 const MAX_STREAMS = 32;
 const KEEPALIVE_MS = 15_000;
-/** A runner whose heartbeat is older than this is stale (heads-down.md §2). */
-const RUNNER_STALE_MS = 30_000;
-/** The header a stop request must carry, with the per-start nonce (usage-visibility.md §7). */
+/** The header an action request must carry, with its surface's per-start nonce. */
 export const ACTION_HEADER = "x-roundtable-action";
 /** Most stop requests a dashboard accepts a minute. */
 export const STOPS_PER_MINUTE = 10;
+export const SIGNOFFS_PER_MINUTE = 10;
+export const MAX_SIGNOFF_BODY_BYTES = 16 * 1024;
+
+/** Stop buffering at the cap, including chunked requests; refused connections are closed. */
+function readSignoffBody(req: IncomingMessage): Promise<Buffer | undefined> {
+  return new Promise((resolve) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    const finish = (body?: Buffer) => {
+      req.off("data", data);
+      req.off("end", end);
+      req.off("aborted", error);
+      // Keep the error listener until close, including after a size refusal.
+      resolve(body);
+    };
+    const data = (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_SIGNOFF_BODY_BYTES) { req.pause(); finish(); }
+      else chunks.push(chunk);
+    };
+    const end = () => finish(Buffer.concat(chunks, size));
+    const error = () => finish();
+    req.on("data", data);
+    req.once("end", end);
+    req.once("error", error);
+    req.once("aborted", error);
+  });
+}
 
 export interface DashboardOptions {
   /** The store to read through (default: openExecutionStore(executionId)). */
@@ -99,15 +116,6 @@ export async function startDashboard(executionId: string, opts: DashboardOptions
   return { url: d.url, close: () => d.close() };
 }
 
-/** Cut text to at most `max` bytes at a line boundary, so redaction never sees half a secret. */
-export function capAtLine(text: string, max: number): { text: string; truncated: boolean } {
-  if (Buffer.byteLength(text, "utf8") <= max) return { text, truncated: false };
-  let cut = Buffer.from(text, "utf8").subarray(0, max).toString("utf8");
-  const nl = cut.lastIndexOf("\n");
-  if (nl > 0) cut = cut.slice(0, nl);
-  return { text: cut, truncated: true };
-}
-
 interface Client {
   stream: ResponseStream;
   seq: number;
@@ -125,6 +133,9 @@ class DashboardServer {
   private readonly infoPath: string;
   /** The nonce stop requests carry: made per start, delivered only inside the Usage page, compared by digest. */
   private readonly nonce = newCapabilityToken();
+  /** A separate per-start nonce delivered only in the Postmortems page's meta element. */
+  private readonly signoffNonce = newCapabilityToken();
+  private readonly signoffTimes: number[] = [];
   /** When the last accepted stop requests came in (ms), for the per-minute limit. */
   private readonly stopTimes: number[] = [];
 
@@ -148,23 +159,26 @@ class DashboardServer {
     this.server = await SecureServer.start({
       name: "Dashboard",
       routes: [
-        { path: "/", handler: page(async () => renderOverview({ ...(await this.context()), usage: await this.usage() })) },
+        previewScreenshotRoute(() => livePreviews(r => r.source.execution === this.store.id)),
+        { path: "/", handler: page(async () => (await runPage(this.store, await this.context(), ""))!) },
         { path: "/tasks", handler: page(async () => renderTasks(await this.context())) },
         { path: "/usage", handler: page(() => this.usagePage()) },
         { path: /^\/agents\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/stop$/, methods: ["POST"], handler: (c) => this.stopAgent(c) },
         { path: /^\/tasks\/([a-z0-9][a-z0-9._-]{0,63})$/, handler: async (c) => {
-          // Running previews of this task are framed; only their origins are added to the CSP.
+          // Only live and click previews add frame origins to the CSP.
           const id = c.match![1];
           const previews = livePreviews((r) => r.source.execution === this.store.id && r.source.task === id, true);
           const html = await this.taskPage(id, previews);
           if (html === undefined) return c.notFound();
           c.html(200, html, withFrameSrc(DASHBOARD_CSP, previewOrigins(previews)));
         } },
+        { path: /^\/escalations\/([^/]+)$/, handler: page(async c => runPage(this.store, await this.context(), `escalations/${c.match![1]}`)) },
         { path: "/escalations", handler: page(async () => renderEscalations(await this.context())) },
         { path: "/dissents", handler: page(async () => renderDissents(await this.context())) },
         { path: "/events", handler: page((c) => this.eventsPage(c.query)) },
         { path: "/contract", handler: page(() => this.contractPage()) },
         { path: "/postmortems", handler: page(() => this.postmortemsPage()) },
+        { path: new RegExp(`^/postmortems/(${PM_ID_RE.source.slice(1, -1)})/signoff$`), methods: ["POST"], handler: (c) => this.signoff(c) },
         { path: "/dag", handler: page(async () => renderDagPage(await this.context())) },
         { path: "/dag.svg", handler: (c) => this.dagSvg(c) },
         { path: "/state.json", handler: async (c) => c.json(200, publicState(await this.store.state(), this.runnerHealth())) },
@@ -252,108 +266,71 @@ class DashboardServer {
     return { state: s, header: this.store.header(), base: this.server!.base, runner: this.runnerHealth() };
   }
 
-  /** From runner.json, which the runner rewrites every 5 s ({pid, heartbeatAt}). */
-  private runnerHealth(): RunnerHealth {
-    let raw: { pid?: unknown; heartbeatAt?: unknown };
-    try {
-      raw = JSON.parse(readFileSync(join(this.store.dir, "runner.json"), "utf8"));
-    } catch {
-      return { status: "unknown", detail: "No runner heartbeat yet (runner.json is missing)." };
+  /**
+   * POST <token>/postmortems/<pm>/signoff is a CSRF target. Its nonce and custom header force
+   * a CORS preflight this server never approves. Origin checks add defense in depth. An agent
+   * with shell access and the dashboard URL can post just as it can run the CLI. This is not a sandbox.
+   * All transport and body checks precede state reads. Never log the nonce, token or identity.
+   */
+  private async signoff(c: RouteContext): Promise<void> {
+    const refuse = (status: number, error: string, headers: Record<string, string> = {}) =>
+      c.json(status, { applied: [], already_signed_off: [], errors: [error] }, { Connection: "close", ...headers });
+    // origin is built from SecureServer's validated bind address, never from the Host header.
+    const origin = this.server!.origin;
+    const bound = new URL(origin).hostname;
+    if (bound !== "127.0.0.1" && bound !== "[::1]") return refuse(403, "Dashboard sign-off is disabled on a tailnet bind. Use the CLI.");
+    const sent = c.req.headers[ACTION_HEADER];
+    if (typeof sent !== "string" || !tokenMatches(sent, this.signoffNonce)) return refuse(403, "Reload the Postmortems page and try again.");
+    const problem = sameOriginProblem(c.req, [origin, origin.replace("127.0.0.1", "localhost")]);
+    if (problem) return refuse(403, problem);
+    if (c.req.headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json") return refuse(415, "Sign-off requires application/json.");
+    if (Number(c.req.headers["content-length"]) > MAX_SIGNOFF_BODY_BYTES) return refuse(413, "Sign-off accepts at most 16 KiB.");
+    const peer = c.req.socket.remoteAddress;
+    if (peer !== "127.0.0.1" && peer !== "::1") return refuse(403, "Sign-off requires a loopback connection. Use the CLI.");
+    const now = Date.now();
+    while (this.signoffTimes.length && now - this.signoffTimes[0] >= 60_000) this.signoffTimes.shift();
+    if (this.signoffTimes.length >= SIGNOFFS_PER_MINUTE) return refuse(429, `At most ${SIGNOFFS_PER_MINUTE} sign-off requests a minute.`, { "Retry-After": "60" });
+    this.signoffTimes.push(now);
+    const body = await readSignoffBody(c.req);
+    if (body === undefined) return refuse(413, "Sign-off accepts at most 16 KiB.");
+    let input: unknown;
+    try { input = JSON.parse(body.toString("utf8")); } catch { return refuse(400, "Invalid sign-off JSON."); }
+    if (!input || typeof input !== "object" || Array.isArray(input)) return refuse(400, "Sign-off needs exactly by and accept.");
+    const fields = input as Record<string, unknown>;
+    if (Object.keys(fields).length !== 2 || !Object.hasOwn(fields, "by") || !Object.hasOwn(fields, "accept")) return refuse(400, "Sign-off needs exactly by and accept.");
+    if (typeof fields.by !== "string") return refuse(400, "Identity must be non-blank and at most 200 characters after scrubbing.");
+    try { validateSignoffIdentity(fields.by); } catch { return refuse(400, "Identity must be non-blank and at most 200 characters after scrubbing."); }
+    if (!Array.isArray(fields.accept) || !fields.accept.length || fields.accept.length > LIMITS.artifacts || fields.accept.some(id => typeof id !== "string" || !ARTIFACT_ID_RE.test(id))) {
+      return refuse(400, `Select between 1 and ${LIMITS.artifacts} artifact ids (a1, a2, ...).`);
     }
-    const at = typeof raw?.heartbeatAt === "string" ? Date.parse(raw.heartbeatAt) : NaN;
-    const pid = Number.isSafeInteger(raw?.pid) ? ` ${raw.pid}` : "";
-    if (!Number.isFinite(at)) return { status: "unknown", detail: `Runner${pid}: no heartbeat time recorded.` };
-    const age = Math.max(0, Math.round((Date.now() - at) / 1000));
-    return age * 1000 > RUNNER_STALE_MS
-      ? { status: "stale", detail: `Runner${pid}: last heartbeat ${age} s ago (stale after 30 s).` }
-      : { status: "alive", detail: `Runner${pid}: heartbeat ${age} s ago.` };
+    const accept: string[] = fields.accept;
+    const pm = c.match![1];
+    const state = await this.store.state();
+    const meetings = state.postmortem?.meetings ?? {};
+    if (!Object.hasOwn(meetings, pm)) return refuse(404, "There is no such postmortem in this run.");
+    try {
+      const r = await signOffPostmortem({ pm, orchestrator: fields.by, accept });
+      c.json(200, {
+        applied: r.applied.filter(a => accept.includes(a.id) && a.signoff && !r.already_signed_off.includes(a.id)).map(a => a.id),
+        already_signed_off: r.already_signed_off,
+        // Shared failures can contain paths or run text. Do not echo them or request text.
+        errors: r.warnings.length ? ["Some effects or audit updates could not be completed. Use the CLI to review and retry."] : [],
+      });
+    } catch {
+      refuse(409, "Sign-off was refused. Check the pending ids and the reviewed contract's identity, or use the CLI for details.");
+    }
   }
 
-  private async blobText(ref: string, max: number): Promise<{ text: string; truncated: boolean }> {
-    const buf = await this.store.getBlob(ref);
-    return capAtLine(buf.toString("utf8"), max);
-  }
+  private runnerHealth(): RunnerHealth { return runnerHealth(this.store); }
 
   private async taskPage(id: string, previews: PreviewRecord[] = []): Promise<string | undefined> {
-    const state = await this.store.state();
-    if (!Object.hasOwn(state.tasks, id)) return undefined;
-    const detail: TaskDetail = { events: [], outputs: {}, previews };
-    detail.events = (await this.store.events()).filter((ev) => eventTask(ev) === id).slice(-50);
-    const diff = Object.hasOwn(state.diffs, id) ? state.diffs[id] : undefined;
-    if (diff) {
-      try {
-        detail.diff = { stat: diff.stat, commit: diff.commit, ...(await this.blobText(diff.blob, DIFF_CAP_BYTES)) };
-      } catch (e) {
-        detail.diff = { stat: diff.stat, commit: diff.commit, error: `The diff cannot be read: ${e instanceof Error ? e.message : String(e)}` };
-      }
-    }
-    for (const [key, ch] of Object.entries(state.checks.task)) {
-      if (!key.startsWith(`${id}/`) || ch.status !== "failed" || !ch.blob) continue;
-      try {
-        detail.outputs[key] = (await this.blobText(ch.blob, OUTPUT_CAP_BYTES)).text;
-      } catch {
-        /* output not stored or unreadable: the signature still shows */
-      }
-    }
-    return renderTaskDetail(await this.context(state), id, detail);
+    const detail = await loadTaskDetail(this.store, id, previews);
+    return detail ? renderTaskDetail(await this.context(), id, detail) : undefined;
   }
 
-  private async eventsPage(query: URLSearchParams): Promise<string> {
-    const state = await this.store.state();
-    const f = parseEventFilter(query);
-    let found: AnyEvent[];
-    if (!f.type && !f.task) {
-      // Unfiltered: read only the page's window of the log.
-      const top = Math.min(state.seq, (f.before ?? state.seq + 1) - 1);
-      found = await this.store.events({ sinceSeq: Math.max(0, top - EVENTS_PAGE_SIZE - 1), limit: EVENTS_PAGE_SIZE + 1 });
-    } else {
-      const types = f.type ? (EVENT_TYPES.filter((x) => x === f.type || x.startsWith(`${f.type}.`)) as EventType[]) : undefined;
-      found = await this.store.events(types ? { types } : {});
-    }
-    const matches = found.filter((ev) => ev.seq <= state.seq && eventMatches(ev, f));
-    const more = matches.length > EVENTS_PAGE_SIZE || (!f.type && !f.task && matches.length > 0 && matches[0].seq > 1);
-    return renderEvents(await this.context(state), f, matches.slice(-EVENTS_PAGE_SIZE).reverse(), more);
-  }
-
-  private async contractPage(): Promise<string> {
-    const state = await this.store.state();
-    const c = state.contract;
-    let md: string | undefined;
-    let source = "";
-    if (c) {
-      md = contractMarkdown(c);
-      source = `Generated from the frozen contract, version ${c.version}.`;
-      const written = this.contractFile(c.id);
-      if (written !== undefined) md += `\n\n---\n\n# CONTRACT.md\n\n${written}`;
-    }
-    return renderContract(await this.context(state), md, source);
-  }
-
-  /** Findings, and each concluded meeting's record from its blob (the record is redacted and escaped at render). */
-  private async postmortemsPage(): Promise<string> {
-    const state = await this.store.state();
-    const records: Record<string, PostmortemRecordView> = {};
-    for (const [id, m] of Object.entries(state.postmortem?.meetings ?? {})) {
-      if (!m.concluded) continue;
-      try {
-        Object.defineProperty(records, id, { value: { markdown: (await this.blobText(m.concluded.record, RECORD_CAP_BYTES)).text }, enumerable: true });
-      } catch (e) {
-        Object.defineProperty(records, id, { value: { error: `The record cannot be read: ${e instanceof Error ? e.message : String(e)}` }, enumerable: true });
-      }
-    }
-    return renderPostmortems(await this.context(state), records);
-  }
-
-  /** contracts/<ctr>/CONTRACT.md as the contract tools wrote it, when present (a regular file up to 1 MiB). */
-  private contractFile(ctr: string): string | undefined {
-    if (!/^[a-z0-9][a-z0-9._-]{0,80}$/.test(ctr) || ctr.includes("..")) return undefined;
-    const path = join(this.store.dir, "contracts", ctr, "CONTRACT.md");
-    try {
-      return readRegularFile(path, { noFollow: true, maxBytes: 1024 * 1024 }).data.toString("utf8");
-    } catch {
-      return undefined;
-    }
-  }
+  private async eventsPage(query: URLSearchParams): Promise<string> { return eventsPage(this.store, await this.context(), query); }
+  private async contractPage(): Promise<string> { return contractPage(this.store, await this.context()); }
+  private async postmortemsPage(): Promise<string> { return postmortemsPage(this.store, { ...(await this.context()), nonce: this.signoffNonce }); }
 
   private async dagSvg(c: RouteContext): Promise<void> {
     const state = await this.store.state();

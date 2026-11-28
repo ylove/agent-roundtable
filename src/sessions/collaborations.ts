@@ -1,3 +1,5 @@
+import { reserveLiveSession } from "../usage/live-limit.js";
+import { validateSessionCap, setSessionCap, stopCappedSession, clearSessionCap, sessionCapView } from "../usage/session-caps.js";
 import { MAX_TOKENS } from "../config.js";
 import type { Seat } from "../table/events.js";
 // ============================================================================
@@ -297,6 +299,7 @@ export async function startCollaboration(
   agentNames: string[],
   topic: string | undefined,
   options: {
+    maxUsd?: number;
     context?: string;
     maxRounds?: number;
     autoRun?: boolean;
@@ -335,21 +338,31 @@ export async function startCollaboration(
   /** Prototype sessions only. */
   prototypes?: ReturnType<PrototypeTracker["takeCallSummary"]>;
 }> {
-  // A bad or unknown duel fails here, before a session exists or any provider is called.
-  if (options.duel !== undefined) options = { ...options, context: withDuelFocus(options.context, options.duel, options.duelSource !== false) };
+  validateSessionCap(options.maxUsd);
   const collaborationId = newId("collab");
-  // An unknown connector fails here, before a session exists or any provider is called.
-  const checked = checkSeatConnectorArgs(options.connectors, options.seatConnectors, agentNames);
-  const connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: options.signal, seatConnectors: checked.seatConnectors }) : undefined;
+  // Only a session that runs rounds by itself during the start call takes a live slot.
+  const releaseRoom = options.autoRun && options.runRounds && options.runRounds > 0 ? reserveLiveSession(collaborationId) : () => {};
   try {
-    const result = await withSessionLock(collaborationId, collaborationBusy(collaborationId), () =>
-      openCollaboration(collaborationId, agentNames, topic, options, connectors)
-    );
-    if (!collaborations.has(collaborationId)) await connectors?.close();
-    return result;
-  } catch (e) {
-    await connectors?.close();
-    throw e;
+    setSessionCap(collaborationId, options.maxUsd);
+    // A bad or unknown duel fails here, before a session exists or any provider is called.
+    if (options.duel !== undefined) options = { ...options, context: withDuelFocus(options.context, options.duel, options.duelSource !== false) };
+    // An unknown connector fails here, before a session exists or any provider is called.
+    const checked = checkSeatConnectorArgs(options.connectors, options.seatConnectors, agentNames);
+    const connectors = checked.names.length ? await startSeatConnectors(checked.names, { signal: options.signal, seatConnectors: checked.seatConnectors }) : undefined;
+    try {
+      const result = await withSessionLock(collaborationId, collaborationBusy(collaborationId), () =>
+        openCollaboration(collaborationId, agentNames, topic, options, connectors)
+      );
+      if (!collaborations.has(collaborationId)) await connectors?.close();
+      await stopCappedSession(collaborationId);
+      return result;
+    } catch (e) {
+      await connectors?.close();
+      throw e;
+    }
+  } finally {
+    releaseRoom();
+    if (!collaborations.has(collaborationId) && !sessionCapView(collaborationId)?.reached) clearSessionCap(collaborationId);
   }
 }
 
@@ -534,6 +547,7 @@ async function openCollaboration(
     firstMessage = await callAgent(collaboration, firstAgent, [{ role: "user", content: initialPrompt }]);
   } catch (e) {
     // Nothing was said: do not leave an orphan session, an unfinalized public topic or a board behind.
+    if (collaboration.stopped) throw e;
     collaborations.delete(collaborationId);
     if (publicChannel) void publicChannel.finalize();
     await closePrototypeTracker(prototype, "ended");

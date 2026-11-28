@@ -24,19 +24,25 @@ import { executionLLM, prepareExecutionProvider } from '../../dist/execution/pro
 import { executionHuddleLLM } from '../../dist/execution/escalation.js';
 import { preflightExecutionProvider } from '../../dist/execution/orchestrator.js';
 import { stubFetch, json } from './helpers.mjs';
+import { parseParameterSize } from '../../dist/providers/local-models.js';
 
 const NOW = Date.UTC(2026, 9, 20, 12);
 const env = { ANTHROPIC_API_KEY: 'fixture-a', OPENAI_API_KEY: 'fixture-b', TOGETHER_API_KEY: 'fixture-c', REPLICATE_API_TOKEN: 'fixture-d' };
 const empty = async () => ({ frontmatter: {} });
 const inputs = extra => ({ env, config: {}, history: [], health: new ProviderHealthCache(() => NOW), ...extra });
 const rates = (input, output) => ({ input, output, cache_read: 0, cache_write: 0 });
+const localTags = parameters => ({ reachable: true, models: [{ name: DEFAULT_MODELS.ollama, ...parseParameterSize(parameters) }] });
 const reply = text => json(200, { choices: [{ message: { content: text } }] });
 const originalEnv = {};
 const keys = [...Object.keys(env), 'OLLAMA_URL', 'OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY', 'ROUNDTABLE_EXECUTION_PROVIDER', 'ROUNDTABLE_EXECUTION_MODEL', 'ROUNDTABLE_EXECUTION_BASE_URL', 'ROUNDTABLE_SKIP_EXECUTION_PREFLIGHT'];
-beforeEach(t => {
+beforeEach(async t => {
   for (const key of keys) { originalEnv[key] = process.env[key]; delete process.env[key]; }
   providerHealth.clear();
   t.mock.method(Date, 'now', () => NOW);
+  // Existing hosted routing fixtures have no local server. Seed that fact without network IO.
+  const offline = t.mock.method(globalThis, 'fetch', async () => { throw new Error('offline fixture'); });
+  await providerHealth.discoverOllama();
+  offline.mock.restore();
 });
 afterEach(() => {
   providerHealth.clear();
@@ -321,7 +327,7 @@ test('healthy pair preflight is cached until TTL expiry and retried after a key 
   t.mock.method(Date, 'now', () => now);
   process.env.OPENAI_API_KEY = 'fixture';
   const calls = stubFetch(t, () => reply('OK'));
-  const options = { agents: ['a'], load: empty, routing: { config: {}, history: [] } };
+  const options = { agents: ['a'], load: empty, routing: { config: {}, history: [], ollama: { reachable: false, models: [] } } };
   await prepareSeats(options); await prepareSeats(options);
   assert.equal(calls.length, 1);
   now += HEALTH_TTL_MS;
@@ -574,4 +580,52 @@ test('non-team live seats all avoid a reasoning model while a non-reasoning one 
   assert.deepEqual([...seats.values()].map(seat => seat.provider), ['replicate', 'replicate', 'replicate']);
   const teams = await resolveSeats({ teamA: ['a', 'x'], teamB: ['b', 'y'], env: pair, load: empty, routing: { config: {}, history: [] } });
   assert.notEqual(teams.get('a').provider, teams.get('b').provider);
+});
+
+test('small Ollama ranks behind hosted candidates for demanding tiers, including reasoning hosts', () => {
+  for (const hosted of [{ OPENAI_API_KEY: 'fixture' }, { TOGETHER_API_KEY: 'fixture' }]) {
+    for (const tier of ['judge', 'builder']) {
+      const choice = routeProvider(inputs({ env: hosted, tier, ollama: localTags('14.8B'), used: [Object.keys(hosted)[0] === 'OPENAI_API_KEY' ? 'openai' : 'together'] }));
+      assert.notEqual(choice.provider, 'ollama');
+      assert.match(choice.reason, new RegExp(`ollama/.* ranked behind hosted models for ${tier} \\(small local model, 14\\.8B\\)`));
+    }
+  }
+  const alone = routeProvider(inputs({ env: {}, tier: 'judge', ollama: localTags('14.8B') }));
+  assert.equal(alone.provider, 'ollama');
+  assert.match(alone.reason, /small local model, 14\.8B/);
+});
+
+test('small local models remain free choices on cost-biased and balanced seats', () => {
+  const base = inputs({ env: { OPENAI_API_KEY: 'fixture' }, ollama: localTags('14.8B') });
+  for (const tier of ['judge', 'builder', 'balanced']) assert.equal(routeProvider({ ...base, tier, costBias: true }).provider, 'ollama');
+  assert.equal(routeProvider({ ...base, tier: 'balanced', used: ['openai'] }).provider, 'ollama');
+  assert.equal(routeProvider({ ...base, tier: 'judge', remainingBudgetUsd: 0 }).provider, 'ollama');
+  const health = new ProviderHealthCache(() => NOW);
+  health.recordCall('openai', false, 'auth failed', base.env);
+  assert.equal(routeProvider({ ...base, tier: 'judge', health }).provider, 'ollama');
+});
+
+test('large and unknown local sizes have no penalty; provider size overrides win over detection', () => {
+  const base = inputs({ env: { OPENAI_API_KEY: 'fixture' }, tier: 'judge' });
+  for (const parameters of ['30B', '70.6B', undefined]) assert.equal(routeProvider({ ...base, ollama: localTags(parameters) }).provider, 'ollama');
+  const config = validateRoutingConfig({ ollama: { size: 'large', judge: { model: DEFAULT_MODELS.ollama } } });
+  const choice = routeProvider({ ...base, config, ollama: localTags('14.8B') });
+  assert.equal(choice.provider, 'ollama');
+  assert.match(choice.reason, /large local model, operator override/);
+  assert.equal(routeProvider({ ...base, config: { ollama: { size: 'small' } }, ollama: localTags('70.6B') }).provider, 'openai');
+  for (const size of ['unknown', 'medium', true, {}, null]) assert.throws(() => validateRoutingConfig({ ollama: { size } }), /routing size/);
+  assert.throws(() => validateRoutingConfig({ ollama: { judge: { model: 'qwen3:14b', size: 'large' } } }), /routing model/);
+});
+
+test('compatible ids identify small models while unknown remote models keep their rank', () => {
+  const env = { OPENAI_API_KEY: 'fixture', OPENAI_COMPATIBLE_BASE_URL: 'http://localhost:1234/v1', ROUNDTABLE_OPENAI_COMPATIBLE_FREE: '1' };
+  for (const tier of ['judge', 'builder']) {
+    const config = { openai_compatible: { [tier]: { model: 'llama-3.1-8b-instruct' } } };
+    assert.equal(routeProvider(inputs({ env, tier, config })).provider, 'openai');
+    assert.equal(routeProvider(inputs({ env, tier, config, costBias: true })).provider, 'openai_compatible');
+    assert.equal(routeProvider(inputs({ env, tier, config: { openai_compatible: { ...config.openai_compatible, size: 'large' } }, used: ['openai'] })).provider, 'openai_compatible');
+  }
+  const frontier = routeProvider(inputs({ env, tier: 'judge', config: { openai_compatible: { judge: { model: 'remote-frontier' } } } }));
+  assert.equal(frontier.provider, 'openai_compatible');
+  assert.match(frontier.reason, /unknown local model/);
 });

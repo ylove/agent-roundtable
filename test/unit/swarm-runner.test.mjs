@@ -141,7 +141,7 @@ test("DAG, task page, dashboard budget and execution_status show the swarm tree"
   assert.match(svg, /stroke-dasharray="5 4"/);
   assert.ok(layers(state.tasks).get("a.x") > layers(state.tasks).get("a"));
   const ctx = { state, header, base: "/test/", runner: { status: "unknown", detail: "" } };
-  assert.match(renderTaskDetail(ctx, "a", { outputs: {}, events: [] }), /Children.*a.x.*a.y/);
+  assert.match(renderTaskDetail(ctx, "a", { outputs: {}, events: [] }), /<dt>Subtasks<\/dt><dd>.*a\.x.*a\.y/);
   assert.match(renderOverview(ctx), /max agents 2 · max subtasks 16/);
   const report = await executionStatusReport({ execution_id: store.id, view: "tasks" });
   const parent = report.tasks.find((task) => task.id === "a");

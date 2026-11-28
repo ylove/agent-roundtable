@@ -55,3 +55,16 @@ On a machine that allows loopback listeners, also run:
 ```sh
 node --import ./test/fixtures/foundation/test-env.mjs --test test/unit/room.test.mjs
 ```
+
+## Recording the duel GIF
+
+`docs/assets/live-duel.gif` (the README animation) is recorded from the bundled synthetic duel, so it needs no keys and anyone can reproduce it. The two teams build different apps for the same brief, a coin game and a pocket planner, from grey skeletons to polished pages, and the room ends on the winner banner.
+
+```sh
+npm run build
+node scripts/record-duel.mjs ./media --speed 3
+```
+
+The dev script (it is not shipped in the package) runs `duel --dry-run` with the room open, a fresh temporary `ROUNDTABLE_HOME` and the given `--speed`. It captures the room in headless Chrome at 1280×720 with a device scale factor of 2 (frames every 100 ms, until about three seconds after the winner banner), then encodes with ffmpeg. It needs Chrome (`ROUNDTABLE_CHROME_PATH` to override) and ffmpeg (`FFMPEG` to override), and it stops every process it starts, even on error.
+
+Outputs: the GIF at `docs/assets/live-duel.gif` (or `--gif <path>`; about 960 px wide, 12 fps, under 8 MB), and `live-duel-1280.mp4` and `live-duel-1080.mp4` (H.264, 30 fps, `+faststart`) in the output directory, for social posts. Pass `--keep-frames` to keep the captured frames for inspection. The fixture is `examples/duel/demo.json`; the room's preview scaling lives in `src/table/room-assets.ts`.

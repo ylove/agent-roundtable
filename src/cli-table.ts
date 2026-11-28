@@ -1,4 +1,5 @@
-import type { DuelOptions, DuelResult, Seat, TableObserver } from "./table/events.js";
+import { validateSessionCap, sessionCapView } from "./usage/session-caps.js";
+import type { DuelControls, DuelOptions, DuelResult, Seat, TableObserver } from "./table/events.js";
 import { parseFlags } from "./cli.js";
 import { clean, createNdjsonObserver, createTerminalObserver, type TerminalOutput } from "./table/terminal.js";
 import { readUserConfig, setUserConfig, setNotifyConfig, setSecretConfig, setConnectorConfig, unsetConfigEntry } from "./user-config.js";
@@ -6,7 +7,14 @@ import { resolveSecret } from "./secrets/broker.js";
 import { secretReason } from "./secrets/backends.js";
 import { parseSecretRef } from "./secrets/ref.js";
 import { ENV_NAME } from "./connectors/config.js";
+import { trustConnector } from "./connectors/pin.js";
 import { assertSeatConnectors, parseSeatConnectorsFlag, type SeatConnectorMap } from "./table/seat-connectors.js";
+import { createDuelControls } from "./table/controls.js";
+import { readCheckpoint } from "./table/checkpoint.js";
+import { exportChosenArtifact, validateDuelOutputDir } from "./table/artifacts.js";
+import type { DuelInput, DuelDependencies } from "./table/duel.js";
+import { createInterface, type Interface } from "node:readline";
+import type { Readable } from "node:stream";
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scrubAndCap } from "./security/secrets.js";
@@ -15,24 +23,31 @@ import { isDuelId } from "./sessions/duel-import.js";
 import { DUEL_KINDS } from "./table/prompts.js";
 
 const HELP = `roundtable duel <brief> --team-a <a,...> --team-b <c,...> --judges <j,...> [options]
-  teams have 1 to 4 members (first writes the concept, last builds, any between critique); 1 to 5 judges
+  teams have 1 to 4 members (first writes the concept, last builds, any between critique); 1 to 5 judges unless --human-judge
   --open --no-room --no-hold   open the live room, skip it, or exit when the duel ends
   --json                       NDJSON events instead of the terminal view
   --seat <agent=provider-or-runtime:model,...>  --mix auto|cheap  --preflight | --no-preflight
   --kind web|code|diagram|text   what the teams build (default web)
-  --criteria "a,b,c"           judging rubric (default: fit to the brief, quality, usability and accessibility, risk or safety)
+  --criteria "a,b,c"           judging rubric (default: fit to the brief, quality, usability and accessibility, risk or safety, process efficiency)
+  --stages <1-4>               build stages (web default 4; other kinds 1)
+  --human-judge                a person chooses; judges, if given, advise
+  --resume <duel-id>           continue a stopped duel from its checkpoint
+  --max-usd <n>               stop at this spend cap; raise it on --resume to continue
+  --out <dir>                  export the chosen artifact; never overwrite
+  --layout auto|split|stack    terminal layout (default auto)
   --no-page-check              skip headless page checks
   --connectors <a,b>           let every seat call these configured MCP connectors (read-only tools unless the config lists more)
   --seat-connectors <s=a+b,...> limit a seat to some of those connectors, e.g. ada=figma,bob=jira+figma (others get all)
   --rounds 1|2  --turn-timeout <s>  --max-seconds <s>  --agents-dir <abs-path>
   --dry-run                    replay the bundled synthetic duel (no keys)
   --replay <archive.json> [--speed <n>]   replay a saved duel
-roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--seat ...] [--duel <duel-id>] [--connectors <a,b>] [--seat-connectors <seat=a+b,...>]
+roundtable debate|waffle|meeting <topic> --agents <a,b> [--rounds n] [--max-usd n] [--seat ...] [--duel <duel-id>] [--connectors <a,b>] [--seat-connectors <seat=a+b,...>]
   --duel makes a saved duel the focus (its brief joins the context); the topic may then be omitted
 roundtable config show | config set env-file|agents-dir <absolute-path>
 roundtable config set secret <ENV_NAME> <secret://ref> | config unset secret <ENV_NAME>
 roundtable config set connector <name> --command <absolute-path> [--arg value] [--env VAR=secret://ref] [--tool name]
 roundtable config unset connector <name> | secrets check
+roundtable connectors trust <name>
 `;
 class UsageError extends Error { readonly exitCode = 2; }
 /** A turn or session deadline passed: reported as a timeout, never as a person stopping the session. */
@@ -46,8 +61,8 @@ function quietOnClosedPipe(stream: NodeJS.WriteStream): void {
 }
 type Flags = Record<string, string | true>;
 export interface ParsedTableArgs { duelFocus?: import("./sessions/duel-focus.js").DuelFocus; topic: string; flags: Flags; options: DuelOptions; agents: string[] }
-const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "replay", "speed", "duel", "connectors", "seat-connectors"];
-const switches = ["open", "no-room", "no-hold", "json", "dry-run", "preflight", "no-preflight", "no-duel-source", "no-page-check"];
+const values = ["team-a", "team-b", "judges", "agents", "agents-dir", "rounds", "kind", "criteria", "seat", "mix", "turn-timeout", "max-seconds", "max-usd", "replay", "speed", "duel", "connectors", "seat-connectors", "stages", "resume", "out", "layout"];
+const switches = ["open", "no-room", "no-hold", "json", "dry-run", "preflight", "no-preflight", "no-duel-source", "no-page-check", "human-judge"];
 const list = (value: string | true | undefined): string[] => {
   if (value === undefined) return [];
   if (typeof value !== "string" || value.split(",").some(s => !s.trim())) throw new UsageError("Agent lists must be comma-separated non-empty identifiers.");
@@ -63,7 +78,20 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const topic = args[0] && !args[0].startsWith("--") ? args[0] : "";
   const parsed = parseFlags(topic ? args.slice(1) : args, { values, flags: switches });
   if (typeof parsed === "string") throw new UsageError(parsed);
+  const maxUsd = parsed["max-usd"] === undefined ? undefined : Number(parsed["max-usd"]);
+  try { validateSessionCap(maxUsd); } catch { throw new UsageError("--max-usd must be a positive finite number."); }
   const replay = !!(parsed.replay || parsed["dry-run"]);
+  if (parsed.layout !== undefined && !["auto", "split", "stack"].includes(String(parsed.layout))) throw new UsageError("--layout must be auto, split or stack.");
+  if (command !== "duel" && ["stages", "human-judge", "resume", "out"].some(k => parsed[k] !== undefined)) throw new UsageError("--stages, --human-judge, --resume and --out are available for duel.");
+  if (parsed.resume !== undefined) {
+    if (!isDuelId(parsed.resume)) throw new UsageError("--resume requires a duel id, never a path.");
+    if (topic || Object.keys(parsed).some(k => !["resume", "open", "no-room", "no-hold", "json", "layout", "out", "max-usd"].includes(k))) throw new UsageError("--resume cannot be combined with a topic or duel options; everything comes from the checkpoint.");
+    if (parsed.open && parsed["no-room"]) throw new UsageError("--open requires the room.");
+    return { topic: "", flags: parsed, agents: [], options: { resume: parsed.resume, ...(maxUsd !== undefined && { maxUsd }) } as DuelOptions };
+  }
+  const stages = parsed.stages === undefined ? undefined : Number(parsed.stages);
+  if (stages !== undefined && (!Number.isInteger(stages) || stages < 1 || stages > 4)) throw new UsageError("--stages must be an integer from 1 to 4.");
+  if (replay && (parsed["human-judge"] || parsed.stages !== undefined)) throw new UsageError("--human-judge and --stages are unavailable with replay or dry-run.");
   if (parsed.duel !== undefined && (command === "duel" || typeof parsed.duel !== "string" || !isDuelId(parsed.duel))) throw new UsageError(command === "duel" ? "--duel is available for debate, waffle and meeting." : "--duel requires a duel id such as duel-<id>.");
   if (parsed["no-duel-source"] && parsed.duel === undefined) throw new UsageError("--no-duel-source requires --duel.");
   if (!topic.trim() && !replay && !(parsed.duel && command !== "duel")) throw new UsageError(`${command} requires a topic.`);
@@ -93,8 +121,8 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
     ? parsed.criteria.split(parsed.criteria.includes(";") ? ";" : ",").map(c => c.trim()) : undefined;
   if (criteria && (criteria.some(c => !c) || criteria.length > 8)) throw new UsageError("--criteria takes 1 to 8 non-empty items, separated by commas (or by ; when an item contains a comma).");
   if (!replay && command === "duel") {
-    if (!teamA.length || !teamB.length || !judges.length) throw new UsageError("duel requires --team-a, --team-b and at least one judge.");
-    try { validateDuelOptions({ topic, teamA, teamB, judges, kind: parsed.kind as never, criteria }); }
+    if (!teamA.length || !teamB.length || (!parsed["human-judge"] && !judges.length)) throw new UsageError("duel requires --team-a, --team-b and at least one judge.");
+    try { validateDuelOptions({ topic, teamA, teamB, judges, kind: parsed.kind as never, criteria, stages, humanJudge: !!parsed["human-judge"] }); }
     catch (e) { throw new UsageError(e instanceof Error ? e.message : "Invalid duel options."); }
   }
   if (!replay && command !== "duel" && agents.length < 2) throw new UsageError(`${command} requires --agents with at least two personas.`);
@@ -103,14 +131,14 @@ export function parseTableArgs(command: string, args: string[]): ParsedTableArgs
   const turnTimeoutMs = positive(parsed, "turn-timeout", 90) * 1000;
   const maxSeconds = positive(parsed, "max-seconds", 600);
   positive(parsed, "speed", 1);
-  return { topic, flags: parsed, agents, options: { topic, teamA, teamB, judges, ...(parsed["no-page-check"] && { pageCheck: false }), rounds: rounds as 1 | 2, turnTimeoutMs, ...(command !== "duel" || parsed["max-seconds"] !== undefined ? { maxSeconds } : {}), ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }), ...(connectors.length && { connectors }), ...(seatConnectors && { seatConnectors }) } };
+  return { topic, flags: parsed, agents, options: { ...(maxUsd !== undefined && { maxUsd }), topic, teamA, teamB, judges, ...(stages !== undefined && { stages }), ...(parsed["human-judge"] && { humanJudge: true }), ...(parsed["no-page-check"] && { pageCheck: false }), rounds: rounds as 1 | 2, turnTimeoutMs, ...(command !== "duel" || parsed["max-seconds"] !== undefined ? { maxSeconds } : {}), ...(parsed.kind && { kind: parsed.kind as never }), ...(criteria && { criteria }), ...(parsed.mix && { mix: parsed.mix as "auto" | "cheap" }), ...(typeof parsed["agents-dir"] === "string" && { agentsDir: parsed["agents-dir"] }), ...(connectors.length && { connectors }), ...(seatConnectors && { seatConnectors }) } };
 }
 
 /** Merge-time module contracts. String imports let the CLI build before the duel modules land. */
 export interface TableRoom extends TableObserver { url?: string; close(): void | Promise<void> }
 export interface TableCliModules {
-  duel(): Promise<{ runDuel: (opts: DuelOptions, obs: TableObserver, signal: AbortSignal, seats?: Map<string, Seat>) => Promise<DuelResult> }>;
-  room(): Promise<{ createRoom(options: { open: boolean }): Promise<TableRoom> }>;
+  duel(): Promise<{ runDuel: (opts: DuelInput, obs: TableObserver, signal: AbortSignal, seats?: Map<string, Seat>, deps?: Pick<DuelDependencies, "controls" | "replayHistory" | "resumeBy">) => Promise<DuelResult> }>;
+  room(): Promise<{ createRoom(options: { open: boolean; controls?: DuelControls }): Promise<TableRoom> }>;
   replay(): Promise<{ replayDuel(options: { archivePath?: string; dryRun: boolean; speed: number }, observer: TableObserver, signal: AbortSignal): Promise<DuelResult> }>;
 }
 const unavailable = (name: string) => new Error(`${name} not available in this build`);
@@ -126,13 +154,13 @@ const defaultModules: TableCliModules = {
     const real = await load<typeof import("./table/duel.js")>("duel");
     return {
       // The CLI already resolved every seat (flags, mix, frontmatter, preflight); apply those to the loaded personas.
-      runDuel: (opts, obs, signal, seats) => real.runDuel(opts, obs, signal, seats ? real.withChosenSeats(seats) : {}),
+      runDuel: (opts, obs, signal, seats, deps) => real.runDuel(opts, obs, signal, { ...(seats ? real.withChosenSeats(seats) : {}), ...deps }),
     };
   },
   room: async () => {
     const real = await load<typeof import("./table/room.js")>("room");
-    return { createRoom: async ({ open }) => {
-      const room = await real.startRoom({ open, hold: false });
+    return { createRoom: async ({ open, controls }) => {
+      const room = await real.startRoom({ open, hold: false, ...(controls && { controls }) });
       return { url: room.url, onEvent: e => room.observer.onEvent(e), close: () => room.close() };
     } };
   },
@@ -144,7 +172,7 @@ const defaultModules: TableCliModules = {
     } };
   },
 };
-interface CliIO { output?: TerminalOutput; error?: TerminalOutput; modules?: TableCliModules }
+interface CliIO { input?: Readable & { isTTY?: boolean }; output?: TerminalOutput; error?: TerminalOutput; modules?: TableCliModules }
 
 function configCommand(args: string[], output: TerminalOutput): number {
   if (args.length === 1 && args[0] === "show") {
@@ -206,6 +234,12 @@ export async function runTableCli(command: string, args: string[], io: CliIO = {
   try {
     if (args.includes("--help") || args.includes("-h")) { output.write(HELP); return 0; }
     if (command === "config") return configCommand(args, output);
+    if (command === "connectors") {
+      if (args.length !== 2 || args[0] !== "trust") throw new UsageError("Use connectors trust <name>.");
+      trustConnector(args[1]);
+      output.write(scrubAndCap(`Connector ${args[1]}: acceptance reset; the next start records its tools.\n`, 200));
+      return 0;
+    }
     if (command === "secrets") {
       if (args.length !== 1 || args[0] !== "check") throw new UsageError("Use secrets check.");
       const config = readUserConfig();
@@ -219,8 +253,8 @@ export async function runTableCli(command: string, args: string[], io: CliIO = {
     }
     const parsed = parseTableArgs(command, args);
     if (parsed.options.agentsDir) process.env.ROUNDTABLE_AGENTS_DIR = parsed.options.agentsDir;
-    const observer = parsed.flags.json ? createNdjsonObserver(output) : createTerminalObserver({ output });
-    return await runTable(command, parsed, observer, io.modules ?? defaultModules, error);
+    const observer = parsed.flags.json ? createNdjsonObserver(output) : createTerminalObserver({ output, layout: (parsed.flags.layout ?? "auto") as "auto" | "split" | "stack" });
+    return await runTable(command, parsed, observer, io.modules ?? defaultModules, error, io.input ?? process.stdin);
   } catch (e) {
     const code = (e as { exitCode?: number }).exitCode === 2 ? 2 : 1;
     // Usage messages are locally generated; remote bodies may contain credentials or private paths.
@@ -229,14 +263,28 @@ export async function runTableCli(command: string, args: string[], io: CliIO = {
   }
 }
 
-async function runTable(command: string, parsed: ParsedTableArgs, terminal: TableObserver, modules: TableCliModules, error: TerminalOutput): Promise<number> {
+async function runTable(command: string, parsed: ParsedTableArgs, terminal: TableObserver, modules: TableCliModules, error: TerminalOutput, input: Readable & { isTTY?: boolean }): Promise<number> {
   const { fanout } = await import("./table/events.js");
-  const controller = new AbortController();
+  let controller = new AbortController();
+  const lifetime = new AbortController();
+  const replay = !!(parsed.flags.replay || parsed.flags["dry-run"]);
+  const controls = command === "duel" && !replay ? createDuelControls() : undefined;
   let interrupts = 0, holding = false, releaseHold: (() => void) | undefined;
+  let current: DuelResult | undefined, activeId: string | undefined;
+  let resumeHintShown = false;
+  let prompt: Interface | undefined;
+  let decisionKeeper: ReturnType<typeof setInterval> | undefined;
+  let spendCapStopped = false;
+  const resumeHint = () => { if (!resumeHintShown && activeId) { error.write(`Resume with: roundtable duel --resume ${activeId}${spendCapStopped ? " --max-usd <higher-cap>" : ""}\n`); resumeHintShown = true; } };
   const stop = () => {
     interrupts++;
-    if (interrupts > 1) process.exit(controller.signal.aborted ? 1 : 0);
-    if (holding) { releaseHold?.(); return; }
+    if (holding || interrupts > 1) {
+      if (current?.resumable || (interrupts > 1 && command === "duel" && !replay)) resumeHint();
+      lifetime.abort(); releaseHold?.();
+      if (!holding) controller.abort();
+      return;
+    }
+    controls?.send({ action: "stop" }, "terminal");
     controller.abort();
   };
   process.on("SIGINT", stop);
@@ -244,7 +292,11 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
   let room: TableRoom | undefined;
   try {
     let observer = terminal;
-    const replay = !!(parsed.flags.replay || parsed.flags["dry-run"]);
+    const humanJudge = parsed.options.humanJudge || (parsed.options.resume && readCheckpoint(parsed.options.resume).options.humanJudge);
+    if (humanJudge && parsed.flags["no-room"] && !input.isTTY) throw new UsageError("--human-judge with --no-room requires a TTY.");
+    if (typeof parsed.flags.out === "string") {
+      try { validateDuelOutputDir(parsed.flags.out); } catch (e) { throw new UsageError(e instanceof Error ? e.message : "Invalid --out directory."); }
+    }
     let seats = new Map<string, Seat>();
     // A bad or unknown duel fails here, before seats are prepared or any provider is called.
     if (!replay && command !== "duel" && typeof parsed.flags.duel === "string") {
@@ -259,7 +311,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
       const { assertConnectorsKnown } = await import("./table/seat-connectors.js");
       try { assertConnectorsKnown(parsed.options.connectors); } catch (e) { throw new UsageError(e instanceof Error ? e.message : "Unknown connector."); }
     }
-    if (!replay) {
+    if (!replay && !parsed.options.resume) {
       const { prepareSeats } = await import("./table/seats.js");
       seats = await prepareSeats(
         { ...(command === "duel" ? parsed.options : { agents: parsed.agents, agentsDir: parsed.options.agentsDir }), seat: parsed.flags.seat as string | undefined, mix: parsed.options.mix },
@@ -271,7 +323,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
     const runner = replay ? await modules.replay() : await modules.duel();
     if (!("runDuel" in runner) && !("replayDuel" in runner)) throw new Error(`${replay ? "replay" : "duel"} not available in this build`);
     if (!parsed.flags["no-room"]) {
-      try { room = await (await modules.room()).createRoom({ open: !!parsed.flags.open }); }
+      try { room = await (await modules.room()).createRoom({ open: !!parsed.flags.open, ...(controls && { controls }) }); }
       catch (e) {
         if (parsed.flags.open || !(e instanceof Error) || e.message !== "room not available in this build") throw e;
         error.write("roundtable: room not available in this build\n");
@@ -281,18 +333,56 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
         if (room.url) error.write(`Room: ${room.url}\n`);
       }
     }
-    const result = "replayDuel" in runner
+    const displayed = observer;
+    observer = { async onEvent(event) {
+      if (event.type === "start") { activeId = event.id; spendCapStopped = false; }
+      if (event.type === "control" && event.action === "stopped") spendCapStopped = event.reason === "spend cap";
+      await displayed.onEvent(event);
+      if (event.type === "decision" && event.status === "awaiting") decisionKeeper ??= setInterval(() => {}, 60_000);
+      if (event.type === "decision" && event.status === "awaiting" && parsed.flags["no-room"] && controls) {
+        prompt?.close();
+        prompt = createInterface({ input, terminal: false });
+        error.write("Choose the winner [A/B]: ");
+        prompt.on("line", line => {
+          const team = line.trim().toUpperCase();
+          if ((team === "A" || team === "B") && controls.send({ action: "choose", team }, "terminal")) { const answered = prompt; prompt = undefined; answered?.close(); }
+          else error.write("Choose a team with a valid artifact [A/B]: ");
+        });
+        prompt.on("close", () => { if (prompt) { prompt = undefined; controls.send({ action: "stop" }, "terminal"); } });
+      }
+      if (event.type === "control" && event.action === "stopped" || event.type === "end" || event.type === "decision" && event.status === "made") { clearInterval(decisionKeeper); decisionKeeper = undefined; const old = prompt; prompt = undefined; old?.close(); }
+    } };
+    current = "replayDuel" in runner
       ? await runner.replayDuel({ archivePath: parsed.flags.replay as string | undefined, dryRun: !!parsed.flags["dry-run"], speed: positive(parsed.flags, "speed", 1) }, observer, controller.signal)
-      : await runner.runDuel(parsed.options, observer, controller.signal, seats);
-    if (room && !parsed.flags["no-hold"]) {
-      error.write("Room stays open; press Ctrl-C to exit.\n");
+      : await runner.runDuel(parsed.options, observer, controller.signal, seats.size ? seats : undefined, { controls });
+    activeId = current.id;
+    if (current.chosen && typeof parsed.flags.out === "string") exportChosenArtifact(current.chosen, parsed.flags.out);
+    while (room && !spendCapStopped && !parsed.flags["no-hold"] && !lifetime.signal.aborted) {
       holding = true;
-      // The room's server is unref'd, so a ref'd timer is what keeps the process (and the room) alive until Ctrl-C.
       const keeper = setInterval(() => {}, 60_000);
-      try { await new Promise<void>(resolve => { releaseHold = resolve; }); } finally { clearInterval(keeper); }
+      try {
+        if (current.resumable && controls && "runDuel" in runner) {
+          error.write("Duel stopped; resume in the room or press Ctrl-C to exit.\n");
+          // The engine has already made Resume available, after saving the checkpoint.
+          const message = await controls.runner.wait(lifetime.signal);
+          if (message.command.action !== "resume") continue;
+          holding = false; interrupts = 0; resumeHintShown = false;
+          controller = new AbortController();
+          current = await runner.runDuel({ resume: current.id }, observer, controller.signal, undefined, { controls, replayHistory: false, resumeBy: message.by });
+          if (current.chosen && typeof parsed.flags.out === "string") exportChosenArtifact(current.chosen, parsed.flags.out);
+          continue;
+        }
+        error.write("Room stays open; press Ctrl-C to exit.\n");
+        await new Promise<void>(resolve => { releaseHold = resolve; });
+        break;
+      } catch (e) { if (!lifetime.signal.aborted) throw e; }
+      finally { holding = false; clearInterval(keeper); }
     }
-    return result.aborted || controller.signal.aborted || result.winner === "none" ? 1 : 0;
+    if (current.resumable) resumeHint();
+    return current.aborted || current.winner === "none" ? 1 : 0;
   } finally {
+    clearInterval(decisionKeeper);
+    const oldPrompt = prompt; prompt = undefined; oldPrompt?.close();
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     await room?.close();
@@ -300,6 +390,7 @@ async function runTable(command: string, parsed: ParsedTableArgs, terminal: Tabl
 }
 
 async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Map<string, Seat>, observer: TableObserver, signal: AbortSignal): Promise<number> {
+  await import("./usage/table-service.js");
   const sessions = await import("./sessions/collaborations.js");
   const { day, readTableLines } = await import("./usage/table.js");
   const origin = `cli-${crypto.randomUUID()}`;
@@ -333,7 +424,7 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
     resetTurn();
     const started = await sessions.startCollaboration(parsed.agents, parsed.topic, {
       mode: command === "debate" ? "debate" : command === "waffle" ? "waffle-house" : "collaborate",
-      maxRounds: Number(parsed.flags.rounds ?? 2), ...(parsed.duelFocus && { duel: parsed.duelFocus }), seats: parsed.options.seats, origin, signal: stop,
+      maxUsd: parsed.options.maxUsd, maxRounds: Number(parsed.flags.rounds ?? 2), ...(parsed.duelFocus && { duel: parsed.duelFocus }), seats: parsed.options.seats, origin, signal: stop,
       ...(parsed.options.connectors?.length && { connectors: parsed.options.connectors }),
       ...(parsed.options.seatConnectors && { seatConnectors: parsed.options.seatConnectors }),
       // Each connector call is a short note in the transcript, like a turn; the payload never appears.
@@ -347,19 +438,25 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
     });
     id = started.collaborationId;
     const collaboration = sessions.collaborations.get(id)!;
-    while (collaboration.status === "running") {
+    while (collaboration && !collaboration.stopped && collaboration.status === "running") {
       stop.throwIfAborted();
       await sessions.advanceCollaboration(collaboration);
     }
     await pending;
-    return stop.aborted ? 1 : 0;
+    return stop.aborted || (id && sessionCapView(id)?.reached) ? 1 : 0;
   } catch (e) {
     // A deadline surfaces inside the provider call as a stop; only a real Stop keeps that wording.
+    if (id && sessionCapView(id)?.reached) return 1;
     if (timedOut && !signal.aborted) throw new TimeoutReport(timedOut);
     throw e;
   } finally {
     clearTimeout(deadline); clearTimeout(turnTimer);
     sessions.setCollaborationRecordHook(undefined);
+    const cap = id ? sessionCapView(id) : undefined;
+    if (id && cap?.reached) {
+      const { stopCappedSession } = await import("./usage/session-caps.js");
+      await stopCappedSession(id);
+    }
     if (id && sessions.collaborations.has(id)) await sessions.endCollaboration(id, false);
     await pending;
     if (id) {
@@ -373,8 +470,9 @@ async function runDiscussion(command: string, parsed: ParsedTableArgs, seats: Ma
         if (line.usd === undefined) entry.unpricedTokens += used;
         totals.set(line.agent, entry);
       }
-      await observer.onEvent({ type: "usage", perSeat: [...totals.values()], totalCostUsd: [...totals.values()].reduce((n, s) => n + s.costUsd, 0), totalUnpricedTokens: [...totals.values()].reduce((n, s) => n + s.unpricedTokens, 0) });
-      await observer.onEvent({ type: "end", winner: "none", tally: { A: 0, B: 0 }, aborted: stop.aborted });
+      await observer.onEvent({ type: "usage", perSeat: [...totals.values()], totalCostUsd: [...totals.values()].reduce((n, s) => n + s.costUsd, 0), totalUnpricedTokens: [...totals.values()].reduce((n, s) => n + s.unpricedTokens, 0),
+        ...(cap && { capUsd: cap.maxUsd, spentUsd: cap.spentUsd, capReached: cap.reached }) });
+      await observer.onEvent({ type: "end", winner: "none", tally: { A: 0, B: 0 }, aborted: stop.aborted || cap?.reached === true });
     }
   }
 }

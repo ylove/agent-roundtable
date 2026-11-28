@@ -36,9 +36,18 @@ test("runner retains provider and execution settings", () => {
     "ROUNDTABLE_PUBLIC_TOPIC_PREFIX", "ROUNDTABLE_TRANSCRIPTS_DIR", "ROUNDTABLE_PUBLISH_FLUSH_TIMEOUT_MS",
     "ROUNDTABLE_PROTOTYPE_DIR", "ROUNDTABLE_PROTOTYPE_TTL_MS", "ROUNDTABLE_PROTOTYPE_OPEN",
     "ROUNDTABLE_CHROME_PATH", "ROUNDTABLE_PROTOTYPE_SCREENSHOTS", "ROUNDTABLE_PAGE_CHECKS",
+    "ROUNDTABLE_PREVIEW_DISPLAY",
   ];
   const source = Object.fromEntries(names.map(name => [name, name === "PATH" ? "/setting-PATH" : `setting-${name}`]));
   assert.deepEqual(runnerSettings({}, source), source);
+});
+
+test("preview display defaults reach runners, serve and each heads-down worker profile", () => {
+  for (const profile of ["runner", "serve", "claude-worker", "codex-worker", "runtime-worker"]) {
+    const source = { ROUNDTABLE_PREVIEW_DISPLAY: "screenshot" };
+    assert.equal(childEnv(profile, {}, source).ROUNDTABLE_PREVIEW_DISPLAY, "screenshot", profile);
+    assert.equal(childEnv(profile, { ROUNDTABLE_PREVIEW_DISPLAY: "click" }, source).ROUNDTABLE_PREVIEW_DISPLAY, "click", profile);
+  }
 });
 
 test("a spawned runner retains Node proxy activation and CA settings", () => {

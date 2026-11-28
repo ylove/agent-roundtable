@@ -20,7 +20,7 @@ const SECRET = "sk-ant-api03-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
 const ID = "duel-focus-fixture";
 
 function writeDuel(id, edit = (a) => a) {
-  const demo = JSON.parse(readFileSync(new URL("../../examples/duel/demo.json", import.meta.url), "utf8"));
+  const demo = JSON.parse(readFileSync(new URL("../fixtures/duel-v1.json", import.meta.url), "utf8"));
   mkdirSync(join(ROUNDTABLE_HOME, "duels"), { recursive: true });
   const archive = edit(demo);
   writeFileSync(join(ROUNDTABLE_HOME, "duels", `${id}.json`), JSON.stringify(archive));
@@ -66,12 +66,16 @@ test("start_meeting, start_collaboration (every mode) and start_ultraplan with d
   const prompts = recorder(t);
   const meeting = await handleToolCall("start_meeting", { agent: cfo, agenda: "review the duel", duel: ID, ...LLM });
   assert.equal(meeting.isError, undefined, meeting.content[0].text);
+  await handleToolCall("end_meeting", { meeting_id: JSON.parse(meeting.content[0].text).meetingId });
   for (const mode of ["collaborate", "debate", "waffle-house", "conversation"]) {
     const r = await handleToolCall("start_collaboration", { agents: [cfo, skeptic], topic: "the duel", mode, duel: ID, grounding: false, ...LLM });
     assert.equal(r.isError, undefined, `${mode}: ${r.content[0].text}`);
+    await handleToolCall("end_collaboration", { collaboration_id: JSON.parse(r.content[0].text).collaborationId });
   }
   const plan = await handleToolCall("start_ultraplan", { agents: [cfo], task: "Plan from the duel", duel: ID, ...LLM });
   assert.equal(plan.isError, undefined, plan.content[0].text);
+  const { ultraplans, endUltraplan } = await import("../../dist/sessions/ultraplan.js");
+  for (const id of ultraplans.keys()) await endUltraplan(id);
   assert.equal(prompts.length, 6);
   for (const p of prompts) expectBrief(p);
 });

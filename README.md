@@ -4,6 +4,10 @@
 An MCP server for multi-agent collaboration across six LLM providers: discuss, challenge and agree on a plan, then execute a contract with parallel workers, budgets and human oversight.
 Runs locally over stdio with Claude Code or any MCP client. Requires Node 22.19+.
 
+![A live duel in the room: two teams build different apps for the same brief, stage by stage, from grey wireframes to polished pages, until Team A is declared the winner.](docs/assets/live-duel.gif)
+
+The [live duel room](docs/modes/duel-room.md), recorded from the bundled synthetic replay.
+
 ## Install and register with Claude Code
 
 ```sh
@@ -14,13 +18,13 @@ claude mcp add --scope user roundtable \
 claude mcp list        # roundtable should show as connected
 ```
 
-`roundtable mcp` starts the orchestrator server, the same as running the binary with no arguments. Without the global install, use `-- npx -y agent-roundtable@2.0.0` or `-- node /absolute/path/to/dist/index.js` (a source checkout). `--scope user` makes it available in every project; leave it out (or use `--scope project`) to register it for one project only. Then ask Claude Code to "list the roundtable tools": you should see the 43 [tools](#tools), named `mcp__roundtable__<tool>`.
+`roundtable mcp` starts the orchestrator server, the same as running the binary with no arguments. Without the global install, use `-- npx -y agent-roundtable@2.1.0` or `-- node /absolute/path/to/dist/index.js` (a source checkout). `--scope user` makes it available in every project; leave it out (or use `--scope project`) to register it for one project only. Then ask Claude Code to "list the roundtable tools": you should see the 43 [tools](#tools), named `mcp__roundtable__<tool>`.
 
 Create personas in that directory or install the [starter pack](examples/starter-pack/) with `roundtable agents starter`. Set keys for the [providers](docs/providers.md) you use; local meetings use your Claude CLI login. For source installs, `.env`, `add-json` and project `.mcp.json` registration, see [getting started](docs/getting-started.md) and [configuration](docs/configuration.md). After a rebuild, reconnect with `/mcp`.
 
 ## Other ways to install
 
-A Docker image recipe, a Claude Code plugin and an MCP registry listing are described in [distribution](docs/distribution.md). Until the package is published to npm, the `npx` and plugin paths do not resolve.
+A Docker image recipe, a Claude Code plugin and an MCP registry listing are described in [distribution](docs/distribution.md).
 
 ## Modes
 
@@ -127,6 +131,7 @@ No arguments starts the orchestrator MCP server. The binary has **15 subcommands
 | `usage [--json] [--watch]` | Who is using what, on which platform, measured or estimated. |
 | `stop <agent> [--execution <exe> \| --session <id>] [--reason <text>]` | Stop one agent, heads-down or at the table. |
 | `serve` / `notify` | Keep runs alive, browse the private index and configure [check-ins](docs/long-running.md). |
+| `down` | Stop the local service, the same as `serve stop`. |
 | `runtimes [--json]` | Detect installed [CLI runtimes](docs/runtimes.md). |
 | [`agents [--json]`](docs/agents-library.md) | List or import personas, install the starter pack, open the library. |
 | `help` | Print usage. |

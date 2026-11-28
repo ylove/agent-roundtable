@@ -56,7 +56,7 @@ test('duel resolves seats and fans identical NDJSON events into the room, then c
   assert.equal(code, 0, streams.error.read());
   const events = streams.output.read().trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.map(e => e.type), ['start', 'end']); assert.deepEqual(state.roomEvents, events);
-  assert.deepEqual(state.roomOptions, { open: true }); assert.equal(state.closed, 1);
+  assert.equal(state.roomOptions.open, true); assert.equal(typeof state.roomOptions.controls.send, "function"); assert.equal(state.closed, 1);
   assert.equal(state.options.seats.designer.agent, 'designer');
   assert.notEqual(state.options.seats.designer.provider, state.options.seats.marketer.provider);
   assert.ok(state.signal instanceof AbortSignal);
@@ -222,4 +222,15 @@ test('--no-preflight skips mix probes; contradictory preflight flags are refused
   assert.equal(state.options.seats.designer.provider, 'anthropic');
   assert.equal(await runTableCli('duel', [...roster, '--preflight'], streams), 2);
   assert.match(streams.error.read(), /Use either --preflight or --no-preflight/);
+});
+
+test('--max-usd parses on table verbs and may override a resume cap', () => {
+  for (const command of ['duel', 'debate', 'waffle', 'meeting']) {
+    const args = command === 'duel' ? roster : ['topic', '--agents', 'designer,builder'];
+    assert.equal(parseTableArgs(command, [...args, '--max-usd', '5000']).options.maxUsd, 5000);
+    for (const value of ['0', '-1', 'NaN', 'Infinity', 'private-value', '']) {
+      assert.throws(() => parseTableArgs(command, [...args, '--max-usd', value]), /--max-usd must be a positive finite number/);
+    }
+  }
+  assert.deepEqual(parseTableArgs('duel', ['--resume', 'duel-fixture', '--max-usd', '2.5']).options, { resume: 'duel-fixture', maxUsd: 2.5 });
 });

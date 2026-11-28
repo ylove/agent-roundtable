@@ -57,7 +57,7 @@ claude mcp add --scope user roundtable \
 
 Scope: `--scope user` registers it for you in every project; `--scope project` writes a shared `.mcp.json`; the default (`local`) is just you, in the current project.
 
-**(b) Without the bin on PATH:** replace the last line with `-- npx -y agent-roundtable@2.0.0`, or, from a source checkout, `-- node /absolute/path/to/agent-mcp/dist/index.js`.
+**(b) Without the bin on PATH:** replace the last line with `-- npx -y agent-roundtable@2.1.0`, or, from a source checkout, `-- node /absolute/path/to/agent-mcp/dist/index.js`.
 
 **(c) `claude mcp add-json`:**
 
